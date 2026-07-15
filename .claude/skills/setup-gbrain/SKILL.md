@@ -1,0 +1,1 @@
+/Users/spectre/conductor/repos/orivo/.claude/skills/gstack/setup-gbrain/SKILL.md

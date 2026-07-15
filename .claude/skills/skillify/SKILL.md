@@ -1,0 +1,1 @@
+/Users/spectre/conductor/repos/orivo/.claude/skills/gstack/skillify/SKILL.md
