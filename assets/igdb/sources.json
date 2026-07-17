@@ -1,0 +1,121 @@
+{
+  "provider": "IGDB image CDN",
+  "cover_transform": "t_cover_big_2x",
+  "note": "The supplied Selector reference visibly contains the first eight titles. Unrailed! and Astro Duel 2 complete the ten-game local showcase because both are already represented in this project.",
+  "assets": [
+    {
+      "title": "Elden Ring",
+      "cover": {
+        "file": "covers/elden-ring.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co4jni.jpg"
+      },
+      "hero": {
+        "file": "heroes/elden-ring.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/scagdp.jpg"
+      },
+      "alternate_hero": {
+        "file": "heroes/elden-ring-gameplay.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_original/scagdm.jpg"
+      }
+    },
+    {
+      "title": "Cyberpunk 2077",
+      "cover": {
+        "file": "covers/cyberpunk-2077.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/coaih8.jpg"
+      },
+      "hero": {
+        "file": "heroes/cyberpunk-2077.webp",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ubbe5gewccx5ig3xy30t.webp"
+      }
+    },
+    {
+      "title": "Baldur's Gate 3",
+      "cover": {
+        "file": "covers/baldurs-gate-3.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co670h.jpg"
+      },
+      "hero": {
+        "file": "heroes/baldurs-gate-3.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/sc81fj.jpg"
+      }
+    },
+    {
+      "title": "Hades II",
+      "cover": {
+        "file": "covers/hades-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/coaknx.jpg"
+      },
+      "hero": {
+        "file": "heroes/hades-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_original/scka7e.jpg"
+      }
+    },
+    {
+      "title": "Red Dead Redemption 2",
+      "cover": {
+        "file": "covers/red-dead-redemption-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co1q1f.jpg"
+      },
+      "hero": {
+        "file": "heroes/red-dead-redemption-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ar4ct.jpg"
+      }
+    },
+    {
+      "title": "The Witcher 3: Wild Hunt",
+      "cover": {
+        "file": "covers/the-witcher-3-wild-hunt.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/coaarl.jpg"
+      },
+      "hero": {
+        "file": "heroes/the-witcher-3-wild-hunt.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/mnljdjtrh44x4snmierh.jpg"
+      }
+    },
+    {
+      "title": "Horizon Forbidden West",
+      "cover": {
+        "file": "covers/horizon-forbidden-west.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co2gvu.jpg"
+      },
+      "hero": {
+        "file": "heroes/horizon-forbidden-west.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ar1cwx.jpg"
+      }
+    },
+    {
+      "title": "God of War (2018)",
+      "cover": {
+        "file": "covers/god-of-war.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/cobkt6.jpg"
+      },
+      "hero": {
+        "file": "heroes/god-of-war.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ye6iswk51xxnhkzt9xt7.jpg"
+      }
+    },
+    {
+      "title": "Unrailed!",
+      "cover": {
+        "file": "covers/unrailed.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co2jx0.jpg"
+      },
+      "hero": {
+        "file": "heroes/unrailed.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_original/arcu7.jpg"
+      }
+    },
+    {
+      "title": "Astro Duel 2",
+      "cover": {
+        "file": "covers/astro-duel-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_cover_big_2x/co7rji.jpg"
+      },
+      "hero": {
+        "file": "heroes/astro-duel-2.jpg",
+        "source": "https://images.igdb.com/igdb/image/upload/t_original/sciudk.jpg"
+      }
+    }
+  ]
+}

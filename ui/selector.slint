@@ -1,0 +1,1004 @@
+// The Selector is intentionally a single scene: game media provides the warmth,
+// while the UI stays quiet, translucent, and anchored to the same safe areas.
+
+component StrokeIcon inherits Path {
+    in property <string> path-data: "";
+    in property <color> tone: #d8d5dd;
+
+    width: 18px;
+    height: 18px;
+    fill: transparent;
+    stroke: root.tone;
+    stroke-width: 1.7px;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: root.path-data;
+}
+
+component OrivoMark inherits Path {
+    width: 31px;
+    height: 29px;
+    fill: #7d54f4;
+    viewbox-x: 0;
+    viewbox-y: 0;
+    viewbox-width: 32;
+    viewbox-height: 30;
+    commands: "M 2 28 C 4 18 7 8 13 3 C 15 1 18 1 20 3 C 26 8 29 18 30 28 L 23 28 C 22 21 20 15 17 12 C 14 14 11 20 10 28 Z M 12 21 C 14 19 18 19 20 21 L 21 25 L 11 25 Z";
+}
+
+// Keep the chrome optically quiet. Every control samples the same pre-blurred
+// viewport at its real position, rather than re-centering a miniature hero in
+// each surface.
+component FrostedGlass inherits Rectangle {
+    in property <image> backdrop-image;
+    in property <length> scene-width: 1536px;
+    in property <length> scene-height: 1024px;
+    in property <color> tint: #0b0d1422;
+    in property <color> rim: #ffffff25;
+    in property <duration> rim-cycle: 4700ms;
+    in-out property <bool> rim-phase: false;
+
+    background: transparent;
+    border-width: 1px;
+    border-color: root.rim;
+    clip: true;
+
+    // The source is a low-resolution, strongly blurred full viewport. Offset
+    // it by this component's actual window position, then clip to the glass.
+    // This is a backdrop blur, not a copied game image inside a button.
+    Image {
+        x: -root.x;
+        y: -root.y;
+        width: root.scene-width;
+        height: root.scene-height;
+        source: root.backdrop-image;
+        image-fit: fill;
+        opacity: root.backdrop-image.width > 0 ? 0.82 : 0;
+        accessible-role: none;
+    }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: root.tint;
+        border-radius: root.border-radius;
+    }
+
+    // A few discontinuous one-pixel catches make the outline feel like real
+    // reflected glass instead of a uniform UI stroke. Each consumer gives the
+    // phase a slightly different cadence, so the chrome never pulses in sync.
+    Rectangle {
+        x: root.rim-phase ? parent.width * 0.54 : parent.width * 0.08;
+        y: 0px;
+        width: parent.width * 0.29;
+        height: 1px;
+        background: @linear-gradient(90deg, #ffffff00 0%, #ffffff72 50%, #ffffff00 100%);
+        opacity: root.rim-phase ? 0.9 : 0.34;
+        animate x { duration: 1650ms; easing: ease-in-out; }
+        animate opacity { duration: 1650ms; easing: ease-in-out; }
+    }
+    Rectangle {
+        x: parent.width - 1px;
+        y: root.rim-phase ? parent.height * 0.54 : parent.height * 0.19;
+        width: 1px;
+        height: parent.height * 0.24;
+        background: @linear-gradient(180deg, #ffffff00 0%, #ffffff5c 50%, #ffffff00 100%);
+        opacity: root.rim-phase ? 0.28 : 0.64;
+        animate y { duration: 1650ms; easing: ease-in-out; }
+        animate opacity { duration: 1650ms; easing: ease-in-out; }
+    }
+    Rectangle {
+        x: parent.width * 0.12;
+        y: parent.height - 1px;
+        width: parent.width * 0.2;
+        height: 1px;
+        background: @linear-gradient(90deg, #ffffff00 0%, #ffffff3f 50%, #ffffff00 100%);
+        opacity: root.rim-phase ? 0.18 : 0.42;
+        animate opacity { duration: 1650ms; easing: ease-in-out; }
+    }
+    Timer {
+        interval: root.rim-cycle;
+        running: true;
+        triggered => { root.rim-phase = !root.rim-phase; }
+    }
+}
+
+export component OrivoSelector inherits Window {
+    title: "Orivo";
+    width: 1536px;
+    height: 1024px;
+    background: #0b0b0d;
+
+    callback import-game();
+    callback play-game();
+    callback previous-game();
+    callback next-game();
+    callback select-game(int);
+
+    in-out property <string> selected-title: "Elden Ring";
+    in-out property <string> selected-description: "A vast world full of mystery and peril. What will you discover?";
+    in-out property <string> selected-play-time: "128h played";
+    in-out property <string> selected-last-played: "Last played 2 days ago";
+    in-out property <string> selected-progress: "Achievements 67/82";
+    in-out property <string> status-text: "Ready to play";
+    in-out property <string> rail-position: "1 / 1";
+    in-out property <int> selected-index: 0;
+    in-out property <int> rail-first-index: 0;
+    in-out property <[image]> rail-covers;
+    in-out property <[string]> rail-titles;
+    in-out property <[string]> rail-metadata;
+    in-out property <image> hero-image;
+    in-out property <image> glass-backdrop-image;
+    in-out property <image> avatar-image;
+
+    // Media and the three deliberately restrained readability overlays.
+    Rectangle { background: #0b0b0d; }
+
+    Image {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        source: root.hero-image;
+        image-fit: cover;
+        opacity: root.hero-image.width > 0 ? 0.84 : 0;
+        accessible-role: none;
+        animate opacity { duration: 220ms; easing: ease-in-out; }
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        // A single falloff avoids visible stop seams in the software renderer
+        // while keeping the left-side typography as quiet as the reference.
+        background: @linear-gradient(90deg, #090a0ee8 0%, #090a0e00 74%);
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: @linear-gradient(0deg, #08090de8 0%, #08090d6a 24%, #08090d00 49%, #08090d45 100%);
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 118px;
+        background: @linear-gradient(0deg, #090a0e00 0%, #090a0e8c 100%);
+    }
+
+    // Top navigation. It is painted once only so it remains visually light.
+    OrivoMark { x: 32px; y: 32px; }
+
+    Rectangle {
+        x: 80px;
+        y: 34px;
+        width: 1px;
+        height: 22px;
+        background: #ffffff1c;
+    }
+
+    StrokeIcon {
+        x: 108px;
+        y: 37px;
+        width: 15px;
+        height: 15px;
+        tone: #d9d6dc;
+        path-data: "M 3 10.5 L 12 3 L 21 10.5 M 5.5 9 V 20 H 18.5 V 9";
+    }
+    Text {
+        x: 131px;
+        y: 35px;
+        width: 43px;
+        height: 22px;
+        text: "Home";
+        color: #d5d2d8;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    FrostedGlass {
+        x: 178px;
+        y: 29px;
+        width: 86px;
+        height: 33px;
+        border-radius: 8px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff27;
+        rim-cycle: 4900ms;
+    }
+    StrokeIcon {
+        x: 191px;
+        y: 38px;
+        width: 15px;
+        height: 15px;
+        tone: #f4f2f7;
+        path-data: "M 4 5 H 10 V 19 H 4 Z M 14 5 H 20 V 19 H 14 Z M 7 8 H 7.01 M 17 8 H 17.01";
+    }
+    Text {
+        x: 215px;
+        y: 35px;
+        width: 42px;
+        height: 22px;
+        text: "Library";
+        color: #f4f2f7;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+
+    StrokeIcon {
+        x: 279px;
+        y: 37px;
+        width: 15px;
+        height: 15px;
+        tone: #d9d6dc;
+        path-data: "M 4 4 H 20 V 20 H 4 Z M 4 9 H 20 M 9 4 V 20";
+    }
+    Text {
+        x: 303px;
+        y: 35px;
+        width: 87px;
+        height: 22px;
+        text: "Collections";
+        color: #d5d2d8;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    StrokeIcon {
+        x: 391px;
+        y: 37px;
+        width: 15px;
+        height: 15px;
+        tone: #d9d6dc;
+        path-data: "M 4 8 H 20 L 18.5 20 H 5.5 Z M 8 8 V 6 C 8 3.5 10 2 12 2 C 14 2 16 3.5 16 6 V 8";
+    }
+    Text {
+        x: 415px;
+        y: 35px;
+        width: 38px;
+        height: 22px;
+        text: "Store";
+        color: #d5d2d8;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    StrokeIcon {
+        x: 471px;
+        y: 37px;
+        width: 15px;
+        height: 15px;
+        tone: #d9d6dc;
+        path-data: "M 12 8 A 4 4 0 1 0 12.01 8 M 3 12 H 5 M 19 12 H 21 M 12 3 V 5 M 12 19 V 21 M 5.6 5.6 L 7 7 M 17 17 L 18.4 18.4 M 18.4 5.6 L 17 7 M 7 17 L 5.6 18.4";
+    }
+    Text {
+        x: 495px;
+        y: 35px;
+        width: 54px;
+        height: 22px;
+        text: "Settings";
+        color: #d5d2d8;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    FrostedGlass {
+        x: parent.width / 2 - 173px;
+        y: 25px;
+        width: 352px;
+        height: 39px;
+        border-radius: 20px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1426;
+        rim: #ffffff2c;
+        rim-cycle: 5400ms;
+        rim-phase: true;
+    }
+    StrokeIcon {
+        x: parent.width / 2 - 155px;
+        y: 37px;
+        width: 15px;
+        height: 15px;
+        tone: #ece4df;
+        path-data: "M 10.5 18 A 7.5 7.5 0 1 1 10.51 18 M 16 16 L 21 21";
+    }
+    Text {
+        x: parent.width / 2 - 130px;
+        y: 32px;
+        width: 188px;
+        height: 25px;
+        text: "Search games...";
+        color: #dbd2cd;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    FrostedGlass {
+        x: parent.width / 2 + 120px;
+        y: 32px;
+        width: 21px;
+        height: 24px;
+        border-radius: 6px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1428;
+        rim: #ffffff24;
+        rim-cycle: 4100ms;
+        rim-phase: true;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "⌘";
+            color: #f2e7e0;
+            font-family: "SF Pro Text";
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    FrostedGlass {
+        x: parent.width / 2 + 146px;
+        y: 32px;
+        width: 21px;
+        height: 24px;
+        border-radius: 6px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1428;
+        rim: #ffffff24;
+        rim-cycle: 6100ms;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "K";
+            color: #f2e7e0;
+            font-family: "SF Pro Text";
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    StrokeIcon {
+        x: parent.width - 125px;
+        y: 37px;
+        width: 16px;
+        height: 16px;
+        tone: #e8e4e8;
+        path-data: "M 18 9 A 6 6 0 0 0 6 9 C 6 16 3 17 3 19 H 21 C 21 17 18 16 18 9 M 10 22 H 14";
+    }
+    Rectangle {
+        x: parent.width - 96px;
+        y: 33px;
+        width: 1px;
+        height: 22px;
+        background: #ffffff1c;
+    }
+    Rectangle {
+        x: parent.width - 74px;
+        y: 25px;
+        width: 40px;
+        height: 40px;
+        background: #0b0d1428;
+        border-width: 1px;
+        border-color: #ffffff35;
+        border-radius: 20px;
+        clip: true;
+        Image {
+            x: 2px;
+            y: 2px;
+            width: parent.width - 4px;
+            height: parent.height - 4px;
+            source: root.avatar-image;
+            image-fit: cover;
+            opacity: root.avatar-image.width > 0 ? 1 : 0;
+            accessible-label: "Steam profile avatar";
+        }
+        // A restrained fallback stays available when the local asset is absent.
+        Rectangle {
+            x: 11px;
+            y: 7px;
+            width: 18px;
+            height: 15px;
+            background: #3d302c;
+            border-radius: 9px;
+            opacity: root.avatar-image.width > 0 ? 0 : 1;
+        }
+        Rectangle {
+            x: 13px;
+            y: 16px;
+            width: 14px;
+            height: 12px;
+            background: #d5a485;
+            border-radius: 7px;
+            opacity: root.avatar-image.width > 0 ? 0 : 1;
+        }
+        Rectangle {
+            x: 9px;
+            y: 27px;
+            width: 22px;
+            height: 12px;
+            background: #48647a;
+            border-radius: 11px;
+            opacity: root.avatar-image.width > 0 ? 0 : 1;
+        }
+    }
+
+    // Hero information remains left aligned and out of the rail's visual field.
+    FrostedGlass {
+        x: 159px;
+        y: parent.height * 0.244;
+        width: 47px;
+        height: 29px;
+        border-radius: 15px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1423;
+        rim: #ffffff26;
+        rim-cycle: 4600ms;
+        rim-phase: true;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "RPG";
+            color: #ddd9e0;
+            font-family: "SF Pro Text";
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    Text {
+        x: 159px;
+        y: parent.height * 0.244 + 46px;
+        width: 590px;
+        height: 92px;
+        text: root.selected-title;
+        color: #f4f2f7;
+        font-family: "SF Pro Display";
+        font-size: 74px;
+        font-weight: 400;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: 159px;
+        y: parent.height * 0.244 + 149px;
+        width: 470px;
+        height: 55px;
+        text: root.selected-description;
+        color: #d0cdd4;
+        font-family: "SF Pro Text";
+        font-size: 18px;
+        wrap: word-wrap;
+    }
+
+    StrokeIcon {
+        x: 159px;
+        y: parent.height * 0.244 + 218px;
+        width: 16px;
+        height: 16px;
+        tone: #d1cdd5;
+        path-data: "M 12 7 V 12 L 15 14 M 20 12 A 8 8 0 1 1 19.99 12";
+    }
+    Text {
+        x: 184px;
+        y: parent.height * 0.244 + 214px;
+        width: 101px;
+        height: 25px;
+        text: root.selected-play-time;
+        color: #c7c2ca;
+        font-family: "SF Pro Text";
+        font-size: 14px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StrokeIcon {
+        x: 288px;
+        y: parent.height * 0.244 + 218px;
+        width: 16px;
+        height: 16px;
+        tone: #d1cdd5;
+        path-data: "M 12 7 V 12 L 15 14 M 20 12 A 8 8 0 1 1 19.99 12";
+    }
+    Text {
+        x: 313px;
+        y: parent.height * 0.244 + 214px;
+        width: 162px;
+        height: 25px;
+        text: root.selected-last-played;
+        color: #c7c2ca;
+        font-family: "SF Pro Text";
+        font-size: 14px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StrokeIcon {
+        x: 489px;
+        y: parent.height * 0.244 + 218px;
+        width: 16px;
+        height: 16px;
+        tone: #d1cdd5;
+        path-data: "M 8 4 H 16 V 8 C 16 10.5 14.5 12.5 12 13 C 9.5 12.5 8 10.5 8 8 Z M 12 13 V 18 M 8 21 H 16 M 6 6 H 3 V 8 C 3 10 4.3 11.6 6.2 12 M 18 6 H 21 V 8 C 21 10 19.7 11.6 17.8 12";
+    }
+    Text {
+        x: 514px;
+        y: parent.height * 0.244 + 214px;
+        width: 151px;
+        height: 25px;
+        text: root.status-text == "Ready to play" ? root.selected-progress : root.status-text;
+        color: #c7c2ca;
+        font-family: "SF Pro Text";
+        font-size: 14px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    Rectangle {
+        x: 159px;
+        y: parent.height * 0.244 + 266px;
+        width: 132px;
+        height: 50px;
+        background: @linear-gradient(100deg, #f2efff 0%, #bbb2f4 100%);
+        border-width: 1px;
+        border-color: #ffffff7d;
+        border-radius: 25px;
+        Path {
+            x: 39px;
+            y: 18px;
+            width: 14px;
+            height: 14px;
+            fill: #1b1921;
+            viewbox-x: 0;
+            viewbox-y: 0;
+            viewbox-width: 14;
+            viewbox-height: 14;
+            commands: "M 2 1 L 13 7 L 2 13 Z";
+        }
+        Text {
+            x: 64px;
+            y: 0px;
+            width: 47px;
+            height: parent.height;
+            text: "Play";
+            color: #1a1820;
+            font-family: "SF Pro Text";
+            font-size: 16px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+        TouchArea { clicked => { root.play-game(); } }
+    }
+
+    FrostedGlass {
+        x: 304px;
+        y: parent.height * 0.244 + 266px;
+        width: 50px;
+        height: 50px;
+        border-radius: 25px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1425;
+        rim: #ffffff27;
+        rim-cycle: 5200ms;
+        rim-phase: true;
+        StrokeIcon {
+            x: 16px;
+            y: 15px;
+            width: 18px;
+            height: 20px;
+            tone: #f0edf1;
+            path-data: "M 6 3 H 18 V 21 L 12 17 L 6 21 Z";
+        }
+    }
+    FrostedGlass {
+        x: 368px;
+        y: parent.height * 0.244 + 266px;
+        width: 50px;
+        height: 50px;
+        border-radius: 25px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1425;
+        rim: #ffffff27;
+        rim-cycle: 5900ms;
+        Rectangle { x: 15px; y: 23px; width: 4px; height: 4px; background: #f0edf1; border-radius: 2px; }
+        Rectangle { x: 23px; y: 23px; width: 4px; height: 4px; background: #f0edf1; border-radius: 2px; }
+        Rectangle { x: 31px; y: 23px; width: 4px; height: 4px; background: #f0edf1; border-radius: 2px; }
+        // The overflow action keeps catalogue import reachable without adding a
+        // visual control that is absent from the reference scene.
+        TouchArea { clicked => { root.import-game(); } }
+    }
+
+    // Carousel controls are kept at the same optical center as the reference.
+    FrostedGlass {
+        x: 24px;
+        y: parent.height * 0.363;
+        width: 50px;
+        height: 50px;
+        border-radius: 25px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 4400ms;
+        rim-phase: true;
+        StrokeIcon {
+            x: 17px;
+            y: 16px;
+            width: 17px;
+            height: 17px;
+            tone: #f5f3f6;
+            path-data: "M 15 4 L 8 12 L 15 20";
+        }
+        TouchArea { clicked => { root.previous-game(); } }
+    }
+    FrostedGlass {
+        x: parent.width - 74px;
+        y: parent.height * 0.363;
+        width: 50px;
+        height: 50px;
+        border-radius: 25px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 5700ms;
+        StrokeIcon {
+            x: 17px;
+            y: 16px;
+            width: 17px;
+            height: 17px;
+            tone: #f5f3f6;
+            path-data: "M 9 4 L 16 12 L 9 20";
+        }
+        TouchArea { clicked => { root.next-game(); } }
+    }
+
+    // Rail controls float over the hero rather than living inside a large panel.
+    Text {
+        x: 77px;
+        y: parent.height - 372px;
+        width: 180px;
+        height: 25px;
+        text: "Recently Played";
+        color: #f1eef3;
+        font-family: "SF Pro Text";
+        font-size: 15px;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+    // The reference intentionally favors large artwork over ten tiny cards;
+    // keep the actual library size visible without turning the rail into a
+    // different layout.
+    Text {
+        x: 196px;
+        y: parent.height - 372px;
+        width: 46px;
+        height: 25px;
+        text: root.rail-position;
+        color: #c8c3cd;
+        font-family: "SF Pro Text";
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+
+    FrostedGlass {
+        x: parent.width - 389px;
+        y: parent.height - 378px;
+        width: 100px;
+        height: 34px;
+        border-radius: 17px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 4800ms;
+        rim-phase: true;
+        Text {
+            x: 14px;
+            width: 65px;
+            height: parent.height;
+            text: "All Games";
+            color: #d6d2d8;
+            font-family: "SF Pro Text";
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        StrokeIcon {
+            x: 78px;
+            y: 12px;
+            width: 10px;
+            height: 10px;
+            tone: #d6d2d8;
+            path-data: "M 4 3 L 8 7 L 12 3";
+        }
+    }
+    FrostedGlass {
+        x: parent.width - 279px;
+        y: parent.height - 378px;
+        width: 97px;
+        height: 34px;
+        border-radius: 17px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 5500ms;
+        Text {
+            x: 15px;
+            width: 50px;
+            height: parent.height;
+            text: "Recent";
+            color: #d6d2d8;
+            font-family: "SF Pro Text";
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        StrokeIcon {
+            x: 75px;
+            y: 12px;
+            width: 10px;
+            height: 10px;
+            tone: #d6d2d8;
+            path-data: "M 4 3 L 8 7 L 12 3";
+        }
+    }
+    FrostedGlass {
+        x: parent.width - 171px;
+        y: parent.height - 378px;
+        width: 38px;
+        height: 34px;
+        border-radius: 17px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 4200ms;
+        rim-phase: true;
+        StrokeIcon {
+            x: 11px;
+            y: 9px;
+            width: 16px;
+            height: 16px;
+            tone: #cfcbd2;
+            path-data: "M 3 3 H 9 V 9 H 3 Z M 15 3 H 21 V 9 H 15 Z M 3 15 H 9 V 21 H 3 Z M 15 15 H 21 V 21 H 15 Z";
+        }
+    }
+    FrostedGlass {
+        x: parent.width - 125px;
+        y: parent.height - 378px;
+        width: 38px;
+        height: 34px;
+        border-radius: 17px;
+        backdrop-image: root.glass-backdrop-image;
+        tint: #0b0d1424;
+        rim: #ffffff26;
+        rim-cycle: 6300ms;
+        StrokeIcon {
+            x: 11px;
+            y: 9px;
+            width: 16px;
+            height: 16px;
+            tone: #cfcbd2;
+            path-data: "M 3 3 H 9 V 9 H 3 Z M 15 3 H 21 V 9 H 15 Z M 3 15 H 9 V 21 H 3 Z M 15 15 H 21 V 21 H 15 Z";
+        }
+    }
+
+    Rectangle {
+        x: 72px;
+        y: parent.height - 340px;
+        width: parent.width - 72px;
+        height: 216px;
+        // The viewport deliberately does not clip: the selected card can use a
+        // fine lavender rim without truncating the far-right continuation.
+        clip: false;
+
+        for card-image[index] in root.rail-covers : Rectangle {
+            // Seven full cards plus the next card's edge match the reference;
+            // the remaining games stay deliberately discoverable via the rail.
+            x: (index - root.rail-first-index) * 204px + (index > root.selected-index ? 20px : 0px);
+            y: index == root.selected-index ? 0px : 8px;
+            width: index == root.selected-index ? 216px : 200px;
+            height: index == root.selected-index ? 216px : 204px;
+            background: transparent;
+            border-radius: 12px;
+            clip: false;
+            opacity: index == root.selected-index ? 1 : 0.94;
+            animate opacity { duration: 180ms; easing: ease-in-out; }
+
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: #17171b;
+                border-width: index == root.selected-index ? 2px : 1px;
+                border-color: index == root.selected-index ? #c3b5ff : #ffffff32;
+                border-radius: 12px;
+                clip: true;
+
+                Image {
+                    x: index == root.selected-index ? 2px : 1px;
+                    y: index == root.selected-index ? 2px : 1px;
+                    width: parent.width - (index == root.selected-index ? 4px : 2px);
+                    height: parent.height - (index == root.selected-index ? 4px : 2px);
+                    source: card-image;
+                    image-fit: cover;
+                    accessible-label: root.rail-titles[index];
+                }
+                Rectangle {
+                    x: 0px;
+                    y: parent.height - 89px;
+                    width: parent.width;
+                    height: 89px;
+                    background: @linear-gradient(0deg, #090a0eee 0%, #090a0d93 53%, #0b0b0d00 100%);
+                }
+                Rectangle {
+                    x: 1px;
+                    y: 1px;
+                    width: parent.width - 2px;
+                    height: parent.height - 2px;
+                    background: @linear-gradient(180deg, #ffffff14 0%, #ffffff00 34%);
+                    border-radius: 11px;
+                }
+                Text {
+                    x: 16px;
+                    y: parent.height - 53px;
+                    width: parent.width - 30px;
+                    height: 22px;
+                    text: root.rail-titles[index];
+                    color: #f3f0f3;
+                    font-family: "SF Pro Text";
+                    font-size: 15px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    x: 16px;
+                    y: parent.height - 31px;
+                    width: parent.width - 30px;
+                    height: 18px;
+                    text: root.rail-metadata[index];
+                    color: #b6b0bb;
+                    font-family: "SF Pro Text";
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+            }
+            /*
+             * The interaction lives outside the clipping rectangle so the card
+             * stays tappable right up to its illuminated rim.
+             */
+            TouchArea { clicked => { root.select-game(index); } }
+        }
+    }
+
+    // The fixed controller HUD gives the bottom edge purpose without another panel.
+    Rectangle {
+        x: 67px;
+        y: parent.height - 60px;
+        width: 37px;
+        height: 3px;
+        background: #33313a;
+        border-radius: 2px;
+    }
+    Rectangle {
+        x: 96px;
+        y: parent.height - 61px;
+        width: 7px;
+        height: 7px;
+        background: #7d54f4;
+        border-radius: 4px;
+    }
+    Text {
+        x: 111px;
+        y: parent.height - 70px;
+        width: 70px;
+        height: 24px;
+        text: "Popular";
+        color: #eeebf0;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    Rectangle { x: parent.width / 2 - 299px; y: parent.height - 60px; width: 100px; height: 3px; background: #ffffff18; border-radius: 2px; }
+    Rectangle { x: parent.width / 2 - 184px; y: parent.height - 60px; width: 100px; height: 3px; background: #7d54f4; border-radius: 2px; }
+    Rectangle { x: parent.width / 2 - 69px; y: parent.height - 60px; width: 100px; height: 3px; background: #ffffff18; border-radius: 2px; }
+    Rectangle { x: parent.width / 2 + 46px; y: parent.height - 60px; width: 100px; height: 3px; background: #ffffff18; border-radius: 2px; }
+    Rectangle { x: parent.width / 2 + 161px; y: parent.height - 60px; width: 100px; height: 3px; background: #ffffff18; border-radius: 2px; }
+
+    Rectangle {
+        x: parent.width - 333px;
+        y: parent.height - 73px;
+        width: 24px;
+        height: 24px;
+        background: #ffffff14;
+        border-radius: 12px;
+        StrokeIcon {
+            x: 7px;
+            y: 7px;
+            width: 10px;
+            height: 10px;
+            tone: #ddd9df;
+            path-data: "M 12 2 V 22 M 2 12 H 22";
+        }
+    }
+    Text {
+        x: parent.width - 300px;
+        y: parent.height - 73px;
+        width: 65px;
+        height: 24px;
+        text: "Navigate";
+        color: #c8c4cb;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: parent.width - 207px;
+        y: parent.height - 73px;
+        width: 24px;
+        height: 24px;
+        background: #1e5131;
+        border-radius: 12px;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "A";
+            color: #74e392;
+            font-family: "SF Pro Text";
+            font-size: 13px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        x: parent.width - 174px;
+        y: parent.height - 73px;
+        width: 44px;
+        height: 24px;
+        text: "Select";
+        color: #c8c4cb;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+    Rectangle {
+        x: parent.width - 108px;
+        y: parent.height - 73px;
+        width: 24px;
+        height: 24px;
+        background: #4c2428;
+        border-radius: 12px;
+        Text {
+            width: parent.width;
+            height: parent.height;
+            text: "B";
+            color: #f06b6e;
+            font-family: "SF Pro Text";
+            font-size: 13px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    Text {
+        x: parent.width - 75px;
+        y: parent.height - 73px;
+        width: 35px;
+        height: 24px;
+        text: "Back";
+        color: #c8c4cb;
+        font-family: "SF Pro Text";
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+}
