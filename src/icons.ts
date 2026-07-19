@@ -17,7 +17,13 @@ export type IconName =
   | "grid"
   | "layout"
   | "navigate"
-  | "more";
+  | "steam"
+  | "download"
+  | "close"
+  | "refresh"
+  | "folder"
+  | "monitor"
+  | "alert";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -43,7 +49,16 @@ const paths: Record<IconName, string> = {
   grid: '<rect x="3" y="3" width="6" height="6" rx=".5" /><rect x="15" y="3" width="6" height="6" rx=".5" /><rect x="3" y="15" width="6" height="6" rx=".5" /><rect x="15" y="15" width="6" height="6" rx=".5" />',
   layout: '<rect x="3" y="3" width="6" height="6" rx=".5" /><rect x="15" y="3" width="6" height="6" rx=".5" /><rect x="3" y="15" width="6" height="6" rx=".5" /><rect x="15" y="15" width="6" height="6" rx=".5" />',
   navigate: '<path d="m12 3 7 9-7 9-7-9zM9 12h6" />',
-  more: '<circle cx="5" cy="12" r="1.3" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.3" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.3" fill="currentColor" stroke="none" />',
+  // Steam's official glyph, kept inline so source badges do not need a
+  // network request or a raster asset at small sizes.
+  steam:
+    '<path fill="currentColor" stroke="none" d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z" />',
+  download: '<path d="M12 3v11M8 10l4 4 4-4M5 18v2h14v-2" />',
+  close: '<path d="m6 6 12 12M18 6 6 18" />',
+  refresh: '<path d="M20 11a8 8 0 1 0 1.2 4.2M20 5v6h-6" />',
+  folder: '<path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />',
+  monitor: '<rect x="3" y="4" width="18" height="13" rx="1" /><path d="M8 21h8M12 17v4" />',
+  alert: '<circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5M12 16h.01" />',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {

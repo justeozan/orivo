@@ -1,0 +1,8 @@
+# macOS Keychain access is tied to an app's code-signing requirement. Cargo's
+# unsigned debug binaries otherwise receive a different ad-hoc identifier on
+# every rebuild, which breaks access to credentials created by the last run.
+[target.aarch64-apple-darwin]
+runner = "src-tauri/scripts/macos-keychain-runner.sh"
+
+[target.x86_64-apple-darwin]
+runner = "src-tauri/scripts/macos-keychain-runner.sh"

@@ -1,6 +1,8 @@
 export interface LibraryGame {
   id: string;
   title: string;
+  /** Presentation source returned by the desktop catalog; fixture entries can omit it. */
+  source?: "steam" | "local" | "showcase";
   description: string;
   metadata: string;
   genre: string;
@@ -10,6 +12,10 @@ export interface LibraryGame {
   lastPlayedAt: string;
   playTimeSeconds: number;
   launchable: boolean;
+  /** Native platform support declared by Steam Store, not compatibility-layer support. */
+  hostPlatform?: "windows" | "macos" | "linux" | "other";
+  supportedPlatforms?: Array<"windows" | "macos" | "linux">;
+  compatibleWithHost?: boolean;
 }
 
 const hero = (name: string) => `/media/igdb/heroes/${name}`;
