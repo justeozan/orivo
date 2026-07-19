@@ -373,7 +373,7 @@ Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'
 - runtime Tauri v2, fenetre et capabilities minimales;
 - shell TypeScript/CSS avec navigation clavier/manette;
 - SQLite, migrations et catalogue minimal;
-- import d'une source;
+- import d'une source — **SteamSource implémenté** : scan local des installations et connexion de bibliothèque Steam directement depuis le desktop, avec secrets dans le Trousseau, synchronisation non bloquante, fusion AppID, preview/import idempotent et launch target typé;
 - recherche FTS5;
 - lancement d'un jeu;
 - cache media scope et page Library.

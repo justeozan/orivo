@@ -2,6 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { appCacheDir, join } from "@tauri-apps/api/path";
 
 const CACHE_PREFIX = "cache:";
+let mediaDirectoryPromise: Promise<string> | null = null;
 
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -27,10 +28,14 @@ export async function resolveMediaUrl(value: string | null | undefined): Promise
   }
 
   try {
-    const cacheDirectory = await appCacheDir();
-    const mediaPath = await join(cacheDirectory, "media", opaqueFilename);
+    mediaDirectoryPromise ??= appCacheDir().then((cacheDirectory) => join(cacheDirectory, "media"));
+    const mediaDirectory = await mediaDirectoryPromise;
+    const separator = mediaDirectory.includes("\\") ? "\\" : "/";
+    const suffix = mediaDirectory.endsWith("/") || mediaDirectory.endsWith("\\") ? "" : separator;
+    const mediaPath = mediaDirectory + suffix + opaqueFilename;
     return convertFileSrc(mediaPath);
   } catch {
+    mediaDirectoryPromise = null;
     return "";
   }
 }

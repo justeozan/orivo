@@ -4,11 +4,11 @@ Ce document fixe le périmètre du premier vertical slice : découvrir un jeu lo
 
 ## Version et compatibilité
 
-- `schema_version` est un entier global, initialisé à `1`.
+- `schema_version` est un entier global, actuellement à `2`.
 - Un fichier avec une version majeure inconnue est refusé sans être modifié.
-- Une version mineure connue peut être chargée si tous ses champs obligatoires sont présents.
+- Le format v1 est migré explicitement vers v2 avant usage ; v2 introduit les launch targets typés et les références média privées des sources.
 - Toute migration est explicite, déterministe et sauvegarde d'abord le fichier source en `.bak`.
-- Une migration échouée laisse le catalogue original intact et expose une action `Restore backup`.
+- Une migration échouée laisse le catalogue original intact ; le fichier `.bak` peut être restauré manuellement si nécessaire.
 - Les champs inconnus sont conservés lors d'une lecture/écriture compatible ; le Selector n'en dépend jamais pour s'afficher.
 
 ## Entrée de catalogue
@@ -17,24 +17,30 @@ La source v0.1 peut être JSON ou SQLite, mais son modèle logique reste le mêm
 
 ```text
 Catalog {
-  schema_version: 1
+  schema_version: 2
   games: [Game]
 }
 
 Game {
   id: string                 // stable, unique, non vide
   title: string              // non vide
-  executable_path: path      // fichier local, obligatoire pour le lancement
+  executable_path: path?     // fichier local, obligatoire pour une source direct
   working_directory: path?   // sinon dossier parent de l'exécutable
   arguments: [string]        // arguments déjà tokenisés, jamais une commande shell
   description: string?       // sous-titre local affiché dans le hero
   metadata: string?           // informations compactes affichées sous le sous-titre
   artwork_path: path?        // hero image statique ou fond panoramique
+  artwork_source_path: path? // origine privée servant à régénérer le cache
   cover_path: path?          // jaquette verticale du rail
+  cover_source_path: path?   // origine privée servant à régénérer le cache
   logo_path: path?           // logo transparent affiché dans le hero
   hero_video_path: path?     // réservé au Gate 2
   last_played_at: timestamp?
   play_time_seconds: integer // >= 0
+  source: local | steam
+  source_id: string?         // ID stable du fournisseur, e.g. Steam appId
+  launch_target: direct | Steam { app_id }
+  installation_path: path?   // conservé côté Rust, jamais exposé au WebView
 }
 ```
 
@@ -91,7 +97,34 @@ Chaque erreur doit fournir une cause lisible et l'action la plus utile :
 - Le hero, le logo et la cover sont des médias indépendants : l'absence de l'un ne masque pas les deux autres.
 - Le chemin de catalogue peut être surchargé avec `ORIVO_CATALOG_PATH` pour les tests et le développement.
 
+## Gate 2 — SteamSource local et bibliothèque de compte
+
+Steam a deux chemins complémentaires, tous deux local-first. Ils ne nécessitent pas de backend Orivo hébergé.
+
+- « Importer les jeux installés » dans le menu ancré au logo conserve le scan local et son aperçu de sélection.
+- « Se connecter à une bibliothèque » ouvre une WebView Steam dédiée, non persistante et sans capability IPC. L'utilisateur se connecte directement auprès de Steam ; Orivo ne collecte jamais son mot de passe ni son Steam Guard. Si Steam termine sans rechargement de page, le bouton « I’ve signed in » relance explicitement la vérification au lieu de laisser l'interface attendre.
+- Une fois l'identité et le jeton de bibliothèque obtenus localement, ils restent dans le Trousseau macOS. Ils ne sont ni ajoutés à `catalog.json`, ni renvoyés au WebView principal, ni journalisés. L'IPC ne reçoit que l'état public de connexion et les compteurs de synchronisation.
+- La bibliothèque est récupérée directement auprès de Steam, en arrière-plan. L'alternative « clé API » accepte un SteamID64 et une clé Web API propres à l'utilisateur ; Orivo la vérifie auprès de Steam avant de remplacer une connexion existante, puis la stocke dans le même Trousseau. Elle sert de secours si la connexion web ne répond plus.
+- Pour les jeux dont le catalogue n'a pas encore été enrichi, Orivo appelle directement l'endpoint public Steam Store avec au plus quatre requêtes simultanées. Il récupère la description courte, le genre et les plateformes natives (`Windows`, `macOS`, `Linux`) sans transmettre le jeton de compte, puis conserve ce résultat localement afin qu'une indisponibilité ponctuelle du Store ne réintroduise pas un texte générique.
+- Orivo détecte le système qui exécute l'application côté Rust et compare cette valeur aux plateformes Steam déclarées. Le hero affiche le résultat uniquement lorsqu'il est connu. Il s'agit d'une compatibilité native annoncée par Steam, pas d'une promesse de fonctionnement via Proton, Wine ou une couche de virtualisation.
+- La connexion web s'appuie sur un jeton présent dans la page Steam, pas sur un OAuth public documenté. Elle peut donc expirer ou évoluer : la reconnexion et la voie API-key restent des états produit explicites. Les challenges HTTPS externes de Steam Guard restent isolés dans la WebView sans capability ; seule une page `store.steampowered.com` peut fournir le jeton accepté.
+- Sur macOS, Orivo découvre la racine Steam locale puis les bibliothèques secondaires déclarées dans `libraryfolders.vdf`.
+- Seuls les manifests `appmanifest_<appid>.acf` complets, installés et associés à un dossier de jeu existant sont proposés. Les redistribuables, bandes-son, manifests incohérents et entrées incomplètes sont ignorés sans empêcher le reste du scan.
+- Le panneau Steam reçoit uniquement un `appId`, un titre, un statut et des URLs de cache opaques ou des jaquettes Steam générées depuis un AppID numérique. Les chemins Steam, manifestes, répertoires d'installation et données source restent côté Rust.
+- `import_steam_games(appIds)` relance un scan côté backend avant toute écriture ; il refuse toute entrée qui n'est plus découverte comme installée. Le frontend ne fournit jamais de chemin, commande, artwork ni argument de lancement.
+- L'import est idempotent par `steam_app_id`, écrit le catalogue de façon atomique et préserve les données utilisateur ou les médias déjà mis en cache lors d'un refresh.
+- Le scan et la préparation des médias tournent hors du chemin UI. Une courte photographie Rust-only de la découverte évite un second parcours des manifests lors de l'hydratation ; elle expire rapidement et ne traverse jamais l'IPC. La liste apparaît d'abord ; un maximum de 16 visuels visibles est hydraté ensuite en arrière-plan.
+- Les médias sont optionnels, plafonnés à 20 MiB par fichier et 128 MiB par opération de cache. Une copie temporaire est renommée atomiquement avant d'être exposée ; une image illisible ou trop volumineuse laisse simplement le fallback visuel.
+- Les mutations de catalogue sont sérialisées, mais les lectures de rail et de lancement ne gardent pas le verrou pendant l'écriture atomique sur disque.
+- Un jeu Steam utilise un launch target typé `Steam { app_id }`, non un faux exécutable. Sur macOS, Orivo appelle le bundle Steam avec l'URI fixe `steam://run/<app_id>` sans shell, puis vérifie que macOS a accepté la demande avant de confirmer le lancement.
+- La synchronisation de compte joint la liste de jeux possédés avec le scan local par AppID. Un jeu possédé mais absent du disque est conservé dans la sidebar avec `installation_path: None`, le statut « Not installed » et `launchable: false`; son bouton ouvre Steam via l'URI fixe `steam://install/<app_id>`, sans construire de commande depuis le WebView.
+- Les trois rôles d'image Steam restent distincts : `library_600x900.jpg` pour la jaquette verticale 2:3, `library_hero.jpg` pour la carte horizontale sélectionnée et `capsule_616x353.jpg` pour le wallpaper officiel avec logo. `header.jpg` n'est qu'un fallback visuel si un asset manque.
+- Une seule identité Steam est liée à une installation Orivo dans ce gate. Déconnecter Steam supprime seulement le secret du Trousseau ; les jeux déjà importés restent dans le catalogue local jusqu'à ce qu'une action produit explicite les retire.
+
+Limites explicites de ce gate : le temps de jeu est celui renvoyé par Steam pour le compte lié ; les succès, le multi-compte, la gestion détaillée d'installation/désinstallation et les autres plateformes restent hors périmètre.
+
 ## Suite immédiate
 
 1. Ajouter les migrations explicites et leurs fixtures versionnées.
 2. Ajouter les tests de migration et la matrice d'erreurs avant le prochain gate fonctionnel.
+3. Ajouter les succès et une stratégie multi-compte explicite avant d'étendre les données Steam sensibles.

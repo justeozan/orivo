@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "productName": "Orivo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "io.orivo.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -25,12 +25,12 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://cdn.cloudflare.steamstatic.com; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPCACHE/media/**/*"]
       },
-      "capabilities": ["main-window"]
+      "capabilities": ["main-window", "steam-auth"]
     }
   },
   "bundle": {
