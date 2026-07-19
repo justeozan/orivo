@@ -1,14 +1,12 @@
 # Revue visuelle du Selector
 
-Orivo étant une application native Slint/WGPU, Playwright n'est pas la bonne surface d'inspection. Le projet utilise le backend headless de Slint pour rendre la scène en PNG à taille fixe, puis la capture peut être ouverte avec un viewer d'image.
+Le Selector est maintenant un frontend TypeScript/CSS dans une fenêtre Tauri. Une suite navigateur telle que Playwright est donc la surface de régression adaptée : elle peut fixer le viewport, exercer les états du rail et comparer les captures au mock de référence.
 
 ## Capture de référence locale
 
-```bash
-cargo test renders_selector_snapshot_for_visual_review -- --nocapture
-```
+La suite visuelle doit ouvrir le frontend à **1536 x 1024**, charger le catalogue de démonstration et produire un golden versionné dans `tests/visual/`. La cible de comparaison est `assets/moc-images/orivo-full-screen.png`.
 
-La capture est écrite dans `.context/orivo-selector-snapshot.png` afin de rester hors du suivi Git. Le test injecte les assets Unrailed! du dossier `assets/test-unrailed-assets` et vérifie donc la composition avec un vrai hero, un logo et une cover.
+Les tests frontend ne doivent pas dépendre d'un catalogue utilisateur, d'un dialogue natif ou d'un accès disque. Ils injectent un `SelectorViewModel` déterministe avec les assets de `public/media/`. Les commandes Tauri réelles sont couvertes séparément par les tests d'intégration Rust et IPC.
 
 ## Points comparés au mock
 
@@ -17,6 +15,8 @@ La capture est écrite dans `.context/orivo-selector-snapshot.png` afin de reste
 - bloc titre/logo, description, métadonnées et CTA ;
 - flèches latérales de sélection ;
 - rail `Recently Played` avec cover active ;
-- HUD de navigation ancré au bas de la scène.
+- HUD de navigation ancré au bas de la scène ;
+- panneaux verre avec blur localisé, bordure et fallback opaque ;
+- transitions du hero et de la carte active sans mouvement de layout.
 
-Le snapshot headless sert à régler la géométrie et les couches. La validation finale de fluidité, du fullscreen et du rendu Metal reste à faire sur la fenêtre native du MacBook.
+La régression navigateur règle la géométrie, les couches CSS et le comportement reduced-motion. La validation finale se fait aussi dans la fenêtre Tauri empaquetée sur les WebViews cibles : fullscreen sans décoration, `backdrop-filter`, décodage média, clavier/manette et frame pacing sur macOS puis Windows.

@@ -1,3 +1,6 @@
 /target/
+/node_modules/
+/dist/
+/src-tauri/gen/
 .DS_Store
 .gstack/

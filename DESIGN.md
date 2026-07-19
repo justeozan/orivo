@@ -7,6 +7,8 @@ Ce document décrit le système visuel partagé d'Orivo et ses deux modes d'inte
 
 Le **Selector fullscreen** est la cible prioritaire du premier prototype. Le **Home / Game Hub** est une surface plus dense, dérivée de la référence secondaire, qui viendra ensuite. Les tokens, la typographie, le verre, les jaquettes et la motion sont partagés, mais la structure et la densité ne le sont pas.
 
+L'implémentation de référence est le frontend TypeScript/CSS de Tauri v2. Les règles CSS de ce document sont donc la spécification directe du WebView : le verre utilise le vrai `backdrop-filter` du navigateur, pas une image du hero floutée et recopiée dans chaque contrôle.
+
 ## 1. Theme Visuel & Atmosphere
 
 - **Ambiance generale**: cockpit gaming nocturne, verre depoli, lumiere chaude issue des jaquettes et des paysages, controles froids et precis.
@@ -14,7 +16,7 @@ Le **Selector fullscreen** est la cible prioritaire du premier prototype. Le **H
 - **Variance**: 6/10. Structure claire en colonnes, mais profondeur creee par le hero image, les cartes flottantes, les rails horizontaux et la sidebar.
 - **Motion**: 5/10. Interactions calmes, rapides, tactiles. Pas d'animation decorative.
 - **Signature visuelle**: grande image de jeu en fond, overlay sombre progressif, panneaux glassmorphism, textes blancs doux, accent violet pour selection et action primaire.
-- **Surface Selector**: canvas fullscreen, navigation horizontale, hero dominant, rail de jeux et HUD de contrôleur.
+- **Surface Selector**: scene fullscreen, navigation horizontale, hero dominant, rail de jeux et HUD de contrôleur.
 - **Surface Home / Game Hub**: application desktop dans une grande fenêtre arrondie, fond noir externe, chrome macOS visible, navigation latérale fixe.
 
 ## 2. Palette Couleur & Roles
@@ -70,7 +72,7 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 
 #### Canvas et zones
 
-- Référence: 1536 x 1024, canvas plein écran sans sidebar ni colonne de widgets.
+- Référence: 1536 x 1024, viewport plein écran sans sidebar ni colonne de widgets.
 - Le hero occupe toute la surface et reste visible jusque derrière le rail inférieur.
 - La barre supérieure est une couche flottante horizontale, sans cadre de fenêtre visible.
 - Le rail `Recently Played` occupe la bande basse du hero; il ne doit jamais recouvrir le titre ou les actions.
@@ -126,7 +128,8 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 - Le jeu sélectionné reçoit le média haute résolution; les voisins utilisent des dérivés légers préchargés.
 - Le changement de jeu anime uniquement `opacity`, `transform` et les propriétés GPU dédiées.
 - Aucun décodage, redimensionnement lourd ou chargement disque ne doit bloquer la navigation.
-- Le Selector doit rester utilisable avec une image statique si le backend vidéo, le fichier ou le GPU est indisponible.
+- Le blur est limité aux petites surfaces glass : il ne s'applique ni au hero ni au viewport complet. En l'absence de `backdrop-filter`, les contrôles utilisent une surface Obsidian plus opaque sans modifier la géométrie.
+- Le Selector doit rester utilisable avec une image statique si le backend vidéo, le fichier ou le décodage matériel est indisponible.
 
 ### 4.2 Home / Game Hub — référence secondaire
 
@@ -330,8 +333,15 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 .glass-panel {
   background: rgba(32,31,34,0.58);
   border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
   backdrop-filter: blur(22px) saturate(130%);
   box-shadow: 0 18px 48px rgba(0,0,0,0.35);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .glass-panel {
+    background: rgba(29,28,32,0.88);
+  }
 }
 ```
 
