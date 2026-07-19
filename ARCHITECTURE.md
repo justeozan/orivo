@@ -6,7 +6,7 @@
 
 Ce document decrit l'architecture cible d'Orivo et sert de reference aux implementations en cours.
 
-Le workspace contient maintenant un premier vertical slice du Selector fullscreen: runtime Rust, interface Slint, catalogue local, lancement direct et pipeline media. Les modules decrits ci-dessous restent les frontieres a construire autour de ce prototype.
+Le Selector fullscreen est desormais une application **Tauri v2** : un frontend TypeScript/CSS leger dans le WebView systeme, pilote par des commandes Rust pour le catalogue, l'import, le lancement et les medias. Le premier vertical slice conserve un catalogue local et le lancement direct, tandis que les modules decrits ci-dessous restent les frontieres a construire autour de lui.
 
 ## 2. Vision produit
 
@@ -29,8 +29,8 @@ Les plateformes existantes comme Steam, Epic, GOG et les emulateurs sont traitee
 1. **Local-first**: la bibliotheque, la recherche et les actions essentielles fonctionnent sans serveur distant.
 2. **UI non bloquante**: l'interface ne doit jamais attendre une synchronisation, une jaquette ou un fournisseur externe.
 3. **Une source canonique**: SQLite est la source de verite locale; les vues de feed, les recherches et les layouts sont des projections derivees.
-4. **Contrats stables**: les integrations et plugins passent par des interfaces structurees, jamais par des acces directs au renderer.
-5. **GPU pour l'immersion**: Slint gere la structure de l'interface; wgpu gere la composition visuelle avancee.
+4. **Contrats stables**: les integrations, plugins et le WebView passent par des interfaces structurees, jamais par des acces directs au domaine, au disque ou au processus de rendu.
+5. **Composition native au WebView**: le CSS porte le hero, le verre, le blur et les animations; une surface WebGL/WebGPU n'est ajoutee que lorsqu'un profilage demontre qu'elle est necessaire.
 6. **Progressive hydration**: la fenetre et les donnees recentes apparaissent immediatement, puis les donnees completes sont hydratees en arriere-plan.
 7. **Accessibilite explicite**: roles, labels, focus clavier, contraste et reduction des animations font partie de chaque composant.
 
@@ -41,16 +41,16 @@ Les plateformes existantes comme Steam, Epic, GOG et les emulateurs sont traitee
 |                         Orivo Desktop App                             |
 |                                                                       |
 |  +--------------------+       +----------------------+                |
-|  | Presentation       |       | Application          |                |
-|  | Slint              |<----->| Commands / Queries   |                |
-|  | navigation, focus  |       | domain state         |                |
+|  | Presentation       |       | Application Rust     |                |
+|  | TypeScript / CSS   |<----->| Commands / Queries   |                |
+|  | navigation, focus  |  IPC  | domain state         |                |
 |  +---------+----------+       +----------+-----------+                |
 |            |                             |                            |
 |            v                             v                            |
 |  +--------------------+       +----------------------+                |
-|  | Visual compositor  |       | Local data platform  |                |
-|  | wgpu               |       | SQLite + FTS5        |                |
-|  | hero, glass, blur  |       | cache + projections  |                |
+|  | Tauri WebView      |       | Local data platform  |                |
+|  | CSS hero/glass/    |       | SQLite + FTS5        |                |
+|  | blur + asset scope |       | cache + projections  |                |
 |  +--------------------+       +----------+-----------+                |
 |                                         |                            |
 |                    +--------------------+--------------------+       |
@@ -69,48 +69,46 @@ Les plateformes existantes comme Steam, Epic, GOG et les emulateurs sont traitee
 
 ### 5.1 Runtime desktop
 
-Le runtime principal est un binaire natif Rust. Il porte le cycle de vie de l'application, la configuration, les threads de travail, les permissions et les appels aux APIs du systeme d'exploitation.
+Le runtime principal est Tauri v2. Son processus Rust porte le cycle de vie de l'application, la configuration, les threads de travail, les permissions, les commandes IPC et les appels aux APIs du systeme d'exploitation. Le WebView systeme reste la surface de presentation, pas une source d'autorite sur le disque ou les processus.
 
 Responsabilites:
 
-- ouvrir et gerer la fenetre native;
-- initialiser le renderer et les ressources GPU;
+- ouvrir et gerer la fenetre native et son WebView;
+- declarer la CSP, les capabilities et les scopes de medias Tauri;
 - demarrer la base locale;
 - restaurer le dernier espace et la derniere selection;
 - coordonner les workers et les plugins;
-- exposer les actions applicatives a l'interface.
+- exposer des commandes et evenements applicatifs minimaux a l'interface.
 
 ### 5.2 Presentation
 
-Slint est la couche d'interface declarative.
-
-Elle gere:
+Le frontend TypeScript/CSS est une couche de presentation legere chargee par Tauri. Il gere:
 
 - la structure des pages et des panneaux;
 - la navigation et les etats visuels;
 - les textes, les controles et les listes;
 - le focus clavier et la navigation manette;
 - les roles et labels d'accessibilite;
-- les etats loading, empty, error et offline.
+- les etats loading, empty, error et offline;
+- les medias recus sous forme d'URL autorisees, jamais de chemins locaux bruts.
 
-Elle ne doit pas contenir la logique de synchronisation des fournisseurs, les requetes SQL complexes ni le code de rendu avance.
+Il ne doit pas contenir la logique de synchronisation des fournisseurs, les requetes SQL complexes, les chemins executables, les arguments de lancement ni une permission generale de filesystem ou de shell. Les mutations passent par des commandes Rust typees; les mises a jour asynchrones reviennent par des evenements ou par relecture d'un view model.
 
 ### 5.3 Composition visuelle
 
-wgpu est utilise pour les surfaces qui donnent a Orivo son identite visuelle:
+Le compositor du WebView et le CSS donnent a Orivo son identite visuelle:
 
-- hero images et backgrounds plein ecran;
-- profondeur et parallax;
-- blur pyramid et composition des panneaux glass;
-- particules, bloom, color grading et overlays;
-- lecture et presentation des medias;
-- textures prechargees et caches GPU.
+- hero images et backgrounds plein ecran avec `object-fit` et overlays gradients;
+- panneaux glass via `backdrop-filter`, applique uniquement aux surfaces compactes;
+- profondeur, parallax optionnelle et transitions GPU-friendly via `transform` et `opacity`;
+- lecture media, fallbacks et placeholders a geometrie stable;
+- prechargement borne du jeu selectionne et de ses voisins immediats.
 
-Le renderer reste une capacite interne de l'application. Un plugin ne peut pas injecter de shader, de render pass ou de callback dans la frame loop.
+Le frontend ne doit pas recreer des canvases, decodages ou filtres plein ecran a chaque selection. Si `backdrop-filter` est indisponible ou trop couteux, une surface opaque conserve la meme geometrie et la meme lisibilite. Un plugin ne peut ni injecter du JavaScript privilegie, ni etendre les capabilities Tauri, ni contourner les commandes Rust. Une surface graphique specialisee reste possible plus tard, isolee dans le frontend et justifiee par une mesure, pas par defaut.
 
 ### 5.4 Domaine applicatif
 
-Le domaine contient les regles metier, independantes de Slint, SQLite et des APIs externes.
+Le domaine contient les regles metier, independantes de Tauri, du frontend, de SQLite et des APIs externes.
 
 Modules proposes:
 
@@ -235,24 +233,24 @@ FTS5 couvre les titres, aliases, developpeurs, editeurs, tags, plateformes et so
 
 Le pipeline distingue:
 
-- les assets produits integres a l'application;
+- les assets produits integres au bundle frontend;
 - les thumbnails de bibliotheque;
-- les versions hero et backdrop;
+- les versions hero, cover et backdrop derivees si elles sont necessaires;
 - les assets videos et captures;
-- les textures pretes pour le GPU.
+- les fichiers copies dans le cache applicatif et exposes au WebView par un scope Tauri explicite.
 
-Les versions derivees sont generees en arriere-plan et peuvent etre supprimees puis reconstruites. L'ecran doit pouvoir afficher un placeholder stable sans modifier la mise en page.
+Les versions derivees sont generees hors du chemin d'input et peuvent etre supprimees puis reconstruites. Le frontend ne recoit que des URL media autorisees, jamais un acces generique aux chemins de l'utilisateur. L'ecran doit pouvoir afficher un placeholder stable sans modifier la mise en page.
 
 ## 8. Flux applicatifs principaux
 
 ### Demarrage
 
 ```text
-Processus Rust
-  -> Fenetre native et shell Slint
-  -> Dernier etat local / hero cache
-  -> Premier rendu interactif
-  -> Ouverture SQLite et hydration des projections
+Processus Tauri Rust
+  -> Capabilities, CSP et fenetre WebView
+  -> Dernier view model local / hero cache borne
+  -> Premier rendu TypeScript/CSS interactif
+  -> Commande Rust de lecture + hydration des projections
   -> Workers: sources, media, intelligence, plugins
 ```
 
@@ -264,8 +262,9 @@ Home query service
   -> jeux recents et Continue Playing
   -> feed contextuel
   -> recommandations et smart collections
-  -> view model Slint
-  -> textures hero / glass composited par wgpu
+  -> view model de presentation
+  -> store TypeScript
+  -> hero / glass composes par CSS dans le WebView
 ```
 
 ### Rechercher puis lancer
@@ -302,7 +301,7 @@ Les composants et services doivent traiter au minimum:
 - `offline`: sources distantes indisponibles, fonctions locales actives;
 - `empty`: aucune bibliotheque ou aucun resultat;
 - `permission-required`: action bloquee par une capability;
-- `degraded`: renderer, media ou provider en mode reduit;
+- `degraded`: WebView, media ou provider en mode reduit;
 - `error`: erreur recuperable avec action de reprise.
 
 ## 10. Performance, accessibilite et fiabilite
@@ -313,7 +312,9 @@ Objectifs de conception tires du rapport technique:
 - conserver le chemin input -> etat sous environ 2 ms;
 - afficher les premiers resultats de recherche en moins d'une frame apres warm-up;
 - rendre un shell utilisable avant l'hydration complete;
-- maintenir les pipelines GPU et textures, sans les recreer a chaque frame;
+- ne decoder et ne precharger que le media selectionne et une petite fenetre de voisins;
+- limiter `backdrop-filter` aux controles et cartes verre, jamais a une scene plein ecran;
+- animer `transform` et `opacity`, et respecter `prefers-reduced-motion`;
 - decharger les medias et projections qui ne sont plus visibles;
 - supporter clavier, manette, navigation focus et reduction des animations;
 - tester les roles et labels avec les outils d'accessibilite des plateformes ciblees;
@@ -325,21 +326,33 @@ La promesse de demarrage sous 100 ms doit etre comprise comme un objectif de dem
 
 ```text
 orivo/
-  Cargo.toml
+  package.json
+  src/                      # frontend TypeScript/CSS
+    app/                    # store, routes et orchestration UI
+    selector/               # scene fullscreen, navigation et rail
+    components/             # controles visuels accessibles
+    styles/                 # tokens, glass, motion et responsive
+  public/
+    media/                  # assets de demonstration du frontend
+  src-tauri/
+    Cargo.toml
+    build.rs
+    tauri.conf.json
+    capabilities/           # permissions minimales par fenetre
+    src/
+      lib.rs                # bootstrap Tauri, commandes et AppState
+      catalog.rs            # modele, import et persistence locale
+      launcher.rs           # lancement direct sans shell
   crates/
-    app-shell/             # cycle de vie, fenetre, configuration
-    domain/                # regles metier et modeles stables
-    application/           # commands, queries, orchestration
-    presentation/          # view models, navigation, focus
-    ui/                    # fichiers Slint et composants visuels
-    renderer/              # wgpu, blur, glass, hero, media GPU
+    domain/                # regles metier et modeles stables, si l'extraction devient utile
+    application/           # commands, queries et orchestration, si l'extraction devient utile
     storage/               # SQLite, migrations, repositories, FTS5
     sources/               # adapters Steam, Epic, GOG, emulateurs...
     media/                 # cache, thumbnails, video et artworks
     jobs/                  # synchronisation et taches asynchrones
     plugins/               # Wasmtime, WIT, permissions, lifecycle
     intelligence/          # hardware, metrics, ONNX, recommandations
-    platform/              # OS, processus, filesystem, fenetre, input
+    platform/              # OS, processus, filesystem et input
   wit/                     # contrats du SDK plugin
   migrations/              # schema SQLite versionne
   assets/
@@ -347,8 +360,8 @@ orivo/
     themes/                # tokens et ressources visuelles
   tests/
     contract/              # adapters et plugins
-    integration/           # storage, launch, sync, search
-    visual/                # screenshots et regression renderer
+    integration/           # storage, launch, sync, search et IPC
+    visual/                # screenshots navigateur/WebView et regressions visuelles
 ```
 
 Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'au moment ou chaque frontiere correspond a un besoin reel.
@@ -357,22 +370,21 @@ Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'
 
 ### Phase 1: fondation utilisable
 
-- runtime Rust et fenetre;
-- shell Slint avec navigation clavier/manette;
+- runtime Tauri v2, fenetre et capabilities minimales;
+- shell TypeScript/CSS avec navigation clavier/manette;
 - SQLite, migrations et catalogue minimal;
 - import d'une source;
 - recherche FTS5;
 - lancement d'un jeu;
-- cache de thumbnails et page Library.
+- cache media scope et page Library.
 
 ### Phase 2: identite visuelle
 
-- pipeline wgpu;
 - hero plein ecran;
-- panneaux glass, blur et overlays;
+- panneaux glass CSS, blur et overlays;
 - transitions et motion;
 - ecran Home avec Continue Playing;
-- tests visuels sur les resolutions ciblees.
+- tests visuels navigateur/WebView sur les resolutions ciblees.
 
 ### Phase 3: valeur produit
 
@@ -394,8 +406,10 @@ Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'
 
 ## 13. Decisions encore ouvertes
 
-- Valider Slint contre Qt Quick sur un prototype de renderer et un test d'accessibilite reel.
+- Valider le rendu CSS du verre, le frame pacing et l'accessibilite sur les WebViews macOS et Windows cibles.
 - Choisir la strategie de fenetre sans bordure et d'integration de la barre de titre par OS.
+- Definir le contrat IPC type entre le frontend, les commandes Rust et les evenements de rafraichissement.
+- Fixer les scopes media et filesystem les plus etroits compatibles avec les imports utilisateur.
 - Definir le premier fournisseur importe et son niveau de lancement/synchronisation.
 - Determiner quelles donnees de progression sont fiables selon chaque fournisseur.
 - Definir les limites du MVP pour le social, les mods et la marketplace.
