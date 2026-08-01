@@ -4,9 +4,15 @@ Ce document fixe le périmètre du premier vertical slice : découvrir un jeu lo
 
 ## Version et compatibilité
 
-- `schema_version` est un entier global, actuellement à `2`.
+- `schema_version` est un entier global, actuellement à `5`.
 - Un fichier avec une version majeure inconnue est refusé sans être modifié.
-- Le format v1 est migré explicitement vers v2 avant usage ; v2 introduit les launch targets typés et les références média privées des sources.
+- Les formats v1 à v4 sont migrés explicitement vers v5 avant usage ; v2
+  introduit les launch targets typés et les références média privées des
+  sources, v3 ajoute le target `Runner` des émulateurs et v4 ajoute les
+  profils Wine-Staging privés et leur inventaire d'exécutables accordés. v5
+  ajoute le backend graphique Wine fermé, par défaut `WineD3D`.
+- La migration v5 est additive : les jeux Direct, Steam et les targets Runner
+  génériques restent inchangés; aucun jeu existant n'est basculé vers Wine.
 - Toute migration est explicite, déterministe et sauvegarde d'abord le fichier source en `.bak`.
 - Une migration échouée laisse le catalogue original intact ; le fichier `.bak` peut être restauré manuellement si nécessaire.
 - Les champs inconnus sont conservés lors d'une lecture/écriture compatible ; le Selector n'en dépend jamais pour s'afficher.
@@ -17,7 +23,7 @@ La source v0.1 peut être JSON ou SQLite, mais son modèle logique reste le mêm
 
 ```text
 Catalog {
-  schema_version: 2
+  schema_version: 5
   games: [Game]
 }
 
@@ -39,7 +45,7 @@ Game {
   play_time_seconds: integer // >= 0
   source: local | steam
   source_id: string?         // ID stable du fournisseur, e.g. Steam appId
-  launch_target: direct | Steam { app_id }
+  launch_target: direct | Steam { app_id } | Runner { runner_id, game_ref, profile_id }
   installation_path: path?   // conservé côté Rust, jamais exposé au WebView
 }
 ```
@@ -48,6 +54,14 @@ Règles importantes :
 
 - Un lancement ne passe jamais par un shell. Le runtime construit directement le processus à partir de `executable_path`, `working_directory` et `arguments`.
 - Le WebView ne transmet que `game_id` à la commande `launch_game`. Le backend résout ensuite le jeu, le chemin, le répertoire et les arguments depuis le catalogue ; il n'accepte jamais une commande, un chemin ou des arguments libres venant du frontend.
+- Un target `Runner` représente un jeu confié à un profil d'émulateur. Ses trois
+  valeurs sont des identifiants opaques et validés : il ne contient ni ROM, ni
+  exécutable, ni ligne de commande. Le host Orivo résout et valide ensuite le
+  profil avant tout lancement.
+- Pour le runner officiel Wine-Staging, le profil et l'inventaire privé
+  contiennent les chemins Wine, préfixe, dossiers accordés et `.exe`; la carte
+  publique ne contient que les IDs opaques du target `Runner`. Le WebView ne
+  reçoit jamais ces chemins.
 - Un chemin relatif est résolu par rapport au fichier de catalogue, puis normalisé et vérifié.
 - Un exécutable absent produit une erreur récupérable ; il ne supprime pas le jeu.
 - Un bundle macOS `.app` est accepté à l'import ; `CFBundleExecutable` est résolu vers `Contents/MacOS` et le nom d'affichage du bundle est utilisé quand il existe.
@@ -59,6 +73,49 @@ Règles importantes :
 Le flux v0.1 est : `Choose executable` → validation du chemin → aperçu des métadonnées → `Add game` → écriture atomique du catalogue. Le dialogue natif est ouvert par une commande Rust Tauri ; le frontend n'obtient pas un accès général au filesystem.
 
 L'import n'exécute aucun fichier et ne scanne pas automatiquement les disques. L'utilisateur garde le contrôle sur les jeux et les médias ajoutés.
+
+## Runner officiel Wine-Staging (macOS)
+
+Le flux Wine est volontairement séparé de l'import Direct :
+`détecter/sélectionner Wine-Staging` → `nommer un profil` → `autoriser des
+dossiers` → `aperçu paginé` → `importer`. La détection ne lance pas un
+candidat automatiquement; une installation détectée doit être confirmée puis
+validée par le host. Les scans et la revalidation d'import sont exécutés hors
+du chemin de rendu, avec annulation possible.
+
+Un profil Wine possède un préfixe créé sous la racine gérée par Orivo et ne
+peut ni adopter ni modifier un préfixe d'une autre application. Au lancement,
+le host recanonise l'exécutable, vérifie qu'il est encore dans un dossier
+accordé et construit `Command` avec des tokens fixes; il n'utilise jamais un
+shell, une ligne de commande ou des arguments provenant du WebView.
+
+Un `.exe` Windows déjà importé comme jeu Direct reste une fiche Direct
+persistée, mais Orivo peut l'associer explicitement à un profil Wine qui a
+déjà accordé son dossier. Le host recanonise alors le chemin privé, vérifie le
+scope et produit une carte `Runner` sans chemin ni arguments. La carte Direct
+est masquée tant que l'association existe, puis réapparaît si le profil Wine
+est supprimé; aucune migration implicite ni perte de bibliothèque ne se
+produit.
+
+Le seul backend graphique additionnel de cette itération est
+`DXVK-macOS` expérimental : un utilisateur sélectionne manuellement l'archive
+DXVK-macOS allowlistée, que le host hache et lit sans extraction libre. Les
+DLL D3D10/11 validées sont copiées atomiquement dans le préfixe Orivo du
+profil, jamais dans l'installation Wine ni dans un autre préfixe. Au
+lancement, le host applique uniquement l'override fixe
+`WINEDLLOVERRIDES=d3d10core,d3d11=n,b`; le trajet est DirectX → Vulkan/MoltenVK
+→ Metal. Aucun téléchargement automatique, GPTK, CrossOver, variable Wine
+libre ou support d'anti-cheat n'est inclus. Le profil peut revenir à
+`WineD3D` : les DLL restent alors dans son préfixe privé, mais ne sont plus
+surchargées au lancement.
+
+Au lancement, le host recanonise puis re-hache l'exécutable avec refus des
+liens juste avant de créer le processus. Wine reçoit le chemin canonique
+autorisé du `.exe`, plutôt qu'un descripteur `/dev/fd/*`, afin que les moteurs
+comme Unity retrouvent leurs ressources voisines (`*_Data`). L'installation
+DXVK utilise des descripteurs de dossiers privés et des opérations
+`openat`/`renameat` sans suivi de liens : aucune écriture ne peut être
+redirigée hors du préfixe Orivo.
 
 ## Cycle de lancement
 

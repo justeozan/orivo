@@ -161,6 +161,11 @@ Le domaine ne depend jamais d'un format proprietaire de fournisseur. Les IDs ext
 
 Le runtime plugin recommande est **Wasmtime + WebAssembly Component Model + WIT**.
 
+Le plan d'exécution, le modèle de sécurité, les contrats initiaux et
+l'intégration des runners d'émulation sont définis dans
+[`docs/plugin-system-plan.md`](docs/plugin-system-plan.md). Ce document est la
+référence avant d'introduire un runtime plugin dans le produit.
+
 Les plugins peuvent fournir:
 
 - une source de jeux;

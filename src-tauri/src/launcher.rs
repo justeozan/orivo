@@ -12,6 +12,13 @@ pub enum LaunchError {
     #[cfg(not(target_os = "macos"))]
     SteamUnsupported,
     SteamDispatchFailed(ExitStatus),
+    /// Third-party runner execution is intentionally unavailable until the
+    /// plugin host can resolve a validated profile into a typed launch intent.
+    /// The built-in Wine-Staging adapter is resolved earlier by the trusted
+    /// runner host and never reaches this generic fallback.
+    RunnerUnavailable {
+        runner_id: String,
+    },
     Process(io::Error),
 }
 
@@ -37,6 +44,13 @@ impl std::fmt::Display for LaunchError {
             Self::SteamDispatchFailed(status) => {
                 write!(f, "Steam could not accept the launch request ({status})")
             }
+            Self::RunnerUnavailable { runner_id } => {
+                write!(
+                    f,
+                    "The {} runner is not available yet. Configure or enable its plugin and try again.",
+                    runner_id
+                )
+            }
             Self::Process(error) => write!(f, "process could not be started: {error}"),
         }
     }
@@ -45,7 +59,7 @@ impl std::fmt::Display for LaunchError {
 impl std::error::Error for LaunchError {}
 
 pub fn launch(game: &Game) -> Result<(), LaunchError> {
-    match game.launch_target {
+    match &game.launch_target {
         LaunchTarget::Direct => {
             let _ = launch_direct(game)?;
             Ok(())
@@ -58,7 +72,16 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
             {
                 return Err(LaunchError::SteamNotInstalled);
             }
-            launch_steam(app_id)
+            launch_steam(*app_id)
+        }
+        LaunchTarget::Runner { runner_id, .. } => {
+            // Do not turn runner ids, game references, or profiles into a
+            // process invocation here. The forthcoming plugin host will
+            // validate a typed LaunchIntent against grants and the selected
+            // profile before it asks this service to start anything.
+            Err(LaunchError::RunnerUnavailable {
+                runner_id: runner_id.clone(),
+            })
         }
     }
 }
@@ -212,6 +235,41 @@ mod tests {
         };
 
         assert!(matches!(launch(&game), Err(LaunchError::SteamNotInstalled)));
+    }
+
+    #[test]
+    fn refuses_runner_targets_until_a_plugin_host_validates_them() {
+        let game = Game {
+            id: "runner:com.orivo.ryujinx:abc123".into(),
+            title: "Example Switch Game".into(),
+            executable_path: None,
+            source: GameSource::Local,
+            source_id: None,
+            launch_target: LaunchTarget::Runner {
+                runner_id: "com.orivo.ryujinx".into(),
+                game_ref: "rom:sha256:abc123".into(),
+                profile_id: "profile-7f3b".into(),
+            },
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: None,
+            metadata: None,
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            logo_path: None,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        };
+
+        assert!(matches!(
+            launch(&game),
+            Err(LaunchError::RunnerUnavailable { runner_id }) if runner_id == "com.orivo.ryujinx"
+        ));
     }
 
     #[cfg(target_os = "macos")]
