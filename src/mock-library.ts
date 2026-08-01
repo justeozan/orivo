@@ -2,7 +2,7 @@ export interface LibraryGame {
   id: string;
   title: string;
   /** Presentation source returned by the desktop catalog; fixture entries can omit it. */
-  source?: "steam" | "local" | "showcase";
+  source?: "steam" | "wine" | "local" | "showcase";
   description: string;
   metadata: string;
   genre: string;
@@ -16,6 +16,8 @@ export interface LibraryGame {
   hostPlatform?: "windows" | "macos" | "linux" | "other";
   supportedPlatforms?: Array<"windows" | "macos" | "linux">;
   compatibleWithHost?: boolean;
+  /** Existing local Windows `.exe` that can be deliberately associated with a Wine profile. */
+  wineAttachable?: boolean;
 }
 
 const hero = (name: string) => `/media/igdb/heroes/${name}`;

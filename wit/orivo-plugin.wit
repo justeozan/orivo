@@ -1,0 +1,193 @@
+package orivo:plugin@1.0.0;
+
+/// Common, serialisable types shared by every Orivo plugin world.
+///
+/// IDs are opaque host references. They are never filesystem paths, command
+/// lines, handles into SQLite, or DOM/IPC capabilities.
+interface types {
+  enum extension-kind {
+    source,
+    runner,
+    metadata,
+    search,
+    automation,
+    ui-contribution,
+  }
+
+  enum plugin-error-code {
+    invalid-input,
+    permission-denied,
+    unavailable,
+    rate-limited,
+    cancelled,
+    internal,
+  }
+
+  record plugin-error {
+    code: plugin-error-code,
+    /// Presentation-safe sentence. The host keeps raw paths, secrets and
+    /// implementation backtraces in its private diagnostic log.
+    message: string,
+    retryable: bool,
+  }
+
+  record page-request {
+    /// Empty for the first page; otherwise a cursor previously returned by
+    /// this exact plugin and operation.
+    cursor: option<string>,
+    limit: u32,
+  }
+
+  record page-info {
+    next-cursor: option<string>,
+    complete: bool,
+  }
+
+  record external-reference {
+    provider-id: string,
+    external-id: string,
+  }
+
+  record game-candidate {
+    reference: external-reference,
+    title: string,
+    sort-title: option<string>,
+    platform: option<string>,
+    installed: bool,
+  }
+
+  record media-candidate {
+    kind: string,
+    url: string,
+    width: option<u32>,
+    height: option<u32>,
+  }
+
+  record command-contribution {
+    id: string,
+    title: string,
+    subtitle: option<string>,
+    icon: option<string>,
+  }
+
+  record badge-contribution {
+    id: string,
+    label: string,
+    tone: string,
+  }
+}
+
+/// Every plugin exports this surface. Startup and health checks are short,
+/// never network-backed, and receive host grants only through imported host
+/// calls in a later capability-specific ABI revision.
+interface plugin-core {
+  use types.{extension-kind, plugin-error};
+
+  record identity {
+    id: string,
+    version: string,
+    extensions: list<extension-kind>,
+  }
+
+  record health {
+    ready: bool,
+    message: option<string>,
+  }
+
+  get-identity: func() -> identity;
+  health-check: func() -> result<health, plugin-error>;
+}
+
+/// Source discovery is paginated and resumable. The plugin never writes the
+/// library itself: Orivo normalises candidates and commits one transaction.
+interface source {
+  use types.{game-candidate, page-info, page-request, plugin-error};
+
+  record discovery-page {
+    games: list<game-candidate>,
+    page: page-info,
+  }
+
+  discover-page: func(request: page-request) -> result<discovery-page, plugin-error>;
+}
+
+/// A runner prepares a typed launch intent from opaque IDs. It cannot return
+/// an executable path, a ROM path, a shell command or arbitrary arguments.
+interface runner {
+  use types.{game-candidate, page-info, page-request, plugin-error};
+
+  record runner-profile {
+    id: string,
+    display-name: string,
+  }
+
+  record profile-validation {
+    valid: bool,
+    message: option<string>,
+  }
+
+  record runner-game-page {
+    games: list<game-candidate>,
+    page: page-info,
+  }
+
+  record launch-intent {
+    runner-id: string,
+    profile-id: string,
+    game-reference: string,
+    /// The host recognises these declared modes. It owns the final process,
+    /// working directory and tokenised arguments for the selected profile.
+    mode: string,
+  }
+
+  validate-profile: func(profile: runner-profile) -> result<profile-validation, plugin-error>;
+  discover-page: func(profile-id: string, request: page-request) -> result<runner-game-page, plugin-error>;
+  prepare-launch: func(profile-id: string, game-reference: string) -> result<launch-intent, plugin-error>;
+}
+
+interface metadata {
+  use types.{external-reference, media-candidate, plugin-error};
+
+  record game-metadata {
+    description: option<string>,
+    genres: list<string>,
+    media: list<media-candidate>,
+  }
+
+  enrich: func(reference: external-reference) -> result<game-metadata, plugin-error>;
+}
+
+/// UI stays declarative. Orivo renders its own accessible controls and does
+/// not accept HTML, CSS, JavaScript, event listeners, or raw routes.
+interface ui-contrib {
+  use types.{badge-contribution, command-contribution, plugin-error};
+
+  record ui-contributions {
+    commands: list<command-contribution>,
+    badges: list<badge-contribution>,
+    /// JSON schema stored as data and rendered by Orivo's settings controls.
+    settings-schema: option<string>,
+  }
+
+  contributions: func() -> result<ui-contributions, plugin-error>;
+}
+
+world source-plugin {
+  export plugin-core;
+  export source;
+}
+
+world runner-plugin {
+  export plugin-core;
+  export runner;
+}
+
+world metadata-plugin {
+  export plugin-core;
+  export metadata;
+}
+
+world ui-plugin {
+  export plugin-core;
+  export ui-contrib;
+}
