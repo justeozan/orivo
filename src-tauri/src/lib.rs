@@ -21,8 +21,9 @@ use std::{
 };
 
 use catalog::{
-    Catalog, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID, WineGameCompatibility,
-    WineGameInventoryEntry, WineGraphicsBackend, WineGraphicsOptions, WineProfile,
+    Catalog, CatalogError, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID,
+    WineGameCompatibility, WineGameInventoryEntry, WineGraphicsBackend, WineGraphicsOptions,
+    WineProfile,
 };
 use futures_util::StreamExt;
 use plugin_manifest::HostCompatibility;
@@ -3498,12 +3499,31 @@ fn resolved_catalog_path(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
 
 fn load_or_migrate_catalog(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
     if path.is_file() {
-        let loaded = Catalog::load_with_migration(path)?;
-        if loaded.migrated_from.is_some() {
-            backup_catalog(path)?;
-            loaded.catalog.save_atomically(path)?;
+        match Catalog::load_with_migration(path) {
+            Ok(loaded) => {
+                if loaded.migrated_from.is_some() {
+                    backup_catalog(path)?;
+                    loaded.catalog.save_atomically(path)?;
+                }
+                return Ok(loaded.catalog);
+            }
+            // A catalog written by a newer build of Orivo cannot be read by this
+            // one (e.g. after switching between branches with different schema
+            // versions). Preserve it as a backup and start from an empty library
+            // instead of aborting the entire app during the setup hook.
+            Err(CatalogError::UnsupportedSchema { found, current }) => {
+                eprintln!(
+                    "orivo: catalog schema {found} is newer than supported schema {current}; \
+                     preserving it as a backup and starting with an empty library"
+                );
+                let backup = path.with_extension(format!("json.schema{found}.bak"));
+                fs::copy(path, &backup)?;
+                let fresh = Catalog::default();
+                fresh.save_atomically(path)?;
+                return Ok(fresh);
+            }
+            Err(error) => return Err(Box::new(error)),
         }
-        return Ok(loaded.catalog);
     }
 
     // Preserve installations of the Slint prototype without replacing the
