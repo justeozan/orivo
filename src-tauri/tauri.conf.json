@@ -1,5 +1,5 @@
 {
-  "$schema": "../gen/schemas/desktop-schema.json",
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Orivo",
   "version": "0.3.0",
   "identifier": "io.orivo.desktop",
@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost game-media: data: blob: https://cdn.cloudflare.steamstatic.com https://cdn.akamai.steamstatic.com https://shared.akamai.steamstatic.com https://store.akamai.steamstatic.com https://upload.wikimedia.org https://images.igdb.com https://lh3.googleusercontent.com https://encrypted-tbn0.gstatic.com; media-src 'self' asset: http://asset.localhost game-media:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost game-media: data: blob: https://cdn.cloudflare.steamstatic.com https://cdn.akamai.steamstatic.com https://shared.akamai.steamstatic.com https://store.akamai.steamstatic.com https://upload.wikimedia.org https://images.igdb.com https://lh3.googleusercontent.com https://encrypted-tbn0.gstatic.com; media-src 'self' asset: http://asset.localhost game-media:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPCACHE/media/**/*"]
@@ -35,8 +35,50 @@
   },
   "bundle": {
     "active": true,
+    "targets": ["app", "dmg", "nsis", "msi", "deb", "rpm", "appimage"],
+    "createUpdaterArtifacts": true,
+    "publisher": "Orivo",
+    "homepage": "https://github.com/justeozan/orivo",
+    "copyright": "Copyright © 2026 Orivo",
     "category": "Entertainment",
     "shortDescription": "A focused local game library",
-    "longDescription": "Orivo is a local-first game library with a cinematic selector."
+    "longDescription": "Orivo is a local-first game library with a cinematic selector.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "recommends": ["xdg-desktop-portal", "xdg-desktop-portal-gtk"]
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "gtk3"],
+        "recommends": ["xdg-desktop-portal", "xdg-desktop-portal-gtk"]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English", "French"]
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI0NzlBNjdCQjI4OUJBOTgKUldTWXVvbXllNlo1dEhXcC9ZL2ZUQzV4L1g5MWNyUHFJbDA1dkttWXh5clpxcmJhbk1FVG5rZkgK",
+      "endpoints": [
+        "https://github.com/justeozan/orivo/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

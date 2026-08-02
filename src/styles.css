@@ -1463,6 +1463,51 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .settings-metric { color: #f2eff7; font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .settings-hint { margin: 0; padding: 0 18px 16px; color: #8f8a99; font-size: 12px; line-height: 1.5; }
 
+/* Updater status inside the About card: one emphasised line for the state, one
+   quiet line for the detail, and a track that only appears while downloading. */
+.update-status { display: grid; gap: 2px; }
+.update-status__label { color: #cfcad8; font-weight: 600; }
+.update-status__detail { color: #98939f; }
+
+.update-progress {
+  display: block;
+  width: 100%;
+  max-width: 260px;
+  height: 6px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  box-shadow: inset 0 1px rgba(0,0,0,.28);
+}
+/* The `display` above would otherwise win over the `hidden` attribute. */
+.update-progress[hidden] { display: none; }
+.update-progress__fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(118deg, #b9aff6, #f0edff);
+  transition: width 200ms ease;
+}
+/* No content length means no percentage. The stripes fill the track so the row
+   reads as busy rather than as a download stuck at zero, and they stay legible
+   when reduced motion stops the sweep. */
+.update-progress--indeterminate .update-progress__fill {
+  background-image: repeating-linear-gradient(
+    115deg,
+    rgba(185,175,246,.85) 0 10px,
+    rgba(240,237,255,.4) 10px 20px
+  );
+  background-size: 40px 100%;
+  animation: update-progress-sweep 1.1s linear infinite;
+}
+
+@keyframes update-progress-sweep {
+  from { background-position: 0 0; }
+  to { background-position: 40px 0; }
+}
+
 /* Plugin browser: installed runners up top, a searchable catalogue below. */
 .plugins-group { padding: 13px 18px 6px; }
 .plugins-group + .plugins-group--catalog { border-top: 1px solid rgba(255,255,255,.07); }
