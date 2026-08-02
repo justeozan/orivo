@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppRoute, GameSummary, ProviderStatus, StoreOffer, StoreProvider } from "./contracts";
 import { PageLifecycleHost } from "./page-lifecycle";
 import type { StoreBrowsePage, StoreBrowseRequest, StoreHomeView } from "./store-model";
-import { EDITORIAL_GAMES } from "./store-model";
+import { DEFAULT_HIGHLIGHTS, EDITORIAL_GAMES, formatPrice, selectBestOffer } from "./store-model";
 import { createStorePage, type StorePageClient } from "./store-page";
 
 const HOUR = 60 * 60 * 1_000;
@@ -174,6 +174,16 @@ const cardFor = (root: HTMLElement, gameId: string): HTMLElement => {
   return node;
 };
 
+/**
+ * Hovering a card moves the hero onto it. The offer line — price, shop and how
+ * fresh the reading is — lives there, so the facts are read through a preview.
+ */
+const previewOfferLine = async (root: HTMLElement, gameId: string): Promise<string> => {
+  cardFor(root, gameId).dispatchEvent(new Event("pointerenter"));
+  await new Promise((resolve) => setTimeout(resolve, 90));
+  return root.querySelector(".store-hero__offer")?.textContent ?? "";
+};
+
 function setOnline(online: boolean): void {
   Object.defineProperty(window.navigator, "onLine", {
     configurable: true,
@@ -204,15 +214,15 @@ describe("Store page filtering", () => {
     tags: ["Short Sessions"],
     offers: [offer({ gameId: "short-steam", provider: "steam" })],
   });
-  const shortInstant = game({
-    id: "short-instant",
+  const shortConsole = game({
+    id: "short-console",
     title: "Astro Duel 2",
     tags: ["Short Sessions"],
     offers: [
       offer({
-        gameId: "short-instant",
-        provider: "instant-gaming",
-        providerLabel: "Instant Gaming",
+        gameId: "short-console",
+        provider: "playstation",
+        providerLabel: "PlayStation Store",
       }),
     ],
   });
@@ -223,9 +233,9 @@ describe("Store page filtering", () => {
     offers: [offer({ gameId: "story-steam", provider: "steam" })],
   });
 
-  it("combines the category filter with the provider filter without a backend round trip", async () => {
+  it("combines the category filter with the platform filter without waiting on the backend", async () => {
     const fake = createFakeClient({
-      getHome: async () => homeView({ games: [shortSteam, shortInstant, storySteam] }),
+      getHome: async () => homeView({ games: [shortSteam, shortConsole, storySteam] }),
     });
     const mounted = mountStore(fake.client);
     await mounted.host.activate(storeRoute());
@@ -233,26 +243,34 @@ describe("Store page filtering", () => {
 
     expect(cardTitles(mounted.container)).toEqual(["Unrailed", "Astro Duel 2", "Baldur's Gate 3"]);
 
+    // Every assertion below runs before the browse each click starts can
+    // resolve: the shelf repaints from what the page already holds.
     byFocusKey(mounted.container, "category-short-sessions").click();
     expect(cardTitles(mounted.container)).toEqual(["Unrailed", "Astro Duel 2"]);
 
-    byFocusKey(mounted.container, "provider-steam").click();
-    expect(cardTitles(mounted.container)).toEqual(["Unrailed"]);
+    byFocusKey(mounted.container, "platform-playstation").click();
+    expect(cardTitles(mounted.container)).toEqual(["Astro Duel 2"]);
 
     expect(byFocusKey(mounted.container, "category-short-sessions").getAttribute("aria-pressed")).toBe("true");
-    expect(byFocusKey(mounted.container, "provider-steam").getAttribute("aria-pressed")).toBe("true");
+    expect(byFocusKey(mounted.container, "platform-playstation").getAttribute("aria-pressed")).toBe("true");
     expect(mounted.navigations.at(-1)).toEqual({
       page: "store",
       category: "short-sessions",
-      platforms: [],
+      platforms: ["playstation"],
       query: "",
     });
-    expect(fake.browseRequests).toEqual([]);
+    expect(fake.browseRequests.at(-1)).toEqual({
+      category: "short-sessions",
+      platforms: ["playstation"],
+      query: "",
+      cursor: null,
+      limit: 30,
+    });
   });
 
   it("sends the combined filters to the backend when the route already carries them", async () => {
     const fake = createFakeClient({
-      getHome: async () => homeView({ games: [shortSteam, shortInstant, storySteam] }),
+      getHome: async () => homeView({ games: [shortSteam, shortConsole, storySteam] }),
       browse: async () => browsePage({ games: [shortSteam], nextCursor: null }),
     });
     const mounted = mountStore(fake.client);
@@ -287,17 +305,13 @@ describe("Store page request ordering", () => {
     await mounted.host.activate(storeRoute());
     await flush();
 
-    const search = byFocusKey(mounted.container, "store-search") as HTMLInputElement;
-    search.value = "first";
-    search.dispatchEvent(new Event("input", { bubbles: true }));
-    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    byFocusKey(mounted.container, "category-short-sessions").click();
+    byFocusKey(mounted.container, "category-all-games").click();
 
-    const laterSearch = byFocusKey(mounted.container, "store-search") as HTMLInputElement;
-    laterSearch.value = "second";
-    laterSearch.dispatchEvent(new Event("input", { bubbles: true }));
-    laterSearch.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-
-    expect(fake.browseRequests.map((request) => request.query)).toEqual(["first", "second"]);
+    expect(fake.browseRequests.map((request) => request.category)).toEqual([
+      "short-sessions",
+      "all-games",
+    ]);
 
     second.resolve(browsePage({ games: [game({ id: "b", title: "Second Result" })] }));
     await flush();
@@ -344,9 +358,15 @@ describe("Store page degraded sources", () => {
           games: [
             game({ id: "steam-game", title: "Steam Game" }),
             game({
-              id: "apple-game",
-              title: "Apple Game",
-              offers: [offer({ gameId: "apple-game", provider: "apple", providerLabel: "Apple" })],
+              id: "console-game",
+              title: "Console Game",
+              offers: [
+                offer({
+                  gameId: "console-game",
+                  provider: "playstation",
+                  providerLabel: "PlayStation Store",
+                }),
+              ],
             }),
           ],
           providerStatuses: [
@@ -359,18 +379,25 @@ describe("Store page degraded sources", () => {
     await mounted.host.activate(storeRoute());
     await flush();
 
-    const ubisoftPill = byFocusKey(mounted.container, "provider-ubisoft");
-    expect(ubisoftPill.dataset.health).toBe("unavailable");
-    expect(ubisoftPill.title).toBe("No authorized catalog feed is configured.");
-    expect(byFocusKey(mounted.container, "provider-steam").dataset.health).toBe("available");
+    // The filter bar speaks machines; shop health is reported in the "Plus"
+    // panel, where a source that cannot answer says so in its own words.
+    byFocusKey(mounted.container, "platform-more").click();
+    const ubisoft = mounted.container.querySelector<HTMLElement>(
+      '.store-more-panel__item[data-provider="ubisoft"]',
+    );
+    expect(ubisoft?.dataset.health).toBe("unavailable");
+    expect(ubisoft?.querySelector(".store-more-panel__message")?.textContent).toBe(
+      "No authorized catalog feed is configured.",
+    );
     expect(
-      mounted.container.querySelector(".store-provider-statuses__summary")?.textContent,
-    ).toBe("1 source notice");
+      mounted.container.querySelector<HTMLElement>('.store-more-panel__item[data-provider="steam"]')
+        ?.dataset.health,
+    ).toBe("available");
 
-    expect(cardTitles(mounted.container)).toEqual(["Steam Game", "Apple Game"]);
-    byFocusKey(mounted.container, "provider-steam").click();
-    expect(cardTitles(mounted.container)).toEqual(["Steam Game"]);
-    expect((byFocusKey(mounted.container, "refresh-store") as HTMLButtonElement).disabled).toBe(false);
+    expect(cardTitles(mounted.container)).toEqual(["Steam Game", "Console Game"]);
+    byFocusKey(mounted.container, "platform-playstation").click();
+    expect(cardTitles(mounted.container)).toEqual(["Console Game"]);
+    expect((byFocusKey(mounted.container, "hero-action") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("still renders saved editorial picks when the Store is offline", async () => {
@@ -385,10 +412,11 @@ describe("Store page degraded sources", () => {
     await flush();
 
     expect(mounted.container.querySelector(".store-status--offline")).not.toBeNull();
-    expect(fake.commands).toEqual(["getHome"]);
-    const titles = cardTitles(mounted.container);
-    expect(titles.length).toBe(EDITORIAL_GAMES.length);
-    expect(titles).toContain("Elden Ring");
+    expect(fake.commands).toEqual(["listOwnedGameIds", "getHome"]);
+    // Cards, not titles: the handful of games that fall back to capsule art
+    // drop the text title so the wordmark is not printed twice.
+    expect(mounted.container.querySelectorAll(".store-card").length).toBe(EDITORIAL_GAMES.length);
+    expect(cardFor(mounted.container, EDITORIAL_GAMES[0].id)).not.toBeNull();
     expect(mounted.container.querySelector(".store-hero")).not.toBeNull();
   });
 });
@@ -448,79 +476,63 @@ describe("Store page offer facts", () => {
     await mounted.host.activate(storeRoute());
     await flush();
 
-    // No known price: the card shows no offer block at all rather than a
+    // No known price: the card leaves the slot empty rather than printing a
     // fabricated price line.
-    const unpriced = cardFor(mounted.container, "unpriced");
-    expect(unpriced.querySelector(".store-card__offer")).toBeNull();
-    expect(unpriced.querySelector(".store-card__price")).toBeNull();
+    expect(cardFor(mounted.container, "unpriced").querySelector(".store-card__price")).toBeNull();
+    expect(await previewOfferLine(mounted.container, "unpriced")).toBe(
+      "Disponible sur Instant Gaming · tarif non vérifié",
+    );
 
     const outdated = cardFor(mounted.container, "outdated");
     expect(outdated.querySelector(".store-card__price")?.textContent).toMatch(/19[.,]99/);
-    expect(outdated.querySelector(".store-card__offer-detail")?.textContent).toBe(
-      "Steam · may be outdated",
+    // A reading older than a day is still shown, dated, so the shopper knows
+    // how fresh it is instead of being told it is today's price.
+    expect(await previewOfferLine(mounted.container, "outdated")).toMatch(
+      /^Dès .*19[.,]99.* sur Steam · relevé le .+$/,
     );
-    expect(outdated.querySelector(".store-card__offer--stale")).not.toBeNull();
 
     const verified = cardFor(mounted.container, "verified");
     expect(verified.querySelector(".store-card__price")?.textContent).toMatch(/29[.,]99/);
-    expect(verified.querySelector(".store-card__offer-detail")?.textContent).toBe("Steam · verified");
-    expect(verified.querySelector(".store-card__offer--stale")).toBeNull();
+    expect(await previewOfferLine(mounted.container, "verified")).toMatch(
+      /^Dès .*29[.,]99.* sur Steam · vérifié aujourd'hui$/,
+    );
   });
 
-  it("shows the Instant Gaming reference price with its discount on editorial cards", async () => {
-    const eldenRing = EDITORIAL_GAMES.find((entry) => entry.title === "Elden Ring");
-    const astroDuel = EDITORIAL_GAMES.find((entry) => entry.title === "Astro Duel 2");
-    if (!eldenRing || !astroDuel) throw new Error("Editorial seeds changed unexpectedly.");
+  it("shows the bundled catalogue's own price, and nothing where no shop quoted one", async () => {
+    const priced = EDITORIAL_GAMES.find((entry) => formatPrice(selectBestOffer(entry)) !== "");
+    if (!priced) throw new Error("The bundled catalogue carries no priced game.");
+    const expectedPrice = formatPrice(selectBestOffer(priced));
+    const quoteless = game({ id: "quoteless", title: "Quoteless", offers: [] });
     const fake = createFakeClient({
-      getHome: async () => homeView({ games: [eldenRing, astroDuel] }),
+      getHome: async () => homeView({ games: [priced, quoteless] }),
     });
     const mounted = mountStore(fake.client);
     await mounted.host.activate(storeRoute());
     await flush();
 
-    const priced = cardFor(mounted.container, eldenRing.id);
-    expect(priced.querySelector(".store-card__price")?.textContent).toContain("34,99");
-    expect(priced.querySelector(".store-card__price")?.textContent).toContain("€");
-    expect(priced.querySelector(".store-card__price-original")?.textContent).toContain("59,99");
-    expect(priced.querySelector(".store-card__discount")?.textContent).toBe("-42%");
-    expect(priced.querySelector(".store-card__offer-detail")?.textContent).toBe("Instant Gaming");
-    expect(priced.querySelector(".store-card__offer--stale")).toBeNull();
-
-    const unpriced = cardFor(mounted.container, astroDuel.id);
-    expect(unpriced.querySelector(".store-card__offer")).toBeNull();
-    expect(unpriced.querySelector(".store-card__price")).toBeNull();
-    expect(unpriced.querySelector(".store-card__discount")).toBeNull();
+    expect(cardFor(mounted.container, priced.id).querySelector(".store-card__price")?.textContent).toBe(
+      expectedPrice,
+    );
+    expect(expectedPrice).toMatch(/\d/);
+    expect(cardFor(mounted.container, "quoteless").querySelector(".store-card__price")).toBeNull();
   });
 
-  it("explains a recommendation with plain facts only", async () => {
+  it("explains the selection with plain facts only", async () => {
     const fake = createFakeClient({
-      getHome: async () =>
-        homeView({
-          games: [
-            game({
-              id: "featured",
-              title: "Featured Game",
-              recommendationReasons: [
-                "Because you play strategy games",
-                "Available on macOS",
-                "Works in short sessions",
-              ],
-            }),
-          ],
-        }),
+      getHome: async () => homeView({ games: [game({ id: "featured", title: "Featured Game" })] }),
     });
     const mounted = mountStore(fake.client);
     await mounted.host.activate(storeRoute());
     await flush();
 
-    const panel = mounted.container.querySelector(".store-reasons");
-    expect(panel).not.toBeNull();
-    expect([...(panel?.querySelectorAll(".store-reasons__fact") ?? [])].map((n) => n.textContent)).toEqual([
-      "Because you play strategy games",
-      "Available on macOS",
-      "Works in short sessions",
-    ]);
-    expect(panel?.textContent ?? "").not.toMatch(
+    expect(
+      [...mounted.container.querySelectorAll(".store-highlight__title")].map((n) => n.textContent),
+    ).toEqual(DEFAULT_HIGHLIGHTS.map((highlight) => highlight.title));
+
+    byFocusKey(mounted.container, "hero-action").click();
+    const why = mounted.container.querySelector<HTMLElement>(".store-why");
+    expect(why?.hidden).toBe(false);
+    expect(mounted.container.querySelector(".store-hero")?.textContent ?? "").not.toMatch(
       /\b(ai|neuro\w*|cognitive|brain|mindful\w*|dopamine|wellbeing|well-being|therapeutic)\b/i,
     );
   });
@@ -539,7 +551,13 @@ describe("Store page wishlist", () => {
     await flush();
 
     expect(fake.wishlistCalls).toEqual([{ gameId: "store:w", wishlisted: true }]);
-    expect(fake.commands).toEqual(["getHome", "refreshSources", "getHome", "setWishlist"]);
+    expect(fake.commands).toEqual([
+      "listOwnedGameIds",
+      "getHome",
+      "refreshSources",
+      "getHome",
+      "setWishlist",
+    ]);
     expect(byFocusKey(mounted.container, "wishlist-store:w").getAttribute("aria-pressed")).toBe("true");
     expect(mounted.navigations.some((route) => route.page === "library")).toBe(false);
 
@@ -586,7 +604,7 @@ describe("Store page lifecycle", () => {
     const mounted = mountStore(fake.client);
     const route = storeRoute({
       category: "short-sessions",
-      platforms: [],
+      platforms: ["pc"],
       query: "unrailed",
     });
 
@@ -602,33 +620,47 @@ describe("Store page lifecycle", () => {
       scrollTop: 240,
       focusKey: "category-relaxing",
       query: "unrailed",
-      filters: ["short-sessions", "steam"],
+      filters: ["short-sessions", "pc"],
     });
 
     await mounted.host.activate(route, restoreState);
     await flush();
 
     expect(byFocusKey(mounted.container, "category-short-sessions").getAttribute("aria-pressed")).toBe("true");
-    expect(byFocusKey(mounted.container, "provider-steam").getAttribute("aria-pressed")).toBe("true");
-    expect((byFocusKey(mounted.container, "store-search") as HTMLInputElement).value).toBe("unrailed");
+    expect(byFocusKey(mounted.container, "platform-pc").getAttribute("aria-pressed")).toBe("true");
+    // The query has no field of its own any more: it rides the route, and the
+    // restored page asks the backend for it again.
+    expect(fake.browseRequests.at(-1)).toEqual({
+      category: "short-sessions",
+      platforms: ["pc"],
+      query: "unrailed",
+      cursor: null,
+      limit: 30,
+    });
     expect(pageRoot(mounted.container).scrollTop).toBe(240);
     expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("category-relaxing");
     expect(cardTitles(mounted.container)).toEqual(["Unrailed"]);
   });
 
-  it("keeps focus on the search field across a background refresh", async () => {
+  it("keeps focus on a card across a background refresh that rebuilds the shelf", async () => {
+    let homeCalls = 0;
     const fake = createFakeClient({
-      getHome: async () => homeView({ games: [game({ id: "a", title: "A Game" })] }),
+      getHome: async () => {
+        homeCalls += 1;
+        // The refresh that follows coming back online returns a changed shelf,
+        // so the cards are rebuilt rather than merely re-read.
+        return homeView({ games: [game({ id: "a", title: "A Game", wishlisted: homeCalls > 2 })] });
+      },
     });
     const mounted = mountStore(fake.client);
     await mounted.host.activate(storeRoute());
     await flush();
 
-    const search = byFocusKey(mounted.container, "store-search") as HTMLInputElement;
-    search.focus();
-    byFocusKey(mounted.container, "refresh-store").click();
+    byFocusKey(mounted.container, "game-a").focus();
+    window.dispatchEvent(new Event("online"));
     await flush();
 
-    expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("store-search");
+    expect(byFocusKey(mounted.container, "wishlist-a").getAttribute("aria-pressed")).toBe("true");
+    expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("game-a");
   });
 });

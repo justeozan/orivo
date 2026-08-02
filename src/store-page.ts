@@ -17,6 +17,7 @@ import {
   isOfferStale,
   modeLabel,
   offerVerifiedOn,
+  matchesStoreFilters,
   ownershipKey,
   providersForPlatforms,
   reduceStorePageState,
@@ -110,8 +111,12 @@ export function createDefaultStorePageClient(): StorePageClient {
     async browse(request, signal) {
       if (!isTauriRuntime()) {
         // Outside the desktop shell the bundled catalog is the catalog, so the
-        // browse endpoint pages through it rather than pretending to fail.
-        const catalog = cloneEditorialHome().games;
+        // browse endpoint pages through it rather than pretending to fail. It
+        // has to apply the filters itself: a browse page is read as already
+        // filtered, and here there is no host to have done it.
+        const catalog = cloneEditorialHome().games.filter((game) =>
+          matchesStoreFilters(game, request),
+        );
         const offset = request.cursor?.startsWith("store_")
           ? Number.parseInt(request.cursor.slice("store_".length), 10)
           : 0;
@@ -686,6 +691,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const open = element("button", "store-card__open");
     open.type = "button";
     open.dataset.focusKey = `game-${game.id}`;
+    open.dataset.navOpen = game.id;
     open.setAttribute("aria-label", `Ouvrir ${game.title}`);
     open.addEventListener("click", () =>
       options.navigate({ page: "game", gameId: game.id, from: "store" }),
@@ -708,12 +714,15 @@ export function createStorePage(options: StorePageOptions): AppPage {
       if (artIndex < artSources.length) art.src = artSources[artIndex];
       else media.classList.add("store-card__media--missing");
     });
-    const price = element("span", "store-card__price", formatPrice(selectBestOffer(game)));
     // A few games have no screenshot that survives the crop and fall back to
     // their capsule, which already carries the wordmark; printing the title
     // over it would show the name twice.
     const artHasWordmark = /\/capsule\.jpg$/.test(art.src || "");
-    media.append(art, element("span", "store-card__veil"), price);
+    media.append(art, element("span", "store-card__veil"));
+    // A shop that quoted nothing leaves the slot empty rather than printing a
+    // blank price frame the shopper would read as "free".
+    const price = formatPrice(selectBestOffer(game));
+    if (price) media.append(element("span", "store-card__price", price));
     if (!artHasWordmark) {
       const cardTitle = element("span", "store-card__title", game.title);
       // A long name is set tighter rather than ellipsised: a shelf is for
@@ -828,6 +837,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const list = element("ul", "store-more-panel__list");
     for (const status of state.home.providerStatuses) {
       const item = element("li", "store-more-panel__item");
+      item.dataset.provider = status.provider;
       item.dataset.health = status.health;
       item.append(
         element("span", "store-more-panel__dot"),
@@ -998,6 +1008,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
+    // The shell keeps every page mounted and hides the inactive ones, so a
+    // window-level listener would otherwise fire while the Store is off-screen.
+    if (!pageRoot?.isConnected || pageRoot.closest("[hidden]")) return;
     if (event.key !== "Escape") return;
     if (whyOpen) {
       whyOpen = false;
