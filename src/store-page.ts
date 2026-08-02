@@ -3,23 +3,31 @@ import type {
   AppRoute,
   GameSummary,
   PageRestoreState,
-  ProviderStatus,
-  StoreProvider,
+  StoreHighlight,
+  StorePlatform,
 } from "./contracts";
-import { icon } from "./icons";
+import { icon, type IconName } from "./icons";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
   createInitialStoreState,
   EDITORIAL_STORE_HOME,
+  fitStats,
   formatPrice,
+  genreLabel,
   isOfferStale,
+  modeLabel,
+  offerVerifiedOn,
+  ownershipKey,
+  providersForPlatforms,
   reduceStorePageState,
   selectBestOffer,
-  selectGamePricing,
+  selectHeroCopy,
   selectStoreGames,
+  sessionLabel,
   STORE_CATEGORIES,
-  STORE_PROVIDERS,
+  STORE_PLATFORMS,
   storeCategoryLabel,
+  taglineLabel,
   type StoreBrowsePage,
   type StoreBrowseRequest,
   type StoreHomeView,
@@ -32,6 +40,8 @@ export interface StorePageClient {
   refreshSources(signal: AbortSignal): Promise<void>;
   setWishlist(gameId: string, wishlisted: boolean, signal: AbortSignal): Promise<void>;
   openOffer(offerId: string, signal: AbortSignal): Promise<void>;
+  /** Ids already in the library. The Store never sells a game you own. */
+  listOwnedGameIds(signal: AbortSignal): Promise<string[]>;
 }
 
 export interface StorePageOptions {
@@ -48,7 +58,7 @@ function isTauriRuntime(): boolean {
 }
 
 function assertActive(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("The Store request was cancelled.", "AbortError");
+  if (signal.aborted) throw new DOMException("La requête Store a été annulée.", "AbortError");
 }
 
 async function invokeWhileActive<T>(
@@ -62,17 +72,31 @@ async function invokeWhileActive<T>(
   return result;
 }
 
+function cloneGame(game: GameSummary): GameSummary {
+  return {
+    ...game,
+    genres: [...game.genres],
+    tags: [...game.tags],
+    supportedPlatforms: [...game.supportedPlatforms],
+    recommendationReasons: [...game.recommendationReasons],
+    offers: game.offers.map((offer) => ({ ...offer })),
+    curation: game.curation
+      ? {
+          ...game.curation,
+          genres: [...game.curation.genres],
+          stats: game.curation.stats.map((stat) => ({ ...stat })),
+          highlights: game.curation.highlights.map((highlight) => ({ ...highlight })),
+          categories: [...game.curation.categories],
+          platforms: [...game.curation.platforms],
+        }
+      : undefined,
+  };
+}
+
 function cloneEditorialHome(): StoreHomeView {
   return {
     ...EDITORIAL_STORE_HOME,
-    games: EDITORIAL_STORE_HOME.games.map((game) => ({
-      ...game,
-      genres: [...game.genres],
-      tags: [...game.tags],
-      supportedPlatforms: [...game.supportedPlatforms],
-      recommendationReasons: [...game.recommendationReasons],
-      offers: game.offers.map((offer) => ({ ...offer })),
-    })),
+    games: EDITORIAL_STORE_HOME.games.map(cloneGame),
     providerStatuses: EDITORIAL_STORE_HOME.providerStatuses.map((status) => ({ ...status })),
   };
 }
@@ -85,27 +109,32 @@ export function createDefaultStorePageClient(): StorePageClient {
     },
     async browse(request, signal) {
       if (!isTauriRuntime()) {
-        const fallbackState = reduceStorePageState(createInitialStoreState(), {
-          type: "activate",
-          category: request.category,
-          providers: request.providers,
-          query: request.query,
-          online: true,
-        });
-        const games = selectStoreGames(fallbackState);
+        // Outside the desktop shell the bundled catalog is the catalog, so the
+        // browse endpoint pages through it rather than pretending to fail.
+        const catalog = cloneEditorialHome().games;
         const offset = request.cursor?.startsWith("store_")
           ? Number.parseInt(request.cursor.slice("store_".length), 10)
           : 0;
         const safeOffset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
-        const pageGames = games.slice(safeOffset, safeOffset + request.limit);
-        const nextOffset = safeOffset + pageGames.length;
+        const games = catalog.slice(safeOffset, safeOffset + request.limit);
+        const nextOffset = safeOffset + games.length;
         return {
-          games: pageGames,
-          nextCursor: nextOffset < games.length ? `store_${nextOffset}` : null,
+          games,
+          nextCursor: nextOffset < catalog.length ? `store_${nextOffset}` : null,
           providerStatuses: EDITORIAL_STORE_HOME.providerStatuses.map((status) => ({ ...status })),
         };
       }
-      return invokeWhileActive<StoreBrowsePage>("browse_store_games", { request }, signal);
+      return invokeWhileActive<StoreBrowsePage>(
+        "browse_store_games",
+        {
+          request: {
+            ...request,
+            // The host still filters on shops; the page filters on machines.
+            providers: providersForPlatforms(request.platforms),
+          },
+        },
+        signal,
+      );
     },
     async refreshSources(signal) {
       if (!isTauriRuntime()) return;
@@ -119,10 +148,24 @@ export function createDefaultStorePageClient(): StorePageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("open_store_offer", { offerId }, signal);
     },
+    async listOwnedGameIds(signal) {
+      if (!isTauriRuntime()) return [];
+      try {
+        const library = await invokeWhileActive<{ games?: Array<{ id: string; title: string }> }>(
+          "get_library",
+          undefined,
+          signal,
+        );
+        // Ids and titles both go back: the same game can sit in the library
+        // under a different source id than the Store row carries.
+        return (library.games ?? []).flatMap((game) => [game.id, ownershipKey(game.title)]);
+      } catch {
+        // A library that cannot be read is not a reason to show no store.
+        return [];
+      }
+    },
   };
 }
-
-type StoreElement = HTMLElement & { dataset: DOMStringMap };
 
 interface FocusSnapshot {
   focusKey: string;
@@ -136,95 +179,70 @@ function element<K extends keyof HTMLElementTagNameMap>(
   text?: string,
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
-  node.className = className;
+  if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
 }
 
-function iconElement(name: Parameters<typeof icon>[0], className = ""): HTMLElement {
+function iconElement(name: IconName, className = ""): HTMLElement {
   const wrapper = element("span", `store-icon ${className}`.trim());
   wrapper.innerHTML = icon(name);
+  wrapper.setAttribute("aria-hidden", "true");
   return wrapper;
 }
 
-function providerStatusFor(
-  statuses: ProviderStatus[],
-  provider: StoreProvider,
-): ProviderStatus | undefined {
-  return statuses.find((status) => status.provider === provider);
+const HIGHLIGHT_ICONS: Readonly<Record<string, IconName>> = {
+  brain: "brain",
+  clock: "clock",
+  book: "book",
+  leaf: "leaf",
+  compass: "compass",
+  sparkle: "sparkle",
+  heart: "heart",
+  puzzle: "puzzle",
+  moon: "moon",
+  palette: "palette",
+};
+
+function highlightIcon(name: string): IconName {
+  return HIGHLIGHT_ICONS[name] ?? "sparkle";
 }
 
-/**
- * Card price block: a priced game shows its price badge (plus original price
- * and discount when the offer is cut) with the source store underneath; a
- * game without any known price renders no offer block at all.
- */
-function renderCardOffer(game: GameSummary): HTMLElement | null {
-  const pricing = selectGamePricing(game);
-  if (!pricing) return null;
-  const bestOffer = selectBestOffer(game);
-  const live = Boolean(bestOffer && bestOffer.priceMinor !== null && bestOffer.currency);
-  const stale = live && bestOffer ? isOfferStale(bestOffer) : false;
-  const block = element("span", "store-card__offer");
-  block.classList.toggle("store-card__offer--stale", stale);
-  const row = element("span", "store-card__price-row");
-  row.append(element("strong", "store-card__price", formatPrice(pricing.price, pricing.currency)));
-  if (pricing.originalPrice !== undefined && pricing.originalPrice > pricing.price) {
-    row.append(
-      element("s", "store-card__price-original", formatPrice(pricing.originalPrice, pricing.currency)),
-    );
-  }
-  if (pricing.discountPercent) {
-    row.append(element("span", "store-card__discount", `-${pricing.discountPercent}%`));
-  }
-  const detail = live
-    ? `${pricing.priceProvider} · ${stale ? "may be outdated" : "verified"}`
-    : pricing.priceProvider;
-  block.append(row, element("span", "store-card__offer-detail", detail));
-  return block;
-}
-
-/**
- * Approved design (assets/moc-images/orivo-store-clean.png) shows each card with
- * a short "fit" read-out. The labels are the game's own tags; the strength is a
- * stable hash of game + tag, so a card always renders identically rather than
- * flickering between renders. Presentational only — never persisted or ranked on.
- */
-function fitRows(game: GameSummary): Array<{ label: string; value: number }> {
-  const labels = (game.tags.length ? game.tags : game.genres).slice(0, 3);
-  return labels.map((label) => {
-    let hash = 0;
-    for (const char of `${game.id}:${label}`) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-    return { label, value: 3 + (hash % 3) };
-  });
-}
-
-/** Session length hint from the game's own tags, else its play time. */
-function sessionLabel(game: GameSummary): string {
-  const tag = game.tags.find((value) => /short|quick|session/i.test(value));
-  if (tag) return "1-3h";
-  const hours = Math.round(game.playTimeSeconds / 3_600);
-  return hours > 0 ? `${hours}h` : "Varies";
-}
-
-function platformLabel(game: GameSummary): string {
-  if (game.supportedPlatforms.includes("macos")) return "macOS";
-  if (game.supportedPlatforms.includes("windows")) return "Windows";
-  if (game.supportedPlatforms.includes("ios")) return "iOS";
-  if (game.supportedPlatforms.includes("android")) return "Android";
-  return "Platform unverified";
-}
+const PLATFORM_ICONS: Readonly<Record<StorePlatform, IconName>> = {
+  pc: "windows",
+  playstation: "playstation",
+  xbox: "xbox",
+  switch: "switch",
+  emulators: "emulator",
+};
 
 function requestErrorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return "";
   if (typeof error === "string" && error.trim()) return error;
   if (error instanceof Error && error.message.trim()) return error.message;
-  return "Live Store sources could not be reached. Saved picks are still available.";
+  return "Les sources du Store sont injoignables. Les sélections enregistrées restent disponibles.";
 }
 
 /**
- * Creates the Store page. The shell injects navigation and imports
- * `store-page.css`; the page owns no topbar or global styles.
+ * The cheapest verified offer, shown while a card is previewed. A price older
+ * than a day is still shown — with the day it was read, so the shopper knows
+ * how fresh it is instead of being told a number Orivo cannot vouch for today.
+ */
+function offerLine(game: GameSummary): string {
+  const offer = selectBestOffer(game);
+  if (!offer) return "";
+  const price = formatPrice(offer);
+  if (!price) return `Disponible sur ${offer.providerLabel} · tarif non vérifié`;
+  if (offer.priceMinor === 0) return `Gratuit sur ${offer.providerLabel}`;
+  const line = `Dès ${price} sur ${offer.providerLabel}`;
+  if (!isOfferStale(offer)) return `${line} · vérifié aujourd'hui`;
+  const day = offerVerifiedOn(offer);
+  return day ? `${line} · relevé le ${day}` : `${line} · tarif à revérifier`;
+}
+
+/**
+ * Creates the Store page ("Découvrir"). The shell injects navigation and
+ * imports `store-page.css`; the page owns no topbar and no global styles.
  */
 export function createStorePage(options: StorePageOptions): AppPage {
   const client = options.client ?? createDefaultStorePageClient();
@@ -235,7 +253,37 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let requestSequence = 0;
   let queryTimer: ReturnType<typeof setTimeout> | null = null;
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
   let transientStatus = "";
+  let morePlatformsOpen = false;
+  let whyOpen = false;
+  /** Which of the two stacked backdrop layers is currently showing. */
+  let backdropFront = 0;
+  let backdropUrl = "";
+  let renderedGameIds = "";
+
+  // Long-lived nodes. The page paints once and then updates in place: a full
+  // rebuild would drop the rail's scroll position and restart the backdrop
+  // crossfade on every hover.
+  const nodes = {
+    backdropLayers: [] as HTMLImageElement[],
+    heroEyebrow: null as HTMLElement | null,
+    heroTitle: null as HTMLElement | null,
+    heroLead: null as HTMLElement | null,
+    heroAction: null as HTMLButtonElement | null,
+    heroOffer: null as HTMLElement | null,
+    highlightList: null as HTMLElement | null,
+    shelfLabel: null as HTMLElement | null,
+    railTrack: null as HTMLElement | null,
+    arrowPrevious: null as HTMLButtonElement | null,
+    arrowNext: null as HTMLButtonElement | null,
+    categoryBar: null as HTMLElement | null,
+    platformBar: null as HTMLElement | null,
+    morePanel: null as HTMLElement | null,
+    status: null as HTMLElement | null,
+    whyPanel: null as HTMLElement | null,
+    emptyState: null as HTMLElement | null,
+  };
 
   const dispatch = (action: StorePageAction, shouldRender = true): void => {
     state = reduceStorePageState(state, action);
@@ -248,22 +296,34 @@ export function createStorePage(options: StorePageOptions): AppPage {
   const currentStoreRoute = (): AppRoute => ({
     page: "store",
     category: state.category,
-    providers: [...state.providers],
+    platforms: [...state.platforms],
     query: state.query.trim(),
   });
 
-  const navigateWithCurrentFilters = (): void => {
-    options.navigate(currentStoreRoute());
-  };
+  const navigateWithCurrentFilters = (): void => options.navigate(currentStoreRoute());
 
   const showTransientStatus = (message: string): void => {
     transientStatus = message;
     if (statusTimer) clearTimeout(statusTimer);
     statusTimer = setTimeout(() => {
       transientStatus = "";
-      render();
+      renderStatus();
     }, 4_500);
-    render();
+    renderStatus();
+  };
+
+  // ---------------------------------------------------------------------------
+  // Data
+  // ---------------------------------------------------------------------------
+
+  const loadOwned = async (context: PageActivation): Promise<void> => {
+    try {
+      const ids = await client.listOwnedGameIds(context.signal);
+      if (!isActive(context) || ids.length === 0) return;
+      dispatch({ type: "owned-games-loaded", gameIds: ids });
+    } catch {
+      // Silent: the library is an optional filter, not a dependency.
+    }
   };
 
   const loadHome = async (context: PageActivation): Promise<void> => {
@@ -296,7 +356,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const home = await client.getHome(context.signal);
       if (!isActive(context)) return;
       dispatch({ type: "home-loaded", requestId, home });
-      if (announce) showTransientStatus("Store sources refreshed.");
+      if (announce) showTransientStatus("Sources du Store actualisées.");
     } catch (error) {
       if (!isActive(context)) return;
       const message = requestErrorMessage(error);
@@ -310,7 +370,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
   };
 
-  const browse = async (context: PageActivation, cursor: string | null, append: boolean): Promise<void> => {
+  const browse = async (
+    context: PageActivation,
+    cursor: string | null,
+    append: boolean,
+  ): Promise<void> => {
     if (!isActive(context)) return;
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId, refresh: true });
@@ -318,7 +382,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const page = await client.browse(
         {
           category: state.category,
-          providers: [...state.providers],
+          platforms: [...state.platforms],
           query: state.query.trim(),
           cursor,
           limit: 30,
@@ -340,15 +404,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
   };
 
-  const scheduleQueryNavigation = (): void => {
-    if (queryTimer) clearTimeout(queryTimer);
-    queryTimer = setTimeout(() => {
-      queryTimer = null;
-      navigateWithCurrentFilters();
-      if (activation) void browse(activation, null, false);
-    }, 280);
-  };
-
   const handleWishlist = async (game: GameSummary): Promise<void> => {
     const context = activation;
     if (!isActive(context)) return;
@@ -357,335 +412,551 @@ export function createStorePage(options: StorePageOptions): AppPage {
     try {
       await client.setWishlist(game.id, wishlisted, context.signal);
       if (isActive(context)) {
-        showTransientStatus(wishlisted ? `${game.title} added to wishlist.` : `${game.title} removed from wishlist.`);
+        showTransientStatus(
+          wishlisted ? `${game.title} ajouté à tes envies.` : `${game.title} retiré de tes envies.`,
+        );
       }
     } catch (error) {
       if (!isActive(context)) return;
       dispatch({ type: "wishlist-changed", gameId: game.id, wishlisted: !wishlisted });
-      showTransientStatus(requestErrorMessage(error) || "The wishlist change was cancelled.");
+      showTransientStatus(requestErrorMessage(error) || "Le changement d'envie a été annulé.");
     }
   };
 
-  const renderStatus = (): HTMLElement | null => {
-    const message = transientStatus || state.errorMessage;
-    if (!message && (state.phase === "ready" || state.phase === "degraded")) return null;
-    const status = element("div", `store-status store-status--${state.phase}`);
-    status.setAttribute("role", state.phase === "error" ? "alert" : "status");
-    status.setAttribute("aria-live", "polite");
-    status.append(
-      iconElement(state.phase === "loading" || state.phase === "refreshing" ? "refresh" : "alert"),
-      element(
-        "span",
-        "store-status__copy",
-        message || (state.phase === "loading" ? "Loading saved Store picks…" : "Refreshing Store sources…"),
-      ),
+  // ---------------------------------------------------------------------------
+  // Skeleton
+  // ---------------------------------------------------------------------------
+
+  const buildBackdrop = (): HTMLElement => {
+    const backdrop = element("div", "store-backdrop");
+    backdrop.setAttribute("aria-hidden", "true");
+    for (let index = 0; index < 2; index += 1) {
+      const layer = element("img", "store-backdrop__layer");
+      layer.alt = "";
+      layer.decoding = "async";
+      backdrop.append(layer);
+      nodes.backdropLayers.push(layer);
+    }
+    backdrop.append(
+      element("div", "store-backdrop__scrim store-backdrop__scrim--left"),
+      element("div", "store-backdrop__scrim store-backdrop__scrim--bottom"),
+      element("div", "store-backdrop__scrim store-backdrop__scrim--top"),
     );
-    return status;
+    return backdrop;
   };
 
-  const renderHero = (featured: GameSummary): HTMLElement => {
+  const buildHero = (): HTMLElement => {
     const hero = element("section", "store-hero");
-    const background = element("img", "store-hero__image");
-    background.src = featured.heroUrl || featured.landscapeUrl;
-    background.alt = "";
-    background.setAttribute("aria-hidden", "true");
-    background.addEventListener("error", () => background.classList.add("store-media--missing"));
-    const veil = element("div", "store-hero__veil");
     const copy = element("div", "store-hero__copy");
-    const eyebrow = element(
-      "p",
-      "store-hero__eyebrow",
-      state.home.recommendationMode === "personalized" ? "Recommended from your play history" : "Curated by Orivo",
-    );
-    const title = element("h1", "store-hero__title", "Experiences that matter.");
-    const summary = element(
-      "p",
-      "store-hero__summary",
-      `${state.home.recommendationHeading}. Clear platform facts, source status, and price freshness before you decide.`,
-    );
-    const featuredButton = element("button", "store-hero__action", `Explore ${featured.title}`);
-    featuredButton.type = "button";
-    featuredButton.dataset.focusKey = `hero-${featured.id}`;
-    featuredButton.addEventListener("click", () =>
-      options.navigate({ page: "game", gameId: featured.id, from: "store" }),
-    );
-    const tagline = element("p", "store-hero__tagline");
-    tagline.append(
-      iconElement("leaf", "store-hero__leaf"),
-      element("span", "store-hero__tagline-copy", "Less noise. More meaning."),
-    );
-    copy.append(eyebrow, title, summary, featuredButton, tagline);
+    nodes.heroEyebrow = element("p", "store-hero__eyebrow");
+    nodes.heroTitle = element("h1", "store-hero__title");
+    nodes.heroLead = element("p", "store-hero__lead");
+    nodes.heroAction = element("button", "store-hero__action");
+    nodes.heroAction.type = "button";
+    nodes.heroAction.dataset.focusKey = "hero-action";
+    nodes.heroAction.addEventListener("click", () => {
+      const heroCopy = selectHeroCopy(state, visibleGames());
+      if (heroCopy.gameId) {
+        options.navigate({ page: "game", gameId: heroCopy.gameId, from: "store" });
+        return;
+      }
+      whyOpen = !whyOpen;
+      renderWhyPanel();
+    });
+    nodes.heroOffer = element("p", "store-hero__offer");
+    copy.append(nodes.heroEyebrow, nodes.heroTitle, nodes.heroLead, nodes.heroAction, nodes.heroOffer);
 
-    const reasonPanel = element("aside", "store-reasons");
-    reasonPanel.setAttribute("aria-label", "Why this recommendation");
-    reasonPanel.append(element("p", "store-reasons__eyebrow", "Why this recommendation"));
-    reasonPanel.append(element("h2", "store-reasons__title", featured.title));
-    const list = element("ul", "store-reasons__list");
-    const reasons = featured.recommendationReasons.length > 0
-      ? featured.recommendationReasons.slice(0, 3)
-      : [`Tagged ${featured.genres[0] ?? "game"}`, platformLabel(featured), "Editorial selection"];
-    for (const reason of reasons) {
-      const item = element("li", "store-reasons__item");
-      item.append(iconElement("navigate"), element("span", "store-reasons__fact", reason));
-      list.append(item);
-    }
-    const basis = state.home.recommendationMode === "personalized"
-      ? "Based only on available play history, genres, tags, and platform support."
-      : "Editorial picks are shown until at least three played games are available.";
-    reasonPanel.append(list, element("p", "store-reasons__basis", basis));
-    hero.append(background, veil, copy, reasonPanel);
+    const highlights = element("aside", "store-highlights");
+    highlights.setAttribute("aria-label", "Pourquoi cette sélection");
+    nodes.highlightList = element("ul", "store-highlights__list");
+    highlights.append(nodes.highlightList);
+
+    nodes.whyPanel = element("div", "store-why");
+    nodes.whyPanel.hidden = true;
+
+    hero.append(copy, highlights, nodes.whyPanel);
     return hero;
   };
 
-  const renderCategoryFilters = (): HTMLElement => {
-    const nav = element("nav", "store-category-filters");
-    nav.setAttribute("aria-label", "Store categories");
+  const buildShelf = (): HTMLElement => {
+    const shelf = element("section", "store-shelf");
+    nodes.shelfLabel = element("p", "store-shelf__label");
+    const rail = element("div", "store-rail");
+    nodes.railTrack = element("div", "store-rail__track");
+    nodes.railTrack.setAttribute("role", "list");
+    nodes.railTrack.addEventListener("scroll", () => syncArrows(), { passive: true });
+
+    nodes.arrowPrevious = element("button", "store-rail__arrow store-rail__arrow--previous");
+    nodes.arrowPrevious.type = "button";
+    nodes.arrowPrevious.dataset.focusKey = "rail-previous";
+    nodes.arrowPrevious.setAttribute("aria-label", "Voir les jeux précédents");
+    nodes.arrowPrevious.append(iconElement("arrow-left"));
+    nodes.arrowPrevious.addEventListener("click", () => scrollRail(-1));
+
+    nodes.arrowNext = element("button", "store-rail__arrow store-rail__arrow--next");
+    nodes.arrowNext.type = "button";
+    nodes.arrowNext.dataset.focusKey = "rail-next";
+    nodes.arrowNext.setAttribute("aria-label", "Voir plus de jeux");
+    nodes.arrowNext.append(iconElement("arrow-right"));
+    nodes.arrowNext.addEventListener("click", () => scrollRail(1));
+
+    nodes.emptyState = element("div", "store-empty");
+    nodes.emptyState.hidden = true;
+
+    rail.append(nodes.railTrack, nodes.arrowPrevious, nodes.arrowNext);
+    shelf.append(nodes.shelfLabel, rail, nodes.emptyState);
+    return shelf;
+  };
+
+  const buildFilters = (): HTMLElement => {
+    const filters = element("section", "store-filters");
+    filters.setAttribute("aria-label", "Filtres du Store");
+
+    nodes.categoryBar = element("nav", "store-chipbar store-chipbar--categories");
+    nodes.categoryBar.setAttribute("aria-label", "Catégories");
     for (const option of STORE_CATEGORIES) {
-      const button = element("button", "store-filter-pill", option.label);
-      button.type = "button";
-      button.dataset.focusKey = `category-${option.id}`;
-      button.classList.toggle("store-filter-pill--active", option.id === state.category);
-      button.setAttribute("aria-pressed", String(option.id === state.category));
-      button.addEventListener("click", () => {
+      const chip = element("button", "store-chip", option.label);
+      chip.type = "button";
+      chip.dataset.focusKey = `category-${option.id}`;
+      chip.dataset.category = option.id;
+      chip.addEventListener("click", () => {
         dispatch({ type: "category-changed", category: option.id });
         navigateWithCurrentFilters();
+        if (activation) void browse(activation, null, false);
       });
-      nav.append(button);
+      nodes.categoryBar.append(chip);
     }
-    return nav;
-  };
 
-  const renderProviderFilters = (): HTMLElement => {
-    const nav = element("nav", "store-provider-filters");
-    nav.setAttribute("aria-label", "Store providers");
-    for (const option of STORE_PROVIDERS) {
-      const providerStatus = providerStatusFor(state.home.providerStatuses, option.id);
-      const selected = state.providers.includes(option.id);
-      const button = element("button", "store-provider-pill");
-      button.type = "button";
-      button.dataset.focusKey = `provider-${option.id}`;
-      button.dataset.health = providerStatus?.health ?? "unavailable";
-      button.classList.toggle("store-provider-pill--active", selected);
-      button.setAttribute("aria-pressed", String(selected));
-      button.title = providerStatus?.message ?? "Provider status unavailable.";
-      const dot = element("span", "store-provider-pill__dot");
-      dot.setAttribute("aria-hidden", "true");
-      button.append(dot, element("span", "store-provider-pill__label", option.label));
-      button.addEventListener("click", () => {
-        const providers = selected
-          ? state.providers.filter((provider) => provider !== option.id)
-          : [...state.providers, option.id];
-        dispatch({ type: "providers-changed", providers });
-        navigateWithCurrentFilters();
-      });
-      nav.append(button);
-    }
-    return nav;
-  };
-
-  const renderSearch = (): HTMLElement => {
-    const label = element("label", "store-inline-search");
-    label.append(iconElement("search"));
-    const input = element("input", "store-inline-search__input");
-    input.type = "search";
-    input.placeholder = "Search this Store catalog";
-    input.value = state.query;
-    input.dataset.focusKey = "store-search";
-    input.setAttribute("aria-label", "Search Store games");
-    input.addEventListener("input", () => {
-      dispatch({ type: "query-changed", query: input.value }, false);
-      scheduleQueryNavigation();
-    });
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        if (queryTimer) clearTimeout(queryTimer);
-        queryTimer = null;
+    const platformGroup = element("div", "store-platform-group");
+    nodes.platformBar = element("nav", "store-chipbar store-chipbar--platforms");
+    nodes.platformBar.setAttribute("aria-label", "Plateformes");
+    for (const option of STORE_PLATFORMS) {
+      const chip = element("button", "store-chip store-chip--platform");
+      chip.type = "button";
+      chip.dataset.focusKey = `platform-${option.id}`;
+      chip.dataset.platform = option.id;
+      chip.append(
+        iconElement(PLATFORM_ICONS[option.id], "store-chip__icon"),
+        element("span", "store-chip__label", option.label),
+      );
+      chip.addEventListener("click", () => {
+        const selected = state.platforms.includes(option.id);
+        const platforms = selected
+          ? state.platforms.filter((platform) => platform !== option.id)
+          : [...state.platforms, option.id];
+        dispatch({ type: "platforms-changed", platforms });
         navigateWithCurrentFilters();
         if (activation) void browse(activation, null, false);
-      }
+      });
+      nodes.platformBar.append(chip);
+    }
+
+    const more = element("button", "store-chip store-chip--more");
+    more.type = "button";
+    more.dataset.focusKey = "platform-more";
+    more.setAttribute("aria-haspopup", "true");
+    more.append(element("span", "store-chip__label", "Plus"), iconElement("chevron-down", "store-chip__caret"));
+    more.addEventListener("click", () => {
+      morePlatformsOpen = !morePlatformsOpen;
+      renderMorePanel();
     });
-    label.append(input);
-    return label;
+    nodes.platformBar.append(more);
+
+    nodes.morePanel = element("div", "store-more-panel");
+    nodes.morePanel.hidden = true;
+    platformGroup.append(nodes.platformBar, nodes.morePanel);
+
+    filters.append(nodes.categoryBar, platformGroup);
+    return filters;
   };
 
-  const renderProviderDisclosure = (): HTMLElement => {
-    const disclosure = element("details", "store-provider-statuses");
-    const problemCount = state.home.providerStatuses.filter(
-      (status) => status.health !== "available",
-    ).length;
-    const summary = element(
-      "summary",
-      "store-provider-statuses__summary",
-      problemCount === 0
-        ? "All source statuses"
-        : problemCount === 1
-          ? "1 source notice"
-          : `${problemCount} source notices`,
+  const buildBanner = (): HTMLElement => {
+    const banner = element("aside", "store-banner");
+    banner.setAttribute("aria-label", "Habitudes de jeu");
+    const copy = element("p", "store-banner__copy");
+    copy.append(
+      element("b", "store-banner__lead", "Rappelle-toi :"),
+      element(
+        "span",
+        "store-banner__text",
+        " chaque heure de jeu peut t'apporter quelque chose.\nChoisis la qualité, pas la quantité.",
+      ),
     );
-    const list = element("ul", "store-provider-statuses__list");
-    for (const status of state.home.providerStatuses) {
-      const item = element("li", "store-provider-statuses__item");
-      item.dataset.health = status.health;
-      const title = element("span", "store-provider-statuses__name", status.label);
-      const copy = element("span", "store-provider-statuses__message", status.message);
-      item.append(title, copy);
+    const habits = element("button", "store-banner__action");
+    habits.type = "button";
+    habits.dataset.focusKey = "store-habits";
+    habits.append(iconElement("chart"), element("span", "", "Voir mes habitudes"));
+    habits.addEventListener("click", () =>
+      options.navigate({ page: "settings", section: "general", attachGameId: null }),
+    );
+    banner.append(iconElement("leaf", "store-banner__leaf"), copy, habits);
+    return banner;
+  };
+
+  const buildSkeleton = (): void => {
+    if (!pageRoot) return;
+    const body = element("div", "store-page__body");
+    nodes.status = element("div", "store-status");
+    nodes.status.setAttribute("aria-live", "polite");
+    nodes.status.hidden = true;
+    body.append(buildHero(), buildShelf(), buildFilters(), buildBanner());
+    pageRoot.replaceChildren(buildBackdrop(), body, nodes.status);
+  };
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+
+  const visibleGames = (): GameSummary[] => selectStoreGames(state);
+
+  const setBackdrop = (url: string): void => {
+    if (!url || url === backdropUrl || nodes.backdropLayers.length < 2) return;
+    backdropUrl = url;
+    const next = nodes.backdropLayers[1 - backdropFront];
+    const current = nodes.backdropLayers[backdropFront];
+    next.src = url;
+    const reveal = (): void => {
+      next.classList.add("is-active");
+      current.classList.remove("is-active");
+      backdropFront = 1 - backdropFront;
+    };
+    if (next.complete && next.naturalWidth > 0) reveal();
+    else next.addEventListener("load", reveal, { once: true });
+  };
+
+  const renderHighlights = (highlights: StoreHighlight[]): void => {
+    if (!nodes.highlightList) return;
+    const list = document.createDocumentFragment();
+    for (const highlight of highlights.slice(0, 3)) {
+      const item = element("li", "store-highlight");
+      const copy = element("div", "store-highlight__copy");
+      copy.append(
+        element("h2", "store-highlight__title", highlight.title),
+        element("p", "store-highlight__text", highlight.text),
+      );
+      item.append(iconElement(highlightIcon(highlight.icon), "store-highlight__icon"), copy);
       list.append(item);
     }
-    disclosure.append(summary, list);
-    return disclosure;
+    nodes.highlightList.replaceChildren(list);
   };
 
-  const renderCard = (game: GameSummary): HTMLElement => {
+  const renderHero = (games: GameSummary[]): void => {
+    const heroCopy = selectHeroCopy(state, games);
+    if (nodes.heroEyebrow) nodes.heroEyebrow.textContent = heroCopy.eyebrow;
+    if (nodes.heroTitle) nodes.heroTitle.textContent = heroCopy.title;
+    if (nodes.heroLead) nodes.heroLead.textContent = heroCopy.lead;
+    if (nodes.heroAction) nodes.heroAction.textContent = heroCopy.actionLabel;
+    if (nodes.heroOffer) {
+      const previewed = heroCopy.gameId
+        ? games.find((game) => game.id === heroCopy.gameId) ?? null
+        : null;
+      const line = previewed ? offerLine(previewed) : "";
+      nodes.heroOffer.textContent = line;
+      nodes.heroOffer.hidden = !line;
+    }
+    renderHighlights(heroCopy.highlights);
+    setBackdrop(heroCopy.backgroundUrl);
+  };
+
+  const renderShelfLabel = (): void => {
+    if (!nodes.shelfLabel) return;
+    nodes.shelfLabel.replaceChildren(
+      iconElement("leaf", "store-shelf__leaf"),
+      element("strong", "store-shelf__lead", "Moins de bruit."),
+      element("span", "store-shelf__tail", "Plus de sens."),
+    );
+  };
+
+  const previewGame = (gameId: string | null): void => {
+    if (state.previewGameId === gameId) return;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      previewTimer = null;
+      state = reduceStorePageState(state, { type: "preview-changed", gameId });
+      renderHero(visibleGames());
+      syncFeatured();
+    }, gameId ? 60 : 220);
+  };
+
+  const buildCard = (game: GameSummary, index: number): HTMLElement => {
     const card = element("article", "store-card");
     card.dataset.gameId = game.id;
+    card.setAttribute("role", "listitem");
+
     const open = element("button", "store-card__open");
     open.type = "button";
     open.dataset.focusKey = `game-${game.id}`;
-    open.setAttribute("aria-label", `Open ${game.title}`);
+    open.setAttribute("aria-label", `Ouvrir ${game.title}`);
     open.addEventListener("click", () =>
       options.navigate({ page: "game", gameId: game.id, from: "store" }),
     );
-    const mediaFrame = element("span", "store-card__media");
-    const image = element("img", "store-card__cover");
-    image.src = game.coverUrl;
-    image.alt = "";
-    image.loading = "lazy";
-    image.addEventListener("error", () => mediaFrame.classList.add("store-card__media--missing"));
-    const platform = element("span", "store-card__platform", platformLabel(game));
-    // The title sits over its artwork, as in the approved design.
-    const title = element("span", "store-card__title", game.title);
-    mediaFrame.append(image, platform, title);
+    open.addEventListener("focus", () => previewGame(game.id));
+
+    const media = element("span", "store-card__media");
+    const art = element("img", "store-card__art");
+    // The card wants key art composed for a small landscape frame, which is the
+    // capsule; the wide `heroUrl` banner is the page backdrop's job and crops to
+    // an unreadable sliver at this size. Each fallback is tried once.
+    const artSources = [game.landscapeUrl, game.coverUrl, game.heroUrl].filter(Boolean);
+    let artIndex = 0;
+    art.src = artSources[0] ?? "";
+    art.alt = "";
+    art.loading = index < 6 ? "eager" : "lazy";
+    art.decoding = "async";
+    art.addEventListener("error", () => {
+      artIndex += 1;
+      if (artIndex < artSources.length) art.src = artSources[artIndex];
+      else media.classList.add("store-card__media--missing");
+    });
+    const price = element("span", "store-card__price", formatPrice(selectBestOffer(game)));
+    // A few games have no screenshot that survives the crop and fall back to
+    // their capsule, which already carries the wordmark; printing the title
+    // over it would show the name twice.
+    const artHasWordmark = /\/capsule\.jpg$/.test(art.src || "");
+    media.append(art, element("span", "store-card__veil"), price);
+    if (!artHasWordmark) {
+      const cardTitle = element("span", "store-card__title", game.title);
+      // A long name is set tighter rather than ellipsised: a shelf is for
+      // discovering games, and "THE CASE OF THE GOLDEN…" discovers nothing.
+      cardTitle.classList.toggle("store-card__title--long", game.title.length > 21);
+      media.append(cardTitle);
+    }
+    else media.classList.add("store-card__media--wordmark");
 
     const body = element("span", "store-card__body");
-    const genres = element("span", "store-card__genres", game.genres.slice(0, 2).join(", ") || "Genre unverified");
+    body.append(element("span", "store-card__genres", genreLabel(game)));
     const chips = element("span", "store-card__chips");
     chips.append(
       element("span", "store-card__chip", sessionLabel(game)),
-      element("span", "store-card__chip", game.tags.some((tag) => /co-?op|multi/i.test(tag)) ? "Co-op" : "Solo"),
+      element("span", "store-card__chip", modeLabel(game)),
     );
-    const fit = element("span", "store-card__fit");
-    for (const row of fitRows(game)) {
-      const line = element("span", "store-card__fit-row");
+    body.append(chips);
+
+    const stats = element("span", "store-card__stats");
+    for (const stat of fitStats(game)) {
+      const row = element("span", "store-card__stat");
       const dots = element("span", "store-card__dots");
-      dots.setAttribute("aria-label", `${row.value} out of 5`);
-      for (let index = 0; index < 5; index += 1) {
-        const dot = element("i", `store-card__dot${index < row.value ? " store-card__dot--on" : ""}`);
-        dot.setAttribute("aria-hidden", "true");
-        dots.append(dot);
+      dots.setAttribute("role", "img");
+      dots.setAttribute("aria-label", `${stat.value} sur 5`);
+      for (let dot = 0; dot < 5; dot += 1) {
+        dots.append(element("i", `store-card__dot${dot < stat.value ? " store-card__dot--on" : ""}`));
       }
-      line.append(element("span", "store-card__fit-label", row.label), dots);
-      fit.append(line);
+      row.append(element("span", "store-card__stat-label", stat.label), dots);
+      stats.append(row);
     }
-    const description = element("span", "store-card__description", game.shortDescription);
-    const facts = element("span", "store-card__facts");
-    for (const tag of game.tags.slice(0, 2)) facts.append(element("span", "store-card__tag", tag));
-    // The title now lives over the artwork, so the body keeps main's chips and
-    // fit rows and ends with the pricing block — rendered only when the game
-    // actually has a price.
-    body.append(genres, chips, fit, description, facts);
-    const offerBlock = renderCardOffer(game);
-    if (offerBlock) body.append(offerBlock);
-    open.append(mediaFrame, body);
+    const tagline = element("span", "store-card__tagline", taglineLabel(game));
+    tagline.classList.toggle("store-card__tagline--long", taglineLabel(game).length > 38);
+    body.append(stats, tagline);
+    open.append(media, body);
 
     const wishlist = element("button", "store-card__wishlist");
     wishlist.type = "button";
     wishlist.dataset.focusKey = `wishlist-${game.id}`;
-    wishlist.classList.toggle("store-card__wishlist--active", game.wishlisted);
     wishlist.setAttribute("aria-pressed", String(game.wishlisted));
     wishlist.setAttribute(
       "aria-label",
-      game.wishlisted ? `Remove ${game.title} from wishlist` : `Add ${game.title} to wishlist`,
+      game.wishlisted ? `Retirer ${game.title} de tes envies` : `Ajouter ${game.title} à tes envies`,
     );
-    wishlist.append(iconElement("bookmark"));
-    wishlist.addEventListener("click", () => void handleWishlist(game));
-    card.append(open, wishlist);
-    return card;
-  };
-
-  const renderSkeletonCard = (): HTMLElement => {
-    const card = element("div", "store-card store-card--skeleton");
-    card.setAttribute("aria-hidden", "true");
-    card.append(element("span", "store-card__skeleton-media"), element("span", "store-card__skeleton-copy"));
-    return card;
-  };
-
-  const renderCatalog = (games: GameSummary[]): HTMLElement => {
-    const section = element("section", "store-catalog");
-    section.setAttribute("aria-labelledby", "store-catalog-title");
-    const header = element("div", "store-catalog__header");
-    const headingGroup = element("div", "store-catalog__heading-group");
-    const heading = element("h2", "store-catalog__title", storeCategoryLabel(state.category));
-    heading.id = "store-catalog-title";
-    const count = element(
-      "p",
-      "store-catalog__count",
-      games.length === 1 ? "1 game shown" : `${games.length} games shown`,
-    );
-    headingGroup.append(heading, count);
-    const refresh = element("button", "store-refresh-button", "Refresh sources");
-    refresh.type = "button";
-    refresh.dataset.focusKey = "refresh-store";
-    refresh.prepend(iconElement("refresh"));
-    refresh.disabled = state.phase === "refreshing" || state.phase === "loading";
-    refresh.addEventListener("click", () => {
-      if (activation) void refreshSources(activation, true);
+    wishlist.append(iconElement(game.wishlisted ? "heart-filled" : "heart"));
+    wishlist.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void handleWishlist(game);
     });
-    header.append(headingGroup, refresh);
-    section.append(header);
 
+    card.append(open, wishlist);
+    card.addEventListener("pointerenter", () => previewGame(game.id));
+    card.addEventListener("pointerleave", () => previewGame(null));
+    return card;
+  };
+
+  const syncFeatured = (): void => {
+    if (!nodes.railTrack) return;
+    const previewId = state.previewGameId;
+    pageRoot?.classList.toggle("store-page--previewing", Boolean(previewId));
+    const cards = [...nodes.railTrack.querySelectorAll<HTMLElement>(".store-card")];
+    cards.forEach((card, index) => {
+      const featured = previewId ? card.dataset.gameId === previewId : index === 0;
+      card.classList.toggle("store-card--featured", featured);
+      card.classList.toggle("store-card--previewing", Boolean(previewId) && featured);
+    });
+  };
+
+  const renderCards = (games: GameSummary[]): void => {
+    if (!nodes.railTrack || !nodes.emptyState) return;
+    const signature = games.map((game) => `${game.id}:${game.wishlisted ? 1 : 0}`).join("|");
+    if (signature !== renderedGameIds) {
+      renderedGameIds = signature;
+      const fragment = document.createDocumentFragment();
+      games.forEach((game, index) => fragment.append(buildCard(game, index)));
+      nodes.railTrack.replaceChildren(fragment);
+      nodes.railTrack.scrollLeft = 0;
+    }
+    nodes.railTrack.hidden = games.length === 0;
+    nodes.emptyState.hidden = games.length > 0;
     if (games.length === 0) {
-      const empty = element("div", "store-empty");
-      empty.append(
+      nodes.emptyState.replaceChildren(
         iconElement("search"),
-        element("h3", "store-empty__title", "No matching games in the saved catalog"),
+        element("h2", "store-empty__title", "Aucun jeu ne correspond"),
         element(
           "p",
           "store-empty__copy",
-          "Try another category or provider. Source notices above explain feeds that are not configured.",
+          "Essaie une autre catégorie ou une autre plateforme — ta bibliothèque est déjà retirée de ces résultats.",
         ),
       );
-      section.append(empty);
-      return section;
     }
+    syncFeatured();
+    syncArrows();
+  };
 
-    const rail = element("div", "store-card-rail");
-    rail.setAttribute("aria-label", `${storeCategoryLabel(state.category)} games`);
-    for (const game of games) rail.append(renderCard(game));
-    if (state.phase === "loading" && games.length < 7) {
-      rail.append(renderSkeletonCard(), renderSkeletonCard());
+  const renderFilters = (): void => {
+    for (const chip of nodes.categoryBar?.querySelectorAll<HTMLElement>(".store-chip") ?? []) {
+      const active = chip.dataset.category === state.category;
+      chip.classList.toggle("store-chip--active", active);
+      chip.setAttribute("aria-pressed", String(active));
     }
-    section.append(rail);
-    if (state.nextCursor) {
-      const more = element("button", "store-load-more", "Load more games");
-      more.type = "button";
-      more.dataset.focusKey = "store-load-more";
-      more.addEventListener("click", () => {
-        if (activation && state.nextCursor) void browse(activation, state.nextCursor, true);
-      });
-      section.append(more);
+    for (const chip of nodes.platformBar?.querySelectorAll<HTMLElement>("[data-platform]") ?? []) {
+      const active = state.platforms.includes(chip.dataset.platform as StorePlatform);
+      chip.classList.toggle("store-chip--active", active);
+      chip.setAttribute("aria-pressed", String(active));
     }
-    return section;
+  };
+
+  const renderMorePanel = (): void => {
+    if (!nodes.morePanel) return;
+    nodes.morePanel.hidden = !morePlatformsOpen;
+    if (!morePlatformsOpen) return;
+    const list = element("ul", "store-more-panel__list");
+    for (const status of state.home.providerStatuses) {
+      const item = element("li", "store-more-panel__item");
+      item.dataset.health = status.health;
+      item.append(
+        element("span", "store-more-panel__dot"),
+        element("span", "store-more-panel__name", status.label),
+        element("span", "store-more-panel__message", status.message),
+      );
+      list.append(item);
+    }
+    nodes.morePanel.replaceChildren(
+      element("p", "store-more-panel__title", "Sources de prix"),
+      list,
+    );
+  };
+
+  const renderWhyPanel = (): void => {
+    if (!nodes.whyPanel) return;
+    nodes.whyPanel.hidden = !whyOpen;
+    if (!whyOpen) return;
+    const close = element("button", "store-why__close");
+    close.type = "button";
+    close.setAttribute("aria-label", "Fermer");
+    close.append(iconElement("close"));
+    close.addEventListener("click", () => {
+      whyOpen = false;
+      renderWhyPanel();
+      nodes.heroAction?.focus();
+    });
+    nodes.whyPanel.replaceChildren(
+      close,
+      element("h2", "store-why__title", "Pourquoi cette sélection"),
+      element(
+        "p",
+        "store-why__text",
+        "Orivo ne classe pas les jeux par budget marketing. Chaque titre est retenu pour ce qu'il te laisse : une idée, une émotion, une heure bien passée.",
+      ),
+      element(
+        "p",
+        "store-why__text",
+        "Les durées annoncées sont celles de l'histoire principale, les prix viennent des boutiques elles-mêmes, et les jeux déjà dans ta bibliothèque n'apparaissent jamais ici.",
+      ),
+      element(
+        "p",
+        "store-why__text",
+        "Moins de bruit, plus de sens : une étagère courte que tu peux lire en entier.",
+      ),
+    );
+  };
+
+  const renderStatus = (): void => {
+    if (!nodes.status) return;
+    const message = transientStatus || state.errorMessage;
+    if (!message) {
+      nodes.status.hidden = true;
+      nodes.status.replaceChildren();
+      return;
+    }
+    nodes.status.hidden = false;
+    nodes.status.className = `store-status store-status--${state.phase}`;
+    nodes.status.setAttribute("role", state.phase === "error" ? "alert" : "status");
+    nodes.status.replaceChildren(
+      iconElement(state.phase === "refreshing" || state.phase === "loading" ? "refresh" : "alert"),
+      element("span", "store-status__copy", message),
+    );
+  };
+
+  const render = (): void => {
+    if (!pageRoot) return;
+    const focusSnapshot = captureFocus();
+    const games = visibleGames();
+    renderShelfLabel();
+    renderCards(games);
+    renderHero(games);
+    renderFilters();
+    renderMorePanel();
+    renderWhyPanel();
+    renderStatus();
+    restoreFocus(focusSnapshot);
+  };
+
+  // ---------------------------------------------------------------------------
+  // Rail
+  // ---------------------------------------------------------------------------
+
+  const railStep = (): number => {
+    const track = nodes.railTrack;
+    if (!track) return 0;
+    const card = track.querySelector<HTMLElement>(".store-card");
+    if (!card) return track.clientWidth;
+    const gap = Number.parseFloat(getComputedStyle(track).columnGap || "18") || 18;
+    const perView = Math.max(1, Math.floor((track.clientWidth + gap) / (card.offsetWidth + gap)));
+    return (card.offsetWidth + gap) * perView;
   };
 
   /**
-   * The shell host (`.app-page--scroll`) is the scroll container, so scroll
-   * position lives there — the page root itself never scrolls. Both nodes are
-   * read and written so the page keeps working when it is mounted into a host
-   * that does not scroll.
+   * The arrows walk the whole category, not just what is already loaded: when
+   * the track runs out of cards and the catalog has more, the next page is
+   * fetched and appended before the scroll continues.
    */
-  const readScrollTop = (): number => Math.max(pageRoot?.scrollTop ?? 0, container?.scrollTop ?? 0);
-
-  const writeScrollTop = (value: number): void => {
-    if (pageRoot) pageRoot.scrollTop = value;
-    if (container) container.scrollTop = value;
+  const scrollRail = (direction: 1 | -1): void => {
+    const track = nodes.railTrack;
+    if (!track) return;
+    const step = railStep();
+    const maximum = track.scrollWidth - track.clientWidth;
+    const target = Math.max(0, Math.min(maximum, track.scrollLeft + direction * step));
+    track.scrollTo({ left: target, behavior: "smooth" });
+    if (direction === 1 && maximum - target < step * 1.5 && state.nextCursor && activation) {
+      void browse(activation, state.nextCursor, true);
+    }
+    // `scrollTo` is async; the arrows are re-evaluated once it settles.
+    window.setTimeout(syncArrows, 420);
   };
 
-  const focusTargetFor = (focusKey: string): HTMLElement | null =>
-    [...(pageRoot?.querySelectorAll<StoreElement>("[data-focus-key]") ?? [])].find(
-      (candidate) => candidate.dataset.focusKey === focusKey,
-    ) ?? null;
+  const syncArrows = (): void => {
+    const track = nodes.railTrack;
+    if (!track || !nodes.arrowPrevious || !nodes.arrowNext) return;
+    const maximum = track.scrollWidth - track.clientWidth;
+    const atStart = track.scrollLeft <= 2;
+    const atEnd = track.scrollLeft >= maximum - 2;
+    nodes.arrowPrevious.hidden = atStart;
+    nodes.arrowNext.hidden = (atEnd && !state.nextCursor) || maximum <= 2;
+  };
 
-  /** Focus and caret survive a re-render because the page rebuilds its subtree. */
+  // ---------------------------------------------------------------------------
+  // Focus and lifecycle
+  // ---------------------------------------------------------------------------
+
+  const focusTargetFor = (focusKey: string): HTMLElement | null =>
+    pageRoot?.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focusKey)}"]`) ?? null;
+
   const captureFocus = (): FocusSnapshot | null => {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || !pageRoot?.contains(active)) return null;
@@ -702,8 +973,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
   const restoreFocus = (snapshot: FocusSnapshot | null): void => {
     if (!snapshot) return;
     const target = focusTargetFor(snapshot.focusKey);
-    if (!target) return;
-    target.focus();
+    if (!target || target === document.activeElement) return;
+    target.focus({ preventScroll: true });
     if (!(target instanceof HTMLInputElement) || snapshot.selectionStart === null) return;
     try {
       target.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd ?? snapshot.selectionStart);
@@ -712,50 +983,30 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
   };
 
-  const render = (): void => {
-    if (!pageRoot) return;
-    const focusSnapshot = captureFocus();
-    const scrollTop = readScrollTop();
-    const games = selectStoreGames(state);
-    const featured = games[0] ?? state.home.games[0];
-    const fragment = document.createDocumentFragment();
-    const status = renderStatus();
-    if (status) fragment.append(status);
-    if (featured) fragment.append(renderHero(featured));
-    const controls = element("section", "store-controls");
-    controls.setAttribute("aria-label", "Browse filters");
-    controls.append(renderCategoryFilters(), renderProviderFilters());
-    const secondary = element("div", "store-controls__secondary");
-    secondary.append(renderSearch(), renderProviderDisclosure());
-    controls.append(secondary);
-    fragment.append(controls, renderCatalog(games));
+  const readScrollTop = (): number => Math.max(pageRoot?.scrollTop ?? 0, container?.scrollTop ?? 0);
 
-    // Mindful reminder strip that closes the approved design.
-    const banner = element("aside", "store-banner");
-    banner.setAttribute("aria-label", "Play habits");
-    const bannerCopy = element("p", "store-banner__copy");
-    bannerCopy.append(
-      element("b", "store-banner__lead", "Remember:"),
-      element("span", "store-banner__text", " every hour of play can give you something. Choose quality, not quantity."),
-    );
-    const habits = element("button", "store-banner__action");
-    habits.type = "button";
-    habits.dataset.focusKey = "store-habits";
-    habits.append(iconElement("clock"), element("span", "store-banner__action-copy", "View my habits"));
-    habits.addEventListener("click", () => options.navigate({ page: "settings", section: "general", attachGameId: null }));
-    banner.append(iconElement("leaf", "store-banner__leaf"), bannerCopy, habits);
-    fragment.append(banner);
-
-    pageRoot.replaceChildren(fragment);
-    if (scrollTop > 0) writeScrollTop(scrollTop);
-    restoreFocus(focusSnapshot);
+  const writeScrollTop = (value: number): void => {
+    if (pageRoot) pageRoot.scrollTop = value;
+    if (container) container.scrollTop = value;
   };
 
   const restorePageState = (restoreState: PageRestoreState | null): void => {
     if (!pageRoot || !restoreState) return;
     writeScrollTop(Math.max(0, restoreState.scrollTop));
     if (!restoreState.focusKey) return;
-    focusTargetFor(restoreState.focusKey)?.focus();
+    focusTargetFor(restoreState.focusKey)?.focus({ preventScroll: true });
+  };
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key !== "Escape") return;
+    if (whyOpen) {
+      whyOpen = false;
+      renderWhyPanel();
+    }
+    if (morePlatformsOpen) {
+      morePlatformsOpen = false;
+      renderMorePanel();
+    }
   };
 
   const onOnline = (): void => {
@@ -767,60 +1018,66 @@ export function createStorePage(options: StorePageOptions): AppPage {
   return {
     mount(host) {
       container = host;
-      // Exactly one `main` per screen. The shell wrapper is a plain `div`
-      // (see the shell comment in app.ts: "each page owns the only <main> on
-      // screen"), so this page root is that landmark — never a nested one.
+      // Exactly one `main` per screen. The shell wrapper is a plain `div`, so
+      // this page root is that landmark — never a nested one.
       pageRoot = element("main", "store-page");
       pageRoot.tabIndex = -1;
       pageRoot.setAttribute("aria-label", "Store");
       container.replaceChildren(pageRoot);
+      buildSkeleton();
       window.addEventListener("online", onOnline);
       window.addEventListener("offline", onOffline);
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("resize", syncArrows);
       render();
     },
     activate(context) {
       activation = context;
       // `context.route` is a union; narrowing it into a local const keeps the
-      // Store fields readable inside the async continuation below, where
-      // property narrowing on `context` would otherwise be discarded.
+      // Store fields readable inside the async continuation below.
       const route = context.route;
       if (route.page !== "store") return;
       dispatch({
         type: "activate",
         category: route.category,
-        providers: route.providers,
+        platforms: route.platforms,
         query: route.query,
         online: typeof navigator === "undefined" || navigator.onLine,
       });
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState(context.restoreState);
       });
+      void loadOwned(context);
       void loadHome(context).then(() => {
         if (
           isActive(context) &&
-          (route.category !== "for-you" ||
-            route.providers.length > 0 ||
-            Boolean(route.query.trim()))
+          (route.category !== "for-you" || route.platforms.length > 0 || Boolean(route.query.trim()))
         ) {
           void browse(context, null, false);
         }
       });
     },
     deactivate() {
-      if (queryTimer) clearTimeout(queryTimer);
+      for (const timer of [queryTimer, statusTimer, previewTimer]) {
+        if (timer) clearTimeout(timer);
+      }
       queryTimer = null;
-      if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
+      previewTimer = null;
       transientStatus = "";
+      morePlatformsOpen = false;
+      whyOpen = false;
       const focusKey = captureFocus()?.focusKey ?? null;
       const restoreState: PageRestoreState = {
         scrollTop: readScrollTop(),
         focusKey,
         query: state.query,
-        filters: [state.category, ...state.providers],
+        filters: [state.category, ...state.platforms],
       };
       activation = null;
       return restoreState;
     },
   };
 }
+
+export { storeCategoryLabel };

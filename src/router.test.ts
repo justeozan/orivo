@@ -60,12 +60,12 @@ describe("hash routing", () => {
   it("normalises Store filters and ignores unknown providers", () => {
     expect(
       parseAppRoute(
-        "#/store?category=short-sessions&provider=steam&provider=steam&provider=unknown&q=co-op",
+        "#/store?category=short-sessions&platform=steam&platform=steam&platform=unknown&q=co-op",
       ),
     ).toEqual({
       page: "store",
       category: "short-sessions",
-      providers: ["steam"],
+      platforms: [],
       query: "co-op",
     });
   });

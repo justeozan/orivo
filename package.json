@@ -12,7 +12,9 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "store:refresh": "node scripts/fetch-store-catalog.mjs && node scripts/fetch-store-scenes.mjs && node scripts/build-store-catalog.mjs && node scripts/prune-store-media.mjs --apply",
+    "store:build": "node scripts/build-store-catalog.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1"

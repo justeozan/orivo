@@ -17,23 +17,28 @@
 //!   `https` plus a host on a hardcoded allowlist before anything is opened.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     future::Future,
     io::{self, Write as _},
     path::{Path, PathBuf},
     pin::Pin,
+    sync::OnceLock,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 /// Derived cache document. The plan named a SQLite database; this crate has no
 /// SQLite dependency, so the same contract is met by a versioned JSON document
 /// with an atomic writer. Unknown or corrupt content is discarded and rebuilt.
 const STORE_CACHE_FILE: &str = "store-cache.json";
-const STORE_CACHE_SCHEMA_VERSION: u32 = 1;
+/// Bumped when the meaning of a cached row changes. Version 2 is the curated
+/// catalogue with `curation` copy: a version 1 document holds the old
+/// ten-game editorial shelf, which `store_home` would otherwise keep serving
+/// (with no French copy) until a refresh happened to succeed.
+const STORE_CACHE_SCHEMA_VERSION: u32 = 2;
 const PREFERENCES_FILE: &str = "preferences.json";
 
 /// An offer older than this is reported as stale rather than presented as a
@@ -50,12 +55,26 @@ const BROWSE_CURSOR_PREFIX: &str = "store_";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const USER_AGENT: &str = "Orivo/0.3 (+https://orivo.io)";
-const MAX_STEAM_REFRESH_APPS: usize = 10;
+
+/// The whole curated catalogue is refreshable, with headroom for the rows a
+/// later catalogue adds. The cap is a guard against an unbounded fan-out, not
+/// a reason for the last games on the shelf to keep a stale price.
+const MAX_STEAM_REFRESH_APPS: usize = 128;
+/// Steam answers a comma-separated `appids` list in one response as long as a
+/// `filters` value is supplied, so the catalogue costs a handful of requests
+/// instead of one per game. See `refresh_steam` for what was measured.
+const STEAM_REFRESH_BATCH: usize = 20;
+/// Only paid between the per-app fallback requests, which is the path that can
+/// actually fan out. The batched path never sleeps.
+const STEAM_REFRESH_PAUSE: Duration = Duration::from_millis(250);
+/// After this many consecutive unanswered fallback requests, Steam is not
+/// reachable rather than slow, and the refresh stops instead of spending a
+/// request timeout per remaining game.
+const STEAM_REFRESH_GIVE_UP_AFTER: usize = 5;
 const APPLE_REFRESH_TERM: &str = "game";
 const APPLE_REFRESH_LIMIT: usize = 10;
 
 /// Host-side configuration only. The WebView cannot influence any of these.
-const STEAM_API_KEY_ENV: &str = "ORIVO_STEAM_WEB_API_KEY";
 const STORE_REGION_ENV: &str = "ORIVO_STORE_REGION";
 const DEFAULT_REGION: &str = "US";
 
@@ -69,6 +88,13 @@ const ALLOWED_OFFER_HOSTS: &[&str] = &[
     "apps.apple.com",
     "play.google.com",
     "www.instant-gaming.com",
+    "store.epicgames.com",
+    "www.gog.com",
+    "www.humblebundle.com",
+    "www.fanatical.com",
+    "www.greenmangaming.com",
+    "store.playstation.com",
+    "www.nintendo.com",
 ];
 
 /// The only remote image origin in the application CSP. A provider artwork URL
@@ -84,44 +110,109 @@ const ALLOWED_ARTWORK_HOSTS: &[&str] = &["cdn.cloudflare.steamstatic.com"];
 #[serde(rename_all = "kebab-case")]
 pub enum StoreProviderId {
     Steam,
+    InstantGaming,
+    Epic,
+    Gog,
+    Humble,
+    Fanatical,
+    GreenManGaming,
     Ubisoft,
     Microsoft,
+    /// `PlayStation` kebab-cases to `play-station`, which is not the contract
+    /// spelling, so the wire name is pinned explicitly.
+    #[serde(rename = "playstation")]
+    PlayStation,
+    Nintendo,
     Apple,
     GooglePlay,
-    InstantGaming,
 }
 
 impl StoreProviderId {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 13] = [
         Self::Steam,
+        Self::InstantGaming,
+        Self::Epic,
+        Self::Gog,
+        Self::Humble,
+        Self::Fanatical,
+        Self::GreenManGaming,
         Self::Ubisoft,
         Self::Microsoft,
+        Self::PlayStation,
+        Self::Nintendo,
         Self::Apple,
         Self::GooglePlay,
-        Self::InstantGaming,
     ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Steam => "Steam",
+            Self::InstantGaming => "Instant Gaming",
+            Self::Epic => "Epic Games Store",
+            Self::Gog => "GOG",
+            Self::Humble => "Humble Bundle",
+            Self::Fanatical => "Fanatical",
+            Self::GreenManGaming => "Green Man Gaming",
             Self::Ubisoft => "Ubisoft",
             Self::Microsoft => "Microsoft/Xbox",
+            Self::PlayStation => "PlayStation Store",
+            Self::Nintendo => "Nintendo eShop",
             Self::Apple => "Apple App Store",
             Self::GooglePlay => "Google Play",
-            Self::InstantGaming => "Instant Gaming",
         }
     }
 
     fn slug(self) -> &'static str {
         match self {
             Self::Steam => "steam",
+            Self::InstantGaming => "instant-gaming",
+            Self::Epic => "epic",
+            Self::Gog => "gog",
+            Self::Humble => "humble",
+            Self::Fanatical => "fanatical",
+            Self::GreenManGaming => "green-man-gaming",
             Self::Ubisoft => "ubisoft",
             Self::Microsoft => "microsoft",
+            Self::PlayStation => "playstation",
+            Self::Nintendo => "nintendo",
             Self::Apple => "apple",
             Self::GooglePlay => "google-play",
-            Self::InstantGaming => "instant-gaming",
         }
     }
+
+    /// The hardware platform a storefront sells for. Apple and Google Play sell
+    /// for mobile devices, which the store platform filter does not model, so
+    /// they map to `None` rather than to a guess.
+    fn platform(self) -> Option<StorePlatformId> {
+        match self {
+            Self::Steam
+            | Self::InstantGaming
+            | Self::Epic
+            | Self::Gog
+            | Self::Humble
+            | Self::Fanatical
+            | Self::GreenManGaming
+            | Self::Ubisoft => Some(StorePlatformId::Pc),
+            Self::Microsoft => Some(StorePlatformId::Xbox),
+            Self::PlayStation => Some(StorePlatformId::PlayStation),
+            Self::Nintendo => Some(StorePlatformId::Switch),
+            Self::Apple | Self::GooglePlay => None,
+        }
+    }
+}
+
+/// The platform pill group in the store filter bar. It describes hardware, not
+/// a storefront: several providers map onto the same platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StorePlatformId {
+    Pc,
+    /// Pinned for the same reason as [`StoreProviderId::PlayStation`].
+    #[serde(rename = "playstation")]
+    PlayStation,
+    Xbox,
+    Switch,
+    Emulators,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +229,7 @@ pub enum ProviderHealth {
 pub enum StoreCategory {
     #[default]
     ForYou,
+    GoodForBrain,
     ShortSessions,
     StrongStories,
     Relaxing,
@@ -174,6 +266,18 @@ pub enum GamePlatform {
     Android,
 }
 
+impl GamePlatform {
+    /// A game's declared platform expressed as a store filter platform. Mobile
+    /// platforms have no pill in the filter bar, so they map to `None`; nothing
+    /// is invented to make a game match a filter it does not satisfy.
+    fn store_platform(self) -> Option<StorePlatformId> {
+        match self {
+            Self::Windows | Self::Macos | Self::Linux => Some(StorePlatformId::Pc),
+            Self::Ios | Self::Android => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecommendationMode {
@@ -208,6 +312,69 @@ pub struct ProviderStatus {
     pub refreshed_at: Option<String>,
 }
 
+/// One "fit" read-out row on a store card: a French label and a 1-5 strength.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreFitStat {
+    pub label: String,
+    pub value: i64,
+}
+
+/// One row of the store hero's right-hand panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreHighlight {
+    pub icon: String,
+    pub title: String,
+    pub text: String,
+}
+
+/// The French editorial copy Orivo writes about a catalogue game. It is
+/// carried through from the generated catalogue untouched: the shell neither
+/// authors nor edits it, it only makes sure the card that renders it gets it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreCuration {
+    #[serde(default, deserialize_with = "lenient_list")]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub duration: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default, deserialize_with = "lenient_list")]
+    pub stats: Vec<StoreFitStat>,
+    #[serde(default)]
+    pub tagline: String,
+    #[serde(default)]
+    pub hero_title: String,
+    #[serde(default)]
+    pub hero_lead: String,
+    #[serde(default, deserialize_with = "lenient_list")]
+    pub highlights: Vec<StoreHighlight>,
+    /// A curator's own category assignment. It is the authority for the store
+    /// rails; keyword matching is only the fallback for a game without one.
+    #[serde(default, deserialize_with = "lenient_list")]
+    pub categories: Vec<StoreCategory>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    pub platforms: Vec<StorePlatformId>,
+}
+
+/// Deserialize a list, dropping only the entries this build cannot understand.
+/// A catalogue written by a newer generator — a category or a storefront this
+/// binary has never heard of — must degrade to the rows it does understand
+/// rather than emptying the whole store.
+fn lenient_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let rows = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameSummary {
@@ -228,6 +395,10 @@ pub struct GameSummary {
     pub last_played_at: Option<String>,
     pub recommendation_reasons: Vec<String>,
     pub offers: Vec<StoreOffer>,
+    /// Present only for the catalogue games Orivo has written copy for, which
+    /// is what `curation?:` means in `src/contracts.ts`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub curation: Option<StoreCuration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -247,6 +418,8 @@ pub struct StoreBrowseRequest {
     pub category: StoreCategory,
     #[serde(default)]
     pub providers: Vec<StoreProviderId>,
+    #[serde(default)]
+    pub platforms: Vec<StorePlatformId>,
     #[serde(default)]
     pub query: String,
     #[serde(default)]
@@ -330,6 +503,10 @@ struct CachedGame {
     editorial_reasons: Vec<String>,
     #[serde(default)]
     offers: Vec<CachedOffer>,
+    /// Carried from the generated catalogue and handed to the WebView
+    /// unchanged, so the cards keep the exact French copy the design approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    curation: Option<StoreCuration>,
 }
 
 impl CachedGame {
@@ -356,6 +533,7 @@ impl CachedGame {
                 .iter()
                 .map(|offer| offer.to_dto(now_ms))
                 .collect(),
+            curation: self.curation.clone(),
         }
     }
 
@@ -486,7 +664,7 @@ impl StoreCache {
     /// the store.
     fn offer_url(&self, offer_id: &str) -> Option<String> {
         find_offer_url(&self.read().games, offer_id)
-            .or_else(|| find_offer_url(&editorial_games(), offer_id))
+            .or_else(|| find_offer_url(catalog_games(), offer_id))
     }
 }
 
@@ -503,220 +681,137 @@ fn cache_error(error: impl std::fmt::Display) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Editorial baseline. Mirrors `src/store-model.ts` so the shell and the
-// WebView agree on identifiers and artwork before any network call happens.
+// The catalogue. One curated list, generated once by
+// `scripts/build-store-catalog.mjs`, written to `src/store-catalog.generated.ts`
+// for the WebView and to the JSON sibling embedded here for the shell. Neither
+// side can drift onto a catalogue of its own: this is the same bytes.
 // ---------------------------------------------------------------------------
 
-struct EditorialSeed {
-    app_id: &'static str,
-    title: &'static str,
-    file: &'static str,
-    hero_file: Option<&'static str>,
-    landscape_file: &'static str,
-    description: &'static str,
-    genres: &'static [&'static str],
-    tags: &'static [&'static str],
-    platforms: &'static [GamePlatform],
-    reasons: &'static [&'static str],
+const STORE_CATALOG_JSON: &str = include_str!("../resources/store-catalog.json");
+
+static STORE_CATALOG: OnceLock<Vec<CachedGame>> = OnceLock::new();
+
+/// One row of the generated catalogue, in the exact shape the generator emits
+/// (`GameSummary` from `src/contracts.ts`). Only the fields the shell can act
+/// on are read; `owned`, `wishlisted` and the play-time fields are library
+/// facts the store never sources from a catalogue file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogSeed {
+    id: String,
+    title: String,
+    #[serde(default)]
+    short_description: String,
+    #[serde(default)]
+    cover_url: String,
+    #[serde(default)]
+    hero_url: String,
+    #[serde(default)]
+    landscape_url: String,
+    #[serde(default, deserialize_with = "lenient_list")]
+    genres: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    tags: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    supported_platforms: Vec<GamePlatform>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    recommendation_reasons: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    offers: Vec<CatalogSeedOffer>,
+    #[serde(default)]
+    curation: Option<StoreCuration>,
 }
 
-const EDITORIAL_SEEDS: &[EditorialSeed] = &[
-    EditorialSeed {
-        app_id: "1245620",
-        title: "Elden Ring",
-        file: "elden-ring.jpg",
-        hero_file: Some("elden-ring-wallpaper.png"),
-        landscape_file: "elden-ring.jpg",
-        description: "Explore a vast open world shaped by discovery, difficult encounters, and player choice.",
-        genres: &["Action", "RPG"],
-        tags: &["Open World", "Strong Stories", "Long Sessions"],
-        platforms: &[GamePlatform::Windows],
-        reasons: &[
-            "Matches action RPGs",
-            "Tagged open world",
-            "Single-player campaign",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1091500",
-        title: "Cyberpunk 2077",
-        file: "cyberpunk-2077.jpg",
-        hero_file: Some("cyberpunk-2077.webp"),
-        landscape_file: "cyberpunk-2077.webp",
-        description: "Build a mercenary's story across the dense districts and shifting alliances of Night City.",
-        genres: &["Action", "RPG"],
-        tags: &["Strong Stories", "Open World", "Single-player"],
-        platforms: &[GamePlatform::Windows, GamePlatform::Macos],
-        reasons: &[
-            "Story-rich campaign",
-            "Matches action RPGs",
-            "Available on macOS",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1086940",
-        title: "Baldur's Gate 3",
-        file: "baldurs-gate-3.jpg",
-        hero_file: None,
-        landscape_file: "baldurs-gate-3.jpg",
-        description: "Shape a party-driven adventure where combat, conversation, and exploration share the stage.",
-        genres: &["RPG", "Strategy"],
-        tags: &["Strong Stories", "Choices Matter", "Co-op"],
-        platforms: &[GamePlatform::Windows, GamePlatform::Macos],
-        reasons: &[
-            "Available on macOS",
-            "Story-rich campaign",
-            "Supports co-op",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1145350",
-        title: "Hades II",
-        file: "hades-2.jpg",
-        hero_file: None,
-        landscape_file: "hades-2.jpg",
-        description: "Battle beyond the Underworld in focused runs that reveal more of the story each time.",
-        genres: &["Action", "Roguelike"],
-        tags: &["Short Sessions", "Replayable", "Strong Stories"],
-        platforms: &[GamePlatform::Windows, GamePlatform::Macos],
-        reasons: &[
-            "Works in short sessions",
-            "Available on macOS",
-            "Replayable runs",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1174180",
-        title: "Red Dead Redemption 2",
-        file: "red-dead-redemption-2.jpg",
-        hero_file: None,
-        landscape_file: "red-dead-redemption-2.jpg",
-        description: "Travel with an outlaw gang through a changing frontier and a long-form character story.",
-        genres: &["Action", "Adventure"],
-        tags: &["Strong Stories", "Open World", "Atmospheric"],
-        platforms: &[GamePlatform::Windows],
-        reasons: &[
-            "Story-rich campaign",
-            "Tagged atmospheric",
-            "Single-player adventure",
-        ],
-    },
-    EditorialSeed {
-        app_id: "292030",
-        title: "The Witcher 3: Wild Hunt",
-        file: "the-witcher-3-wild-hunt.jpg",
-        hero_file: None,
-        landscape_file: "the-witcher-3-wild-hunt.jpg",
-        description: "Track monsters and follow interwoven quests across a broad fantasy world.",
-        genres: &["RPG", "Adventure"],
-        tags: &["Strong Stories", "Open World", "Choices Matter"],
-        platforms: &[GamePlatform::Windows],
-        reasons: &[
-            "Matches RPGs",
-            "Story-rich campaign",
-            "Tagged choices matter",
-        ],
-    },
-    EditorialSeed {
-        app_id: "2420110",
-        title: "Horizon Forbidden West",
-        file: "horizon-forbidden-west.jpg",
-        hero_file: None,
-        landscape_file: "horizon-forbidden-west.jpg",
-        description: "Cross a colorful frontier of machine encounters, ruins, and character-led quests.",
-        genres: &["Action", "Adventure"],
-        tags: &["Strong Stories", "Open World", "Exploration"],
-        platforms: &[GamePlatform::Windows],
-        reasons: &[
-            "Story-rich campaign",
-            "Tagged exploration",
-            "Open-world adventure",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1593500",
-        title: "God of War",
-        file: "god-of-war.jpg",
-        hero_file: None,
-        landscape_file: "god-of-war.jpg",
-        description: "Follow Kratos and Atreus through a focused journey across the Norse realms.",
-        genres: &["Action", "Adventure"],
-        tags: &["Strong Stories", "Single-player", "Cinematic"],
-        platforms: &[GamePlatform::Windows],
-        reasons: &[
-            "Story-rich campaign",
-            "Single-player adventure",
-            "Matches action games",
-        ],
-    },
-    EditorialSeed {
-        app_id: "1016920",
-        title: "Unrailed!",
-        file: "unrailed.jpg",
-        hero_file: None,
-        landscape_file: "unrailed.jpg",
-        description: "Build a railway together in quick procedural rounds before the train outruns the track.",
-        genres: &["Co-op", "Strategy"],
-        tags: &["Short Sessions", "Relaxing", "Local Co-op"],
-        platforms: &[
-            GamePlatform::Windows,
-            GamePlatform::Macos,
-            GamePlatform::Linux,
-        ],
-        reasons: &[
-            "Works in short sessions",
-            "Available on macOS",
-            "Supports local co-op",
-        ],
-    },
-    EditorialSeed {
-        app_id: "655350",
-        title: "Astro Duel 2",
-        file: "astro-duel-2.jpg",
-        hero_file: None,
-        landscape_file: "astro-duel-2.jpg",
-        description: "Switch between ship combat and on-foot action in compact competitive matches.",
-        genres: &["Action", "Arcade"],
-        tags: &["Short Sessions", "Local Multiplayer", "Campaign"],
-        platforms: &[GamePlatform::Windows, GamePlatform::Macos],
-        reasons: &[
-            "Works in short sessions",
-            "Available on macOS",
-            "Supports local multiplayer",
-        ],
-    },
-];
+/// A catalogue offer. The price the generator recorded is a price a provider
+/// actually quoted, so it is carried through byte for byte — including the
+/// nulls. Nothing here is converted, rounded, or filled in.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CatalogSeedOffer {
+    id: String,
+    provider: StoreProviderId,
+    #[serde(default)]
+    price_minor: Option<i64>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    verified_at: Option<String>,
+    #[serde(default)]
+    availability: OfferAvailability,
+}
 
-fn editorial_games() -> Vec<CachedGame> {
-    EDITORIAL_SEEDS
-        .iter()
-        .map(|seed| {
-            let id = format!("steam:{}", seed.app_id);
-            CachedGame {
-                offers: vec![CachedOffer {
-                    id: format!("offer_ed_{}", seed.app_id),
-                    game_id: id.clone(),
-                    provider: StoreProviderId::Steam,
-                    price_minor: None,
-                    currency: None,
-                    region: DEFAULT_REGION.to_string(),
-                    verified_at_epoch_ms: None,
-                    availability: OfferAvailability::Unknown,
-                    discount_percent: 0,
-                    url: steam_app_url(seed.app_id),
-                }],
-                id,
-                title: seed.title.to_string(),
-                short_description: seed.description.to_string(),
-                cover_url: format!("/media/igdb/covers/{}", seed.file),
-                hero_url: format!("/media/igdb/heroes/{}", seed.hero_file.unwrap_or(seed.file)),
-                landscape_url: format!("/media/igdb/landscapes/{}", seed.landscape_file),
-                genres: seed.genres.iter().map(|value| value.to_string()).collect(),
-                tags: seed.tags.iter().map(|value| value.to_string()).collect(),
-                supported_platforms: seed.platforms.to_vec(),
-                editorial_reasons: seed.reasons.iter().map(|value| value.to_string()).collect(),
-            }
+impl CatalogSeed {
+    fn into_cached_game(self) -> Option<CachedGame> {
+        if self.id.trim().is_empty() || self.title.trim().is_empty() {
+            return None;
+        }
+        // Only a Steam catalogue id names a page Orivo can state as a fact. A
+        // row keyed any other way still sells, it just has nowhere to send the
+        // shopper until the catalogue carries that storefront's identifier.
+        let app_id = steam_app_id(&self.id);
+        let offers = self
+            .offers
+            .into_iter()
+            .map(|offer| CachedOffer {
+                id: offer.id,
+                game_id: self.id.clone(),
+                provider: offer.provider,
+                price_minor: offer.price_minor,
+                currency: offer.currency,
+                region: offer.region.unwrap_or_else(|| DEFAULT_REGION.to_string()),
+                verified_at_epoch_ms: offer.verified_at.as_deref().and_then(epoch_ms_from_iso8601),
+                availability: offer.availability,
+                discount_percent: 0,
+                // Orivo only opens a page it can name from a fact it holds.
+                // The Steam app page is one; the other storefronts sell the
+                // same game under identifiers Orivo was never given, so those
+                // rows carry their quoted price and no destination rather than
+                // a search URL dressed up as a product page.
+                url: match (offer.provider, app_id.as_deref()) {
+                    (StoreProviderId::Steam, Some(app_id)) => steam_app_url(app_id),
+                    _ => String::new(),
+                },
+            })
+            .collect();
+        Some(CachedGame {
+            id: self.id,
+            title: self.title,
+            short_description: self.short_description,
+            cover_url: validated_artwork_url(&self.cover_url),
+            hero_url: validated_artwork_url(&self.hero_url),
+            landscape_url: validated_artwork_url(&self.landscape_url),
+            genres: self.genres,
+            tags: self.tags,
+            supported_platforms: self.supported_platforms,
+            editorial_reasons: self.recommendation_reasons,
+            offers,
+            curation: self.curation,
         })
+    }
+}
+
+/// The numeric part of a `steam:<appid>` catalogue identifier.
+fn steam_app_id(game_id: &str) -> Option<String> {
+    let app_id = game_id.strip_prefix("steam:")?;
+    (!app_id.is_empty() && app_id.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| app_id.to_string())
+}
+
+/// The embedded catalogue, parsed once. A row this build cannot read is
+/// dropped rather than taking the shelf down with it; the test below pins the
+/// count, so a catalogue that stops parsing fails the build, not the user.
+fn catalog_games() -> &'static [CachedGame] {
+    STORE_CATALOG.get_or_init(|| parse_catalog(STORE_CATALOG_JSON))
+}
+
+fn parse_catalog(encoded: &str) -> Vec<CachedGame> {
+    serde_json::from_str::<Vec<serde_json::Value>>(encoded)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|row| serde_json::from_value::<CatalogSeed>(row).ok())
+        .filter_map(CatalogSeed::into_cached_game)
         .collect()
 }
 
@@ -728,9 +823,12 @@ fn steam_app_url(app_id: &str) -> String {
 /// are factual statements about configuration, not placeholders for data.
 fn unconfigured_status(provider: StoreProviderId) -> CachedProviderStatus {
     let (health, message) = match provider {
+        // Steam's storefront price endpoint is public, so there is nothing to
+        // configure: the prices are simply the ones the catalogue was built
+        // with until the first refresh lands.
         StoreProviderId::Steam => (
-            ProviderHealth::NotConfigured,
-            "Connect a host-side Steam Web API key for live catalog updates.",
+            ProviderHealth::Degraded,
+            "Steam prices are the ones this catalogue shipped with until the next refresh.",
         ),
         StoreProviderId::Ubisoft => (
             ProviderHealth::Unavailable,
@@ -751,6 +849,34 @@ fn unconfigured_status(provider: StoreProviderId) -> CachedProviderStatus {
         StoreProviderId::InstantGaming => (
             ProviderHealth::Unavailable,
             "No authorized Instant Gaming feed is configured, so no Instant Gaming prices are shown.",
+        ),
+        StoreProviderId::Epic => (
+            ProviderHealth::Unavailable,
+            "No authorized Epic Games Store feed is configured, so no Epic prices are shown.",
+        ),
+        StoreProviderId::Gog => (
+            ProviderHealth::Unavailable,
+            "No authorized GOG catalog feed is configured, so no GOG prices are shown.",
+        ),
+        StoreProviderId::Humble => (
+            ProviderHealth::Unavailable,
+            "No authorized Humble Bundle feed is configured, so no Humble Bundle prices are shown.",
+        ),
+        StoreProviderId::Fanatical => (
+            ProviderHealth::Unavailable,
+            "No authorized Fanatical feed is configured, so no Fanatical prices are shown.",
+        ),
+        StoreProviderId::GreenManGaming => (
+            ProviderHealth::Unavailable,
+            "No authorized Green Man Gaming feed is configured, so no Green Man Gaming prices are shown.",
+        ),
+        StoreProviderId::PlayStation => (
+            ProviderHealth::NotConfigured,
+            "Registered PlayStation Store partner access is required; no public catalog feed exists.",
+        ),
+        StoreProviderId::Nintendo => (
+            ProviderHealth::NotConfigured,
+            "Registered Nintendo eShop partner access is required; no public catalog feed exists.",
         ),
     };
     CachedProviderStatus {
@@ -1019,23 +1145,133 @@ fn matches_category(game: &CachedGame, category: StoreCategory) -> bool {
     if matches!(category, StoreCategory::ForYou | StoreCategory::AllGames) {
         return true;
     }
+    // A curator placed the catalogue games on their shelves by hand. That
+    // assignment is the answer where it exists; keyword matching is only for
+    // the rows a live provider contributed, which nobody has curated.
+    if let Some(curation) = &game.curation
+        && !curation.categories.is_empty()
+    {
+        return curation.categories.contains(&category);
+    }
+    // The catalogue speaks French and a provider feed speaks English, so both
+    // vocabularies are read. Nothing is translated: these are the words that
+    // actually appear in a tag or a genre.
     let facts = normalize(&[game.tags.join(" "), game.genres.join(" ")].join(" "));
+    let says = |needles: &[&str]| needles.iter().any(|needle| facts.contains(needle));
     match category {
-        StoreCategory::ShortSessions => facts.contains("short session"),
-        StoreCategory::StrongStories => {
-            facts.contains("strong stor")
-                || facts.contains("story rich")
-                || facts.contains("story-rich")
+        StoreCategory::GoodForBrain => says(&[
+            "puzzle",
+            "strategy",
+            "strategie",
+            "logic",
+            "logique",
+            "thinking",
+            "reflexion",
+            "cartes",
+            "enquete",
+            "cerveau",
+        ]),
+        StoreCategory::ShortSessions => says(&["short session", "courte", "arcade", "roguelike"]),
+        StoreCategory::StrongStories => says(&[
+            "strong stor",
+            "story rich",
+            "story-rich",
+            "recit",
+            "narratif",
+            "histoire",
+        ]),
+        StoreCategory::Relaxing => {
+            says(&["relaxing", "relaxant", "cozy", "detente", "contemplatif"])
         }
-        StoreCategory::Relaxing => facts.contains("relaxing") || facts.contains("cozy"),
         StoreCategory::ForYou | StoreCategory::AllGames => true,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Ownership. The store never sells a game the library already holds, and the
+// decision is made here rather than in the WebView: a page cannot be handed a
+// row it should not have been offered in the first place.
+// ---------------------------------------------------------------------------
+
+/// One library entry reduced to the two facts ownership turns on. Built by the
+/// shell from the same rows `get_library` returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedGame {
+    pub id: String,
+    pub title: String,
+}
+
+/// A title reduced to a comparable key. The same game reaches the library and
+/// the catalogue under different identifiers — a Steam import against a store
+/// row — so the title is the fallback match. Mirrors `ownershipKey` in
+/// `src/store-model.ts`.
+fn ownership_key(title: &str) -> String {
+    normalize(title)
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OwnedIndex {
+    ids: BTreeSet<String>,
+    titles: BTreeSet<String>,
+}
+
+impl OwnedIndex {
+    fn new(library: &[OwnedGame]) -> Self {
+        let mut index = Self::default();
+        for game in library {
+            let id = game.id.trim();
+            if !id.is_empty() {
+                index.ids.insert(id.to_string());
+            }
+            let title = ownership_key(&game.title);
+            if !title.is_empty() {
+                index.titles.insert(title);
+            }
+        }
+        index
+    }
+
+    fn owns(&self, game: &CachedGame) -> bool {
+        self.ids.contains(game.id.trim()) || self.titles.contains(&ownership_key(&game.title))
+    }
+}
+
+/// The catalogue minus everything the library already holds.
+fn without_owned(games: Vec<CachedGame>, library: &[OwnedGame]) -> Vec<CachedGame> {
+    if library.is_empty() {
+        return games;
+    }
+    let owned = OwnedIndex::new(library);
+    games.into_iter().filter(|game| !owned.owns(game)).collect()
+}
+
+/// A game satisfies a platform filter when one of its offers comes from a
+/// storefront for that platform, or when the game itself declares a platform
+/// that maps onto it. Anything Orivo cannot map stays unmatched rather than
+/// being assumed to fit.
+fn matches_platforms(game: &CachedGame, platforms: &[StorePlatformId]) -> bool {
+    if platforms.is_empty() {
+        return true;
+    }
+    game.offers
+        .iter()
+        .filter_map(|offer| offer.provider.platform())
+        .chain(
+            game.supported_platforms
+                .iter()
+                .filter_map(|platform| platform.store_platform()),
+        )
+        .any(|platform| platforms.contains(&platform))
 }
 
 fn matches_request(
     game: &CachedGame,
     category: StoreCategory,
     providers: &[StoreProviderId],
+    platforms: &[StorePlatformId],
     query: &str,
 ) -> bool {
     if !matches_category(game, category) {
@@ -1047,6 +1283,9 @@ fn matches_request(
             .iter()
             .any(|offer| providers.contains(&offer.provider))
     {
+        return false;
+    }
+    if !matches_platforms(game, platforms) {
         return false;
     }
     if query.is_empty() {
@@ -1086,7 +1325,15 @@ fn browse_pool(
     );
     let filtered: Vec<CachedGame> = games
         .iter()
-        .filter(|game| matches_request(game, request.category, &request.providers, &query))
+        .filter(|game| {
+            matches_request(
+                game,
+                request.category,
+                &request.providers,
+                &request.platforms,
+                &query,
+            )
+        })
         .cloned()
         .collect();
     let (ranked, _, _) = recommend(&filtered, profile, now_ms);
@@ -1114,6 +1361,13 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// this module can reach the network.
 pub trait StoreHttp: Send + Sync {
     fn get_json<'a>(&'a self, url: &'a str) -> BoxFuture<'a, Result<serde_json::Value, String>>;
+
+    /// The politeness pause between fallback requests, behind the same seam as
+    /// the requests themselves so that no test in this module ever waits on a
+    /// real clock.
+    fn pause<'a>(&'a self, duration: Duration) -> BoxFuture<'a, ()> {
+        Box::pin(async move { tokio::time::sleep(duration).await })
+    }
 }
 
 pub struct ReqwestStoreHttp {
@@ -1171,14 +1425,14 @@ struct ProviderOutcome {
 
 #[derive(Debug, Clone)]
 pub struct RefreshConfig {
-    pub steam_api_key: Option<String>,
+    /// The storefront region every price is quoted in. There is no API key
+    /// here on purpose: every endpoint this module calls is public.
     pub region: String,
 }
 
 impl Default for RefreshConfig {
     fn default() -> Self {
         Self {
-            steam_api_key: None,
             region: DEFAULT_REGION.to_string(),
         }
     }
@@ -1191,10 +1445,10 @@ async fn refresh_all(
     config: &RefreshConfig,
     now_ms: u64,
 ) -> StoreCacheDocument {
-    let mut games = editorial_games();
+    let mut games = catalog_games().to_vec();
     let mut statuses = Vec::new();
 
-    let (steam_outcome, steam_status) = refresh_steam(http, config, now_ms).await;
+    let (steam_outcome, steam_status) = refresh_steam(http, config, &games, now_ms).await;
     apply_outcome(&mut games, steam_outcome);
     statuses.push(steam_status);
 
@@ -1202,14 +1456,20 @@ async fn refresh_all(
     apply_outcome(&mut games, apple_outcome);
     statuses.push(apple_status);
 
-    // Ubisoft, Microsoft, Google Play, and Instant Gaming have no official
-    // catalog contract available to Orivo. They perform no network call and
-    // never contribute a price.
+    // Every remaining storefront has no official catalog contract available to
+    // Orivo. They perform no network call and never contribute a price.
     for provider in [
+        StoreProviderId::InstantGaming,
+        StoreProviderId::Epic,
+        StoreProviderId::Gog,
+        StoreProviderId::Humble,
+        StoreProviderId::Fanatical,
+        StoreProviderId::GreenManGaming,
         StoreProviderId::Ubisoft,
         StoreProviderId::Microsoft,
+        StoreProviderId::PlayStation,
+        StoreProviderId::Nintendo,
         StoreProviderId::GooglePlay,
-        StoreProviderId::InstantGaming,
     ] {
         statuses.push(unconfigured_status(provider));
     }
@@ -1257,21 +1517,75 @@ fn apply_outcome(games: &mut Vec<CachedGame>, outcome: ProviderOutcome) {
     }
 }
 
-fn steam_api_key() -> Option<String> {
-    std::env::var(STEAM_API_KEY_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+/// One catalogue game the Steam storefront can be asked about. The offer
+/// identifier is the catalogue's own, so a refreshed price *replaces* the
+/// price the catalogue shipped with instead of appearing beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SteamRefreshTarget {
+    app_id: String,
+    game_id: String,
+    offer_id: String,
 }
 
-/// Steam refresh. Without a host-configured Web API key Orivo performs no
-/// Steam network request at all and reports `not-configured`.
+fn steam_refresh_targets(games: &[CachedGame]) -> Vec<SteamRefreshTarget> {
+    games
+        .iter()
+        .filter_map(|game| {
+            let app_id = steam_app_id(&game.id)?;
+            let offer = game
+                .offers
+                .iter()
+                .find(|offer| offer.provider == StoreProviderId::Steam)?;
+            Some(SteamRefreshTarget {
+                app_id,
+                game_id: game.id.clone(),
+                offer_id: offer.id.clone(),
+            })
+        })
+        .take(MAX_STEAM_REFRESH_APPS)
+        .collect()
+}
+
+fn steam_batch_url(app_ids: &str, region: &str) -> String {
+    format!(
+        "https://store.steampowered.com/api/appdetails?appids={app_ids}&cc={}&l=french&filters=price_overview",
+        region.to_lowercase()
+    )
+}
+
+fn steam_app_details_url(app_id: &str, region: &str) -> String {
+    format!(
+        "https://store.steampowered.com/api/appdetails?appids={app_id}&cc={}&l=french",
+        region.to_lowercase()
+    )
+}
+
+/// Steam refresh over the *public* storefront endpoint. It takes no Web API
+/// key, which is why nothing here is gated on one.
+///
+/// What `store.steampowered.com/api/appdetails` actually does, measured
+/// against the live endpoint before this was written:
+///
+/// * `appids=a,b,c` on its own answers `HTTP 400` with a `null` body;
+/// * `appids=a,b,c&filters=price_overview` answers `200` with **every**
+///   requested id keyed in one object — all 47 catalogue games came back in a
+///   single response — so the shelf costs a handful of requests, not 47;
+/// * a free game answers `{"success": true, "data": []}`: no price, which
+///   stays `None` rather than being read as zero;
+/// * an unknown id answers `{"success": false}`.
+///
+/// The batched call is therefore the normal path. Any id a batch did not
+/// answer for is asked about on its own, in the unfiltered single-app form,
+/// spaced by [`STEAM_REFRESH_PAUSE`] — so a Steam that starts answering one id
+/// at a time still refreshes the catalogue, just more slowly.
 async fn refresh_steam(
     http: &dyn StoreHttp,
     config: &RefreshConfig,
+    games: &[CachedGame],
     now_ms: u64,
 ) -> (ProviderOutcome, CachedProviderStatus) {
-    if config.steam_api_key.is_none() {
+    let targets = steam_refresh_targets(games);
+    if targets.is_empty() {
         return (
             ProviderOutcome::default(),
             unconfigured_status(StoreProviderId::Steam),
@@ -1279,20 +1593,52 @@ async fn refresh_steam(
     }
 
     let mut outcome = ProviderOutcome::default();
-    let mut failures = 0usize;
-    let mut attempts = 0usize;
-    for seed in EDITORIAL_SEEDS.iter().take(MAX_STEAM_REFRESH_APPS) {
-        attempts += 1;
-        let url = format!(
-            "https://store.steampowered.com/api/appdetails?appids={}&cc={}&l=en",
-            seed.app_id,
-            config.region.to_lowercase()
-        );
-        let Ok(payload) = http.get_json(&url).await else {
-            failures += 1;
+    let mut unanswered: Vec<&SteamRefreshTarget> = Vec::new();
+
+    for batch in targets.chunks(STEAM_REFRESH_BATCH) {
+        let app_ids = batch
+            .iter()
+            .map(|target| target.app_id.as_str())
+            .collect::<Vec<&str>>()
+            .join(",");
+        let Ok(payload) = http
+            .get_json(&steam_batch_url(&app_ids, &config.region))
+            .await
+        else {
+            unanswered.extend(batch.iter());
             continue;
         };
-        match steam_offer_from_payload(seed, &payload, &config.region, now_ms) {
+        for target in batch {
+            match steam_offer_from_payload(target, &payload, &config.region, now_ms) {
+                Some(offer) => outcome.offers.push(offer),
+                None => unanswered.push(target),
+            }
+        }
+    }
+
+    let mut failures = 0usize;
+    let mut unreachable_in_a_row = 0usize;
+    for target in unanswered {
+        // Politeness, not correctness: the fallback is the only path that can
+        // fan out into one request per game.
+        http.pause(STEAM_REFRESH_PAUSE).await;
+        let Ok(payload) = http
+            .get_json(&steam_app_details_url(&target.app_id, &config.region))
+            .await
+        else {
+            failures += 1;
+            unreachable_in_a_row += 1;
+            // Steam has stopped answering altogether. Walking the rest of the
+            // catalogue would only spend a request timeout per game to learn
+            // the same thing, so the remaining games keep the price they have
+            // and the status says so.
+            if unreachable_in_a_row >= STEAM_REFRESH_GIVE_UP_AFTER {
+                break;
+            }
+            continue;
+        };
+        unreachable_in_a_row = 0;
+        match steam_offer_from_payload(target, &payload, &config.region, now_ms) {
             Some(offer) => outcome.offers.push(offer),
             None => failures += 1,
         }
@@ -1305,7 +1651,7 @@ async fn refresh_steam(
             message: "Live Steam storefront prices are up to date.".to_string(),
             refreshed_at_epoch_ms: Some(now_ms),
         }
-    } else if failures < attempts {
+    } else if !outcome.offers.is_empty() {
         CachedProviderStatus {
             provider: StoreProviderId::Steam,
             health: ProviderHealth::Degraded,
@@ -1325,13 +1671,16 @@ async fn refresh_steam(
     (outcome, status)
 }
 
+/// Read one app out of a storefront payload. Both shapes are handled by the
+/// same reader: the filtered batch response carries `price_overview` alone,
+/// the single-app response carries the whole listing.
 fn steam_offer_from_payload(
-    seed: &EditorialSeed,
+    target: &SteamRefreshTarget,
     payload: &serde_json::Value,
     region: &str,
     now_ms: u64,
 ) -> Option<CachedOffer> {
-    let entry = payload.get(seed.app_id)?;
+    let entry = payload.get(&target.app_id)?;
     if !entry.get("success").and_then(serde_json::Value::as_bool)? {
         return None;
     }
@@ -1356,17 +1705,20 @@ fn steam_offer_from_payload(
         .and_then(|value| value.get("discount_percent"))
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0) as u32;
-    let url = steam_app_url(seed.app_id);
+    let url = steam_app_url(&target.app_id);
     validate_store_url(&url).ok()?;
 
     Some(CachedOffer {
-        id: format!("offer_ed_{}", seed.app_id),
-        game_id: format!("steam:{}", seed.app_id),
+        id: target.offer_id.clone(),
+        game_id: target.game_id.clone(),
         provider: StoreProviderId::Steam,
         price_minor,
         currency,
         region: region.to_string(),
-        verified_at_epoch_ms: Some(now_ms),
+        // A refresh that quoted nothing is not a verified price. Keeping the
+        // timestamp off it is what makes the card say "unverified" instead of
+        // presenting a blank as today's price.
+        verified_at_epoch_ms: price_minor.is_some().then_some(now_ms),
         // A payload with no price is reported as unknown, never as free.
         availability: if price_minor.is_some() {
             OfferAvailability::Available
@@ -1523,6 +1875,9 @@ fn apple_entry(
         supported_platforms: vec![platform],
         editorial_reasons: vec!["Listed on the App Store".to_string()],
         offers: Vec::new(),
+        // Orivo writes editorial copy about the games it curates, and it has
+        // written none about a live App Store result.
+        curation: None,
     };
     Some((game, offer))
 }
@@ -1676,25 +2031,37 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Orivo could not resolve its data directory: {error}"))
 }
 
-/// Serve immediately from editorial content plus whatever the cache already
-/// holds. This never performs a network request.
+/// Serve immediately from the embedded catalogue plus whatever the cache
+/// already holds, minus everything the library owns. This never performs a
+/// network request, so a slow or failing refresh cannot delay or fail it.
 #[tauri::command]
-pub fn get_store_home(app: AppHandle) -> Result<StoreHomeView, String> {
+pub fn get_store_home(
+    app: AppHandle,
+    state: State<'_, crate::AppState>,
+) -> Result<StoreHomeView, String> {
     let directory = app_data_dir(&app)?;
+    let library = crate::owned_library_games(&app, &state)?;
     Ok(store_home(
         &StoreCache::new(&directory),
         &directory,
+        &library,
         now_epoch_ms(),
     ))
 }
 
-fn store_home(cache: &StoreCache, app_data_dir: &Path, now_ms: u64) -> StoreHomeView {
+fn store_home(
+    cache: &StoreCache,
+    app_data_dir: &Path,
+    library: &[OwnedGame],
+    now_ms: u64,
+) -> StoreHomeView {
     let document = cache.read();
     let games = if document.games.is_empty() {
-        editorial_games()
+        catalog_games().to_vec()
     } else {
         document.games
     };
+    let games = without_owned(games, library);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -1714,12 +2081,15 @@ fn store_home(cache: &StoreCache, app_data_dir: &Path, now_ms: u64) -> StoreHome
 #[tauri::command]
 pub fn browse_store_games(
     app: AppHandle,
+    state: State<'_, crate::AppState>,
     request: StoreBrowseRequest,
 ) -> Result<StoreBrowsePage, String> {
     let directory = app_data_dir(&app)?;
+    let library = crate::owned_library_games(&app, &state)?;
     Ok(browse(
         &StoreCache::new(&directory),
         &directory,
+        &library,
         &request,
         now_epoch_ms(),
     ))
@@ -1728,15 +2098,17 @@ pub fn browse_store_games(
 fn browse(
     cache: &StoreCache,
     app_data_dir: &Path,
+    library: &[OwnedGame],
     request: &StoreBrowseRequest,
     now_ms: u64,
 ) -> StoreBrowsePage {
     let document = cache.read();
     let games = if document.games.is_empty() {
-        editorial_games()
+        catalog_games().to_vec()
     } else {
         document.games
     };
+    let games = without_owned(games, library);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -1757,7 +2129,6 @@ fn browse(
 pub async fn refresh_store_sources(app: AppHandle) -> Result<(), String> {
     let directory = app_data_dir(&app)?;
     let config = RefreshConfig {
-        steam_api_key: steam_api_key(),
         region: resolve_region(&directory),
     };
     let http = ReqwestStoreHttp::new()?;
@@ -1834,6 +2205,77 @@ fn iso8601_from_epoch_ms(epoch_ms: u64) -> String {
         (time_of_day % 3_600) / 60,
         time_of_day % 60
     )
+}
+
+/// Read back the same UTC ISO-8601 form, which is how a catalogue timestamp
+/// survives into the cache unchanged. Only that form is accepted: a value that
+/// is not a timestamp Orivo wrote is no timestamp at all, and the offer it
+/// belongs to is then reported as never verified rather than as fresh.
+fn epoch_ms_from_iso8601(value: &str) -> Option<u64> {
+    fn field(value: &str, range: std::ops::Range<usize>) -> Option<i64> {
+        let slice = value.get(range)?;
+        slice
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| slice.parse::<i64>().ok())
+            .flatten()
+    }
+
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || !value.ends_with('Z')
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year = field(value, 0..4)?;
+    let month = field(value, 5..7)?;
+    let day = field(value, 8..10)?;
+    let hour = field(value, 11..13)?;
+    let minute = field(value, 14..16)?;
+    let second = field(value, 17..19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    // Milliseconds are optional and read to at most three digits, which is the
+    // precision the generator writes.
+    let milliseconds = match bytes[19] {
+        b'.' => {
+            let digits: String = value[20..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .take(3)
+                .collect();
+            format!("{digits:0<3}").parse::<i64>().ok()?
+        }
+        b'Z' => 0,
+        _ => return None,
+    };
+
+    let seconds = days_from_civil(year, month as u32, day as u32) * 86_400
+        + hour * 3_600
+        + minute * 60
+        + second;
+    u64::try_from(seconds * 1_000 + milliseconds).ok()
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_position = if month > 2 { month - 3 } else { month + 9 } as i64;
+    let day_of_year = (153 * month_position + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
@@ -1966,6 +2408,12 @@ mod tests {
                     .ok_or_else(|| "network unavailable".to_string())
             })
         }
+
+        /// No test waits on a real clock, and none of them needs a Tokio timer
+        /// to exercise the per-app fallback.
+        fn pause<'a>(&'a self, _duration: Duration) -> BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
     }
 
     #[derive(Default)]
@@ -2008,7 +2456,28 @@ mod tests {
             supported_platforms: vec![GamePlatform::Macos],
             editorial_reasons: vec!["Editorial".to_string()],
             offers,
+            curation: None,
         }
+    }
+
+    /// A library the store must not sell back to the user.
+    fn owned(id: &str, title: &str) -> OwnedGame {
+        OwnedGame {
+            id: id.to_string(),
+            title: title.to_string(),
+        }
+    }
+
+    /// The curated catalogue the shell ships with. Pinned so that a generator
+    /// change which silently drops games fails here instead of on a shelf.
+    const CATALOG_SIZE: usize = 47;
+
+    /// The first catalogue game, as the Steam refresh addresses it.
+    fn catalog_refresh_target() -> SteamRefreshTarget {
+        steam_refresh_targets(catalog_games())
+            .into_iter()
+            .next()
+            .expect("the catalogue has a refreshable Steam game")
     }
 
     fn played(title: &str, genre: &str) -> PlayedGame {
@@ -2051,6 +2520,9 @@ mod tests {
         ] {
             assert!(object.contains_key(key), "GameSummary is missing {key}");
         }
+        // `curation?:` is optional in `src/contracts.ts`, so a game without
+        // editorial copy must not carry the key at all.
+        assert!(!object.contains_key("curation"));
         assert_eq!(object.len(), 17, "GameSummary has unexpected fields");
         assert_eq!(object["source"], "store");
         assert_eq!(object["supportedPlatforms"], serde_json::json!(["macos"]));
@@ -2078,6 +2550,49 @@ mod tests {
         assert_eq!(offer["providerLabel"], "Steam");
         assert_eq!(offer["availability"], "available");
         assert_eq!(offer["verifiedAt"], "2026-07-25T17:20:00Z");
+
+        // A curated catalogue game carries it, camelCased, exactly as the
+        // catalogue wrote it.
+        let curated = catalog_games()
+            .iter()
+            .find(|game| game.id == "steam:1608230")
+            .expect("Planet of Lana is in the catalogue")
+            .to_summary(NOW_MS, Vec::new());
+        let curated = serde_json::to_value(&curated).unwrap();
+        assert_eq!(curated.as_object().unwrap().len(), 18);
+        let curation = curated["curation"].as_object().unwrap();
+        for key in [
+            "genres",
+            "duration",
+            "mode",
+            "stats",
+            "tagline",
+            "heroTitle",
+            "heroLead",
+            "highlights",
+            "categories",
+            "platforms",
+        ] {
+            assert!(curation.contains_key(key), "StoreCuration is missing {key}");
+        }
+        assert_eq!(curation.len(), 10);
+        assert_eq!(curated["curation"]["duration"], "3-4h");
+        assert_eq!(curated["curation"]["mode"], "Solo");
+        assert_eq!(
+            curated["curation"]["tagline"],
+            "Histoire émouvante sans violence."
+        );
+        assert_eq!(curated["curation"]["stats"][0]["label"], "Réflexion");
+        assert_eq!(curated["curation"]["stats"][0]["value"], 5);
+        assert_eq!(curated["curation"]["highlights"][0]["icon"], "heart");
+        assert_eq!(
+            curated["curation"]["categories"],
+            serde_json::json!(["strong-stories", "short-sessions"])
+        );
+        assert_eq!(
+            curated["curation"]["platforms"],
+            serde_json::json!(["pc", "xbox", "playstation"])
+        );
     }
 
     #[test]
@@ -2090,16 +2605,32 @@ mod tests {
             providers,
             serde_json::json!([
                 "steam",
+                "instant-gaming",
+                "epic",
+                "gog",
+                "humble",
+                "fanatical",
+                "green-man-gaming",
                 "ubisoft",
                 "microsoft",
+                "playstation",
+                "nintendo",
                 "apple",
-                "google-play",
-                "instant-gaming"
+                "google-play"
             ])
             .as_array()
             .unwrap()
             .clone()
         );
+        // The serialized name is the contract; the slug is what the frontend
+        // builds its filter route from. They must not drift apart.
+        for provider in StoreProviderId::ALL {
+            assert_eq!(
+                serde_json::to_value(provider).unwrap(),
+                provider.slug(),
+                "{provider:?} serializes differently from its slug"
+            );
+        }
 
         for (health, expected) in [
             (ProviderHealth::Available, "available"),
@@ -2111,12 +2642,26 @@ mod tests {
         }
         for (category, expected) in [
             (StoreCategory::ForYou, "for-you"),
+            (StoreCategory::GoodForBrain, "good-for-brain"),
             (StoreCategory::ShortSessions, "short-sessions"),
             (StoreCategory::StrongStories, "strong-stories"),
             (StoreCategory::Relaxing, "relaxing"),
             (StoreCategory::AllGames, "all-games"),
         ] {
             assert_eq!(serde_json::to_value(category).unwrap(), expected);
+        }
+        for (platform, expected) in [
+            (StorePlatformId::Pc, "pc"),
+            (StorePlatformId::PlayStation, "playstation"),
+            (StorePlatformId::Xbox, "xbox"),
+            (StorePlatformId::Switch, "switch"),
+            (StorePlatformId::Emulators, "emulators"),
+        ] {
+            assert_eq!(serde_json::to_value(platform).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_value::<StorePlatformId>(serde_json::json!(expected)).unwrap(),
+                platform
+            );
         }
         assert_eq!(
             serde_json::to_value(RecommendationMode::Personalized).unwrap(),
@@ -2130,6 +2675,7 @@ mod tests {
         let request: StoreBrowseRequest = serde_json::from_value(serde_json::json!({
             "category": "short-sessions",
             "providers": ["steam", "google-play"],
+            "platforms": ["pc", "playstation"],
             "query": "rail",
             "cursor": null,
             "limit": 12
@@ -2140,8 +2686,35 @@ mod tests {
             request.providers,
             vec![StoreProviderId::Steam, StoreProviderId::GooglePlay]
         );
+        assert_eq!(
+            request.platforms,
+            vec![StorePlatformId::Pc, StorePlatformId::PlayStation]
+        );
         assert_eq!(request.limit, 12);
         assert!(request.cursor.is_none());
+
+        // The platform filter is additive: a payload written before it existed
+        // still deserializes and still means "no platform filter".
+        let legacy: StoreBrowseRequest = serde_json::from_value(serde_json::json!({
+            "category": "good-for-brain",
+            "providers": ["epic", "gog", "humble", "fanatical", "green-man-gaming"],
+            "query": "",
+            "cursor": null,
+            "limit": 0
+        }))
+        .unwrap();
+        assert_eq!(legacy.category, StoreCategory::GoodForBrain);
+        assert_eq!(
+            legacy.providers,
+            vec![
+                StoreProviderId::Epic,
+                StoreProviderId::Gog,
+                StoreProviderId::Humble,
+                StoreProviderId::Fanatical,
+                StoreProviderId::GreenManGaming
+            ]
+        );
+        assert!(legacy.platforms.is_empty());
     }
 
     #[test]
@@ -2194,9 +2767,10 @@ mod tests {
         .unwrap();
         assert_eq!(cache.read(), StoreCacheDocument::default());
 
-        // A discarded cache is never fatal: the store still serves editorial.
-        let home = store_home(&cache, &directory.root, NOW_MS);
-        assert_eq!(home.games.len(), EDITORIAL_SEEDS.len());
+        // A discarded cache is never fatal: the store still serves the whole
+        // embedded catalogue.
+        let home = store_home(&cache, &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE);
         assert_eq!(home.recommendation_mode, RecommendationMode::Editorial);
         assert!(home.refreshed_at.is_none());
     }
@@ -2260,27 +2834,48 @@ mod tests {
         assert!(value["priceMinor"].is_null());
         assert!(value["currency"].is_null());
 
-        // Editorial offers ship with no price at all.
-        for game in editorial_games() {
+        // The catalogue quotes a price only where a shop quoted one. Every
+        // other row keeps its nulls all the way to the wire; a console
+        // storefront Orivo has no feed for is exactly such a row.
+        let mut priceless = 0usize;
+        for game in catalog_games() {
             for offer in &game.offers {
-                assert_eq!(offer.price_minor, None);
-                assert_eq!(offer.availability, OfferAvailability::Unknown);
+                if offer.price_minor.is_none() {
+                    priceless += 1;
+                    assert_eq!(offer.currency, None);
+                    let value = serde_json::to_value(offer.to_dto(NOW_MS)).unwrap();
+                    assert!(value["priceMinor"].is_null());
+                    assert!(value["currency"].is_null());
+                } else {
+                    assert!(offer.currency.is_some(), "a price arrived with no currency");
+                }
             }
         }
+        assert!(priceless > 0, "the catalogue quotes a price for everything");
     }
 
     #[test]
     fn a_steam_payload_without_a_price_reports_unknown_availability() {
-        let seed = &EDITORIAL_SEEDS[0];
+        let target = catalog_refresh_target();
         let payload = serde_json::json!({
-            seed.app_id: { "success": true, "data": { "name": seed.title } }
+            target.app_id.clone(): { "success": true, "data": { "name": "Planet of Lana" } }
         });
-        let offer = steam_offer_from_payload(seed, &payload, "US", NOW_MS).unwrap();
+        let offer = steam_offer_from_payload(&target, &payload, "US", NOW_MS).unwrap();
+        assert_eq!(offer.price_minor, None);
+        assert_eq!(offer.currency, None);
+        assert_eq!(offer.availability, OfferAvailability::Unknown);
+
+        // The filtered batch shape a free game answers with: still no price,
+        // and still not read as "free".
+        let free = serde_json::json!({
+            target.app_id.clone(): { "success": true, "data": [] }
+        });
+        let offer = steam_offer_from_payload(&target, &free, "FR", NOW_MS).unwrap();
         assert_eq!(offer.price_minor, None);
         assert_eq!(offer.availability, OfferAvailability::Unknown);
 
         let priced = serde_json::json!({
-            seed.app_id: {
+            target.app_id.clone(): {
                 "success": true,
                 "data": {
                     "is_free": false,
@@ -2288,29 +2883,70 @@ mod tests {
                 }
             }
         });
-        let offer = steam_offer_from_payload(seed, &priced, "FR", NOW_MS).unwrap();
+        let offer = steam_offer_from_payload(&target, &priced, "FR", NOW_MS).unwrap();
         assert_eq!(offer.price_minor, Some(4_199));
         assert_eq!(offer.currency.as_deref(), Some("EUR"));
         assert_eq!(offer.discount_percent, 30);
         assert_eq!(offer.availability, OfferAvailability::Available);
     }
 
+    /// A refresh that comes back without a price must leave the offer's price
+    /// null on the wire rather than reporting a stale or invented one.
+    #[test]
+    fn a_refresh_that_quotes_no_price_leaves_the_offer_null() {
+        let target = catalog_refresh_target();
+        let http = FakeHttp::default().with(
+            "store.steampowered.com/api/appdetails",
+            serde_json::json!({ target.app_id.clone(): { "success": true, "data": [] } }),
+        );
+        let document = block_on(refresh_all(&http, &RefreshConfig::default(), NOW_MS));
+
+        let game = document
+            .games
+            .iter()
+            .find(|game| game.id == target.game_id)
+            .expect("the refreshed game stays in the catalogue");
+        let offer = game
+            .offers
+            .iter()
+            .find(|offer| offer.id == target.offer_id)
+            .expect("the catalogue's own Steam offer was refreshed in place");
+        assert_eq!(offer.price_minor, None);
+        assert_eq!(offer.currency, None);
+        assert_eq!(offer.availability, OfferAvailability::Unknown);
+
+        let dto = serde_json::to_value(offer.to_dto(NOW_MS)).unwrap();
+        assert!(dto["priceMinor"].is_null());
+        assert!(dto["currency"].is_null());
+        assert_eq!(dto["stale"], true);
+
+        // The refresh replaced the shipped offer rather than adding a second
+        // one, so there is no way for the card to fall back to the old price.
+        assert_eq!(
+            game.offers
+                .iter()
+                .filter(|offer| offer.provider == StoreProviderId::Steam)
+                .count(),
+            1
+        );
+    }
+
     // -- providers -----------------------------------------------------------
 
     #[test]
     fn one_failing_provider_never_fails_the_response() {
-        // Steam is configured and answers; Apple's request fails.
+        // Steam answers for one catalogue game; Apple's request fails.
+        let target = catalog_refresh_target();
         let http = FakeHttp::default().with(
             "store.steampowered.com/api/appdetails",
             serde_json::json!({
-                "1245620": {
+                target.app_id.clone(): {
                     "success": true,
                     "data": { "price_overview": { "currency": "USD", "final": 3_999, "discount_percent": 0 } }
                 }
             }),
         );
         let config = RefreshConfig {
-            steam_api_key: Some("0".repeat(32)),
             region: "US".to_string(),
         };
         let document = block_on(refresh_all(&http, &config, NOW_MS));
@@ -2329,28 +2965,39 @@ mod tests {
             ProviderHealth::Degraded
         );
         assert!(!status(StoreProviderId::Apple).message.is_empty());
-        // Only the first seed has a canned answer, so Steam degrades partially
-        // but still contributes its verified offer.
+        // Only one catalogue game has a canned answer, so Steam degrades
+        // partially but still contributes its verified offer.
         assert_eq!(
             status(StoreProviderId::Steam).health,
             ProviderHealth::Degraded
         );
         assert!(!document.games.is_empty());
-        let elden_ring = document
+        let refreshed = document
             .games
             .iter()
-            .find(|game| game.id == "steam:1245620")
+            .find(|game| game.id == target.game_id)
             .unwrap();
-        assert_eq!(elden_ring.offers[0].price_minor, Some(3_999));
-        assert!(!elden_ring.offers[0].to_dto(NOW_MS).stale);
+        let steam_offer = refreshed
+            .offers
+            .iter()
+            .find(|offer| offer.id == target.offer_id)
+            .unwrap();
+        assert_eq!(steam_offer.price_minor, Some(3_999));
+        assert_eq!(steam_offer.currency.as_deref(), Some("USD"));
+        assert!(!steam_offer.to_dto(NOW_MS).stale);
 
-        // A seed with no answer keeps its priceless editorial offer.
-        let witcher = document
+        // A catalogue game with no answer keeps the price it shipped with,
+        // reported as the older quote it is rather than as today's.
+        let untouched = document
             .games
             .iter()
-            .find(|game| game.id == "steam:292030")
+            .find(|game| game.id != target.game_id && steam_app_id(&game.id).is_some())
             .unwrap();
-        assert_eq!(witcher.offers[0].price_minor, None);
+        let shipped = catalog_games()
+            .iter()
+            .find(|game| game.id == untouched.id)
+            .unwrap();
+        assert_eq!(untouched.offers, shipped.offers);
     }
 
     #[test]
@@ -2359,10 +3006,17 @@ mod tests {
         let document = block_on(refresh_all(&http, &RefreshConfig::default(), NOW_MS));
 
         for provider in [
+            StoreProviderId::InstantGaming,
+            StoreProviderId::Epic,
+            StoreProviderId::Gog,
+            StoreProviderId::Humble,
+            StoreProviderId::Fanatical,
+            StoreProviderId::GreenManGaming,
             StoreProviderId::Ubisoft,
             StoreProviderId::Microsoft,
+            StoreProviderId::PlayStation,
+            StoreProviderId::Nintendo,
             StoreProviderId::GooglePlay,
-            StoreProviderId::InstantGaming,
         ] {
             let status = document
                 .provider_statuses
@@ -2374,31 +3028,56 @@ mod tests {
                 ProviderHealth::Unavailable | ProviderHealth::NotConfigured
             ));
             assert!(status.message.len() > 10);
-            assert!(
-                !document
+            // Such a provider may carry the price the catalogue was built with,
+            // but this refresh must not have touched it: byte for byte, the
+            // offers are the ones that shipped.
+            let shipped = catalog_games()
+                .iter()
+                .find(|game| game.id == status_game_id(&document, provider))
+                .map(|game| game.offers.clone());
+            if let Some(shipped) = shipped {
+                let live = document
                     .games
                     .iter()
-                    .flat_map(|game| game.offers.iter())
-                    .any(|offer| offer.provider == provider),
-                "{provider:?} contributed an offer without a feed"
-            );
+                    .find(|game| game.id == status_game_id(&document, provider))
+                    .unwrap();
+                assert_eq!(live.offers, shipped);
+            }
         }
 
-        // Steam is not configured here, so it must not have been requested.
+        // Steam's storefront endpoint needs no key, so it *is* requested, and
+        // no other unreachable provider is.
         let requested = http.requested.lock().unwrap().clone();
         assert!(
-            requested.iter().all(|url| url.contains("itunes.apple.com")),
-            "an unconfigured provider performed a request: {requested:?}"
-        );
-        assert_eq!(
-            document
-                .provider_statuses
+            requested
                 .iter()
-                .find(|status| status.provider == StoreProviderId::Steam)
-                .unwrap()
-                .health,
-            ProviderHealth::NotConfigured
+                .any(|url| url.contains("store.steampowered.com/api/appdetails")),
+            "the public Steam price endpoint was never called: {requested:?}"
         );
+        assert!(
+            requested.iter().all(|url| url.contains("itunes.apple.com")
+                || url.contains("store.steampowered.com/api/appdetails")),
+            "a provider without a feed performed a request: {requested:?}"
+        );
+        // Steam was unreachable in this test, so it reports that rather than a
+        // configuration problem it no longer has.
+        let steam = document
+            .provider_statuses
+            .iter()
+            .find(|status| status.provider == StoreProviderId::Steam)
+            .unwrap();
+        assert_eq!(steam.health, ProviderHealth::Degraded);
+        assert!(steam.refreshed_at_epoch_ms.is_none());
+    }
+
+    /// The first catalogue game carrying an offer from `provider`, if any.
+    fn status_game_id(document: &StoreCacheDocument, provider: StoreProviderId) -> String {
+        document
+            .games
+            .iter()
+            .find(|game| game.offers.iter().any(|offer| offer.provider == provider))
+            .map(|game| game.id.clone())
+            .unwrap_or_default()
     }
 
     #[test]
@@ -2522,19 +3201,66 @@ mod tests {
     }
 
     #[test]
-    fn editorial_offers_stay_openable_without_a_cache_file() {
+    fn catalogue_offers_stay_openable_without_a_cache_file() {
         let directory = TestDirectory::new("no-cache");
         let opener = RecordingOpener::default();
-        let offer_id = &editorial_games()[0].offers[0].id;
-        open_offer_with(&directory.cache(), offer_id, &opener).unwrap();
+        let game = &catalog_games()[0];
+        let steam_offer = game
+            .offers
+            .iter()
+            .find(|offer| offer.provider == StoreProviderId::Steam)
+            .expect("every catalogue game is sold on Steam");
+        open_offer_with(&directory.cache(), &steam_offer.id, &opener).unwrap();
         assert_eq!(
             opener.opened.lock().unwrap()[0],
-            "https://store.steampowered.com/app/1245620/"
+            format!(
+                "https://store.steampowered.com/app/{}/",
+                steam_app_id(&game.id).unwrap()
+            )
         );
+
+        // The other storefronts sell the same game under identifiers Orivo was
+        // never given, so those rows quote their price and refuse to open a
+        // page Orivo would have had to guess at.
+        for offer in game
+            .offers
+            .iter()
+            .filter(|offer| offer.provider != StoreProviderId::Steam)
+        {
+            assert!(
+                offer.url.is_empty(),
+                "{:?} was given a guessed URL",
+                offer.provider
+            );
+            assert!(open_offer_with(&directory.cache(), &offer.id, &opener).is_err());
+        }
+        assert_eq!(opener.opened.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn the_allowlist_covers_the_six_supported_stores() {
+    fn the_allowlist_covers_every_supported_storefront() {
+        // Written out a second time on purpose: the allowlist is a security
+        // boundary, so a host may only appear in it deliberately.
+        for (provider, host) in [
+            (StoreProviderId::Steam, "store.steampowered.com"),
+            (StoreProviderId::InstantGaming, "www.instant-gaming.com"),
+            (StoreProviderId::Epic, "store.epicgames.com"),
+            (StoreProviderId::Gog, "www.gog.com"),
+            (StoreProviderId::Humble, "www.humblebundle.com"),
+            (StoreProviderId::Fanatical, "www.fanatical.com"),
+            (StoreProviderId::GreenManGaming, "www.greenmangaming.com"),
+            (StoreProviderId::Ubisoft, "store.ubisoft.com"),
+            (StoreProviderId::Microsoft, "apps.microsoft.com"),
+            (StoreProviderId::PlayStation, "store.playstation.com"),
+            (StoreProviderId::Nintendo, "www.nintendo.com"),
+            (StoreProviderId::Apple, "apps.apple.com"),
+            (StoreProviderId::GooglePlay, "play.google.com"),
+        ] {
+            assert!(
+                ALLOWED_OFFER_HOSTS.contains(&host),
+                "{provider:?} has no allowlisted storefront host"
+            );
+        }
         assert_eq!(ALLOWED_OFFER_HOSTS.len(), StoreProviderId::ALL.len());
         for host in ALLOWED_OFFER_HOSTS {
             assert!(validate_store_url(&format!("https://{host}/page")).is_ok());
@@ -2548,7 +3274,7 @@ mod tests {
     #[test]
     fn view_models_never_carry_a_url_or_a_filesystem_path() {
         let directory = TestDirectory::new("leaks");
-        let home = store_home(&directory.cache(), &directory.root, NOW_MS);
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
         let encoded = serde_json::to_string(&home).unwrap();
         assert!(
             !encoded.contains("http"),
@@ -2575,7 +3301,7 @@ mod tests {
             })
             .unwrap();
 
-        let home = store_home(&directory.cache(), &directory.root, NOW_MS);
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
         let encoded = serde_json::to_string(&home).unwrap();
         // Without this the assertions below would pass on an empty view.
         assert!(encoded.contains("Example App"), "{encoded}");
@@ -2758,9 +3484,11 @@ mod tests {
         let page = browse(
             &cache,
             &directory.root,
+            &[],
             &StoreBrowseRequest {
                 category: StoreCategory::ShortSessions,
                 providers: vec![StoreProviderId::Steam],
+                platforms: Vec::new(),
                 query: String::new(),
                 cursor: None,
                 limit: 2,
@@ -2770,32 +3498,45 @@ mod tests {
         assert_eq!(page.games.len(), 2);
         assert_eq!(page.next_cursor.as_deref(), Some("store_2"));
         for game in &page.games {
-            assert!(game.tags.iter().any(|tag| tag == "Short Sessions"));
+            // The curator's own shelf assignment is what put it here.
+            assert!(game.curation.as_ref().is_some_and(|curation| {
+                curation.categories.contains(&StoreCategory::ShortSessions)
+            }));
         }
         assert_eq!(page.provider_statuses.len(), StoreProviderId::ALL.len());
 
-        let next = browse(
+        // Paging walks the whole shelf and stops exactly once.
+        let short_session_games = catalog_games()
+            .iter()
+            .filter(|game| matches_category(game, StoreCategory::ShortSessions))
+            .count();
+        let rest = browse(
             &cache,
             &directory.root,
+            &[],
             &StoreBrowseRequest {
                 category: StoreCategory::ShortSessions,
                 providers: Vec::new(),
+                platforms: Vec::new(),
                 query: String::new(),
                 cursor: page.next_cursor.clone(),
-                limit: 2,
+                limit: MAX_BROWSE_LIMIT,
             },
             NOW_MS,
         );
-        assert!(next.next_cursor.is_none());
-        assert_eq!(next.games.len(), 1);
+        assert_eq!(rest.games.len(), short_session_games - 2);
+        assert!(rest.next_cursor.is_none());
 
-        // An unknown provider filter yields an empty page, not an error.
+        // A provider nobody sells these games on yields an empty page, not an
+        // error.
         let empty = browse(
             &cache,
             &directory.root,
+            &[],
             &StoreBrowseRequest {
                 category: StoreCategory::AllGames,
                 providers: vec![StoreProviderId::InstantGaming],
+                platforms: Vec::new(),
                 query: String::new(),
                 cursor: None,
                 limit: 10,
@@ -2809,9 +3550,11 @@ mod tests {
         let searched = browse(
             &cache,
             &directory.root,
+            &[],
             &StoreBrowseRequest {
                 category: StoreCategory::AllGames,
                 providers: Vec::new(),
+                platforms: Vec::new(),
                 query: "  HÁDES ".to_string(),
                 cursor: None,
                 limit: 10,
@@ -2819,7 +3562,7 @@ mod tests {
             NOW_MS,
         );
         assert_eq!(searched.games.len(), 1);
-        assert_eq!(searched.games[0].title, "Hades II");
+        assert_eq!(searched.games[0].title, "Hades");
     }
 
     #[test]
@@ -2828,14 +3571,712 @@ mod tests {
         let request = StoreBrowseRequest {
             category: StoreCategory::AllGames,
             providers: Vec::new(),
+            platforms: Vec::new(),
             query: String::new(),
             cursor: Some("store_not-a-number".to_string()),
             limit: 10_000,
         };
-        let page = browse(&directory.cache(), &directory.root, &request, NOW_MS);
-        assert_eq!(page.games.len(), EDITORIAL_SEEDS.len());
+        let page = browse(&directory.cache(), &directory.root, &[], &request, NOW_MS);
+        assert_eq!(page.games.len(), MAX_BROWSE_LIMIT.min(CATALOG_SIZE));
         assert_eq!(parse_cursor(Some("nonsense")), 0);
         assert_eq!(parse_cursor(Some("store_4")), 4);
+    }
+
+    #[test]
+    fn good_for_brain_selects_thinking_games_only() {
+        let puzzler = CachedGame {
+            id: "steam:10".to_string(),
+            genres: vec!["Puzzle".to_string()],
+            tags: vec!["Logic".to_string()],
+            ..game_fixture(Vec::new())
+        };
+        let strategist = CachedGame {
+            id: "steam:11".to_string(),
+            genres: vec!["Strategy".to_string()],
+            tags: vec!["Thinking".to_string()],
+            ..game_fixture(Vec::new())
+        };
+        let shooter = CachedGame {
+            id: "steam:12".to_string(),
+            genres: vec!["Action".to_string()],
+            tags: vec!["Fast Paced".to_string()],
+            ..game_fixture(Vec::new())
+        };
+
+        assert!(matches_category(&puzzler, StoreCategory::GoodForBrain));
+        assert!(matches_category(&strategist, StoreCategory::GoodForBrain));
+        assert!(!matches_category(&shooter, StoreCategory::GoodForBrain));
+        // The new category is a filter, not a reordering of the other ones.
+        assert!(matches_category(&shooter, StoreCategory::AllGames));
+        assert!(matches_category(&shooter, StoreCategory::ForYou));
+        assert!(!matches_category(&puzzler, StoreCategory::Relaxing));
+
+        // A curated catalogue game is placed by its curator, not by a keyword
+        // that happens to be in an English tag. The catalogue speaks French.
+        let curated = CachedGame {
+            id: "steam:13".to_string(),
+            genres: vec!["Aventure".to_string()],
+            tags: vec!["Récits forts".to_string()],
+            curation: Some(StoreCuration {
+                categories: vec![StoreCategory::GoodForBrain],
+                ..StoreCuration::default()
+            }),
+            ..game_fixture(Vec::new())
+        };
+        assert!(matches_category(&curated, StoreCategory::GoodForBrain));
+        assert!(!matches_category(&curated, StoreCategory::StrongStories));
+        // French facts still read for anything nobody curated.
+        let french = CachedGame {
+            genres: vec!["Réflexion".to_string()],
+            tags: vec!["Bon pour le cerveau".to_string()],
+            curation: None,
+            ..game_fixture(Vec::new())
+        };
+        assert!(matches_category(&french, StoreCategory::GoodForBrain));
+
+        // It reaches the real pool too, so an empty rail would be a regression.
+        let directory = TestDirectory::new("brain");
+        let page = browse(
+            &directory.cache(),
+            &directory.root,
+            &[],
+            &StoreBrowseRequest {
+                category: StoreCategory::GoodForBrain,
+                providers: Vec::new(),
+                platforms: Vec::new(),
+                query: String::new(),
+                cursor: None,
+                limit: 10,
+            },
+            NOW_MS,
+        );
+        assert!(!page.games.is_empty());
+        for game in &page.games {
+            assert!(
+                game.curation.as_ref().is_some_and(|curation| curation
+                    .categories
+                    .contains(&StoreCategory::GoodForBrain)),
+                "{} is not on the thinking shelf",
+                game.title
+            );
+        }
+    }
+
+    #[test]
+    fn platform_filters_apply_alongside_provider_filters() {
+        for (provider, expected) in [
+            (StoreProviderId::Steam, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Epic, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Gog, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Humble, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Fanatical, Some(StorePlatformId::Pc)),
+            (StoreProviderId::GreenManGaming, Some(StorePlatformId::Pc)),
+            (StoreProviderId::InstantGaming, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Ubisoft, Some(StorePlatformId::Pc)),
+            (StoreProviderId::Microsoft, Some(StorePlatformId::Xbox)),
+            (
+                StoreProviderId::PlayStation,
+                Some(StorePlatformId::PlayStation),
+            ),
+            (StoreProviderId::Nintendo, Some(StorePlatformId::Switch)),
+            // Mobile storefronts have no pill, so they are never guessed into
+            // one.
+            (StoreProviderId::Apple, None),
+            (StoreProviderId::GooglePlay, None),
+        ] {
+            assert_eq!(provider.platform(), expected, "{provider:?}");
+        }
+
+        let steam_game = game_fixture(vec![offer_fixture(
+            "offer_pc",
+            "https://store.steampowered.com/app/1/",
+        )]);
+        let console_game = CachedGame {
+            id: "psn:1".to_string(),
+            supported_platforms: Vec::new(),
+            offers: vec![CachedOffer {
+                game_id: "psn:1".to_string(),
+                provider: StoreProviderId::PlayStation,
+                ..offer_fixture("offer_psn", "https://store.playstation.com/app/1/")
+            }],
+            ..game_fixture(Vec::new())
+        };
+        // No offer at all, but the game declares Windows support.
+        let declared_only = CachedGame {
+            id: "steam:20".to_string(),
+            supported_platforms: vec![GamePlatform::Windows],
+            offers: Vec::new(),
+            ..game_fixture(Vec::new())
+        };
+        let mobile_only = CachedGame {
+            id: "apple:1".to_string(),
+            supported_platforms: vec![GamePlatform::Ios],
+            offers: Vec::new(),
+            ..game_fixture(Vec::new())
+        };
+
+        // An empty filter never excludes anything.
+        assert!(matches_platforms(&mobile_only, &[]));
+
+        assert!(matches_platforms(&steam_game, &[StorePlatformId::Pc]));
+        assert!(matches_platforms(&declared_only, &[StorePlatformId::Pc]));
+        assert!(!matches_platforms(&console_game, &[StorePlatformId::Pc]));
+        assert!(matches_platforms(
+            &console_game,
+            &[StorePlatformId::PlayStation]
+        ));
+        // Multi-select is a union.
+        assert!(matches_platforms(
+            &console_game,
+            &[StorePlatformId::Pc, StorePlatformId::PlayStation]
+        ));
+        // Nothing maps onto emulators, so it excludes rather than invents.
+        assert!(!matches_platforms(
+            &steam_game,
+            &[StorePlatformId::Emulators]
+        ));
+        assert!(!matches_platforms(&mobile_only, &[StorePlatformId::Pc]));
+
+        // Both filters are applied, not one or the other.
+        assert!(matches_request(
+            &steam_game,
+            StoreCategory::AllGames,
+            &[StoreProviderId::Steam],
+            &[StorePlatformId::Pc],
+            ""
+        ));
+        assert!(!matches_request(
+            &steam_game,
+            StoreCategory::AllGames,
+            &[StoreProviderId::Steam],
+            &[StorePlatformId::Switch],
+            ""
+        ));
+        assert!(!matches_request(
+            &steam_game,
+            StoreCategory::AllGames,
+            &[StoreProviderId::Epic],
+            &[StorePlatformId::Pc],
+            ""
+        ));
+
+        // End to end through the real pool: every catalogue game is sold on
+        // PC, and only the ones with a Nintendo offer answer a Switch filter.
+        let directory = TestDirectory::new("platforms");
+        let request = |platforms: Vec<StorePlatformId>| StoreBrowseRequest {
+            category: StoreCategory::AllGames,
+            providers: Vec::new(),
+            platforms,
+            query: String::new(),
+            cursor: None,
+            limit: MAX_BROWSE_LIMIT,
+        };
+        let pc = browse(
+            &directory.cache(),
+            &directory.root,
+            &[],
+            &request(vec![StorePlatformId::Pc]),
+            NOW_MS,
+        );
+        assert_eq!(pc.games.len(), CATALOG_SIZE);
+        let expected_switch = catalog_games()
+            .iter()
+            .filter(|game| {
+                game.offers
+                    .iter()
+                    .any(|offer| offer.provider == StoreProviderId::Nintendo)
+            })
+            .count();
+        let switch = browse(
+            &directory.cache(),
+            &directory.root,
+            &[],
+            &request(vec![StorePlatformId::Switch]),
+            NOW_MS,
+        );
+        assert_eq!(switch.games.len(), expected_switch);
+        assert!(
+            switch.games.len() < CATALOG_SIZE,
+            "the filter matched everything"
+        );
+        for game in &switch.games {
+            assert!(
+                game.offers
+                    .iter()
+                    .any(|offer| offer.provider == StoreProviderId::Nintendo),
+                "{} has no Switch storefront",
+                game.title
+            );
+        }
+        assert_eq!(switch.provider_statuses.len(), StoreProviderId::ALL.len());
+
+        // A machine nothing in the catalogue is sold for empties the page
+        // without erroring.
+        let emulators = browse(
+            &directory.cache(),
+            &directory.root,
+            &[],
+            &request(vec![StorePlatformId::Emulators]),
+            NOW_MS,
+        );
+        assert!(emulators.games.is_empty());
+        assert!(emulators.next_cursor.is_none());
+    }
+
+    // -- the embedded catalogue ----------------------------------------------
+
+    #[test]
+    fn the_embedded_catalogue_is_the_curated_forty_seven_games() {
+        let games = catalog_games();
+        assert_eq!(
+            games.len(),
+            CATALOG_SIZE,
+            "the embedded catalogue is not the curated catalogue"
+        );
+
+        // It is the same catalogue the WebView bundles, not a copy that has
+        // been allowed to drift: same order, same ids, same titles.
+        assert_eq!(games[0].id, "steam:1608230");
+        assert_eq!(games[0].title, "Planet of Lana");
+
+        let mut seen = BTreeSet::new();
+        for game in games {
+            assert!(seen.insert(game.id.clone()), "{} appears twice", game.id);
+            assert!(
+                steam_app_id(&game.id).is_some(),
+                "{} is not addressable",
+                game.id
+            );
+            assert!(!game.title.trim().is_empty());
+            assert!(!game.short_description.trim().is_empty());
+            // Artwork is a bundled asset path, never a remote origin the WebView
+            // would then have to fetch from.
+            for artwork in [&game.cover_url, &game.hero_url, &game.landscape_url] {
+                assert!(
+                    artwork.starts_with("/media/store/"),
+                    "{artwork} is not bundled"
+                );
+            }
+            assert!(!game.offers.is_empty(), "{} is sold nowhere", game.id);
+            assert!(
+                game.curation.is_some(),
+                "{} lost its French copy on the way in",
+                game.id
+            );
+            // None of the old hard-coded shelf survives anywhere.
+            for banned in ["Elden Ring", "Cyberpunk 2077", "Unrailed!", "Astro Duel 2"] {
+                assert_ne!(game.title, banned, "the old editorial shelf is still here");
+            }
+        }
+    }
+
+    #[test]
+    fn a_catalogue_row_keeps_the_price_and_the_timestamp_it_was_given() {
+        // Read straight out of the embedded document so the assertion is about
+        // the bytes on disk, not about a fixture that mirrors them.
+        let raw: Vec<serde_json::Value> = serde_json::from_str(STORE_CATALOG_JSON).unwrap();
+        assert_eq!(raw.len(), CATALOG_SIZE);
+
+        for row in &raw {
+            let game = catalog_games()
+                .iter()
+                .find(|game| game.id == row["id"].as_str().unwrap())
+                .expect("every row is embedded");
+            for (index, offer) in row["offers"].as_array().unwrap().iter().enumerate() {
+                let cached = &game.offers[index];
+                assert_eq!(cached.id, offer["id"].as_str().unwrap());
+                assert_eq!(cached.price_minor, offer["priceMinor"].as_i64());
+                assert_eq!(
+                    cached.currency.as_deref(),
+                    offer["currency"].as_str(),
+                    "{} changed currency",
+                    cached.id
+                );
+                assert_eq!(cached.region, offer["region"].as_str().unwrap());
+                assert_eq!(
+                    serde_json::to_value(cached.availability).unwrap(),
+                    offer["availability"]
+                );
+                // A null stays null; a quoted instant survives the round trip
+                // to the second the contract renders.
+                match offer["verifiedAt"].as_str() {
+                    None => assert_eq!(cached.verified_at_epoch_ms, None),
+                    Some(verified_at) => {
+                        let epoch_ms = cached.verified_at_epoch_ms.expect("a parsed timestamp");
+                        assert_eq!(
+                            iso8601_from_epoch_ms(epoch_ms),
+                            format!("{}Z", verified_at.split('.').next().unwrap())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_catalogue_row_this_build_cannot_read_is_dropped_not_fatal() {
+        let games = parse_catalog(
+            &serde_json::json!([
+                {
+                    "id": "steam:1",
+                    "title": "Readable",
+                    "supportedPlatforms": ["windows", "holodeck"],
+                    "offers": [
+                        {
+                            "id": "offer_steam_steam1",
+                            "provider": "steam",
+                            "priceMinor": 1_999,
+                            "currency": "EUR",
+                            "region": "FR",
+                            "verifiedAt": "2026-08-02T18:10:02.752Z",
+                            "availability": "available"
+                        },
+                        {
+                            "id": "offer_future_steam1",
+                            "provider": "some-future-shop",
+                            "priceMinor": 1,
+                            "currency": "EUR"
+                        }
+                    ],
+                    "curation": { "categories": ["relaxing", "time-travel"], "duration": "2h" }
+                },
+                { "title": "No id at all" },
+                { "id": "steam:8", "offers": [] },
+                {
+                    "id": "apple:7",
+                    "title": "Sold somewhere Orivo cannot address yet",
+                    "offers": [
+                        { "id": "offer_apple_7", "provider": "apple", "priceMinor": 299, "currency": "EUR" }
+                    ]
+                }
+            ])
+            .to_string(),
+        );
+
+        assert_eq!(games.len(), 2, "a readable row was thrown away");
+        assert_eq!(games[0].supported_platforms, vec![GamePlatform::Windows]);
+        assert_eq!(games[0].offers.len(), 1, "an unknown shop was accepted");
+        assert_eq!(games[0].offers[0].price_minor, Some(1_999));
+        assert_eq!(
+            games[0].offers[0].url,
+            "https://store.steampowered.com/app/1/"
+        );
+
+        // A row Orivo cannot address still sells at the price it was given; it
+        // simply has no page to open.
+        assert_eq!(games[1].id, "apple:7");
+        assert_eq!(games[1].offers[0].price_minor, Some(299));
+        assert!(games[1].offers[0].url.is_empty());
+
+        let curation = games[0].curation.clone().unwrap();
+        assert_eq!(curation.categories, vec![StoreCategory::Relaxing]);
+        assert_eq!(curation.duration, "2h");
+
+        // A document that is not a catalogue at all leaves an empty shelf
+        // rather than taking the process down.
+        assert!(parse_catalog("not json").is_empty());
+        assert!(parse_catalog("{}").is_empty());
+    }
+
+    // -- ownership -----------------------------------------------------------
+
+    #[test]
+    fn the_store_never_sells_a_game_the_library_already_owns() {
+        let directory = TestDirectory::new("owned");
+        let catalogue = catalog_games();
+        let by_id = &catalogue[0];
+        let by_title = &catalogue[1];
+
+        let library = vec![
+            // Same id as the catalogue row.
+            owned(&by_id.id, "Something else entirely"),
+            // Same game, imported from Steam under a different source id and
+            // written in caps with an edition suffix stripped by the key.
+            owned("steam-import:9999", &by_title.title.to_uppercase()),
+            owned("local:1", "A game that is not in the store"),
+        ];
+
+        let home = store_home(&directory.cache(), &directory.root, &library, NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE - 2);
+        assert!(!home.games.iter().any(|game| game.id == by_id.id));
+        assert!(!home.games.iter().any(|game| game.title == by_title.title));
+
+        let page = browse(
+            &directory.cache(),
+            &directory.root,
+            &library,
+            &StoreBrowseRequest {
+                category: StoreCategory::AllGames,
+                providers: Vec::new(),
+                platforms: Vec::new(),
+                query: String::new(),
+                cursor: None,
+                limit: MAX_BROWSE_LIMIT,
+            },
+            NOW_MS,
+        );
+        assert_eq!(page.games.len(), CATALOG_SIZE - 2);
+        assert!(!page.games.iter().any(|game| game.id == by_id.id));
+        assert!(!page.games.iter().any(|game| game.title == by_title.title));
+
+        // The exclusion also holds for what a refresh wrote into the cache,
+        // not only for the built-in shelf.
+        directory
+            .cache()
+            .write(&StoreCacheDocument {
+                games: catalogue.to_vec(),
+                provider_statuses: default_provider_statuses(),
+                ..StoreCacheDocument::default()
+            })
+            .unwrap();
+        let cached_home = store_home(&directory.cache(), &directory.root, &library, NOW_MS);
+        assert_eq!(cached_home.games.len(), CATALOG_SIZE - 2);
+
+        // An empty library changes nothing.
+        assert_eq!(
+            store_home(&directory.cache(), &directory.root, &[], NOW_MS)
+                .games
+                .len(),
+            CATALOG_SIZE
+        );
+    }
+
+    #[test]
+    fn ownership_matches_on_a_normalised_title() {
+        assert_eq!(ownership_key("Planet of Lana"), "planetoflana");
+        // Case, punctuation, spacing and accents are all folded, because the
+        // same game is written every one of those ways across sources.
+        assert_eq!(ownership_key("  PLANET  of Lana!  "), "planetoflana");
+        assert_eq!(ownership_key("Wilmot's Warehouse"), "wilmotswarehouse");
+        assert_eq!(ownership_key("Gris"), ownership_key("GRIS"));
+        assert_eq!(ownership_key("Célèste"), "celeste");
+        // Two different games never collide into one key.
+        assert_ne!(ownership_key("Mini Metro"), ownership_key("Mini Motorways"));
+        // A blank title is no ownership signal at all.
+        assert!(ownership_key("   ").is_empty());
+
+        let index = OwnedIndex::new(&[owned("steam:1", ""), owned("", "Fixture")]);
+        assert!(index.owns(&game_fixture(Vec::new())));
+        assert!(index.owns(&CachedGame {
+            id: "other:2".to_string(),
+            ..game_fixture(Vec::new())
+        }));
+        assert!(!index.owns(&CachedGame {
+            id: "other:2".to_string(),
+            title: "Unowned".to_string(),
+            ..game_fixture(Vec::new())
+        }));
+    }
+
+    // -- refresh -------------------------------------------------------------
+
+    #[test]
+    fn the_whole_catalogue_refreshes_in_batches_over_the_public_endpoint() {
+        let targets = steam_refresh_targets(catalog_games());
+        assert_eq!(
+            targets.len(),
+            CATALOG_SIZE,
+            "the shelf is only partly priced"
+        );
+        assert!(
+            MAX_STEAM_REFRESH_APPS >= CATALOG_SIZE,
+            "the refresh cap is below the catalogue"
+        );
+
+        // Steam answers a comma-separated `appids` list when `filters` is set,
+        // so the catalogue costs one request per batch and no more.
+        let priced: serde_json::Map<String, serde_json::Value> = targets
+            .iter()
+            .map(|target| {
+                (
+                    target.app_id.clone(),
+                    serde_json::json!({
+                        "success": true,
+                        "data": { "price_overview": { "currency": "EUR", "final": 1_999, "discount_percent": 10 } }
+                    }),
+                )
+            })
+            .collect();
+        let http = FakeHttp::default().with(
+            "store.steampowered.com/api/appdetails",
+            serde_json::Value::Object(priced),
+        );
+        let config = RefreshConfig {
+            region: "FR".to_string(),
+        };
+        let (outcome, status) = block_on(refresh_steam(&http, &config, catalog_games(), NOW_MS));
+
+        assert_eq!(outcome.offers.len(), CATALOG_SIZE);
+        assert_eq!(status.health, ProviderHealth::Available);
+        let requested = http.requested.lock().unwrap().clone();
+        assert_eq!(
+            requested.len(),
+            CATALOG_SIZE.div_ceil(STEAM_REFRESH_BATCH),
+            "the refresh did not batch: {requested:?}"
+        );
+        for url in &requested {
+            // The public storefront endpoint, in the user's region and
+            // language, with the filter that makes a multi-id list work.
+            assert!(url.starts_with("https://store.steampowered.com/api/appdetails?appids="));
+            assert!(url.contains("&cc=fr"));
+            assert!(url.contains("&l=french"));
+            assert!(url.contains("&filters=price_overview"));
+            assert!(!url.contains("key="), "a key was sent to a public endpoint");
+        }
+        for offer in &outcome.offers {
+            assert_eq!(offer.price_minor, Some(1_999));
+            assert_eq!(offer.currency.as_deref(), Some("EUR"));
+            assert_eq!(offer.region, "FR");
+            assert_eq!(offer.discount_percent, 10);
+        }
+        // The refreshed offers replace the shipped ones instead of doubling up.
+        let mut games = catalog_games().to_vec();
+        apply_outcome(&mut games, outcome);
+        for game in &games {
+            assert_eq!(
+                game.offers
+                    .iter()
+                    .filter(|offer| offer.provider == StoreProviderId::Steam)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_that_answers_for_one_app_falls_back_to_one_request_per_app() {
+        let targets = steam_refresh_targets(catalog_games());
+        // The shape Steam returns when a multi-id request is not honoured: the
+        // first id only. Every other app has to be asked for on its own.
+        let http = FakeHttp::default().with(
+            "store.steampowered.com/api/appdetails",
+            serde_json::json!({
+                targets[0].app_id.clone(): {
+                    "success": true,
+                    "data": { "price_overview": { "currency": "EUR", "final": 499, "discount_percent": 75 } }
+                }
+            }),
+        );
+        let (outcome, status) = block_on(refresh_steam(
+            &http,
+            &RefreshConfig::default(),
+            catalog_games(),
+            NOW_MS,
+        ));
+
+        let requested = http.requested.lock().unwrap().clone();
+        let batches = CATALOG_SIZE.div_ceil(STEAM_REFRESH_BATCH);
+        // One request per batch, then one per app the batches left unanswered.
+        assert_eq!(requested.len(), batches + CATALOG_SIZE - 1);
+        let singles: Vec<&String> = requested
+            .iter()
+            .filter(|url| !url.contains("filters=price_overview"))
+            .collect();
+        assert_eq!(singles.len(), CATALOG_SIZE - 1);
+        for url in singles {
+            assert!(!url.contains(','), "a fallback request was still batched");
+        }
+
+        // The one app that did answer keeps its live price; the rest degrade
+        // into an honest status instead of a guess.
+        assert_eq!(outcome.offers.len(), 1);
+        assert_eq!(outcome.offers[0].price_minor, Some(499));
+        assert_eq!(status.health, ProviderHealth::Degraded);
+    }
+
+    #[test]
+    fn a_steam_that_answers_nothing_is_not_walked_game_by_game() {
+        let http = FakeHttp::default();
+        let (outcome, status) = block_on(refresh_steam(
+            &http,
+            &RefreshConfig::default(),
+            catalog_games(),
+            NOW_MS,
+        ));
+
+        let requested = http.requested.lock().unwrap().len();
+        let batches = CATALOG_SIZE.div_ceil(STEAM_REFRESH_BATCH);
+        assert_eq!(
+            requested,
+            batches + STEAM_REFRESH_GIVE_UP_AFTER,
+            "an unreachable Steam was still asked about every game"
+        );
+        assert!(outcome.offers.is_empty());
+        assert_eq!(status.health, ProviderHealth::Degraded);
+        assert!(status.refreshed_at_epoch_ms.is_none());
+    }
+
+    #[test]
+    fn a_failing_refresh_never_blocks_or_empties_the_store() {
+        let directory = TestDirectory::new("refresh-fails");
+        let http = FakeHttp::default();
+
+        // Nothing answers, so every provider degrades...
+        let document = block_on(refresh_all(&http, &RefreshConfig::default(), NOW_MS));
+        assert_eq!(document.games.len(), CATALOG_SIZE);
+        directory.cache().write(&document).unwrap();
+
+        // ...and the home view is still the whole catalogue, with the prices
+        // the catalogue shipped with rather than none at all.
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE);
+        assert!(
+            home.games
+                .iter()
+                .flat_map(|game| game.offers.iter())
+                .any(|offer| offer.price_minor.is_some())
+        );
+        // The French copy survives the trip through the cache document, which
+        // is the only path the card's text can be lost on.
+        assert!(home.games.iter().all(|game| game.curation.is_some()));
+        let lana = home
+            .games
+            .iter()
+            .find(|game| game.id == "steam:1608230")
+            .unwrap();
+        assert_eq!(
+            lana.curation.as_ref().unwrap().tagline,
+            "Histoire émouvante sans violence."
+        );
+        assert_eq!(lana.curation.as_ref().unwrap().stats.len(), 3);
+        assert!(
+            home.provider_statuses
+                .iter()
+                .all(|status| !status.message.trim().is_empty())
+        );
+    }
+
+    #[test]
+    fn catalogue_timestamps_survive_the_round_trip() {
+        assert_eq!(
+            epoch_ms_from_iso8601("2026-07-25T17:20:00Z"),
+            Some(1_785_000_000_000)
+        );
+        assert_eq!(
+            epoch_ms_from_iso8601("2026-07-25T17:20:00.752Z"),
+            Some(1_785_000_000_752)
+        );
+        assert_eq!(
+            iso8601_from_epoch_ms(epoch_ms_from_iso8601("2026-08-02T18:10:02.752Z").unwrap()),
+            "2026-08-02T18:10:02Z"
+        );
+        assert_eq!(epoch_ms_from_iso8601("1970-01-01T00:00:00Z"), Some(0));
+        for hostile in [
+            "",
+            "2026-08-02",
+            "2026-08-02T18:10:02",
+            "2026-08-02T18:10:02+02:00",
+            "2026-13-02T18:10:02Z",
+            "2026-08-02T25:10:02Z",
+            "not a timestamp at all",
+            "1969-12-31T23:59:59Z",
+        ] {
+            assert_eq!(
+                epoch_ms_from_iso8601(hostile),
+                None,
+                "{hostile} was accepted"
+            );
+        }
     }
 
     // -- misc ----------------------------------------------------------------

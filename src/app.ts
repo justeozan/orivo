@@ -3061,7 +3061,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // blanked out, because a 352px hole mid-bar reads as a broken layout. Only
     // what the field searches changes.
     if (route.page === "store") {
-      refs.search.placeholder = "Search the store…";
+      refs.search.placeholder = "Search games…";
       refs.search.setAttribute("aria-label", "Search the store");
       if (document.activeElement !== refs.search) refs.search.value = route.query;
       return;
@@ -3081,10 +3081,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   const syncTopbar = (route: AppRoute): void => {
     const current = navPageForRoute(route);
-    // The Library is a full-bleed hero with its own top gradient, so the topbar
-    // floats over it. Every other page scrolls content underneath the bar and
-    // needs an opaque, blurred scrim or that content reads straight through it.
-    refs.topbar.classList.toggle("topbar--over-content", route.page !== "library");
+    // The Library and the Store are full-bleed heroes with their own top
+    // gradient, so the topbar floats over them completely transparent. Every
+    // other page scrolls content underneath the bar and needs an opaque,
+    // blurred scrim or that content reads straight through it.
+    refs.topbar.classList.toggle(
+      "topbar--over-content",
+      route.page !== "library" && route.page !== "store",
+    );
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
       link.classList.toggle("is-active", active);
@@ -3259,7 +3263,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const page = link.dataset.navPage;
       if (page === "store") {
         if (currentRoute.page === "store") return;
-        navigate({ page: "store", category: "for-you", providers: [], query: "" });
+        navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" });
       } else if (page === "me") {
         if (currentRoute.page === "me") return;
         navigate({ page: "me" });
@@ -3393,6 +3397,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  let storeSearchTimer: ReturnType<typeof setTimeout> | null = null;
+
   refs.search.addEventListener("input", () => {
     const route = currentRoute;
     const value = refs.search.value;
@@ -3410,6 +3416,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       renderSettingsSearch();
       return;
     }
+    if (route.page === "store") {
+      // Typing filters the shelf live. Each keystroke replaces the entry rather
+      // than pushing one, so Back still leaves the Store in one step.
+      if (storeSearchTimer) clearTimeout(storeSearchTimer);
+      storeSearchTimer = setTimeout(() => {
+        storeSearchTimer = null;
+        const current = currentRoute;
+        if (current.page !== "store") return;
+        navigate(
+          {
+            page: "store",
+            category: current.category,
+            platforms: [...current.platforms],
+            query: refs.search.value.trim(),
+          },
+          { replace: true },
+        );
+      }, 240);
+      return;
+    }
     // Detail and not-found keep the library query warm so Enter can carry it.
     if (route.page === "game" || route.page === "not-found") {
       state.query = value;
@@ -3424,7 +3450,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       navigate({
         page: "store",
         category: route.category,
-        providers: [...route.providers],
+        platforms: [...route.platforms],
         query: refs.search.value.trim(),
       });
       return;
@@ -3534,7 +3560,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const hash = window.location.hash;
     const isDefaultEntry = hash === "" || hash === "#" || hash === "#/";
     if (isDefaultEntry && state.preferences.startPage === "store") {
-      navigate({ page: "store", category: "for-you", providers: [], query: "" }, { replace: true });
+      navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" }, { replace: true });
     }
   })();
 }
@@ -4169,7 +4195,7 @@ function shell(): string {
       </footer>
       </div>
 
-      <div id="app-page-store" class="app-page app-page--scroll"></div>
+      <div id="app-page-store" class="app-page app-page--store"></div>
       <div id="app-page-me" class="app-page app-page--scroll"></div>
 
       <div id="app-page-game" class="app-page app-page--scroll"></div>

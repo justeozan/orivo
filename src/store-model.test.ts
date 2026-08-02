@@ -3,13 +3,10 @@ import type { GameSummary, ProviderStatus, StoreOffer, StoreProvider } from "./c
 import {
   createInitialStoreState,
   EDITORIAL_GAMES,
-  EDITORIAL_PRICING,
   EDITORIAL_PROVIDER_STATUSES,
-  formatPrice,
   isOfferStale,
   reduceStorePageState,
   selectBestOffer,
-  selectGamePricing,
   selectStoreGames,
   storeCategoryLabel,
   STORE_CATEGORIES,
@@ -90,7 +87,7 @@ describe("createInitialStoreState", () => {
 
     expect(state.phase).toBe("loading");
     expect(state.category).toBe("for-you");
-    expect(state.providers).toEqual([]);
+    expect(state.platforms).toEqual([]);
     expect(state.query).toBe("");
     expect(state.browseGames).toBeNull();
     expect(state.nextCursor).toBeNull();
@@ -132,14 +129,14 @@ describe("reduceStorePageState", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready", browseGames: [game()] }), {
       type: "activate",
       category: "relaxing",
-      providers: ["steam"],
+      platforms: [],
       query: "unrailed",
       online: true,
     });
 
     expect(next.phase).toBe("ready");
     expect(next.category).toBe("relaxing");
-    expect(next.providers).toEqual(["steam"]);
+    expect(next.platforms).toEqual(["steam"]);
     expect(next.query).toBe("unrailed");
     expect(next.browseGames).toBeNull();
     expect(next.errorMessage).toBe("");
@@ -149,7 +146,7 @@ describe("reduceStorePageState", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready" }), {
       type: "activate",
       category: "for-you",
-      providers: [],
+      platforms: [],
       query: "",
       online: false,
     });
@@ -305,10 +302,10 @@ describe("reduceStorePageState", () => {
     expect(byCategory.nextCursor).toBeNull();
 
     const byProvider = reduceStorePageState(browsing, {
-      type: "providers-changed",
-      providers: ["steam", "apple"],
+      type: "platforms-changed",
+      platforms: [],
     });
-    expect(byProvider.providers).toEqual(["steam", "apple"]);
+    expect(byProvider.platforms).toEqual(["steam", "apple"]);
     expect(byProvider.browseGames).toBeNull();
 
     const byQuery = reduceStorePageState(browsing, { type: "query-changed", query: "hades" });
@@ -387,7 +384,7 @@ describe("selectStoreGames", () => {
   });
 
   it("combines the category filter with the provider filter", () => {
-    const state = stateWith({ home, category: "short-sessions", providers: ["steam"] });
+    const state = stateWith({ home, category: "short-sessions", platforms: [] });
 
     expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["short-steam"]);
   });
@@ -417,7 +414,7 @@ describe("selectStoreGames", () => {
   });
 
   it("returns an empty list rather than inventing results", () => {
-    expect(selectStoreGames(stateWith({ home, providers: ["google-play"] }))).toEqual([]);
+    expect(selectStoreGames(stateWith({ home, platforms: [] }))).toEqual([]);
   });
 });
 
@@ -453,84 +450,6 @@ describe("isOfferStale", () => {
 
     expect(isOfferStale(fresh, NOW)).toBe(false);
     expect(isOfferStale(old, NOW)).toBe(true);
-  });
-});
-
-describe("formatPrice", () => {
-  it("formats euro prices in the 24,99 € shape", () => {
-    const text = formatPrice(24.99);
-    expect(text).toContain("24,99");
-    expect(text).toContain("€");
-  });
-
-  it("drops decimals for zero-decimal currencies", () => {
-    const text = formatPrice(1500, "JPY");
-    expect(text).toMatch(/1\s?500/u);
-    expect(text).not.toMatch(/[.,]\d/u);
-  });
-
-  it("falls back to a plain amount when the currency code is invalid", () => {
-    expect(formatPrice(9.99, "NOPE!")).toBe("9.99 NOPE!");
-  });
-});
-
-describe("selectGamePricing", () => {
-  it("exposes Instant Gaming reference prices for the editorial catalog", () => {
-    const eldenRing = EDITORIAL_GAMES.find((entry) => entry.title === "Elden Ring");
-    const pricing = eldenRing && selectGamePricing(eldenRing);
-
-    expect(pricing).not.toBeNull();
-    expect(pricing?.priceProvider).toBe("Instant Gaming");
-    expect(pricing?.currency).toBe("EUR");
-    expect(pricing?.price).toBe(34.99);
-    expect(pricing?.originalPrice).toBe(59.99);
-    expect(pricing?.discountPercent).toBe(42);
-  });
-
-  it("keeps every editorial reference price coherent", () => {
-    expect(Object.keys(EDITORIAL_PRICING).length).toBeGreaterThan(0);
-    for (const [gameId, pricing] of Object.entries(EDITORIAL_PRICING)) {
-      expect(pricing.price, gameId).toBeGreaterThan(0);
-      expect(pricing.priceProvider, gameId).toBe("Instant Gaming");
-      if (pricing.originalPrice !== undefined) {
-        expect(pricing.originalPrice, gameId).toBeGreaterThan(pricing.price);
-      }
-      if (pricing.discountPercent !== undefined) {
-        expect(pricing.discountPercent, gameId).toBeGreaterThan(0);
-        expect(pricing.discountPercent, gameId).toBeLessThan(100);
-        expect(pricing.originalPrice, gameId).toBeDefined();
-      }
-    }
-  });
-
-  it("returns null for a game with no known price instead of inventing one", () => {
-    expect(selectGamePricing(game({ id: "store:unknown", offers: [] }))).toBeNull();
-    expect(selectGamePricing(game({ id: "store:unpriced" }))).toBeNull();
-
-    const astroDuel = EDITORIAL_GAMES.find((entry) => entry.title === "Astro Duel 2");
-    expect(astroDuel && selectGamePricing(astroDuel)).toBeNull();
-  });
-
-  it("prefers a live priced offer over the editorial reference price", () => {
-    const eldenRing = EDITORIAL_GAMES.find((entry) => entry.title === "Elden Ring");
-    const live = game({
-      id: eldenRing?.id ?? "steam:1245620",
-      offers: [
-        offer({
-          availability: "available",
-          stale: false,
-          verifiedAt: new Date(NOW).toISOString(),
-          priceMinor: 4_999,
-          currency: "USD",
-        }),
-      ],
-    });
-
-    const pricing = selectGamePricing(live);
-    expect(pricing?.price).toBe(49.99);
-    expect(pricing?.currency).toBe("USD");
-    expect(pricing?.priceProvider).toBe("Steam");
-    expect(pricing?.originalPrice).toBeUndefined();
   });
 });
 

@@ -58,11 +58,18 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
 
 const providerLabels: Record<StoreProvider, string> = {
   steam: "Steam",
+  "instant-gaming": "Instant Gaming",
+  epic: "Epic Games Store",
+  gog: "GOG",
+  humble: "Humble Store",
+  fanatical: "Fanatical",
+  "green-man-gaming": "Green Man Gaming",
   ubisoft: "Ubisoft",
   microsoft: "Microsoft / Xbox",
+  playstation: "PlayStation Store",
+  nintendo: "Nintendo eShop",
   apple: "Apple App Store",
   "google-play": "Google Play",
-  "instant-gaming": "Instant Gaming",
 };
 
 const providers = Object.keys(providerLabels) as StoreProvider[];

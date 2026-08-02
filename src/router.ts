@@ -3,23 +3,23 @@ import type {
   GameId,
   SettingsSection,
   StoreCategory,
-  StoreProvider,
+  StorePlatform,
 } from "./contracts";
 
 const storeCategories = new Set<StoreCategory>([
   "for-you",
+  "good-for-brain",
   "short-sessions",
   "strong-stories",
   "relaxing",
   "all-games",
 ]);
-const storeProviders = new Set<StoreProvider>([
-  "steam",
-  "ubisoft",
-  "microsoft",
-  "apple",
-  "google-play",
-  "instant-gaming",
+const storePlatforms = new Set<StorePlatform>([
+  "pc",
+  "playstation",
+  "xbox",
+  "switch",
+  "emulators",
 ]);
 const settingsSections = new Set<SettingsSection>([
   "general",
@@ -57,13 +57,13 @@ export function parseAppRoute(hash: string): AppRoute {
     const category = requestedCategory && storeCategories.has(requestedCategory)
       ? requestedCategory
       : "for-you";
-    const providers = query
-      .getAll("provider")
-      .filter((provider): provider is StoreProvider => storeProviders.has(provider as StoreProvider));
+    const platforms = query
+      .getAll("platform")
+      .filter((platform): platform is StorePlatform => storePlatforms.has(platform as StorePlatform));
     return {
       page: "store",
       category,
-      providers: [...new Set(providers)],
+      platforms: [...new Set(platforms)],
       query: query.get("q")?.trim() ?? "",
     };
   }
@@ -110,7 +110,7 @@ export function appRouteToHash(route: AppRoute): string {
   if (route.page === "store") {
     const query = new URLSearchParams();
     if (route.category !== "for-you") query.set("category", route.category);
-    for (const provider of route.providers) query.append("provider", provider);
+    for (const platform of route.platforms) query.append("platform", platform);
     if (route.query.trim()) query.set("q", route.query.trim());
     const suffix = query.size ? `?${query.toString()}` : "";
     return `#/store${suffix}`;
