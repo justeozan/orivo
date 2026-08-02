@@ -64,9 +64,6 @@ interface SteamAccountSyncResult {
 }
 
 type WineRunnerState = "checking" | "ready" | "unavailable" | "invalid" | "error";
-type WineSetupStep = "loading" | "wine" | "name" | "directories" | "preview" | "complete" | "error";
-type WineScanPhase = "idle" | "starting" | "scanning" | "cancelling" | "ready" | "importing" | "cancelled" | "error";
-type WineDetectionState = "detecting" | "ready" | "unavailable" | "cancelled" | "error";
 type LaunchFeedbackPhase = "launching" | "started" | "failed";
 
 interface WineRunnerStatus {
@@ -93,60 +90,6 @@ interface WineProfile {
   graphicsSummary: string;
 }
 
-interface WineSetupSnapshot {
-  setupId: string;
-  wineLabel: string;
-  detectedWineLabel: string;
-  detectionState: WineDetectionState;
-  detectionMessage: string;
-  directories: WineDirectory[];
-}
-
-interface WineScanStatus {
-  state: WineScanPhase;
-  scannedFiles: number;
-  foundGames: number;
-  message: string;
-}
-
-interface WineScanGame {
-  ref: string;
-  title: string;
-  directoryLabel: string;
-  alreadyImported: boolean;
-  launchable: boolean;
-}
-
-interface WineScanPage {
-  games: WineScanGame[];
-  nextCursor: string | null;
-}
-
-interface WineImportResult {
-  importedIds: string[];
-  updatedIds: string[];
-  skippedRefs: string[];
-  message: string;
-}
-
-interface WinePanelState {
-  open: boolean;
-  step: WineSetupStep;
-  setup: WineSetupSnapshot | null;
-  profile: WineProfile | null;
-  profileId: string;
-  displayName: string;
-  scanPhase: WineScanPhase;
-  scanJobId: string;
-  scanStatus: WineScanStatus | null;
-  scanGames: Map<string, WineScanGame>;
-  selectedGameRefs: Set<string>;
-  nextCursor: string | null;
-  loadingPage: boolean;
-  notice: string;
-  noticeTone: SteamNoticeTone;
-}
-
 interface WineSettingsState {
   open: boolean;
   loading: boolean;
@@ -155,7 +98,6 @@ interface WineSettingsState {
   notice: string;
   noticeTone: SteamNoticeTone;
   pendingDeleteProfileId: string;
-  pendingAttachGameId: string;
 }
 
 interface LaunchFeedback {
@@ -218,7 +160,6 @@ interface State {
   libraryMenuOpen: boolean;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
-  wine: WinePanelState;
   wineSettings: WineSettingsState;
   launchFeedback: LaunchFeedback | null;
 }
@@ -230,9 +171,6 @@ const MAX_STEAM_IMPORT_SELECTION = 2_000;
 const MAX_AUTOMATIC_STEAM_SELECTION = 50;
 const MAX_RENDERED_LIBRARY_CARDS = 48;
 const MAX_LIBRARY_MEDIA_HYDRATION = 16;
-const MAX_RENDERED_WINE_GAMES = 100;
-const WINE_SCAN_PAGE_SIZE = 80;
-const MAX_WINE_IMPORT_SELECTION = 2_000;
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
@@ -264,23 +202,6 @@ export function mountApp(root: HTMLElement): void {
       lastSync: null,
       apiKeySteamId: "",
     },
-    wine: {
-      open: false,
-      step: "loading",
-      setup: null,
-      profile: null,
-      profileId: "",
-      displayName: "",
-      scanPhase: "idle",
-      scanJobId: "",
-      scanStatus: null,
-      scanGames: new Map(),
-      selectedGameRefs: new Set(),
-      nextCursor: null,
-      loadingPage: false,
-      notice: "",
-      noticeTone: "info",
-    },
     wineSettings: {
       open: false,
       loading: false,
@@ -289,7 +210,6 @@ export function mountApp(root: HTMLElement): void {
       notice: "",
       noticeTone: "info",
       pendingDeleteProfileId: "",
-      pendingAttachGameId: "",
     },
     launchFeedback: null,
   };
@@ -335,8 +255,6 @@ export function mountApp(root: HTMLElement): void {
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
     playButton: get<HTMLButtonElement>("#play-button"),
     launchFeedback: get<HTMLElement>("#launch-feedback"),
-    winePanel: get<HTMLElement>("#wine-setup-panel"),
-    wineBody: get<HTMLElement>("#wine-setup-body"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
     settingsNav: get<HTMLButtonElement>("#settings-nav-button"),
@@ -352,10 +270,6 @@ export function mountApp(root: HTMLElement): void {
   let steamPreviewMediaRefreshQueued = false;
   let steamReturnFocus: HTMLElement | null = null;
   let steamAccountReturnFocus: HTMLElement | null = null;
-  let wineScanRequest = 0;
-  let wineScanTimer: number | undefined;
-  let wineDetectionRequest = 0;
-  let wineDetectionTimer: number | undefined;
 
   const visibleGames = (): LibraryGame[] => {
     const term = state.query.trim().toLocaleLowerCase();
@@ -721,7 +635,6 @@ export function mountApp(root: HTMLElement): void {
       ? `Last played ${game.lastPlayedAt}`
       : "Not played yet";
     const isSteamInstallable = game.source === "steam" && !game.launchable;
-    const isWineAttachable = Boolean(game.wineAttachable);
     const sourceName =
       game.source === "steam"
         ? "Steam"
@@ -747,15 +660,13 @@ export function mountApp(root: HTMLElement): void {
     refs.platform.classList.toggle("is-compatible", compatibility === true);
     refs.platform.classList.toggle("is-incompatible", compatibility === false);
     refs.platformLabel.textContent = compatibilityLabel;
-    refs.playButton.disabled = !game.launchable && !isSteamInstallable && !isWineAttachable;
+    refs.playButton.disabled = !game.launchable && !isSteamInstallable;
     refs.playButton.setAttribute(
       "aria-label",
       game.launchable
         ? "Play " + game.title
         : isSteamInstallable
           ? "Install " + game.title + " in Steam"
-          : isWineAttachable
-            ? "Configure " + game.title + " with Wine-Staging"
           : game.title + " is unavailable",
     );
     const playLabel = refs.playButton.querySelector<HTMLElement>("span");
@@ -764,9 +675,7 @@ export function mountApp(root: HTMLElement): void {
         ? "Play"
         : isSteamInstallable
           ? "Install"
-          : isWineAttachable
-            ? "Configurer Wine"
-            : "Unavailable";
+          : "Unavailable";
     }
     updateHeroImage(game, immediateHero);
     renderCards();
@@ -871,57 +780,6 @@ export function mountApp(root: HTMLElement): void {
     }
   };
 
-  const clearWineScanPolling = (): number => {
-    wineScanRequest += 1;
-    if (wineScanTimer !== undefined) {
-      window.clearTimeout(wineScanTimer);
-      wineScanTimer = undefined;
-    }
-    return wineScanRequest;
-  };
-
-  const stopWineDetectionPolling = (): number => {
-    wineDetectionRequest += 1;
-    if (wineDetectionTimer !== undefined) {
-      window.clearTimeout(wineDetectionTimer);
-      wineDetectionTimer = undefined;
-    }
-    return wineDetectionRequest;
-  };
-
-  const cancelWineBackgroundWork = (): void => {
-    const setup = state.wine.setup;
-    const jobId = state.wine.scanJobId;
-    const scanPhase = state.wine.scanPhase;
-    if (!isTauriRuntime()) {
-      return;
-    }
-    if (setup?.setupId && setup.detectionState === "detecting") {
-      void invoke("cancel_wine_detection", { setupId: setup.setupId }).catch(() => {
-        // The setup may already have finished or expired. Its result is no
-        // longer visible, so no UI update is needed.
-      });
-    }
-    if (
-      jobId &&
-      (scanPhase === "starting" || scanPhase === "scanning" || scanPhase === "cancelling" || scanPhase === "importing")
-    ) {
-      void invoke("cancel_wine_scan", { jobId }).catch(() => {
-        // A stale scan is intentionally best-effort cancelled when its panel
-        // disappears; failures cannot block navigation.
-      });
-    }
-  };
-
-  const resetWineScan = (): void => {
-    state.wine.scanPhase = "idle";
-    state.wine.scanJobId = "";
-    state.wine.scanStatus = null;
-    state.wine.scanGames.clear();
-    state.wine.selectedGameRefs.clear();
-    state.wine.nextCursor = null;
-    state.wine.loadingPage = false;
-  };
 
   const wineActionButton = (
     action: string,
@@ -971,33 +829,6 @@ export function mountApp(root: HTMLElement): void {
     parent.append(loading);
   };
 
-  const setWineSetupOpen = (open: boolean): void => {
-    state.wine.open = open;
-    refs.winePanel.hidden = !open;
-    if (open) {
-      closeLibraryMenu();
-      state.wineSettings.open = false;
-      renderWineSettingsPanel();
-      if (state.steam.open) {
-        state.steam.open = false;
-        renderSteamPanel();
-      }
-    } else {
-      cancelWineBackgroundWork();
-      stopWineDetectionPolling();
-      clearWineScanPolling();
-    }
-    renderWineSetupPanel();
-    if (open) {
-      requestAnimationFrame(() => {
-        const focusTarget =
-          refs.winePanel.querySelector<HTMLInputElement>("input[name='wine-profile-name']") ??
-          refs.winePanel.querySelector<HTMLButtonElement>("[data-wine-action='select-wine']") ??
-          refs.winePanel.querySelector<HTMLButtonElement>("[data-wine-action='close']");
-        focusTarget?.focus();
-      });
-    }
-  };
 
   const runnerStatusLabel = (runner: WineRunnerStatus | null): string => {
     if (!runner || runner.state === "checking") {
@@ -1035,427 +866,7 @@ export function mountApp(root: HTMLElement): void {
     }
   };
 
-  const renderWineGameList = (parent: HTMLElement): void => {
-    const wine = state.wine;
-    const games = [...wine.scanGames.values()].slice(0, MAX_RENDERED_WINE_GAMES);
-    const status = wine.scanStatus;
-    const importedCount = games.filter((game) => game.alreadyImported).length;
 
-    if (games.length === 0) {
-      if (wine.scanPhase === "importing") {
-        appendWineLoadingState(
-          parent,
-          "Validation avant l’import",
-          "Orivo vérifie les exécutables sélectionnés. Vous pouvez annuler.",
-        );
-        return;
-      } else if (wine.scanPhase === "scanning" || wine.scanPhase === "starting" || wine.scanPhase === "cancelling") {
-        appendWineLoadingState(
-          parent,
-          "Analyse des dossiers de jeux",
-          "Orivo recherche des exécutables Windows en arrière-plan. Vous pouvez continuer à naviguer.",
-        );
-        return;
-      }
-
-      const empty = document.createElement("section");
-      empty.className = "steam-list-empty";
-      const heading = document.createElement("h2");
-      heading.textContent =
-        wine.scanPhase === "cancelled"
-          ? "Import annulé"
-          : wine.scanPhase === "error"
-            ? "L’analyse n’a pas abouti"
-            : "Aucun jeu Windows trouvé";
-      const message = document.createElement("p");
-      message.textContent =
-        wine.scanPhase === "cancelled"
-          ? "Vous pouvez relancer l’analyse quand vous le souhaitez."
-          : wine.scanPhase === "error"
-            ? status?.message || "Vos jeux déjà présents dans Orivo ne sont pas affectés."
-            : "Ajoutez un autre dossier autorisé ou réessayez après avoir vérifié son contenu.";
-      empty.append(heading, message);
-      parent.append(empty);
-      return;
-    }
-
-    const summary = document.createElement("p");
-    summary.className = "wine-results-count";
-    const foundCount = status?.foundGames ?? games.length;
-    const foundLabel = foundCount === 1 ? "1 jeu détecté" : foundCount.toLocaleString() + " jeux détectés";
-    const importedLabel = importedCount > 0 ? " · " + importedCount + " déjà dans la bibliothèque" : "";
-    summary.textContent =
-      foundCount > games.length
-        ? foundLabel + importedLabel + " · aperçu des " + games.length + " premiers"
-        : foundLabel + importedLabel;
-    summary.setAttribute("aria-live", "polite");
-    parent.append(summary);
-
-    const controls = document.createElement("div");
-    controls.className = "wine-list-controls";
-    // A rescan is also the deliberate refresh path for an already-imported
-    // executable: its content fingerprint may have changed after an update.
-    // The host upserts the same opaque game reference, so this never creates
-    // a duplicate library card.
-    const selectedReady = games.filter(
-      (game) => game.launchable && wine.selectedGameRefs.has(game.ref),
-    ).length;
-    const selectable = games.filter((game) => game.launchable);
-    const selectAll = wineActionButton(
-      selectedReady === selectable.length && selectable.length > 0 ? "clear-wine-selection" : "select-visible-wine-games",
-      selectedReady === selectable.length && selectable.length > 0 ? "Tout désélectionner" : "Sélectionner les jeux prêts",
-      "steam-secondary-button",
-    );
-    selectAll.disabled =
-      selectable.length === 0 ||
-      wine.scanPhase === "importing" ||
-      wine.scanPhase === "cancelling";
-    controls.append(selectAll);
-    parent.append(controls);
-
-    const list = document.createElement("div");
-    list.className = "steam-game-list wine-game-list";
-    list.setAttribute("role", "list");
-    for (const game of games) {
-      const row = document.createElement("label");
-      row.className = "steam-game-row wine-game-row";
-      const isSelected = wine.selectedGameRefs.has(game.ref);
-      row.classList.toggle("is-selected", isSelected);
-      row.classList.toggle("is-imported", game.alreadyImported);
-      row.setAttribute("role", "listitem");
-
-      const toggle = document.createElement("input");
-      toggle.type = "checkbox";
-      toggle.checked = isSelected;
-      toggle.disabled =
-        !game.launchable ||
-        wine.scanPhase === "importing" ||
-        wine.scanPhase === "cancelling";
-      toggle.dataset.wineGameRef = game.ref;
-      toggle.setAttribute("aria-label", "Sélectionner " + game.title);
-
-      const artwork = document.createElement("span");
-      artwork.className = "steam-game-artwork steam-game-artwork--fallback";
-      artwork.innerHTML = icon("monitor");
-      artwork.setAttribute("aria-hidden", "true");
-
-      const copy = document.createElement("span");
-      copy.className = "steam-game-copy";
-      const gameTitle = document.createElement("strong");
-      gameTitle.textContent = game.title;
-      const metadata = document.createElement("span");
-      metadata.className = "steam-game-metadata";
-      metadata.textContent = game.directoryLabel || "Dossier autorisé";
-      copy.append(gameTitle, metadata);
-
-      const badge = document.createElement("span");
-      badge.className = "steam-game-status";
-      badge.textContent = game.alreadyImported ? "Dans la bibliothèque" : game.launchable ? "Prêt" : "Non lançable";
-      row.append(toggle, artwork, copy, badge);
-      list.append(row);
-    }
-    parent.append(list);
-
-    if (wine.nextCursor) {
-      const more = wineActionButton(
-        "load-more-wine-games",
-        wine.loadingPage ? "Chargement…" : "Afficher davantage",
-        "steam-secondary-button",
-        "refresh",
-      );
-      more.disabled = wine.loadingPage || wine.scanPhase === "importing";
-      more.classList.add("wine-load-more");
-      parent.append(more);
-    }
-  };
-
-  const renderWineSetupPanel = (): void => {
-    const wine = state.wine;
-    refs.winePanel.hidden = !wine.open;
-    refs.winePanel.setAttribute(
-      "aria-busy",
-      String(
-        wine.step === "loading" ||
-          wine.scanPhase === "starting" ||
-          wine.scanPhase === "scanning" ||
-          wine.scanPhase === "cancelling" ||
-          wine.scanPhase === "importing",
-      ),
-    );
-    if (!wine.open) {
-      return;
-    }
-
-    const title = refs.winePanel.querySelector<HTMLElement>("#wine-setup-title");
-    const detail = refs.winePanel.querySelector<HTMLElement>("#wine-setup-detail");
-    if (title) {
-      title.textContent =
-        wine.step === "preview" || wine.step === "complete" ? "Importer avec Wine-Staging" : "Ajouter Wine-Staging";
-    }
-    if (detail) {
-      detail.textContent =
-        wine.profile?.displayName ||
-        wine.setup?.wineLabel ||
-        (wine.step === "loading" ? "Préparation du profil isolé" : "Un profil Wine isolé pour Orivo");
-    }
-
-    refs.wineBody.replaceChildren();
-    const body = refs.wineBody;
-
-    if (wine.step === "loading") {
-      appendWineLoadingState(
-        body,
-        "Préparation de Wine-Staging",
-        "Orivo vérifie le runner local sans modifier les préfixes d’autres applications.",
-      );
-      return;
-    }
-
-    if (wine.step === "error") {
-      const unavailable = document.createElement("section");
-      unavailable.className = "steam-state steam-state--unavailable";
-      const badge = document.createElement("span");
-      badge.className = "steam-state__icon";
-      badge.innerHTML = icon("alert");
-      badge.setAttribute("aria-hidden", "true");
-      const heading = document.createElement("h2");
-      heading.textContent = "Wine-Staging ne peut pas être configuré";
-      const message = document.createElement("p");
-      message.textContent = wine.notice || "Aucun changement n’a été apporté à votre bibliothèque.";
-      const retry = wineActionButton("restart-wine-setup", "Réessayer", "steam-secondary-button", "refresh");
-      unavailable.append(badge, heading, message, retry);
-      body.append(unavailable);
-      return;
-    }
-
-    if (wine.step === "wine") {
-      const intro = document.createElement("section");
-      intro.className = "wine-step-intro";
-      const heading = document.createElement("h2");
-      heading.textContent = "1. Choisir Wine-Staging";
-      const message = document.createElement("p");
-      message.textContent =
-        "Sélectionnez une installation Wine-Staging déjà présente sur ce Mac. Orivo n’installe rien et n’utilisera qu’un préfixe dédié.";
-      intro.append(heading, message);
-      body.append(intro);
-      appendWineRunnerSummary(body, state.wineSettings.runner);
-
-      const setup = wine.setup;
-      if (setup?.detectionState === "detecting") {
-        const detection = document.createElement("section");
-        detection.className = "wine-detection-status";
-        detection.setAttribute("aria-live", "polite");
-        const spinner = document.createElement("span");
-        spinner.className = "steam-spinner";
-        spinner.setAttribute("aria-hidden", "true");
-        const copy = document.createElement("p");
-        copy.textContent =
-          setup.detectionMessage ||
-          "Recherche d’une installation Wine-Staging locale en arrière-plan.";
-        detection.append(spinner, copy);
-        body.append(detection);
-      } else if (setup?.detectionMessage && !setup.wineLabel && !setup.detectedWineLabel) {
-        const tone: SteamNoticeTone =
-          setup.detectionState === "error" || setup.detectionState === "unavailable" ? "error" : "info";
-        appendWineNotice(body, setup.detectionMessage, tone);
-      }
-
-      if (setup?.detectedWineLabel && !setup.wineLabel) {
-        const detected = document.createElement("p");
-        detected.className = "wine-detected-label";
-        detected.textContent = "Installation Wine-Staging détectée : " + setup.detectedWineLabel;
-        body.append(detected);
-      }
-
-      const select = wineActionButton(
-        "select-wine",
-        setup?.wineLabel ? "Changer l’installation Wine-Staging" : "Sélectionner manuellement Wine-Staging",
-        setup?.wineLabel ? "steam-secondary-button" : "steam-import-button",
-        "monitor",
-      );
-      const actions = document.createElement("div");
-      actions.className = "wine-step-actions";
-      if (setup?.wineLabel) {
-        actions.append(wineActionButton("continue-from-wine", "Continuer", "steam-secondary-button"));
-        actions.append(select);
-      } else {
-        if (setup?.detectedWineLabel) {
-          actions.append(
-            wineActionButton(
-              "confirm-detected-wine",
-              "Utiliser Wine-Staging détecté",
-              "steam-import-button",
-              "monitor",
-            ),
-          );
-        }
-        actions.append(select);
-        if (setup?.detectionState === "detecting") {
-          actions.append(wineActionButton("cancel-wine-detection", "Annuler la détection", "steam-secondary-button", "close"));
-        }
-      }
-      body.append(actions);
-      appendWineNotice(body, wine.notice, wine.noticeTone);
-      return;
-    }
-
-    if (wine.step === "name") {
-      const intro = document.createElement("section");
-      intro.className = "wine-step-intro";
-      const heading = document.createElement("h2");
-      heading.textContent = "2. Nommer le profil";
-      const message = document.createElement("p");
-      message.textContent =
-        "Chaque profil possède son propre préfixe Wine géré par Orivo. Aucun préfixe existant ne sera modifié.";
-      intro.append(heading, message);
-      body.append(intro);
-
-      const form = document.createElement("form");
-      form.className = "wine-profile-form";
-      form.dataset.wineForm = "profile-name";
-      const label = document.createElement("label");
-      label.textContent = "Nom du profil";
-      const input = document.createElement("input");
-      input.name = "wine-profile-name";
-      input.autocomplete = "off";
-      input.maxLength = 80;
-      input.required = true;
-      input.placeholder = "Par exemple, Jeux Windows";
-      input.value = wine.displayName;
-      label.append(input);
-      const actions = document.createElement("div");
-      actions.className = "wine-step-actions";
-      actions.append(
-        wineActionButton("back-to-wine", "Retour", "steam-secondary-button", "close"),
-        wineActionButton("continue-to-directories", "Continuer", "steam-import-button"),
-      );
-      actions.lastElementChild?.setAttribute("type", "submit");
-      form.append(label, actions);
-      body.append(form);
-      appendWineNotice(body, wine.notice, wine.noticeTone);
-      return;
-    }
-
-    if (wine.step === "directories") {
-      const intro = document.createElement("section");
-      intro.className = "wine-step-intro";
-      const heading = document.createElement("h2");
-      heading.textContent = "3. Autoriser les dossiers de jeux";
-      const message = document.createElement("p");
-      message.textContent =
-        "Choisissez les dossiers à analyser. Orivo n’affichera ici que leurs libellés et n’analysera jamais d’autres emplacements.";
-      intro.append(heading, message);
-      body.append(intro);
-
-      const directories = wine.setup?.directories ?? [];
-      if (directories.length === 0) {
-        const empty = document.createElement("section");
-        empty.className = "wine-directory-empty";
-        empty.textContent = "Aucun dossier de jeux autorisé pour ce profil.";
-        body.append(empty);
-      } else {
-        const list = document.createElement("div");
-        list.className = "wine-directory-list";
-        for (const directory of directories) {
-          const row = document.createElement("div");
-          row.className = "wine-directory-row";
-          const label = document.createElement("span");
-          label.innerHTML = icon("folder") + "<strong></strong>";
-          label.querySelector("strong")!.textContent = directory.label;
-          const remove = wineActionButton("remove-wine-directory", "Retirer", "wine-text-button");
-          remove.dataset.directoryId = directory.id;
-          row.append(label, remove);
-          list.append(row);
-        }
-        body.append(list);
-      }
-
-      const add = wineActionButton("choose-wine-directory", "Ajouter un dossier de jeux", "steam-secondary-button", "folder");
-      body.append(add);
-      const actions = document.createElement("div");
-      actions.className = "wine-step-actions";
-      const back = wineActionButton("back-to-name", "Retour", "steam-secondary-button", "close");
-      const create = wineActionButton("create-wine-profile", "Analyser les jeux", "steam-import-button", "search");
-      create.disabled = directories.length === 0;
-      actions.append(back, create);
-      body.append(actions);
-      appendWineNotice(body, wine.notice, wine.noticeTone);
-      return;
-    }
-
-    if (wine.step === "preview") {
-      const intro = document.createElement("section");
-      intro.className = "wine-step-intro wine-step-intro--compact";
-      const heading = document.createElement("h2");
-      heading.textContent = "4. Aperçu des jeux trouvés";
-      const message = document.createElement("p");
-      const scan = wine.scanStatus;
-      if (wine.scanPhase === "importing") {
-        message.textContent = "Validation des exécutables avant l’import · vous pouvez annuler.";
-      } else if (wine.scanPhase === "scanning" || wine.scanPhase === "starting" || wine.scanPhase === "cancelling") {
-        const fileCount = scan?.scannedFiles ?? 0;
-        message.textContent =
-          fileCount > 0
-            ? fileCount.toLocaleString() + " fichiers vérifiés · vous pouvez continuer à utiliser Orivo."
-            : "L’analyse se poursuit en arrière-plan.";
-      } else {
-        message.textContent =
-          scan?.message || "Sélectionnez les exécutables à ajouter à votre bibliothèque.";
-      }
-      intro.append(heading, message);
-      body.append(intro);
-      appendWineNotice(body, wine.notice, wine.noticeTone);
-      renderWineGameList(body);
-
-      const actions = document.createElement("div");
-      actions.className = "wine-step-actions wine-step-actions--preview";
-      if (
-        wine.scanPhase === "scanning" ||
-        wine.scanPhase === "starting" ||
-        wine.scanPhase === "cancelling" ||
-        wine.scanPhase === "importing"
-      ) {
-        const cancel = wineActionButton(
-          "cancel-wine-scan",
-          wine.scanPhase === "cancelling"
-            ? "Annulation…"
-            : wine.scanPhase === "importing"
-              ? "Annuler l’import"
-              : "Annuler l’analyse",
-          "steam-secondary-button",
-          "close",
-        );
-        cancel.disabled = wine.scanPhase === "cancelling";
-        actions.append(cancel);
-      } else if (wine.scanPhase === "error" || wine.scanPhase === "cancelled") {
-        actions.append(wineActionButton("retry-wine-scan", "Relancer l’analyse", "steam-secondary-button", "refresh"));
-      }
-      const selectedCount = wine.selectedGameRefs.size;
-      const importButton = wineActionButton(
-        "import-wine-games",
-        selectedCount === 1 ? "Importer 1 jeu" : "Importer " + selectedCount + " jeux",
-        "steam-import-button",
-      );
-      importButton.disabled = selectedCount === 0 || wine.scanPhase !== "ready";
-      actions.append(importButton);
-      body.append(actions);
-      return;
-    }
-
-    const completed = document.createElement("section");
-    completed.className = "steam-state steam-state--unavailable";
-    const badge = document.createElement("span");
-    badge.className = "steam-state__icon";
-    badge.innerHTML = icon("library");
-    badge.setAttribute("aria-hidden", "true");
-    const heading = document.createElement("h2");
-    heading.textContent = "Import Wine terminé";
-    const message = document.createElement("p");
-    message.textContent = wine.notice || "Les jeux importés sont disponibles dans votre bibliothèque.";
-    const done = wineActionButton("close", "Terminer", "steam-import-button");
-    completed.append(badge, heading, message, done);
-    body.append(completed);
-  };
 
   const renderWineSettingsPanel = (): void => {
     const settings = state.wineSettings;
@@ -1479,25 +890,6 @@ export function mountApp(root: HTMLElement): void {
     appendWineRunnerSummary(body, settings.runner);
     appendWineNotice(body, settings.notice, settings.noticeTone);
 
-    const attachedGame = settings.pendingAttachGameId
-      ? state.games.find((game) => game.id === settings.pendingAttachGameId && game.wineAttachable)
-      : undefined;
-    if (attachedGame) {
-      const association = document.createElement("section");
-      association.className = "wine-direct-association";
-      const heading = document.createElement("h2");
-      heading.textContent = "Configurer avec Wine";
-      const message = document.createElement("p");
-      message.textContent =
-        "Choisissez un profil qui autorise déjà le dossier de “" +
-        attachedGame.title +
-        "”. Orivo validera l’exécutable avant de le lancer, sans modifier sa fiche Direct.";
-      const cancel = wineActionButton("cancel-direct-wine-association", "Annuler", "wine-text-button");
-      association.append(heading, message, cancel);
-      body.append(association);
-    } else if (settings.pendingAttachGameId) {
-      settings.pendingAttachGameId = "";
-    }
 
     const heading = document.createElement("h2");
     heading.className = "wine-settings-heading";
@@ -1507,11 +899,7 @@ export function mountApp(root: HTMLElement): void {
     if (settings.profiles.length === 0) {
       const empty = document.createElement("section");
       empty.className = "wine-directory-empty";
-      empty.textContent = attachedGame
-        ? "Créez d’abord un profil Wine-Staging et autorisez le dossier de ce jeu Windows."
-        : "Aucun profil Wine-Staging n’est encore configuré.";
-      const add = wineActionButton("add-wine-profile", "Ajouter Wine-Staging", "steam-secondary-button", "monitor");
-      empty.append(add);
+      empty.textContent = "Aucun profil Wine-Staging n’est encore configuré.";
       body.append(empty);
       return;
     }
@@ -1566,13 +954,14 @@ export function mountApp(root: HTMLElement): void {
       if (profile.graphicsBackend === "dxvk_macos") {
         const warning = document.createElement("p");
         warning.className = "wine-profile-card__warning";
-        warning.textContent = "Expérimental · évitez les jeux protégés par anti-cheat.";
+        warning.textContent =
+          "DXVK-macOS (Metal) est le rendu par défaut sur les Mac Apple Silicon. Réglage expérimental · évitez les jeux protégés par anti-cheat. « Revenir à Wine 3D » reste un choix optionnel.";
         card.append(warning);
       } else {
         const dxvkHint = document.createElement("p");
         dxvkHint.className = "wine-profile-card__hint";
         dxvkHint.textContent =
-          "Compatibilité automatique · au premier lancement d’un jeu Wine compatible, Orivo prépare DXVK-macOS si nécessaire pour ce profil, sans modifier Wine-Staging ni les préfixes d’autres applications.";
+          "Ce profil utilise Wine 3D. Sur les Mac Apple Silicon, DXVK-macOS (Metal) est activé par défaut ; « Activer DXVK-macOS » n’est qu’un réglage optionnel. Orivo prépare DXVK-macOS au premier lancement d’un jeu compatible si nécessaire, sans modifier Wine-Staging ni les préfixes d’autres applications.";
         card.append(dxvkHint);
       }
 
@@ -1598,17 +987,6 @@ export function mountApp(root: HTMLElement): void {
       } else {
         const actions = document.createElement("div");
         actions.className = "wine-profile-card__actions";
-        if (attachedGame) {
-          const associate = wineActionButton(
-            "associate-direct-game-with-wine",
-            "Utiliser pour “" + attachedGame.title + "”",
-            "steam-import-button",
-            "monitor",
-          );
-          associate.dataset.profileId = profile.id;
-          associate.disabled = !profile.enabled;
-          actions.append(associate);
-        }
         const dxvk = wineActionButton(
           "install-dxvk-macos",
           profile.graphicsBackend === "dxvk_macos" ? "Réinstaller DXVK-macOS" : "Activer DXVK-macOS",
@@ -1626,9 +1004,6 @@ export function mountApp(root: HTMLElement): void {
           wine3d.dataset.profileId = profile.id;
           actions.append(wine3d);
         }
-        const reimport = wineActionButton("reimport-wine-profile", "Relancer l’import", "steam-secondary-button", "refresh");
-        reimport.dataset.profileId = profile.id;
-        reimport.disabled = !profile.enabled;
         const toggle = wineActionButton(
           "toggle-wine-profile",
           profile.enabled ? "Désactiver" : "Activer",
@@ -1638,7 +1013,7 @@ export function mountApp(root: HTMLElement): void {
         toggle.dataset.enabled = String(!profile.enabled);
         const remove = wineActionButton("delete-wine-profile", "Supprimer", "wine-text-button");
         remove.dataset.profileId = profile.id;
-        actions.append(dxvk, reimport, toggle, remove);
+        actions.append(dxvk, toggle, remove);
         card.append(actions);
       }
       profiles.append(card);
@@ -1646,692 +1021,6 @@ export function mountApp(root: HTMLElement): void {
     body.append(profiles);
   };
 
-  const setWineNotice = (message: string, tone: SteamNoticeTone): void => {
-    state.wine.notice = message;
-    state.wine.noticeTone = tone;
-  };
-
-  const scheduleWineDetectionPoll = (request: number, setupId: string, delay = 650): void => {
-    const setup = state.wine.setup;
-    if (
-      request !== wineDetectionRequest ||
-      !state.wine.open ||
-      !setup ||
-      setup.setupId !== setupId ||
-      setup.detectionState !== "detecting"
-    ) {
-      return;
-    }
-    window.clearTimeout(wineDetectionTimer);
-    wineDetectionTimer = window.setTimeout(() => {
-      wineDetectionTimer = undefined;
-      void pollWineDetection(request, setupId);
-    }, delay);
-  };
-
-  const pollWineDetection = async (request: number, setupId: string): Promise<void> => {
-    const currentSetup = state.wine.setup;
-    if (
-      request !== wineDetectionRequest ||
-      !state.wine.open ||
-      !currentSetup ||
-      currentSetup.setupId !== setupId ||
-      currentSetup.detectionState !== "detecting" ||
-      !isTauriRuntime()
-    ) {
-      return;
-    }
-
-    try {
-      const setup = normaliseWineSetup(
-        await invoke<unknown>("get_wine_profile_setup", { setupId }),
-        currentSetup,
-      );
-      if (
-        request !== wineDetectionRequest ||
-        !state.wine.open ||
-        state.wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      if (!setup) {
-        throw new Error("La détection Wine-Staging n’a pas renvoyé d’état valide.");
-      }
-      state.wine.setup = setup;
-      renderWineSetupPanel();
-      if (setup.detectionState === "detecting") {
-        scheduleWineDetectionPoll(request, setupId);
-      }
-    } catch (error) {
-      if (
-        request !== wineDetectionRequest ||
-        !state.wine.open ||
-        state.wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      state.wine.setup = {
-        ...currentSetup,
-        detectionState: "error",
-        detectionMessage: messageFromError(error, "La détection Wine-Staging n’a pas pu être suivie."),
-      };
-      renderWineSetupPanel();
-    }
-  };
-
-  const cancelWineDetection = async (): Promise<void> => {
-    const currentSetup = state.wine.setup;
-    if (
-      !currentSetup ||
-      currentSetup.detectionState !== "detecting" ||
-      !isTauriRuntime()
-    ) {
-      return;
-    }
-    const setupId = currentSetup.setupId;
-    const request = stopWineDetectionPolling();
-    state.wine.setup = {
-      ...currentSetup,
-      detectionState: "cancelled",
-      detectionMessage: "Annulation de la détection Wine-Staging…",
-    };
-    renderWineSetupPanel();
-
-    try {
-      const result = await invoke<unknown>("cancel_wine_detection", { setupId });
-      if (
-        request !== wineDetectionRequest ||
-        !state.wine.open ||
-        state.wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      const setup = normaliseWineSetup(result, currentSetup);
-      state.wine.setup = setup ?? {
-        ...currentSetup,
-        detectionState: "cancelled",
-        detectionMessage: "Détection Wine-Staging annulée.",
-      };
-    } catch (error) {
-      if (
-        request !== wineDetectionRequest ||
-        !state.wine.open ||
-        state.wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      state.wine.setup = {
-        ...currentSetup,
-        detectionState: "error",
-        detectionMessage: messageFromError(error, "La détection Wine-Staging n’a pas pu être annulée."),
-      };
-    }
-    renderWineSetupPanel();
-  };
-
-  const loadWineRunnerStatus = async (): Promise<WineRunnerStatus | null> => {
-    if (!isTauriRuntime()) {
-      const unavailable: WineRunnerStatus = {
-        state: "unavailable",
-        available: false,
-        version: "",
-        message: "Wine-Staging est disponible dans l’app Orivo pour macOS.",
-      };
-      state.wineSettings.runner = unavailable;
-      return unavailable;
-    }
-
-    try {
-      const status = normaliseWineRunnerStatus(await invoke<unknown>("get_wine_runner_status"));
-      state.wineSettings.runner = status;
-      return status;
-    } catch (error) {
-      const unavailable: WineRunnerStatus = {
-        state: "error",
-        available: false,
-        version: "",
-        message: messageFromError(error, "L’état de Wine-Staging est temporairement indisponible."),
-      };
-      state.wineSettings.runner = unavailable;
-      return unavailable;
-    }
-  };
-
-  const beginWineProfileSetup = async (): Promise<void> => {
-    cancelWineBackgroundWork();
-    clearWineScanPolling();
-    const detectionRequest = stopWineDetectionPolling();
-    const wine = state.wine;
-    wine.step = "loading";
-    wine.setup = null;
-    wine.profile = null;
-    wine.profileId = "";
-    wine.displayName = "";
-    resetWineScan();
-    setWineNotice("", "info");
-    renderWineSetupPanel();
-
-    if (!isTauriRuntime()) {
-      wine.step = "error";
-      setWineNotice("La configuration Wine-Staging est disponible dans l’app Orivo pour macOS.", "error");
-      renderWineSetupPanel();
-      return;
-    }
-
-    const runnerTask = loadWineRunnerStatus();
-    void runnerTask.then(() => {
-      if (detectionRequest === wineDetectionRequest && wine.open) {
-        renderWineSetupPanel();
-      }
-    });
-    try {
-      const setup = normaliseWineSetup(await invoke<unknown>("begin_wine_profile_setup"));
-      if (detectionRequest !== wineDetectionRequest || !wine.open) {
-        return;
-      }
-      if (!setup) {
-        throw new Error("Wine-Staging a renvoyé une préparation de profil invalide.");
-      }
-      wine.setup = setup;
-      wine.step = "wine";
-      if (setup.detectionState === "detecting") {
-        scheduleWineDetectionPoll(detectionRequest, setup.setupId, 250);
-      }
-    } catch (error) {
-      if (detectionRequest !== wineDetectionRequest || !wine.open) {
-        return;
-      }
-      wine.step = "error";
-      setWineNotice(messageFromError(error, "Le profil Wine n’a pas pu être préparé."), "error");
-    }
-    renderWineSetupPanel();
-  };
-
-  const openWineSetup = async (): Promise<void> => {
-    closeLibraryMenu();
-    setWineSetupOpen(true);
-    await beginWineProfileSetup();
-  };
-
-  const selectWineStaging = async (): Promise<void> => {
-    const wine = state.wine;
-    const currentSetup = wine.setup;
-    if (!currentSetup || !isTauriRuntime()) {
-      return;
-    }
-    const setupId = currentSetup.setupId;
-    const request = stopWineDetectionPolling();
-    const stoppedSetup: WineSetupSnapshot = {
-      ...currentSetup,
-      detectionState: currentSetup.detectionState === "detecting" ? "cancelled" : currentSetup.detectionState,
-      detectionMessage:
-        currentSetup.detectionState === "detecting"
-          ? "Détection interrompue pour choisir Wine-Staging manuellement."
-          : currentSetup.detectionMessage,
-    };
-    wine.setup = stoppedSetup;
-    wine.step = "loading";
-    setWineNotice("Ouverture du sélecteur Wine-Staging…", "info");
-    renderWineSetupPanel();
-
-    try {
-      const result = await invoke<unknown>("select_wine_staging", { setupId });
-      if (
-        request !== wineDetectionRequest ||
-        !wine.open ||
-        wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      const setup = normaliseWineSetup(result, stoppedSetup);
-      if (!setup || !setup.wineLabel) {
-        throw new Error("Wine-Staging n’a pas confirmé l’installation sélectionnée.");
-      }
-      wine.setup = setup;
-      wine.step = "wine";
-      setWineNotice("", "info");
-    } catch (error) {
-      if (
-        request !== wineDetectionRequest ||
-        !wine.open ||
-        wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      wine.setup = stoppedSetup;
-      wine.step = "wine";
-      setWineNotice(messageFromError(error, "L’installation Wine-Staging n’a pas pu être validée."), "error");
-    }
-    renderWineSetupPanel();
-  };
-
-  const confirmDetectedWineStaging = async (): Promise<void> => {
-    const wine = state.wine;
-    const currentSetup = wine.setup;
-    if (!currentSetup || !currentSetup.detectedWineLabel || !isTauriRuntime()) {
-      return;
-    }
-    const setupId = currentSetup.setupId;
-    const request = stopWineDetectionPolling();
-    wine.step = "loading";
-    setWineNotice("Validation de Wine-Staging détecté…", "info");
-    renderWineSetupPanel();
-
-    try {
-      const result = await invoke<unknown>("confirm_detected_wine_staging", { setupId });
-      if (
-        request !== wineDetectionRequest ||
-        !wine.open ||
-        wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      const setup = normaliseWineSetup(result, currentSetup);
-      if (!setup || !setup.wineLabel) {
-        throw new Error("Wine-Staging détecté n’a pas pu être validé.");
-      }
-      wine.setup = setup;
-      wine.step = "wine";
-      setWineNotice("", "info");
-    } catch (error) {
-      if (
-        request !== wineDetectionRequest ||
-        !wine.open ||
-        wine.setup?.setupId !== setupId
-      ) {
-        return;
-      }
-      wine.setup = currentSetup;
-      wine.step = "wine";
-      setWineNotice(messageFromError(error, "Wine-Staging détecté n’a pas pu être validé."), "error");
-    }
-    renderWineSetupPanel();
-  };
-
-  const chooseWineGameDirectory = async (): Promise<void> => {
-    const wine = state.wine;
-    const currentSetup = wine.setup;
-    if (!currentSetup || !isTauriRuntime()) {
-      return;
-    }
-    const setupId = currentSetup.setupId;
-    setWineNotice("Choisissez un dossier de jeux dans le sélecteur macOS.", "info");
-    renderWineSetupPanel();
-    try {
-      const result = await invoke<unknown>("choose_wine_game_directory", { setupId });
-      const setup = normaliseWineSetup(result, currentSetup);
-      if (setup) {
-        wine.setup = setup;
-      } else {
-        const directory = normaliseWineDirectory(result);
-        if (directory && !currentSetup.directories.some((candidate) => candidate.id === directory.id)) {
-          wine.setup = { ...currentSetup, directories: [...currentSetup.directories, directory] };
-        }
-      }
-      setWineNotice("", "info");
-    } catch (error) {
-      setWineNotice(messageFromError(error, "Le dossier de jeux n’a pas été ajouté."), "error");
-    }
-    renderWineSetupPanel();
-  };
-
-  const removeWineSetupDirectory = async (directoryId: string): Promise<void> => {
-    const wine = state.wine;
-    const currentSetup = wine.setup;
-    if (!currentSetup || !directoryId || !isTauriRuntime()) {
-      return;
-    }
-    const setupId = currentSetup.setupId;
-    try {
-      const result = await invoke<unknown>("remove_wine_setup_directory", { setupId, directoryId });
-      const setup = normaliseWineSetup(result, currentSetup);
-      wine.setup = setup ?? {
-        ...currentSetup,
-        directories: currentSetup.directories.filter((directory) => directory.id !== directoryId),
-      };
-      setWineNotice("", "info");
-    } catch (error) {
-      setWineNotice(messageFromError(error, "Le dossier autorisé n’a pas pu être retiré."), "error");
-    }
-    renderWineSetupPanel();
-  };
-
-  const continueWineProfileName = (displayName: string): void => {
-    const wine = state.wine;
-    const trimmed = displayName.trim();
-    if (!trimmed) {
-      setWineNotice("Donnez un nom à ce profil Wine.", "error");
-      renderWineSetupPanel();
-      return;
-    }
-    wine.displayName = trimmed;
-    wine.step = "directories";
-    setWineNotice("", "info");
-    renderWineSetupPanel();
-  };
-
-  const scheduleWineScanPoll = (request: number, delay = 700): void => {
-    if (request !== wineScanRequest) {
-      return;
-    }
-    window.clearTimeout(wineScanTimer);
-    wineScanTimer = window.setTimeout(() => {
-      wineScanTimer = undefined;
-      void pollWineScan(request);
-    }, delay);
-  };
-
-  const loadWineScanPage = async (request: number): Promise<void> => {
-    const wine = state.wine;
-    const jobId = wine.scanJobId;
-    if (
-      request !== wineScanRequest ||
-      !jobId ||
-      wine.loadingPage ||
-      !isTauriRuntime()
-    ) {
-      return;
-    }
-    wine.loadingPage = true;
-    renderWineSetupPanel();
-    try {
-      const page = normaliseWineScanPage(
-        await invoke<unknown>("get_wine_scan_page", {
-          jobId,
-          cursor: wine.nextCursor,
-          limit: WINE_SCAN_PAGE_SIZE,
-        }),
-      );
-      if (request !== wineScanRequest || wine.scanJobId !== jobId) {
-        return;
-      }
-      for (const game of page.games) {
-        const previous = wine.scanGames.get(game.ref);
-        wine.scanGames.set(game.ref, { ...previous, ...game });
-        if (game.launchable && wine.selectedGameRefs.size < MAX_WINE_IMPORT_SELECTION) {
-          wine.selectedGameRefs.add(game.ref);
-        }
-      }
-      wine.nextCursor = page.nextCursor;
-      if (wine.selectedGameRefs.size >= MAX_WINE_IMPORT_SELECTION) {
-        setWineNotice(
-          "Choisissez jusqu’à " + MAX_WINE_IMPORT_SELECTION.toLocaleString() + " jeux par import.",
-          "info",
-        );
-      }
-    } catch (error) {
-      if (request === wineScanRequest) {
-        setWineNotice(messageFromError(error, "L’aperçu des jeux Wine n’a pas pu être chargé."), "error");
-      }
-    } finally {
-      if (request === wineScanRequest) {
-        wine.loadingPage = false;
-        renderWineSetupPanel();
-      }
-    }
-  };
-
-  const pollWineScan = async (request: number): Promise<void> => {
-    const wine = state.wine;
-    const jobId = wine.scanJobId;
-    if (
-      request !== wineScanRequest ||
-      !jobId ||
-      wine.scanPhase === "cancelling" ||
-      wine.scanPhase === "cancelled" ||
-      wine.scanPhase === "error" ||
-      !isTauriRuntime()
-    ) {
-      return;
-    }
-
-    try {
-      const status = normaliseWineScanStatus(await invoke<unknown>("get_wine_scan_status", { jobId }));
-      if (request !== wineScanRequest || wine.scanJobId !== jobId) {
-        return;
-      }
-      wine.scanStatus = status;
-      wine.scanPhase = status.state;
-      if (status.foundGames > wine.scanGames.size || wine.scanGames.size === 0) {
-        void loadWineScanPage(request);
-      }
-      renderWineSetupPanel();
-      if (status.state === "starting" || status.state === "scanning") {
-        scheduleWineScanPoll(request);
-      } else if (status.state === "ready") {
-        void loadWineScanPage(request);
-      }
-    } catch (error) {
-      if (request !== wineScanRequest) {
-        return;
-      }
-      wine.scanPhase = "error";
-      wine.scanStatus = {
-        state: "error",
-        scannedFiles: wine.scanStatus?.scannedFiles ?? 0,
-        foundGames: wine.scanStatus?.foundGames ?? wine.scanGames.size,
-        message: messageFromError(error, "L’analyse Wine n’a pas pu être suivie."),
-      };
-      renderWineSetupPanel();
-    }
-  };
-
-  const startWineProfileScan = async (profileId: string): Promise<void> => {
-    if (!profileId || !isTauriRuntime()) {
-      return;
-    }
-    const request = clearWineScanPolling();
-    const wine = state.wine;
-    resetWineScan();
-    wine.step = "preview";
-    wine.profileId = profileId;
-    wine.scanPhase = "starting";
-    setWineNotice("", "info");
-    renderWineSetupPanel();
-    try {
-      const result = await invoke<unknown>("start_wine_profile_scan", { profileId });
-      if (request !== wineScanRequest) {
-        return;
-      }
-      const status = normaliseWineScanStatus(result);
-      const jobId = readStringFromUnknown(result, "jobId", "job_id");
-      if (!jobId) {
-        throw new Error("Wine-Staging n’a pas démarré l’analyse demandée.");
-      }
-      wine.scanJobId = jobId;
-      wine.scanStatus = status;
-      wine.scanPhase = status.state;
-      renderWineSetupPanel();
-      void loadWineScanPage(request);
-      if (status.state === "starting" || status.state === "scanning") {
-        scheduleWineScanPoll(request, 350);
-      }
-    } catch (error) {
-      if (request !== wineScanRequest) {
-        return;
-      }
-      wine.scanPhase = "error";
-      wine.scanStatus = {
-        state: "error",
-        scannedFiles: 0,
-        foundGames: 0,
-        message: messageFromError(error, "L’analyse des jeux Wine n’a pas pu démarrer."),
-      };
-      renderWineSetupPanel();
-    }
-  };
-
-  const createWineProfile = async (): Promise<void> => {
-    const wine = state.wine;
-    const setup = wine.setup;
-    const displayName = wine.displayName.trim();
-    if (!setup || !displayName || setup.directories.length === 0 || !isTauriRuntime()) {
-      return;
-    }
-    wine.step = "loading";
-    setWineNotice("", "info");
-    renderWineSetupPanel();
-    try {
-      const result = await invoke<unknown>("create_wine_profile", {
-        setupId: setup.setupId,
-        displayName,
-      });
-      const profile = normaliseWineProfile(result, {
-        id: readStringFromUnknown(result, "profileId", "profile_id"),
-        displayName,
-        enabled: true,
-        wineLabel: setup.wineLabel,
-        directories: setup.directories,
-        lastImport: "",
-        lastImportSummary: "",
-        graphicsBackend: "wine_d3d",
-        graphicsSummary: "Wine 3D · mode de compatibilité par défaut",
-      });
-      if (!profile) {
-        throw new Error("Wine-Staging n’a pas créé de profil valide.");
-      }
-      wine.profile = profile;
-      wine.profileId = profile.id;
-      wine.step = "preview";
-      await startWineProfileScan(profile.id);
-    } catch (error) {
-      wine.step = "directories";
-      setWineNotice(messageFromError(error, "Le profil Wine n’a pas pu être créé."), "error");
-      renderWineSetupPanel();
-    }
-  };
-
-  const cancelWineScan = async (): Promise<void> => {
-    const wine = state.wine;
-    const jobId = wine.scanJobId;
-    if (!jobId || !isTauriRuntime() || wine.scanPhase === "cancelling") {
-      return;
-    }
-    const request = clearWineScanPolling();
-    wine.scanPhase = "cancelling";
-    renderWineSetupPanel();
-    try {
-      await invoke("cancel_wine_scan", { jobId });
-      if (request !== wineScanRequest || wine.scanJobId !== jobId) {
-        return;
-      }
-      wine.scanPhase = "cancelled";
-      wine.scanStatus = {
-        state: "cancelled",
-        scannedFiles: wine.scanStatus?.scannedFiles ?? 0,
-        foundGames: wine.scanStatus?.foundGames ?? wine.scanGames.size,
-        message: "L’analyse Wine a été annulée.",
-      };
-    } catch (error) {
-      if (request !== wineScanRequest) {
-        return;
-      }
-      wine.scanPhase = "error";
-      wine.scanStatus = {
-        state: "error",
-        scannedFiles: wine.scanStatus?.scannedFiles ?? 0,
-        foundGames: wine.scanStatus?.foundGames ?? wine.scanGames.size,
-        message: messageFromError(error, "L’analyse Wine n’a pas pu être annulée."),
-      };
-    }
-    renderWineSetupPanel();
-  };
-
-  const retryWineScan = async (): Promise<void> => {
-    const profileId = state.wine.profileId || state.wine.profile?.id;
-    if (profileId) {
-      await startWineProfileScan(profileId);
-    }
-  };
-
-  const updateWineSelection = (gameRef: string, selected: boolean): void => {
-    const wine = state.wine;
-    const game = wine.scanGames.get(gameRef);
-    if (!game || !game.launchable) {
-      return;
-    }
-    if (selected) {
-      if (!wine.selectedGameRefs.has(gameRef) && wine.selectedGameRefs.size >= MAX_WINE_IMPORT_SELECTION) {
-        setWineNotice(
-          "Choisissez jusqu’à " + MAX_WINE_IMPORT_SELECTION.toLocaleString() + " jeux par import.",
-          "info",
-        );
-      } else {
-        wine.selectedGameRefs.add(gameRef);
-      }
-    } else {
-      wine.selectedGameRefs.delete(gameRef);
-    }
-    renderWineSetupPanel();
-  };
-
-  const setVisibleWineSelection = (selected: boolean): void => {
-    const wine = state.wine;
-    let capped = false;
-    for (const game of [...wine.scanGames.values()].slice(0, MAX_RENDERED_WINE_GAMES)) {
-      if (!game.launchable) {
-        continue;
-      }
-      if (selected) {
-        if (!wine.selectedGameRefs.has(game.ref) && wine.selectedGameRefs.size >= MAX_WINE_IMPORT_SELECTION) {
-          capped = true;
-          break;
-        }
-        wine.selectedGameRefs.add(game.ref);
-      } else {
-        wine.selectedGameRefs.delete(game.ref);
-      }
-    }
-    if (capped) {
-      setWineNotice(
-        "Choisissez jusqu’à " + MAX_WINE_IMPORT_SELECTION.toLocaleString() + " jeux par import.",
-        "info",
-      );
-    }
-    renderWineSetupPanel();
-  };
-
-  const importWineGames = async (): Promise<void> => {
-    const wine = state.wine;
-    const profileId = wine.profileId || wine.profile?.id;
-    const jobId = wine.scanJobId;
-    const gameRefs = [...wine.selectedGameRefs].filter((ref) => wine.scanGames.has(ref));
-    if (
-      !profileId ||
-      !jobId ||
-      gameRefs.length === 0 ||
-      wine.scanPhase !== "ready" ||
-      !isTauriRuntime()
-    ) {
-      return;
-    }
-
-    wine.scanPhase = "importing";
-    setWineNotice("", "info");
-    renderWineSetupPanel();
-    try {
-      const result = normaliseWineImportResult(
-        await invoke<unknown>("import_wine_games", { profileId, jobId, gameRefs }),
-      );
-      wine.step = "complete";
-      wine.scanPhase = "ready";
-      wine.selectedGameRefs.clear();
-      setWineNotice(wineImportSummary(result), result.importedIds.length + result.updatedIds.length > 0 ? "success" : "info");
-      const importedId = result.importedIds[0] || result.updatedIds[0];
-      await Promise.all([refreshLibrary(importedId), refreshWineRunnerSettings(false)]);
-      showToast(wine.notice);
-    } catch (error) {
-      const cancelled = wine.scanStatus?.state === "cancelled";
-      wine.scanPhase = cancelled ? "cancelled" : "ready";
-      setWineNotice(
-        cancelled
-          ? "L’import Wine a été annulé."
-          : messageFromError(error, "Les jeux Wine sélectionnés n’ont pas pu être importés."),
-        cancelled ? "info" : "error",
-      );
-    }
-    renderWineSetupPanel();
-  };
 
   const refreshWineRunnerSettings = async (render = true): Promise<void> => {
     const settings = state.wineSettings;
@@ -2375,19 +1064,11 @@ export function mountApp(root: HTMLElement): void {
     state.wineSettings.open = open;
     refs.wineSettingsPanel.hidden = !open;
     if (!open) {
-      state.wineSettings.pendingAttachGameId = "";
       state.wineSettings.pendingDeleteProfileId = "";
       renderWineSettingsPanel();
       return;
     }
     closeLibraryMenu();
-    if (state.wine.open) {
-      cancelWineBackgroundWork();
-      stopWineDetectionPolling();
-      clearWineScanPolling();
-      state.wine.open = false;
-      renderWineSetupPanel();
-    }
     if (state.steam.open) {
       state.steam.open = false;
       renderSteamPanel();
@@ -2396,27 +1077,10 @@ export function mountApp(root: HTMLElement): void {
     renderWineSettingsPanel();
     void refreshWineRunnerSettings();
     requestAnimationFrame(() => {
-      refs.wineSettingsPanel.querySelector<HTMLButtonElement>("[data-wine-action='add-wine-profile']")?.focus();
+      refs.wineSettingsPanel.querySelector<HTMLButtonElement>("[data-wine-settings-action='close']")?.focus();
     });
   };
 
-  const startWineProfileReimport = async (profileId: string): Promise<void> => {
-    const profile = state.wineSettings.profiles.find((candidate) => candidate.id === profileId);
-    if (!profile || !profile.enabled) {
-      return;
-    }
-    cancelWineBackgroundWork();
-    clearWineScanPolling();
-    state.wine.profile = profile;
-    state.wine.profileId = profile.id;
-    state.wine.displayName = profile.displayName;
-    state.wine.setup = null;
-    state.wine.step = "preview";
-    resetWineScan();
-    setWineNotice("", "info");
-    setWineSetupOpen(true);
-    await startWineProfileScan(profile.id);
-  };
 
   const setWineProfileEnabled = async (profileId: string, enabled: boolean): Promise<void> => {
     if (!profileId || !isTauriRuntime()) {
@@ -3391,41 +2055,6 @@ export function mountApp(root: HTMLElement): void {
     renderSteamPanel();
   };
 
-  const configureDirectGameWithWine = async (gameId: string): Promise<void> => {
-    const game = state.games.find((candidate) => candidate.id === gameId);
-    if (!game?.wineAttachable) {
-      return;
-    }
-    state.wineSettings.pendingAttachGameId = gameId;
-    state.wineSettings.pendingDeleteProfileId = "";
-    setWineSettingsOpen(true);
-  };
-
-  const associateDirectGameWithWine = async (profileId: string): Promise<void> => {
-    const settings = state.wineSettings;
-    const gameId = settings.pendingAttachGameId;
-    if (!gameId || !profileId || !isTauriRuntime() || settings.loading) {
-      return;
-    }
-    settings.loading = true;
-    settings.notice = "Validation du jeu Windows avec ce profil Wine…";
-    settings.noticeTone = "info";
-    renderWineSettingsPanel();
-    try {
-      const result = await invoke<unknown>("associate_direct_game_with_wine_profile", { gameId, profileId });
-      const wineGameId = readStringFromUnknown(result, "gameId", "game_id");
-      settings.pendingAttachGameId = "";
-      await Promise.all([refreshLibrary(wineGameId || undefined), refreshWineRunnerSettings(false)]);
-      settings.notice = "Le jeu Windows est prêt à être lancé avec Wine-Staging.";
-      settings.noticeTone = "success";
-      showToast(settings.notice);
-    } catch (error) {
-      settings.notice = messageFromError(error, "Ce jeu Windows n’a pas pu être associé à ce profil Wine.");
-      settings.noticeTone = "error";
-    }
-    settings.loading = false;
-    renderWineSettingsPanel();
-  };
 
   const installDxvkMacosForProfile = async (profileId: string): Promise<void> => {
     const settings = state.wineSettings;
@@ -3483,10 +2112,6 @@ export function mountApp(root: HTMLElement): void {
     }
 
     try {
-      if (game.wineAttachable) {
-        await configureDirectGameWithWine(game.id);
-        return;
-      }
       if (!game.launchable) {
         if (game.source === "steam") {
           showToast("Opening Steam to install " + game.title + "…");
@@ -3590,8 +2215,6 @@ export function mountApp(root: HTMLElement): void {
       setSteamAccountPanelOpen(true, trigger);
     } else if (action === "local") {
       void importGame();
-    } else if (action === "wine") {
-      void openWineSetup();
     }
   });
 
@@ -3635,84 +2258,6 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-  refs.winePanel.addEventListener("click", (event) => {
-    const target = event.target as Element | null;
-    const button = target?.closest<HTMLButtonElement>("[data-wine-action]");
-    const action = button?.dataset.wineAction;
-    if (!action) {
-      return;
-    }
-
-    if (action === "close") {
-      setWineSetupOpen(false);
-    } else if (action === "restart-wine-setup") {
-      void beginWineProfileSetup();
-    } else if (action === "select-wine") {
-      void selectWineStaging();
-    } else if (action === "confirm-detected-wine") {
-      void confirmDetectedWineStaging();
-    } else if (action === "cancel-wine-detection") {
-      void cancelWineDetection();
-    } else if (action === "continue-from-wine") {
-      state.wine.step = "name";
-      setWineNotice("", "info");
-      renderWineSetupPanel();
-    } else if (action === "back-to-wine") {
-      state.wine.step = "wine";
-      setWineNotice("", "info");
-      renderWineSetupPanel();
-    } else if (action === "back-to-name") {
-      state.wine.step = "name";
-      setWineNotice("", "info");
-      renderWineSetupPanel();
-    } else if (action === "choose-wine-directory") {
-      void chooseWineGameDirectory();
-    } else if (action === "remove-wine-directory") {
-      const directoryId = button?.dataset.directoryId;
-      if (directoryId) {
-        void removeWineSetupDirectory(directoryId);
-      }
-    } else if (action === "create-wine-profile") {
-      void createWineProfile();
-    } else if (action === "cancel-wine-scan") {
-      void cancelWineScan();
-    } else if (action === "retry-wine-scan") {
-      void retryWineScan();
-    } else if (action === "load-more-wine-games") {
-      void loadWineScanPage(wineScanRequest);
-    } else if (action === "select-visible-wine-games") {
-      setVisibleWineSelection(true);
-    } else if (action === "clear-wine-selection") {
-      setVisibleWineSelection(false);
-    } else if (action === "import-wine-games") {
-      void importWineGames();
-    }
-  });
-
-  refs.winePanel.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement) || !target.dataset.wineGameRef) {
-      return;
-    }
-    updateWineSelection(target.dataset.wineGameRef, target.checked);
-  });
-
-  refs.winePanel.addEventListener("submit", (event) => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement) || form.dataset.wineForm !== "profile-name") {
-      return;
-    }
-    event.preventDefault();
-    const displayName = form.querySelector<HTMLInputElement>("input[name='wine-profile-name']")?.value ?? "";
-    continueWineProfileName(displayName);
-  });
-
-  refs.winePanel.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setWineSetupOpen(false);
-    }
-  });
 
   refs.wineSettingsPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
@@ -3728,18 +2273,7 @@ export function mountApp(root: HTMLElement): void {
     if (!action) {
       return;
     }
-    if (action === "add-wine-profile") {
-      void openWineSetup();
-    } else if (action === "cancel-direct-wine-association") {
-      state.wineSettings.pendingAttachGameId = "";
-      state.wineSettings.notice = "";
-      renderWineSettingsPanel();
-    } else if (action === "associate-direct-game-with-wine") {
-      const profileId = button?.dataset.profileId;
-      if (profileId) {
-        void associateDirectGameWithWine(profileId);
-      }
-    } else if (action === "install-dxvk-macos") {
+    if (action === "install-dxvk-macos") {
       const profileId = button?.dataset.profileId;
       if (profileId) {
         void installDxvkMacosForProfile(profileId);
@@ -3748,11 +2282,6 @@ export function mountApp(root: HTMLElement): void {
       const profileId = button?.dataset.profileId;
       if (profileId) {
         void useWine3dForProfile(profileId);
-      }
-    } else if (action === "reimport-wine-profile") {
-      const profileId = button?.dataset.profileId;
-      if (profileId) {
-        void startWineProfileReimport(profileId);
       }
     } else if (action === "toggle-wine-profile") {
       const profileId = button?.dataset.profileId;
@@ -4067,11 +2596,6 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
 
-    if (state.wine.open && event.key === "Escape") {
-      event.preventDefault();
-      setWineSetupOpen(false);
-      return;
-    }
     if (state.wineSettings.open && event.key === "Escape") {
       event.preventDefault();
       setWineSettingsOpen(false);
@@ -4083,7 +2607,7 @@ export function mountApp(root: HTMLElement): void {
     if (refs.steamAccountPanel.contains(target)) {
       return;
     }
-    if (refs.winePanel.contains(target) || refs.wineSettingsPanel.contains(target)) {
+    if (refs.wineSettingsPanel.contains(target)) {
       return;
     }
     if (refs.libraryMenu.contains(target)) {
@@ -4154,7 +2678,6 @@ export function mountApp(root: HTMLElement): void {
 
   renderSelection(true);
   renderSteamPanel();
-  renderWineSetupPanel();
   renderWineSettingsPanel();
   void refreshLibrary();
 }
@@ -4281,9 +2804,6 @@ function immediateMediaUrl(value: string): string {
   return value.startsWith("https://") || value.startsWith("/media/") ? value : "";
 }
 
-function readStringFromUnknown(value: unknown, ...keys: string[]): string {
-  return isRecord(value) ? readString(value, ...keys) : "";
-}
 
 function nestedRecord(record: BackendRecord, ...keys: string[]): BackendRecord | null {
   for (const key of keys) {
@@ -4354,84 +2874,6 @@ function normaliseWineDirectories(value: unknown): WineDirectory[] {
   return directories;
 }
 
-function normaliseWineDetectionState(
-  value: string,
-  fallback: WineDetectionState | undefined,
-  hasValidatedWine: boolean,
-): WineDetectionState {
-  switch (value.toLocaleLowerCase()) {
-    case "detecting":
-    case "searching":
-      return "detecting";
-    case "ready":
-    case "complete":
-    case "completed":
-      return "ready";
-    case "unavailable":
-    case "missing":
-      return "unavailable";
-    case "cancelled":
-    case "canceled":
-      return "cancelled";
-    case "error":
-    case "failed":
-      return "error";
-    default:
-      return hasValidatedWine ? "ready" : fallback ?? "ready";
-  }
-}
-
-function normaliseWineSetup(
-  value: unknown,
-  fallback?: WineSetupSnapshot | null,
-): WineSetupSnapshot | null {
-  const record = isRecord(value) ? nestedRecord(value, "setup", "wineSetup", "wine_setup") ?? value : null;
-  if (!record) {
-    return fallback ?? null;
-  }
-  const setupId = readString(record, "setupId", "setup_id") || fallback?.setupId || "";
-  if (!setupId) {
-    return fallback ?? null;
-  }
-  const rawDirectories =
-    record.directories ??
-    record.gameDirectories ??
-    record.game_directories;
-  const hasDirectoryList = Array.isArray(rawDirectories);
-  let directories = hasDirectoryList
-    ? normaliseWineDirectories(rawDirectories)
-    : [...(fallback?.directories ?? [])];
-  const directory = normaliseWineDirectory(record);
-  if (directory && !directories.some((candidate) => candidate.id === directory.id)) {
-    directories = [...directories, directory];
-  }
-  const wineLabel =
-    readString(record, "wineLabel", "wine_label", "wineVersion", "wine_version", "version") ||
-    fallback?.wineLabel ||
-    "";
-  const detectionState = normaliseWineDetectionState(
-    readString(record, "detectionState", "detection_state"),
-    fallback?.detectionState,
-    Boolean(wineLabel),
-  );
-  const reportedDetectedWineLabel = readString(record, "detectedWineLabel", "detected_wine_label");
-  const detectedWineLabel =
-    reportedDetectedWineLabel ||
-    (wineLabel || detectionState === "cancelled" || detectionState === "unavailable" || detectionState === "error"
-      ? ""
-      : fallback?.detectedWineLabel || "");
-  return {
-    setupId,
-    wineLabel,
-    detectedWineLabel,
-    detectionState,
-    detectionMessage:
-      readString(record, "detectionMessage", "detection_message") ||
-      fallback?.detectionMessage ||
-      "",
-    directories,
-  };
-}
 
 function normaliseWineLastImport(record: BackendRecord, fallback = ""): string {
   const supplied = readString(record, "lastImport", "last_import", "lastImportAt", "last_import_at");
@@ -4490,80 +2932,6 @@ function normaliseWineProfile(value: unknown, fallback?: WineProfile): WineProfi
   };
 }
 
-function normaliseWineScanStatus(value: unknown): WineScanStatus {
-  const record = isRecord(value) ? value : {};
-  const rawState = readString(record, "state", "status", "phase").toLocaleLowerCase();
-  const complete = readBoolean(record, "complete", "completed") ?? false;
-  let state: WineScanPhase;
-  if (rawState === "cancelled" || rawState === "canceled") {
-    state = "cancelled";
-  } else if (rawState === "error" || rawState === "failed") {
-    state = "error";
-  } else if (rawState === "starting" || rawState === "queued" || rawState === "pending") {
-    state = "starting";
-  } else if (rawState === "scanning" || rawState === "running" || rawState === "in_progress") {
-    state = "scanning";
-  } else if (rawState === "cancelling") {
-    state = "cancelling";
-  } else if (rawState === "ready" || rawState === "complete" || rawState === "completed") {
-    state = "ready";
-  } else if (!rawState && complete) {
-    state = "ready";
-  } else {
-    state = "scanning";
-  }
-  return {
-    state,
-    scannedFiles: Math.max(0, Math.floor(readNumber(record, "scannedFiles", "scanned_files") ?? 0)),
-    foundGames: Math.max(0, Math.floor(readNumber(record, "foundGames", "found_games") ?? 0)),
-    message: readString(record, "message"),
-  };
-}
-
-function normaliseWineScanPage(value: unknown): WineScanPage {
-  const record = isRecord(value) ? nestedRecord(value, "page", "result") ?? value : {};
-  const rawGames = Array.isArray(record.games)
-    ? record.games
-    : Array.isArray(record.items)
-      ? record.items
-      : [];
-  const games: WineScanGame[] = [];
-  const seenRefs = new Set<string>();
-  for (const candidate of rawGames) {
-    if (!isRecord(candidate)) {
-      continue;
-    }
-    const ref = readString(candidate, "gameRef", "game_ref", "ref", "id");
-    const title = readString(candidate, "title", "name");
-    if (!ref || !title || seenRefs.has(ref)) {
-      continue;
-    }
-    seenRefs.add(ref);
-    games.push({
-      ref,
-      title,
-      directoryLabel: readString(candidate, "directoryLabel", "directory_label", "locationLabel", "location_label"),
-      alreadyImported: readBoolean(candidate, "alreadyImported", "already_imported") ?? false,
-      launchable: readBoolean(candidate, "launchable") ?? true,
-    });
-  }
-  return {
-    games,
-    nextCursor: readOptionalString(record, "nextCursor", "next_cursor") || null,
-  };
-}
-
-function normaliseWineImportResult(value: unknown): WineImportResult {
-  if (!isRecord(value)) {
-    throw new Error("Wine-Staging a renvoyé un résultat d’import invalide.");
-  }
-  return {
-    importedIds: readStringArray(value, "importedIds", "imported_ids"),
-    updatedIds: readStringArray(value, "updatedIds", "updated_ids"),
-    skippedRefs: readStringArray(value, "skippedRefs", "skipped_refs", "skippedGameRefs", "skipped_game_refs"),
-    message: readString(value, "message"),
-  };
-}
 
 function normaliseWineRunnerSettings(value: unknown): { runner: WineRunnerStatus; profiles: WineProfile[] } {
   const record = isRecord(value) ? value : {};
@@ -4589,22 +2957,6 @@ function normaliseWineRunnerSettings(value: unknown): { runner: WineRunnerStatus
   };
 }
 
-function wineImportSummary(result: WineImportResult): string {
-  if (result.message) {
-    return result.message;
-  }
-  const parts: string[] = [];
-  if (result.importedIds.length > 0) {
-    parts.push(result.importedIds.length === 1 ? "1 jeu Wine importé" : result.importedIds.length + " jeux Wine importés");
-  }
-  if (result.updatedIds.length > 0) {
-    parts.push(result.updatedIds.length === 1 ? "1 jeu Wine mis à jour" : result.updatedIds.length + " jeux Wine mis à jour");
-  }
-  if (result.skippedRefs.length > 0) {
-    parts.push(result.skippedRefs.length === 1 ? "1 jeu ignoré" : result.skippedRefs.length + " jeux ignorés");
-  }
-  return parts.length > 0 ? parts.join(" · ") + "." : "Aucun jeu Wine n’avait besoin d’être importé.";
-}
 
 async function normaliseSteamPreview(result: unknown): Promise<SteamPreview | null> {
   if (!isRecord(result)) {
@@ -4886,10 +3238,6 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Importer un jeu local</strong><small>Depuis ce Mac</small></span>
               </button>
-              <button type="button" class="library-source-action" role="menuitem" data-library-action="wine">
-                <span class="library-source-action__icon" aria-hidden="true">${icon("monitor")}</span>
-                <span class="library-source-action__copy"><strong>Ajouter Wine-Staging</strong><small>Créer un profil Wine isolé</small></span>
-              </button>
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
@@ -4984,21 +3332,6 @@ function shell(): string {
         </footer>
       </aside>
 
-      <aside id="wine-setup-panel" class="wine-panel" role="complementary" aria-labelledby="wine-setup-title" aria-describedby="wine-setup-detail" hidden>
-        <header class="steam-panel-header">
-          <div class="steam-panel-title">
-            <span class="steam-source-mark wine-source-mark" aria-hidden="true">${icon("monitor")}</span>
-            <span>
-              <strong id="wine-setup-title">Ajouter Wine-Staging</strong>
-              <small id="wine-setup-detail">Un profil Wine isolé pour Orivo</small>
-            </span>
-          </div>
-          <div class="steam-panel-actions">
-            <button type="button" class="steam-header-button" data-wine-action="close" aria-label="Fermer Wine-Staging">${icon("close")}</button>
-          </div>
-        </header>
-        <div id="wine-setup-body" class="wine-panel-body"></div>
-      </aside>
 
       <aside id="wine-settings-panel" class="wine-settings-panel" role="complementary" aria-labelledby="wine-settings-title" hidden>
         <header class="steam-panel-header">
