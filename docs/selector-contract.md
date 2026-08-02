@@ -10,7 +10,10 @@ Ce document fixe le périmètre du premier vertical slice : découvrir un jeu lo
   introduit les launch targets typés et les références média privées des
   sources, v3 ajoute le target `Runner` des émulateurs et v4 ajoute les
   profils Wine-Staging privés et leur inventaire d'exécutables accordés. v5
-  ajoute le backend graphique Wine fermé, par défaut `WineD3D`.
+  ajoute le backend graphique Wine fermé. La politique par jeu est `Auto`
+  (DXVK-macOS préféré, repli `WineD3D`) ; le défaut du profil est `WineD3D`,
+  sauf sur un Mac Apple Silicon où le profil géré par défaut est directement en
+  `DXVK-macOS` afin que l'utilisateur n'ait jamais à l'activer à la main.
 - La migration v5 est additive : les jeux Direct, Steam et les targets Runner
   génériques restent inchangés; aucun jeu existant n'est basculé vers Wine.
 - Toute migration est explicite, déterministe et sauvegarde d'abord le fichier source en `.bak`.
@@ -76,12 +79,17 @@ L'import n'exécute aucun fichier et ne scanne pas automatiquement les disques. 
 
 ## Runner officiel Wine-Staging (macOS)
 
-Le flux Wine est volontairement séparé de l'import Direct :
-`détecter/sélectionner Wine-Staging` → `nommer un profil` → `autoriser des
-dossiers` → `aperçu paginé` → `importer`. La détection ne lance pas un
-candidat automatiquement; une installation détectée doit être confirmée puis
-validée par le host. Les scans et la revalidation d'import sont exécutés hors
-du chemin de rendu, avec annulation possible.
+Orivo applique Wine-Staging **automatiquement** à tout jeu local `.exe` : il
+n'y a plus d'ajout manuel d'un jeu via Wine. Dès qu'un `.exe` est importé,
+présent au démarrage ou lors d'un rechargement de bibliothèque, le host
+l'associe à un unique profil Wine-Staging géré par défaut (`orivo-auto-wine`).
+Ce profil est provisionné sans assistant : le host détecte l'installation
+Wine-Staging (`detect_wine_staging`), la valide (`wine --version`), crée son
+préfixe sous la racine gérée par Orivo, et n'accorde comme dossier que le
+répertoire canonique propre à chaque `.exe` — jamais une arborescence plus
+large et sans jamais scanner les disques. Orivo n'embarque pas Wine : sans
+installation Wine-Staging détectée, le `.exe` reste une fiche Direct et le
+lancement invite à installer Wine-Staging.
 
 Un profil Wine possède un préfixe créé sous la racine gérée par Orivo et ne
 peut ni adopter ni modifier un préfixe d'une autre application. Au lancement,
@@ -89,25 +97,29 @@ le host recanonise l'exécutable, vérifie qu'il est encore dans un dossier
 accordé et construit `Command` avec des tokens fixes; il n'utilise jamais un
 shell, une ligne de commande ou des arguments provenant du WebView.
 
-Un `.exe` Windows déjà importé comme jeu Direct reste une fiche Direct
-persistée, mais Orivo peut l'associer explicitement à un profil Wine qui a
-déjà accordé son dossier. Le host recanonise alors le chemin privé, vérifie le
-scope et produit une carte `Runner` sans chemin ni arguments. La carte Direct
-est masquée tant que l'association existe, puis réapparaît si le profil Wine
-est supprimé; aucune migration implicite ni perte de bibliothèque ne se
-produit.
+L'association reste **réversible et non destructive** : la fiche Direct
+d'origine est conservée (`origin_direct_game_id`) et masquée tant que la carte
+`Runner` existe, puis réapparaît si le profil géré est supprimé. La carte
+`Runner` ne porte que des IDs opaques, sans chemin ni arguments. Aucune
+bibliothèque n'est perdue et aucun jeu n'est écrit avec un chemin exposé au
+WebView.
 
-Le seul backend graphique additionnel de cette itération est
-`DXVK-macOS` expérimental : un utilisateur sélectionne manuellement l'archive
-DXVK-macOS allowlistée, que le host hache et lit sans extraction libre. Les
-DLL D3D10/11 validées sont copiées atomiquement dans le préfixe Orivo du
-profil, jamais dans l'installation Wine ni dans un autre préfixe. Au
-lancement, le host applique uniquement l'override fixe
+Le backend graphique par défaut dépend de la machine. La politique par jeu est
+`Auto` : sur macOS le host tente d'abord `DXVK-macOS` puis retombe sur
+`WineD3D`. Sur un Mac **Apple Silicon** (détecté via `hw.optional.arm64`, donc
+valide même sous Rosetta), le profil géré par défaut est directement en
+`DXVK-macOS` afin que l'utilisateur n'ait jamais à l'activer à chaque fois. Le
+runtime DXVK-macOS reste allowlisté et vérifié : le host télécharge la seule
+archive épinglée depuis une URL fixe, la hache (`sha256`) et la lit sans
+extraction libre avant d'en copier atomiquement les DLL D3D10/11 validées dans
+le seul préfixe Orivo du profil, jamais dans l'installation Wine ni dans un
+autre préfixe. Au lancement, le host applique uniquement l'override fixe
 `WINEDLLOVERRIDES=d3d10core,d3d11=n,b`; le trajet est DirectX → Vulkan/MoltenVK
-→ Metal. Aucun téléchargement automatique, GPTK, CrossOver, variable Wine
-libre ou support d'anti-cheat n'est inclus. Le profil peut revenir à
-`WineD3D` : les DLL restent alors dans son préfixe privé, mais ne sont plus
-surchargées au lancement.
+→ Metal. Ce téléchargement automatique est limité à cette archive épinglée et
+vérifiée ; aucun GPTK, CrossOver, variable Wine libre ou support d'anti-cheat
+n'est inclus. Un profil peut revenir à `WineD3D` (bouton d'override optionnel) :
+les DLL restent alors dans son préfixe privé, mais ne sont plus surchargées au
+lancement.
 
 Au lancement, le host recanonise puis re-hache l'exécutable avec refus des
 liens juste avant de créer le processus. Wine reçoit le chemin canonique

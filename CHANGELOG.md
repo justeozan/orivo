@@ -21,6 +21,15 @@
 - Locally added games no longer fall back to Elden Ring artwork; media is searched by title with a neutral placeholder fallback.
 - Hozy Playtest now has a cover.
 
+### Changed (Wine)
+
+- Run every local Windows `.exe` through Wine-Staging automatically: importing, launching, or reopening the library now associates each `.exe` with a managed default Wine profile, so there is no manual "add a game via Wine" step. The original local record is kept and reappears if the managed profile is removed.
+- Default to DXVK-macOS on Apple Silicon Macs so Windows games use the Metal graphics path out of the box, without enabling it on every profile. The pinned DXVK runtime is still downloaded, hash-verified, and copied only into Orivo's private prefix, and Wine 3D remains available as an optional override.
+
+### Removed
+
+- The manual Wine setup wizard and the "attach this game to a Wine profile" flow from the interface; Windows games are handled automatically instead.
+
 ## [0.3.0] - 2026-07-19
 
 ### Added
