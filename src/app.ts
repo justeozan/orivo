@@ -4894,8 +4894,8 @@ function shell(): string {
           </div>
           <span class="top-divider" aria-hidden="true"></span>
           <nav class="primary-nav" aria-label="Orivo navigation">
-            <button type="button" class="nav-link is-active" aria-current="page">${icon("library")}<span>Library</span></button>
-            <button type="button" class="nav-link">${icon("store")}<span>Store</span></button>
+            <button type="button" class="nav-link is-active" data-view="library" aria-current="page">${icon("library")}<span>Library</span></button>
+            <button type="button" class="nav-link" data-view="store">${icon("store")}<span>Store</span></button>
             <button id="settings-nav-button" type="button" class="nav-link">${icon("settings")}<span>Settings</span></button>
           </nav>
         </div>
