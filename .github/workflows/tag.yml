@@ -1,0 +1,150 @@
+name: Tag release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version, without the leading v (e.g. 0.4.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Bump version and push tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate the version and make sure the tag is free
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$VERSION' is not a valid version. Expected MAJOR.MINOR.PATCH[-prerelease], without a leading v."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists locally. Pick a new version."
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$VERSION already exists on origin. Pick a new version."
+            exit 1
+          fi
+
+      - name: Bump the version in package.json, Cargo.toml, Cargo.lock and tauri.conf.json
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/bump-version.mjs" <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const version = process.argv[2];
+          if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(version ?? "")) {
+            console.error(`Invalid version: ${version}`);
+            process.exit(1);
+          }
+
+          const fail = (message) => {
+            console.error(message);
+            process.exit(1);
+          };
+
+          // Rewrites a single version literal in place so the rest of the file
+          // keeps its exact formatting.
+          const bump = (path, pattern) => {
+            const source = readFileSync(path, "utf8");
+            const matches = source.match(new RegExp(pattern.source, `${pattern.flags}g`)) ?? [];
+            if (matches.length !== 1) {
+              fail(`Expected exactly one version to bump in ${path}, found ${matches.length}.`);
+            }
+            writeFileSync(path, source.replace(pattern, `$1${version}$2`));
+          };
+
+          const verifyJson = (path) => {
+            const value = JSON.parse(readFileSync(path, "utf8"));
+            if (value.version !== version) {
+              fail(`${path} still reports version ${value.version}.`);
+            }
+          };
+
+          // The top-level "version" key: nested keys are indented deeper.
+          bump("package.json", /^(  "version": ")[^"]*(")/m);
+          bump("src-tauri/tauri.conf.json", /^(  "version": ")[^"]*(")/m);
+          // The `version` of the [package] table.
+          bump("src-tauri/Cargo.toml", /(^\[package\][\s\S]*?^version = ")[^"]*(")/m);
+          // The `orivo` entry only, so no dependency version is touched.
+          bump("Cargo.lock", /(^name = "orivo"\nversion = ")[^"]*(")/m);
+
+          verifyJson("package.json");
+          verifyJson("src-tauri/tauri.conf.json");
+
+          console.log(`Bumped package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml and Cargo.lock to ${version}.`);
+          NODE
+          node "$RUNNER_TEMP/bump-version.mjs" "$VERSION"
+          git --no-pager diff --stat
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json Cargo.lock src-tauri/Cargo.toml src-tauri/tauri.conf.json
+          if git diff --cached --quiet; then
+            echo "Version files are already at $VERSION; tagging the current commit."
+          else
+            git commit -m "chore(release): v$VERSION"
+            git push origin HEAD:main
+          fi
+          git tag -a "v$VERSION" -m "Orivo v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Start the release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # A tag pushed with GITHUB_TOKEN does not start a workflow run, so
+          # release.yml is dispatched explicitly at the new tag. workflow_dispatch
+          # is one of the two events GitHub exempts from that restriction.
+          # The ref can take a moment to become visible to the API right after
+          # the push, so the dispatch is retried a few times.
+          for attempt in 1 2 3 4 5; do
+            if gh workflow run release.yml --ref "v$VERSION" -f version="$VERSION"; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::Could not dispatch release.yml at v$VERSION. The tag is pushed; start Actions → Release manually against that tag."
+              exit 1
+            fi
+            echo "Dispatch failed (attempt $attempt/5), retrying in 5s..."
+            sleep 5
+          done
+          {
+            echo "### Tagged v$VERSION"
+            echo ""
+            echo "Release workflow dispatched at tag \`v$VERSION\`."
+            echo "Follow it in [Actions → Release](${{ github.server_url }}/${{ github.repository }}/actions/workflows/release.yml)."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -500,6 +500,10 @@ impl AppState {
 
 pub fn run() {
     tauri::Builder::default()
+        // The updater downloads and verifies signed releases; `process` is what
+        // lets the frontend relaunch into the version it just installed.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
