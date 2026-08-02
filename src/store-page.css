@@ -712,14 +712,21 @@
   white-space: nowrap;
 }
 
+/* Titles clamp to two whole lines: words wrap at word boundaries only (no
+   aggressive word-break), and overflow ends the clamp with an ellipsis
+   instead of cutting mid-word on one line. */
 .store-card__title {
+  display: -webkit-box;
   overflow: hidden;
   color: #f8f6fa;
   font-size: clamp(16px, 1.2vw, 18px);
   font-weight: 640;
   letter-spacing: -0.026em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.22;
+  overflow-wrap: normal;
+  word-break: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 /* The min-heights match the clamped maximum so every card in a row keeps the
@@ -738,17 +745,23 @@
 .store-card__facts {
   display: flex;
   min-height: 20px;
+  flex-wrap: nowrap;
   gap: 5px;
   overflow: hidden;
 }
 
+/* Tag pills never wrap: a pill that runs out of room shrinks and ellipsizes
+   on its single line instead of breaking onto a second one. */
 .store-card__tag {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   padding: 3px 9px;
   border-radius: var(--store-r-pill);
   color: #bbb5c2;
   background: rgba(255, 255, 255, 0.055);
   font-size: 11px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -761,12 +774,42 @@
   border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.store-card__price-row {
+  display: flex;
+  min-width: 0;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+}
+
 .store-card__price {
   overflow: hidden;
   color: #e7e2ec;
   font-size: 13px;
   font-weight: 620;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.store-card__price-original {
+  flex: none;
+  color: #8f8996;
+  font-size: 11px;
+  text-decoration: line-through;
+  white-space: nowrap;
+}
+
+.store-card__discount {
+  flex: none;
+  align-self: center;
+  padding: 1px 7px;
+  border: 1px solid rgba(143, 202, 156, 0.28);
+  border-radius: var(--store-r-pill);
+  color: #a7dcb4;
+  background: rgba(143, 202, 156, 0.12);
+  font-size: 11px;
+  font-weight: 650;
   white-space: nowrap;
 }
 

@@ -33,8 +33,10 @@ import {
   normaliseProviderStatuses,
   normaliseWallpaperCredentials,
 } from "./settings-model";
+import { createMePage } from "./me-page";
 import { createStorePage } from "./store-page";
 import "./game-detail-page.css";
+import "./me-page.css";
 import "./store-page.css";
 
 type BackendRecord = Record<string, unknown>;
@@ -276,6 +278,7 @@ interface State {
 
 export interface MountAppOptions {
   storePage?: AppPage;
+  mePage?: AppPage;
   gameDetailPage?: AppPage;
 }
 
@@ -394,9 +397,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     platform: get<HTMLElement>("#hero-platform"),
     platformLabel: get<HTMLElement>("#hero-platform-label"),
     cards: get<HTMLElement>("#game-cards"),
+    mostPlayed: get<HTMLElement>(".most-played"),
+    mostPlayedCards: get<HTMLElement>("#most-played-cards"),
     search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
+    librarySourceList: get<HTMLElement>("#library-source-list"),
     toast: get<HTMLElement>("#toast"),
     steamPanel: get<HTMLElement>("#steam-import-panel"),
     steamBody: get<HTMLElement>("#steam-import-body"),
@@ -425,6 +431,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     wallpaperGoogleCseId: get<HTMLInputElement>("#wallpaper-google-cse-id"),
     libraryPage: get<HTMLElement>("#app-page-library"),
     storePage: get<HTMLElement>("#app-page-store"),
+    mePage: get<HTMLElement>("#app-page-me"),
     gamePage: get<HTMLElement>("#app-page-game"),
     settingsPage: get<HTMLElement>("#app-page-settings"),
     notFoundPage: get<HTMLElement>("#app-page-not-found"),
@@ -755,6 +762,45 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
+  const MAX_MOST_PLAYED_CARDS = 8;
+
+  const mostPlayedGames = (): LibraryGame[] =>
+    state.games
+      .filter((game) => game.playTimeSeconds > 0)
+      .sort((a, b) => b.playTimeSeconds - a.playTimeSeconds)
+      .slice(0, MAX_MOST_PLAYED_CARDS);
+
+  const renderMostPlayed = (): void => {
+    // The row steps aside during a search so the results stay the only list.
+    const games = state.query.trim() ? [] : mostPlayedGames();
+    refs.mostPlayed.hidden = games.length === 0;
+    if (games.length === 0) {
+      refs.mostPlayedCards.replaceChildren();
+      return;
+    }
+
+    const cards = Array.from(refs.mostPlayedCards.querySelectorAll<HTMLButtonElement>(".game-card"));
+    const matchesCurrentOrder =
+      cards.length === games.length &&
+      cards.every((card, index) => card.dataset.gameId === games[index].id);
+
+    if (!matchesCurrentOrder) {
+      const cardsById = new Map(cards.map((card) => [card.dataset.gameId, card]));
+      const fragment = document.createDocumentFragment();
+      for (const [index, game] of games.entries()) {
+        const card = cardsById.get(game.id) ?? createGameCard();
+        syncGameCard(card, game, index, game.id === state.selectedId);
+        fragment.append(card);
+      }
+      refs.mostPlayedCards.replaceChildren(fragment);
+      return;
+    }
+
+    for (const [index, game] of games.entries()) {
+      syncGameCard(cards[index], game, index, game.id === state.selectedId);
+    }
+  };
+
   const hydrateLibraryMedia = (candidates: LibraryGame[]): void => {
     const request = libraryRequest;
     const seenIds = new Set<string>();
@@ -922,8 +968,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     updateHeroImage(game, immediateHero);
     renderCards();
+    renderMostPlayed();
     renderLaunchFeedback();
-    hydrateLibraryMedia([game, ...railGames(visibleGames())]);
+    hydrateLibraryMedia([game, ...mostPlayedGames(), ...railGames(visibleGames())]);
   };
 
   const selectGame = (id: string, scroll = true): void => {
@@ -973,11 +1020,49 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     (edge === "first" ? items[0] : items.at(-1))?.focus();
   };
 
+  // The Steam account status only loads once Settings has been visited, so the
+  // library itself is the reliable witness that a Steam source is connected.
+  const steamSourceConnected = (): boolean =>
+    state.steamAccount.status?.connected === true ||
+    state.games.some((game) => game.source === "steam");
+
+  const renderLibrarySources = (): void => {
+    const list = refs.librarySourceList;
+    list.replaceChildren();
+
+    if (steamSourceConnected()) {
+      const steam = document.createElement("button");
+      steam.type = "button";
+      steam.className = "library-source-action";
+      steam.setAttribute("role", "menuitem");
+      steam.dataset.libraryAction = "source-steam";
+      steam.innerHTML =
+        `<span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>` +
+        `<span class="library-source-action__copy"><strong>Steam</strong><small>Connected · import installed games</small></span>` +
+        icon("chevron-right", "library-source-action__chevron");
+      list.append(steam);
+    }
+
+    // The local source is always present: it is this Mac itself. It is a
+    // status row, not an action — importing a local game keeps its own entry
+    // under "This Mac" below.
+    const local = document.createElement("div");
+    local.className = "library-source-action library-source-row";
+    local.setAttribute("role", "none");
+    local.innerHTML =
+      `<span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>` +
+      `<span class="library-source-action__copy"><strong>Local</strong><small>Games on this Mac</small></span>`;
+    list.append(local);
+  };
+
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
     state.libraryMenuOpen = open;
     refs.libraryMenu.hidden = !open;
     refs.libraryMenuButton.setAttribute("aria-expanded", String(open));
     refs.topbar.classList.toggle("is-library-menu-open", open);
+    if (open) {
+      renderLibrarySources();
+    }
 
     if (open && focus) {
       requestAnimationFrame(() => focusLibraryMenuItem(focus));
@@ -4027,9 +4112,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
-    if (action === "source-steam" || action === "add-source") {
-      // A single "Sources" entry now covers connecting an account and importing
-      // installed games; both live in Settings › Libraries & Sources.
+    if (action === "source-steam") {
+      // The connected Steam source goes straight to the existing installed-games
+      // import that lives in Settings › Libraries & Sources.
+      closeLibraryMenu();
+      navigate({ page: "settings", section: "libraries", attachGameId: null });
+      setSteamPanelOpen(true);
+    } else if (action === "add-source") {
+      // "Add a new source" opens the existing library connection flow: the
+      // Settings › Libraries page auto-expands the Steam account connect card.
       closeLibraryMenu();
       navigate({ page: "settings", section: "libraries", attachGameId: null });
     } else if (action === "local") {
@@ -4443,10 +4534,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   // Shell: one topbar, one router, one host per page.
   // ---------------------------------------------------------------------------
 
-  type NavPage = "library" | "store" | "settings";
+  type NavPage = "library" | "store" | "me" | "settings";
 
   const navPageForRoute = (route: AppRoute): NavPage => {
     if (route.page === "store") return "store";
+    if (route.page === "me") return "me";
     if (route.page === "settings") return "settings";
     if (route.page === "game") return route.from === "store" ? "store" : "library";
     return "library";
@@ -4625,9 +4717,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       },
     });
 
+  const mePage = options.mePage ?? createMePage();
+
   const pageHosts: Record<AppRoute["page"], PageLifecycleHost> = {
     library: new PageLifecycleHost(refs.libraryPage, libraryPage),
     store: new PageLifecycleHost(refs.storePage, storePage),
+    me: new PageLifecycleHost(refs.mePage, mePage),
     game: new PageLifecycleHost(refs.gamePage, gameDetailPage),
     settings: new PageLifecycleHost(refs.settingsPage, settingsPage),
     "not-found": new PageLifecycleHost(refs.notFoundPage, notFoundPage),
@@ -4657,6 +4752,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (page === "store") {
         if (currentRoute.page === "store") return;
         navigate({ page: "store", category: "for-you", providers: [], query: "" });
+      } else if (page === "me") {
+        if (currentRoute.page === "me") return;
+        navigate({ page: "me" });
       } else if (page === "settings") {
         if (currentRoute.page === "settings") return;
         navigate({ page: "settings", section: "general", attachGameId: null });
@@ -5641,18 +5739,14 @@ function shell(): string {
             </button>
             <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="Library sources" hidden>
               <p class="library-source-menu__label" id="library-sources-label">Sources</p>
-              <div role="group" aria-labelledby="library-sources-label">
-                <button type="button" class="library-source-action" role="menuitem" data-library-action="source-steam">
-                  <span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>
-                  <span class="library-source-action__copy"><strong>Steam</strong><small>Connect, sync, and import installed games</small></span>
-                  ${icon("chevron-right", "library-source-action__chevron")}
-                </button>
-                <button type="button" class="library-source-action" role="menuitem" data-library-action="add-source">
-                  <span class="library-source-action__icon" aria-hidden="true">${icon("collections")}</span>
-                  <span class="library-source-action__copy"><strong>Add a new source</strong><small>See every library source Orivo can read</small></span>
-                  ${icon("chevron-right", "library-source-action__chevron")}
-                </button>
-              </div>
+              <!-- The connected sources are rendered on open, so the list always
+                   reflects the current library rather than a hardcoded set. -->
+              <div id="library-source-list" role="group" aria-labelledby="library-sources-label"></div>
+              <button type="button" class="library-source-action" role="menuitem" data-library-action="add-source">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("collections")}</span>
+                <span class="library-source-action__copy"><strong>Add a new source</strong><small>Connect another library to Orivo</small></span>
+                ${icon("chevron-right", "library-source-action__chevron")}
+              </button>
               <p class="library-source-menu__label">This Mac</p>
               <button type="button" class="library-source-action" role="menuitem" data-library-action="local">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
@@ -5668,6 +5762,7 @@ function shell(): string {
           <nav class="primary-nav" aria-label="Orivo navigation">
             <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page">${icon("library")}<span>Library</span></button>
             <button type="button" class="nav-link" data-nav-page="store">${icon("store")}<span>Store</span></button>
+            <button type="button" class="nav-link" data-nav-page="me">${icon("user")}<span>Me</span></button>
             <button type="button" class="nav-link" data-nav-page="settings">${icon("settings")}<span>Settings</span></button>
           </nav>
         </div>
@@ -5722,7 +5817,13 @@ function shell(): string {
         <div id="launch-feedback" class="launch-feedback" role="status" aria-live="polite" hidden></div>
       </section>
 
-      <section class="recently-played" aria-labelledby="recently-played-title">
+      <section class="recently-played" aria-label="Library games">
+        <section class="most-played" aria-labelledby="most-played-title" hidden>
+          <div class="rail-header rail-header--most-played">
+            <h2 id="most-played-title">Most Played</h2>
+          </div>
+          <div id="most-played-cards" class="game-cards most-played-cards" role="list" aria-label="Most played games"></div>
+        </section>
         <div class="rail-header">
           <h2 id="recently-played-title">Recently Played</h2>
           <div class="rail-filters" aria-label="Library view controls">
@@ -5747,6 +5848,7 @@ function shell(): string {
       </div>
 
       <div id="app-page-store" class="app-page app-page--scroll"></div>
+      <div id="app-page-me" class="app-page app-page--scroll"></div>
 
       <div id="app-page-game" class="app-page app-page--scroll"></div>
 

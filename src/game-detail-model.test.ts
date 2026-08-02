@@ -633,6 +633,19 @@ describe("normalisation", () => {
     });
   });
 
+  it("strips runtime-state mentions the Play button already conveys", () => {
+    const detail = normaliseGameDetail({
+      id: "game_3",
+      title: "Wine Game",
+      features: ["Single-player", "wine-staging", "Installed"],
+      tags: ["Roguelike", "Incompatible for macOS"],
+      genres: ["Action", "installed"],
+    });
+    expect(detail?.features).toEqual(["Single-player"]);
+    expect(detail?.tags).toEqual(["Roguelike"]);
+    expect(detail?.genres).toEqual(["Action"]);
+  });
+
   it("rejects payloads without an opaque id", () => {
     expect(normaliseGameDetail({ title: "No id" })).toBeNull();
     expect(normaliseGameDetail(null)).toBeNull();
@@ -716,6 +729,14 @@ describe("formatting", () => {
   it("omits the achievements stat when the game has none", () => {
     const facts = buildStatFacts(detailWith({ achievements: null }), Date.now());
     expect(facts.map((fact) => fact.id)).toEqual(["playtime", "last-played"]);
+  });
+
+  it("shows no playtime facts at all for a never-played game", () => {
+    const facts = buildStatFacts(
+      detailWith({ playTimeSeconds: 0, lastPlayedAt: null, achievements: null }),
+      Date.now(),
+    );
+    expect(facts).toEqual([]);
   });
 });
 

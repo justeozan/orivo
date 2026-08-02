@@ -263,6 +263,37 @@ fn swap_igdb_size(url: &str, size: &str) -> String {
     format!("{}/t_{size}{}", &url[..start], &rest[offset..])
 }
 
+/// Lowercased alphanumerics only, so "Elden Ring" and "EldenRing.exe" compare
+/// equal and punctuation or casing never break a title match.
+fn normalized_title_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// A simple fuzzy title check: exact normalized equality, or containment when
+/// the shorter key is substantial enough (three characters) to not match by
+/// accident. Candidate titles carry suffixes ("Elden Ring — header"), so
+/// containment is the shape a correct hit actually takes.
+fn loose_title_match(query: &str, candidate: &str) -> bool {
+    let query_key = normalized_title_key(query);
+    let candidate_key = normalized_title_key(candidate);
+    if query_key.is_empty() || candidate_key.is_empty() {
+        return false;
+    }
+    if query_key == candidate_key {
+        return true;
+    }
+    let (short, long) = if query_key.len() <= candidate_key.len() {
+        (query_key.as_str(), candidate_key.as_str())
+    } else {
+        (candidate_key.as_str(), query_key.as_str())
+    };
+    short.len() >= 3 && long.contains(short)
+}
+
 fn https_url(raw: &str) -> String {
     let trimmed = raw.trim();
     let trimmed = trimmed.strip_prefix("//").unwrap_or(trimmed);
@@ -747,7 +778,15 @@ impl WallpaperSearchService {
             return None;
         }
         let candidates = self.search_steam_store(query, 0).await.ok()?;
-        candidates.into_iter().next().map(|candidate| candidate.url)
+        // The store search is fuzzy: an unknown title ("Hozy Playtest") can
+        // still return a best-effort hit for a completely different game.
+        // Only a candidate whose own title loosely matches the query may win;
+        // otherwise the game keeps its neutral placeholder instead of wearing
+        // another game's art.
+        candidates
+            .into_iter()
+            .find(|candidate| loose_title_match(query, &candidate.title))
+            .map(|candidate| candidate.url)
     }
 
     pub async fn import_candidate(
@@ -1200,6 +1239,16 @@ pub async fn import_wallpaper_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artwork_relevance_guard_matches_loosely_and_rejects_unrelated_titles() {
+        assert!(loose_title_match("Elden Ring", "Elden Ring — header"));
+        assert!(loose_title_match("EldenRing", "ELDEN RING — screenshot 1"));
+        assert!(loose_title_match("Rez", "Rez Infinite — header"));
+        assert!(!loose_title_match("Hozy Playtest", "Elden Ring — header"));
+        assert!(!loose_title_match("", "Elden Ring — header"));
+        assert!(!loose_title_match("Hozy Playtest", ""));
+    }
 
     #[test]
     fn credentials_missing_is_not_configured() {

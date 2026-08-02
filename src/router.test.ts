@@ -38,6 +38,11 @@ describe("hash routing", () => {
     expect(parseAppRoute("#/library")).toEqual({ page: "library" });
   });
 
+  it("round-trips the Me page", () => {
+    expect(parseAppRoute("#/me")).toEqual({ page: "me" });
+    expect(appRouteToHash({ page: "me" })).toBe("#/me");
+  });
+
   it("round-trips opaque unicode game IDs", () => {
     const hash = appRouteToHash({ page: "game", gameId: "igdb:竜の旅", from: "store" });
     expect(parseAppRoute(hash)).toEqual({

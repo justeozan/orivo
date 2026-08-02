@@ -4719,6 +4719,36 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
         }
     }
 
+    // A local record with no discovered or fetched artwork borrows the bundled
+    // plate whose title matches its own (case-insensitive, loose), and
+    // otherwise wears the neutral placeholder. This is presentation-only: the
+    // stored record keeps its empty slots, so the post-import artwork search
+    // still sees the gap and can fill it with real art.
+    for game in &mut presentation.games {
+        if game.source != GameSource::Local
+            || (game.cover_path.is_some() && game.artwork_path.is_some())
+        {
+            continue;
+        }
+        let matched = bundled_artwork_for_title(&game.title);
+        let cover = matched.and_then(|entry| entry.cover.clone());
+        let hero = matched.and_then(|entry| entry.hero.clone());
+        if game.cover_path.is_none() {
+            game.cover_path = Some(PathBuf::from(
+                cover
+                    .clone()
+                    .or_else(|| hero.clone())
+                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
+            ));
+        }
+        if game.artwork_path.is_none() {
+            game.artwork_path = Some(PathBuf::from(
+                hero.or(cover)
+                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
+            ));
+        }
+    }
+
     presentation
 }
 
@@ -4887,6 +4917,79 @@ fn game_key(title: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// The bundled IGDB artwork manifest shipped with the app. It names the titles
+/// whose covers and heroes exist as `/media/igdb` public assets.
+const BUNDLED_ARTWORK_MANIFEST: &str = include_str!("../../assets/igdb/sources.json");
+
+/// A neutral bundled brand image for games whose artwork was not found. An
+/// unknown game must never wear another game's art (this used to fall through
+/// to the Elden Ring plates).
+const NEUTRAL_ARTWORK_PLACEHOLDER: &str = "/media/orivo-ring-icon.png";
+
+/// One bundled title from the manifest, keyed by its normalized title.
+struct BundledArtwork {
+    key: String,
+    cover: Option<String>,
+    hero: Option<String>,
+}
+
+fn bundled_artwork_index() -> &'static [BundledArtwork] {
+    static INDEX: OnceLock<Vec<BundledArtwork>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(BUNDLED_ARTWORK_MANIFEST)
+        else {
+            return Vec::new();
+        };
+        let file_of = |asset: &serde_json::Value, slot: &str| {
+            asset
+                .get(slot)
+                .and_then(|slot| slot.get("file"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|file| !file.contains("..") && !file.contains('\\'))
+                .map(|file| format!("/media/igdb/{file}"))
+        };
+        manifest
+            .get("assets")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|asset| {
+                let title = asset.get("title").and_then(serde_json::Value::as_str)?;
+                let key = game_key(title);
+                (!key.is_empty()).then(|| BundledArtwork {
+                    key,
+                    cover: file_of(asset, "cover"),
+                    hero: file_of(asset, "hero"),
+                })
+            })
+            .collect()
+    })
+}
+
+/// Case-insensitive, punctuation-free title lookup with a loose containment
+/// fallback, so an executable-style name ("EldenRing", "witcher3") still finds
+/// its bundled artwork. A containment match requires a stem of at least five
+/// characters so a short junk title cannot alias onto a manifest entry.
+fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
+    const MIN_LOOSE_KEY: usize = 5;
+    let key = game_key(title);
+    if key.is_empty() {
+        return None;
+    }
+    let index = bundled_artwork_index();
+    if let Some(exact) = index.iter().find(|entry| entry.key == key) {
+        return Some(exact);
+    }
+    index.iter().find(|entry| {
+        let (short, long) = if entry.key.len() <= key.len() {
+            (entry.key.as_str(), key.as_str())
+        } else {
+            (key.as_str(), entry.key.as_str())
+        };
+        short.len() >= MIN_LOOSE_KEY && long.contains(short)
+    })
 }
 
 #[cfg(test)]
@@ -5438,6 +5541,53 @@ mod tests {
             game_media_response(&media, &media_request("hero-large.png", Some("bytes=0-")));
         assert_eq!(ranged.status(), tauri::http::StatusCode::PARTIAL_CONTENT);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A freshly imported local game must never wear another game's art: a
+    /// title matching a bundled plate borrows that plate, and an unknown title
+    /// gets the neutral placeholder rather than the Elden Ring fallback.
+    #[test]
+    fn local_games_without_artwork_get_bundled_or_neutral_presentation_art() {
+        let mut stored = Catalog::default();
+        let mut matched = imported_local_game_fixture();
+        matched.id = "local-elden".into();
+        matched.title = "EldenRing".into();
+        let mut unknown = imported_local_game_fixture();
+        unknown.id = "local-hozy".into();
+        unknown.title = "Hozy Playtest".into();
+        stored.games.push(matched);
+        stored.games.push(unknown);
+
+        let presentation = presentation_catalog(&stored, false);
+        let matched = presentation
+            .games
+            .iter()
+            .find(|game| game.id == "local-elden")
+            .unwrap();
+        assert_eq!(
+            matched.cover_path.as_deref(),
+            Some(Path::new("/media/igdb/covers/elden-ring.jpg"))
+        );
+        assert_eq!(
+            matched.artwork_path.as_deref(),
+            Some(Path::new("/media/igdb/heroes/elden-ring-wallpaper.png"))
+        );
+        let unknown = presentation
+            .games
+            .iter()
+            .find(|game| game.id == "local-hozy")
+            .unwrap();
+        assert_eq!(
+            unknown.cover_path.as_deref(),
+            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
+        );
+        assert_eq!(
+            unknown.artwork_path.as_deref(),
+            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
+        );
+        // Presentation enrichment must stay out of the stored catalog so the
+        // post-import artwork search still sees the gap.
+        assert!(stored.games.iter().all(|game| game.cover_path.is_none()));
     }
 
     /// The Library and the detail page resolve artwork through one function.

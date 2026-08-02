@@ -267,7 +267,7 @@ describe("application shell", () => {
   });
 
   it("deploys on the first card click and opens the detail page on a second click", async () => {
-    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>(".game-card"));
+    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>("#game-cards .game-card"));
     expect(cards.length).toBeGreaterThan(1);
     const card = cards[1];
     expect(card.classList.contains("is-selected")).toBe(false);
@@ -283,6 +283,34 @@ describe("application shell", () => {
     await settle();
     expect(window.location.hash.startsWith("#/games/")).toBe(true);
     expect(detail.routes.at(-1)?.page).toBe("game");
+  });
+
+  it("shows a Most Played rail sorted by play time, capped at eight cards", () => {
+    const rail = root.querySelector<HTMLElement>(".most-played")!;
+    expect(rail.hidden).toBe(false);
+
+    const ids = Array.from(rail.querySelectorAll<HTMLElement>(".game-card")).map(
+      (card) => card.dataset.gameId,
+    );
+    expect(ids.length).toBeLessThanOrEqual(8);
+    // The fallback library's biggest play times, in descending order.
+    expect(ids.slice(0, 3)).toEqual([
+      "showcase-the-witcher-3",
+      "showcase-elden-ring",
+      "showcase-god-of-war",
+    ]);
+  });
+
+  it("lists connected sources and one add-source entry in the library menu", () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    expect(menu.hidden).toBe(false);
+
+    // No Steam source is connected in the fallback library, so only the
+    // always-present local source is listed.
+    expect(menu.querySelector("[data-library-action='source-steam']")).toBeNull();
+    expect(menu.querySelector("#library-source-list")?.textContent).toContain("Local");
+    expect(menu.querySelectorAll("[data-library-action='add-source']")).toHaveLength(1);
   });
 });
 
@@ -331,7 +359,7 @@ describe("application shell against the desktop backend", () => {
       .map(([, args]) => args?.gameId);
 
   const libraryCardIds = (): string[] =>
-    Array.from(root.querySelectorAll<HTMLElement>(".game-card")).map(
+    Array.from(root.querySelectorAll<HTMLElement>("#game-cards .game-card")).map(
       (card) => card.dataset.gameId ?? "",
     );
 

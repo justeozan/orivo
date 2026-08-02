@@ -377,12 +377,19 @@
 .gd-hero__title {
   margin: 0;
   /* Never break a title mid-word; wrap only at spaces and keep the glyph box
-     tall enough that descenders are never clipped. */
+     tall enough that descenders are never clipped. Long titles clamp to two
+     clean lines (with an ellipsis) rather than wrapping on forever, and the
+     minimum size is small enough that most titles fit without truncating. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
   overflow-wrap: normal;
   word-break: keep-all;
   hyphens: none;
   text-wrap: balance;
-  font-size: clamp(44px, 4.85vw, 74px);
+  font-size: clamp(36px, 4.85vw, 74px);
   font-weight: 700;
   line-height: 1.04;
   letter-spacing: -0.035em;
@@ -403,6 +410,29 @@
   gap: 14px;
 }
 
+/* The source logo + meta facts share one line under the title. */
+.gd-hero__subline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: -6px;
+  min-width: 0;
+}
+
+/* The larger source logo: Steam's mark or the local-machine glyph. */
+.gd-source {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  color: #e8e5ec;
+}
+
+.gd-source .icon {
+  width: 26px;
+  height: 26px;
+}
+
 /* ------------------------------------------------------------ fact lists */
 
 .gd-meta,
@@ -418,6 +448,12 @@
 
 .gd-meta {
   margin-top: -6px;
+  min-width: 0;
+}
+
+/* The subline already owns the negative offset; the list sits flush inside. */
+.gd-hero__subline .gd-meta {
+  margin-top: 0;
 }
 
 .gd-meta__item,
@@ -445,6 +481,16 @@
 
 .gd-meta__item[data-tone="accent"] .icon {
   color: var(--gd-accent);
+}
+
+/* The genre never wraps mid-pill; an over-long genre truncates instead. */
+.gd-meta__item[data-fact-id="genre"] {
+  flex: 0 1 auto;
+  white-space: nowrap;
+}
+
+.gd-meta__item[data-fact-id="genre"] .gd-meta__text {
+  max-width: 180px;
 }
 
 .gd-meta__item[data-fact-id="review"] .gd-meta__text {
@@ -660,15 +706,6 @@
 .gd-primary-action[data-action="unavailable"] .gd-button__label,
 .gd-primary-action[data-action="unavailable"] .icon {
   color: var(--gd-muted);
-}
-
-.gd-wishlist--active {
-  border-color: rgba(185, 174, 242, 0.55);
-  color: var(--gd-accent);
-}
-
-.gd-wishlist--active .icon {
-  fill: currentcolor;
 }
 
 /* -------------------------------------------------------- hero media rail */

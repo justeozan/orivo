@@ -219,6 +219,17 @@ function stringList(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
 }
 
+/**
+ * Runtime/install-state mentions ("wine-staging", "incompatible for macos",
+ * "installed") that the primary Play button already conveys. They are stripped
+ * during normalisation so no badge or feature row ever repeats them.
+ */
+const RUNTIME_STATE_LABEL = /wine[\s_-]?staging|incompatible|installed/i;
+
+function visibleLabels(values: string[]): string[] {
+  return values.filter((value) => !RUNTIME_STATE_LABEL.test(value));
+}
+
 function wholeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
@@ -306,8 +317,8 @@ function normaliseSummary(value: unknown): GameSummary | null {
     coverUrl: text(value.coverUrl),
     heroUrl: text(value.heroUrl),
     landscapeUrl: text(value.landscapeUrl),
-    genres: stringList(value.genres),
-    tags: stringList(value.tags),
+    genres: visibleLabels(stringList(value.genres)),
+    tags: visibleLabels(stringList(value.tags)),
     supportedPlatforms: platforms,
     owned: value.owned === true,
     launchable: value.launchable === true,
@@ -409,7 +420,7 @@ export function normaliseGameDetail(value: unknown): GameDetailViewModel | null 
     developer: optionalText(value.developer),
     publisher: optionalText(value.publisher),
     releaseDate: optionalText(value.releaseDate),
-    features: stringList(value.features),
+    features: visibleLabels(stringList(value.features)),
     achievements: normaliseAchievements(value.achievements),
     media: normaliseGameMedia(value.media),
     relatedGames: Array.isArray(value.relatedGames)
