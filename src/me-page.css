@@ -1,0 +1,231 @@
+.me-page {
+  /* Lavande premium alignée sur --violet (styles.css), avec une pointe sauge
+     pour les scores élevés — même échelle de rayons que la page Store. */
+  --me-accent: var(--violet, #7d54f4);
+  --me-accent-soft: #b9a8ff;
+  --me-sage: #8fca9c;
+  --me-amber: #e8bd7f;
+  --me-rose: #e2a9ac;
+  --me-text: var(--text, #f4f2f7);
+  --me-muted: var(--muted, #c8c5cf);
+  --me-dim: var(--ash, #9b97a3);
+  --me-surface: rgba(19, 18, 26, 0.72);
+  --me-line: rgba(255, 255, 255, 0.1);
+  --me-r-sm: 14px;
+  --me-r-md: 18px;
+  --me-r-lg: 24px;
+  --me-elev-card: 0 16px 40px rgba(0, 0, 0, 0.28);
+  position: relative;
+  display: block;
+  width: 100%;
+  /* Le host du shell (`.app-page--scroll`) est l'unique conteneur de scroll et
+     possède le dégagement du topbar : la page n'ajoute ni hauteur ni overflow
+     ni padding haut (même règle que la page Store). */
+  min-height: 100%;
+  padding: 0 clamp(24px, 3vw, 48px) clamp(24px, 3.5svh, 48px);
+  color: var(--me-text);
+  background:
+    radial-gradient(1100px 520px at 12% -6%, rgba(125, 84, 244, 0.16), transparent 62%),
+    radial-gradient(900px 460px at 88% 4%, rgba(143, 202, 156, 0.07), transparent 60%),
+    linear-gradient(180deg, #0d0c12 0%, #0b0b0d 58%, #0a0a0c 100%);
+}
+
+.me-header {
+  max-width: 640px;
+  padding: clamp(8px, 1.4svh, 18px) 2px clamp(18px, 2.6svh, 30px);
+}
+
+.me-header__eyebrow {
+  margin: 0 0 10px;
+  color: var(--me-accent-soft);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.me-header__title {
+  margin: 0 0 12px;
+  color: var(--me-text);
+  font-size: clamp(38px, 3.6vw, 54px);
+  font-weight: 480;
+  letter-spacing: -0.042em;
+  line-height: 1;
+}
+
+.me-header__lede {
+  margin: 0;
+  color: var(--me-muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.me-section-title {
+  margin: 0 0 14px;
+  color: var(--me-text);
+  font-size: 17px;
+  font-weight: 630;
+  letter-spacing: -0.016em;
+}
+
+.me-metrics {
+  margin-bottom: clamp(22px, 3svh, 36px);
+}
+
+.me-metrics__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
+  gap: 12px;
+}
+
+.me-metric-card {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 16px 17px 15px;
+  border: 1px solid var(--me-line);
+  border-radius: var(--me-r-md);
+  background: linear-gradient(165deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)), var(--me-surface);
+  box-shadow: var(--me-elev-card), inset 0 1px rgba(255, 255, 255, 0.05);
+  transition: border-color 180ms ease, transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.me-metric-card:hover {
+  border-color: rgba(196, 181, 255, 0.3);
+  transform: translateY(-2px);
+}
+
+.me-metric-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.me-metric-card__label {
+  margin: 0;
+  color: var(--me-text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+
+.me-metric-card__score {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.me-metric-card__value {
+  color: var(--me-accent-soft);
+  font-size: 22px;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+}
+
+.me-metric-card__scale {
+  color: var(--me-dim);
+  font-size: 11px;
+}
+
+/* Le chiffre suit la bande de score : rose (faible) -> ambre -> lavande ->
+   sauge (élevé), le dégradé de couleur demandé par le scan. */
+.me-metric-card[data-band="faible"] .me-metric-card__value { color: var(--me-rose); }
+.me-metric-card[data-band="modere"] .me-metric-card__value { color: var(--me-amber); }
+.me-metric-card[data-band="soutenu"] .me-metric-card__value { color: var(--me-accent-soft); }
+.me-metric-card[data-band="eleve"] .me-metric-card__value { color: var(--me-sage); }
+
+.me-gauge {
+  position: relative;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px rgba(0, 0, 0, 0.32);
+}
+
+.me-gauge__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  min-width: 3px;
+  border-radius: inherit;
+  /* Remplissage en dégradé violet -> lavande -> sauge ; la largeur (score %)
+     détermine jusqu'où le dégradé se dévoile. */
+  background: linear-gradient(90deg, #5d3fc0 0%, var(--me-accent) 34%, var(--me-accent-soft) 68%, var(--me-sage) 100%);
+  background-size: calc(100% / max(var(--me-fill, 1), 0.01)) 100%;
+  box-shadow: 0 0 12px rgba(125, 84, 244, 0.35);
+  transition: width 480ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.me-metric-card__description {
+  margin: 0;
+  color: var(--me-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.me-profile {
+  padding: clamp(18px, 2.2vw, 28px);
+  border: 1px solid rgba(196, 181, 255, 0.16);
+  border-radius: var(--me-r-lg);
+  background:
+    radial-gradient(560px 240px at 8% 0%, rgba(125, 84, 244, 0.14), transparent 70%),
+    linear-gradient(165deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+    var(--me-surface);
+  box-shadow: var(--me-elev-card), inset 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.me-profile__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.me-profile__stat {
+  display: grid;
+  min-width: 128px;
+  gap: 4px;
+  padding: 10px 13px;
+  border: 1px solid var(--me-line);
+  border-radius: var(--me-r-sm);
+  background: rgba(10, 10, 15, 0.45);
+}
+
+.me-profile__stat-label {
+  color: var(--me-dim);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.me-profile__stat-value {
+  margin: 0;
+  color: var(--me-text);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.me-profile__summary {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--me-muted);
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+@media (max-width: 640px) {
+  .me-metrics__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .me-profile__stat {
+    flex: 1;
+  }
+}

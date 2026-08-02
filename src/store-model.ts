@@ -137,6 +137,8 @@ interface EditorialGameSeed {
   tags: string[];
   platforms: GameSummary["supportedPlatforms"];
   reasons: string[];
+  /** Instant Gaming reference price in EUR; omitted when no price is known. */
+  pricing?: { price: number; originalPrice?: number; discountPercent?: number };
 }
 
 const editorialSeeds: EditorialGameSeed[] = [
@@ -150,6 +152,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Open World", "Strong Stories", "Long Sessions"],
     platforms: ["windows"],
     reasons: ["Matches action RPGs", "Tagged open world", "Single-player campaign"],
+    pricing: { price: 34.99, originalPrice: 59.99, discountPercent: 42 },
   },
   {
     appId: "1091500",
@@ -161,6 +164,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Open World", "Single-player"],
     platforms: ["windows", "macos"],
     reasons: ["Story-rich campaign", "Matches action RPGs", "Available on macOS"],
+    pricing: { price: 23.49, originalPrice: 59.99, discountPercent: 61 },
   },
   {
     appId: "1086940",
@@ -171,6 +175,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Choices Matter", "Co-op"],
     platforms: ["windows", "macos"],
     reasons: ["Available on macOS", "Story-rich campaign", "Supports co-op"],
+    pricing: { price: 46.79, originalPrice: 59.99, discountPercent: 22 },
   },
   {
     appId: "1145350",
@@ -181,6 +186,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Short Sessions", "Replayable", "Strong Stories"],
     platforms: ["windows", "macos"],
     reasons: ["Works in short sessions", "Available on macOS", "Replayable runs"],
+    pricing: { price: 24.49, originalPrice: 28.99, discountPercent: 16 },
   },
   {
     appId: "1174180",
@@ -191,6 +197,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Open World", "Atmospheric"],
     platforms: ["windows"],
     reasons: ["Story-rich campaign", "Tagged atmospheric", "Single-player adventure"],
+    pricing: { price: 19.79, originalPrice: 59.99, discountPercent: 67 },
   },
   {
     appId: "292030",
@@ -201,6 +208,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Open World", "Choices Matter"],
     platforms: ["windows"],
     reasons: ["Matches RPGs", "Story-rich campaign", "Tagged choices matter"],
+    pricing: { price: 8.49, originalPrice: 29.99, discountPercent: 72 },
   },
   {
     appId: "2420110",
@@ -211,6 +219,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Open World", "Exploration"],
     platforms: ["windows"],
     reasons: ["Story-rich campaign", "Tagged exploration", "Open-world adventure"],
+    pricing: { price: 32.99, originalPrice: 59.99, discountPercent: 45 },
   },
   {
     appId: "1593500",
@@ -221,6 +230,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Strong Stories", "Single-player", "Cinematic"],
     platforms: ["windows"],
     reasons: ["Story-rich campaign", "Single-player adventure", "Matches action games"],
+    pricing: { price: 15.99, originalPrice: 49.99, discountPercent: 68 },
   },
   {
     appId: "1016920",
@@ -231,6 +241,7 @@ const editorialSeeds: EditorialGameSeed[] = [
     tags: ["Short Sessions", "Relaxing", "Local Co-op"],
     platforms: ["windows", "macos", "linux"],
     reasons: ["Works in short sessions", "Available on macOS", "Supports local co-op"],
+    pricing: { price: 4.79, originalPrice: 19.99, discountPercent: 76 },
   },
   {
     appId: "655350",
@@ -266,6 +277,56 @@ export const EDITORIAL_GAMES: GameSummary[] = editorialSeeds.map((seed) => {
     offers: [editorialOffer(gameId, seed.appId)],
   };
 });
+
+/**
+ * Card pricing facts. Prices are major currency units (24.99 renders as
+ * "24,99 €"). `originalPrice` and `discountPercent` are only present for a
+ * discounted offer; `priceProvider` names the store the price came from.
+ */
+export interface GamePricing {
+  price: number;
+  currency: string;
+  originalPrice?: number;
+  discountPercent?: number;
+  priceProvider: string;
+}
+
+/**
+ * Instant Gaming reference prices (EUR) for the built-in catalog. A game
+ * absent from this map simply shows no price on its card. Live offers keep
+ * their own price data through `selectGamePricing`.
+ */
+export const EDITORIAL_PRICING: Readonly<Record<string, GamePricing>> = Object.fromEntries(
+  editorialSeeds.flatMap((seed) =>
+    seed.pricing
+      ? [[
+          `steam:${seed.appId}`,
+          { currency: "EUR", priceProvider: "Instant Gaming", ...seed.pricing } satisfies GamePricing,
+        ]]
+      : [],
+  ),
+);
+
+const ZERO_DECIMAL_CURRENCIES = ["JPY", "KRW"];
+
+function priceFractionDigits(currency: string): number {
+  return ZERO_DECIMAL_CURRENCIES.includes(currency.toUpperCase()) ? 0 : 2;
+}
+
+/** Formats "24,99 €" style prices; falls back to "24.99 EUR" if Intl rejects the code. */
+export function formatPrice(price: number, currency = "EUR"): string {
+  const fractionDigits = priceFractionDigits(currency);
+  try {
+    return new Intl.NumberFormat("fr-FR", {
+      style: "currency",
+      currency,
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    }).format(price);
+  } catch {
+    return `${price.toFixed(fractionDigits)} ${currency}`;
+  }
+}
 
 export const EDITORIAL_STORE_HOME: StoreHomeView = {
   games: EDITORIAL_GAMES,
@@ -438,4 +499,21 @@ export function selectBestOffer(game: GameSummary): StoreOffer | null {
       return left.priceMinor - right.priceMinor;
     })[0] ?? null
   );
+}
+
+/**
+ * Price facts for a card: a live priced offer wins, then the Instant Gaming
+ * reference price for the built-in catalog. Returns null when no price is
+ * known — the card then shows nothing rather than a fabricated price.
+ */
+export function selectGamePricing(game: GameSummary): GamePricing | null {
+  const offer = selectBestOffer(game);
+  if (offer && offer.priceMinor !== null && offer.currency) {
+    return {
+      price: offer.priceMinor / 10 ** priceFractionDigits(offer.currency),
+      currency: offer.currency,
+      priceProvider: offer.providerLabel,
+    };
+  }
+  return EDITORIAL_PRICING[game.id] ?? null;
 }

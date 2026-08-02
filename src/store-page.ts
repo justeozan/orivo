@@ -11,9 +11,11 @@ import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
   createInitialStoreState,
   EDITORIAL_STORE_HOME,
+  formatPrice,
   isOfferStale,
   reduceStorePageState,
   selectBestOffer,
+  selectGamePricing,
   selectStoreGames,
   STORE_CATEGORIES,
   STORE_PROVIDERS,
@@ -152,34 +154,34 @@ function providerStatusFor(
   return statuses.find((status) => status.provider === provider);
 }
 
-function formatOffer(game: GameSummary): { price: string; detail: string; stale: boolean } {
-  const offer = selectBestOffer(game);
-  if (!offer) return { price: "No offer", detail: "No verified offer", stale: false };
-  const stale = isOfferStale(offer);
-  if (offer.priceMinor === null || !offer.currency) {
-    return {
-      price: "Price unavailable",
-      detail: stale ? `${offer.providerLabel} · not recently verified` : offer.providerLabel,
-      stale,
-    };
+/**
+ * Card price block: a priced game shows its price badge (plus original price
+ * and discount when the offer is cut) with the source store underneath; a
+ * game without any known price renders no offer block at all.
+ */
+function renderCardOffer(game: GameSummary): HTMLElement | null {
+  const pricing = selectGamePricing(game);
+  if (!pricing) return null;
+  const bestOffer = selectBestOffer(game);
+  const live = Boolean(bestOffer && bestOffer.priceMinor !== null && bestOffer.currency);
+  const stale = live && bestOffer ? isOfferStale(bestOffer) : false;
+  const block = element("span", "store-card__offer");
+  block.classList.toggle("store-card__offer--stale", stale);
+  const row = element("span", "store-card__price-row");
+  row.append(element("strong", "store-card__price", formatPrice(pricing.price, pricing.currency)));
+  if (pricing.originalPrice !== undefined && pricing.originalPrice > pricing.price) {
+    row.append(
+      element("s", "store-card__price-original", formatPrice(pricing.originalPrice, pricing.currency)),
+    );
   }
-  const fractionDigits = ["JPY", "KRW"].includes(offer.currency.toUpperCase()) ? 0 : 2;
-  let price: string;
-  try {
-    price = new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: offer.currency,
-      minimumFractionDigits: fractionDigits,
-      maximumFractionDigits: fractionDigits,
-    }).format(offer.priceMinor / 10 ** fractionDigits);
-  } catch {
-    price = `${offer.priceMinor / 10 ** fractionDigits} ${offer.currency}`;
+  if (pricing.discountPercent) {
+    row.append(element("span", "store-card__discount", `-${pricing.discountPercent}%`));
   }
-  return {
-    price,
-    detail: stale ? `${offer.providerLabel} · may be outdated` : `${offer.providerLabel} · verified`,
-    stale,
-  };
+  const detail = live
+    ? `${pricing.priceProvider} · ${stale ? "may be outdated" : "verified"}`
+    : pricing.priceProvider;
+  block.append(row, element("span", "store-card__offer-detail", detail));
+  return block;
 }
 
 /**
@@ -577,14 +579,12 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const description = element("span", "store-card__description", game.shortDescription);
     const facts = element("span", "store-card__facts");
     for (const tag of game.tags.slice(0, 2)) facts.append(element("span", "store-card__tag", tag));
-    const offer = formatOffer(game);
-    const offerBlock = element("span", "store-card__offer");
-    offerBlock.classList.toggle("store-card__offer--stale", offer.stale);
-    offerBlock.append(
-      element("strong", "store-card__price", offer.price),
-      element("span", "store-card__offer-detail", offer.detail),
-    );
-    body.append(genres, chips, fit, description, facts, offerBlock);
+    // The title now lives over the artwork, so the body keeps main's chips and
+    // fit rows and ends with the pricing block — rendered only when the game
+    // actually has a price.
+    body.append(genres, chips, fit, description, facts);
+    const offerBlock = renderCardOffer(game);
+    if (offerBlock) body.append(offerBlock);
     open.append(mediaFrame, body);
 
     const wishlist = element("button", "store-card__wishlist");
