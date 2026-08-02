@@ -186,6 +186,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .library-source-action__copy strong { color: inherit; font-size: 13px; font-weight: 590; letter-spacing: -.008em; }
 .library-source-action__copy small { color: #aba5b2; font-size: 11px; font-weight: 450; }
 .library-source-action__chevron { width: 16px; height: 16px; color: #bdb6c8; }
+/* A connected source listed for information only: same anatomy as an action
+   row, but it never lights up as a pressable item. */
+.library-source-row { min-height: 48px; cursor: default; }
+.library-source-row:hover { color: #ebe7ee; background: transparent; }
 
 .top-divider { width: 1px; height: 22px; background: rgba(255,255,255,.11); }
 
@@ -1004,6 +1008,19 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .rail-header { height: 36px; justify-content: space-between; padding-right: 78px; }
 .rail-header h2 { margin: 0; color: #f1eef3; font-size: 15px; font-weight: 600; transform: translateY(-6px); }
+
+/* "Most Played": a compact rail stacked above Recently Played. The section
+   lives inside the bottom-anchored rail block, so it simply grows the block
+   upward and every breakpoint offset keeps working. Cards reuse the exact
+   rail card component at a smaller scale (same 2:3 portrait ratio). */
+.most-played { --rail-card-height: 156px; margin-bottom: 4px; }
+.most-played .rail-header { height: 30px; }
+.most-played .game-card { flex: 0 0 104px; width: 104px; }
+.most-played .game-card.is-selected,
+.most-played .game-card.is-selected:hover { flex-basis: clamp(226px, 17vw, 277px); }
+.most-played[hidden] { display: none; }
+/* On short viewports the hero and the main rail keep priority. */
+@media (max-height: 820px) { .most-played { display: none; } }
 .rail-filters { gap: 10px; }
 .compact-filter, .compact-icon { height: 34px; border: 1px solid rgba(255,255,255,.12); color: #d6d2d8; background: rgba(12,13,17,.35); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(16px) saturate(125%); backdrop-filter: blur(16px) saturate(125%); }
 .compact-filter { display: inline-flex; align-items: center; gap: 8px; padding: 0 13px; border-radius: 17px; font-size: 12px; }

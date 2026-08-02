@@ -22,11 +22,15 @@ Le socle est en place : target de lancement `Runner` et migration catalogue v5,
 validation stricte des manifestes/capabilities, découverte lazy des composants
 hashés, préflight Wasmtime Component Model dans un worker, contrat WIT v1 et
 runner officiel Wine-Staging macOS. Wine est un adapter Rust natif de référence
-: profils persistants isolés, dossiers accordés, découverte `.exe` paginée et
-annulable, inventaire privé, association réversible d'un import Direct et
-lancement par `LaunchIntent` typé sans shell. Le backend DXVK-macOS est une
-option locale expérimentale : archive allowlistée, DLL copiées dans le seul
-préfixe Orivo et override hôte fixe, sans GPTK, CrossOver ni téléchargement.
+: profils persistants isolés, dossiers accordés, inventaire privé et lancement
+par `LaunchIntent` typé sans shell. Wine-Staging s'applique désormais
+**automatiquement** à tout jeu local `.exe` via un profil géré par défaut
+provisionné sans assistant (détection de l'engine, préfixe géré, dossier
+accordé dérivé du seul répertoire de chaque `.exe`), avec une association
+réversible qui conserve la fiche Direct d'origine. Le backend DXVK-macOS est le
+défaut sur Apple Silicon (détecté via `hw.optional.arm64`) : archive épinglée
+allowlistée, téléchargée puis hachée par le host, DLL copiées dans le seul
+préfixe Orivo et override hôte fixe, sans GPTK ni CrossOver.
 
 Restent volontairement hors de cette première intégration : l’installateur de
 packages signés, l’invocation WIT de composants tiers avec grants, l’import de

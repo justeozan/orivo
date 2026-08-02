@@ -448,25 +448,48 @@ describe("Store page offer facts", () => {
     await mounted.host.activate(storeRoute());
     await flush();
 
+    // No known price: the card shows no offer block at all rather than a
+    // fabricated price line.
     const unpriced = cardFor(mounted.container, "unpriced");
-    expect(unpriced.querySelector(".store-card__price")?.textContent).toBe("Price unavailable");
-    expect(unpriced.querySelector(".store-card__price")?.textContent ?? "").not.toMatch(/\d/);
-    expect(unpriced.querySelector(".store-card__offer-detail")?.textContent).toBe(
-      "Instant Gaming · not recently verified",
-    );
-    expect(unpriced.querySelector(".store-card__offer--stale")).not.toBeNull();
+    expect(unpriced.querySelector(".store-card__offer")).toBeNull();
+    expect(unpriced.querySelector(".store-card__price")).toBeNull();
 
     const outdated = cardFor(mounted.container, "outdated");
-    expect(outdated.querySelector(".store-card__price")?.textContent).toMatch(/19\.99/);
+    expect(outdated.querySelector(".store-card__price")?.textContent).toMatch(/19[.,]99/);
     expect(outdated.querySelector(".store-card__offer-detail")?.textContent).toBe(
       "Steam · may be outdated",
     );
     expect(outdated.querySelector(".store-card__offer--stale")).not.toBeNull();
 
     const verified = cardFor(mounted.container, "verified");
-    expect(verified.querySelector(".store-card__price")?.textContent).toMatch(/29\.99/);
+    expect(verified.querySelector(".store-card__price")?.textContent).toMatch(/29[.,]99/);
     expect(verified.querySelector(".store-card__offer-detail")?.textContent).toBe("Steam · verified");
     expect(verified.querySelector(".store-card__offer--stale")).toBeNull();
+  });
+
+  it("shows the Instant Gaming reference price with its discount on editorial cards", async () => {
+    const eldenRing = EDITORIAL_GAMES.find((entry) => entry.title === "Elden Ring");
+    const astroDuel = EDITORIAL_GAMES.find((entry) => entry.title === "Astro Duel 2");
+    if (!eldenRing || !astroDuel) throw new Error("Editorial seeds changed unexpectedly.");
+    const fake = createFakeClient({
+      getHome: async () => homeView({ games: [eldenRing, astroDuel] }),
+    });
+    const mounted = mountStore(fake.client);
+    await mounted.host.activate(storeRoute());
+    await flush();
+
+    const priced = cardFor(mounted.container, eldenRing.id);
+    expect(priced.querySelector(".store-card__price")?.textContent).toContain("34,99");
+    expect(priced.querySelector(".store-card__price")?.textContent).toContain("€");
+    expect(priced.querySelector(".store-card__price-original")?.textContent).toContain("59,99");
+    expect(priced.querySelector(".store-card__discount")?.textContent).toBe("-42%");
+    expect(priced.querySelector(".store-card__offer-detail")?.textContent).toBe("Instant Gaming");
+    expect(priced.querySelector(".store-card__offer--stale")).toBeNull();
+
+    const unpriced = cardFor(mounted.container, astroDuel.id);
+    expect(unpriced.querySelector(".store-card__offer")).toBeNull();
+    expect(unpriced.querySelector(".store-card__price")).toBeNull();
+    expect(unpriced.querySelector(".store-card__discount")).toBeNull();
   });
 
   it("explains a recommendation with plain facts only", async () => {

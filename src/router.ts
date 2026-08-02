@@ -68,6 +68,10 @@ export function parseAppRoute(hash: string): AppRoute {
     };
   }
 
+  if (path === "/me") {
+    return { page: "me" };
+  }
+
   const gameMatch = /^\/games\/([^/]+)$/.exec(path);
   if (gameMatch) {
     const gameId = decodeSegment(gameMatch[1]);
@@ -114,6 +118,9 @@ export function appRouteToHash(route: AppRoute): string {
   if (route.page === "game") {
     const query = route.from ? `?from=${route.from}` : "";
     return `#/games/${encodeURIComponent(route.gameId)}${query}`;
+  }
+  if (route.page === "me") {
+    return "#/me";
   }
   if (route.page === "settings") {
     const query = route.attachGameId

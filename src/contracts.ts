@@ -193,6 +193,7 @@ export type AppRoute =
     }
   | { page: "game"; gameId: GameId; from: "library" | "store" | null }
   | { page: "settings"; section: SettingsSection; attachGameId: GameId | null }
+  | { page: "me" }
   | { page: "not-found"; path: string };
 
 export interface PageRestoreState {

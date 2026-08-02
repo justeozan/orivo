@@ -31,6 +31,7 @@ export type IconName =
   | "gamepad"
   | "cloud"
   | "windows"
+  | "local"
   | "more"
   | "check"
   | "leaf"
@@ -100,6 +101,10 @@ const paths: Record<IconName, string> = {
     '<path d="M7.2 18.5h9.6a4.3 4.3 0 0 0 .5-8.57 5.8 5.8 0 0 0-11.2-1.2A4 4 0 0 0 7.2 18.5z" />',
   windows:
     '<path fill="currentColor" stroke="none" d="M3 5.6 10.6 4.5v6.9H3zM11.7 4.34 21 3v8.4h-9.3zM3 12.6h7.6v6.9L3 18.4zM11.7 12.6H21V21l-9.3-1.35z" />',
+  // A local install: a desktop computer, used as the source glyph for games
+  // that live on this machine rather than in a connected store library.
+  local:
+    '<rect x="3" y="4.5" width="18" height="12" rx="1.5" /><path d="M8.5 20.5h7M12 16.5v4M6.5 13.5h5" />',
   more:
     '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none" />',
   leaf:

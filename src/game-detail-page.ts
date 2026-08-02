@@ -277,6 +277,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     dispatch({ type: "status-changed", message });
   };
 
+  /** Drop a pending progress message the moment its result is on screen. */
+  const clearTransientStatus = (): void => {
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = null;
+    dispatch({ type: "status-changed", message: "" });
+  };
+
   const loadDetail = async (context: PageActivation, gameId: string): Promise<void> => {
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId });
@@ -332,7 +339,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (!isFresh(context, gameId)) return;
       options.onLibraryChanged?.();
       await loadDetail(context, gameId);
-      if (isFresh(context, gameId)) showTransientStatus("Cover & images updated.");
+      // The refreshed cover and screenshots are the confirmation; a message
+      // saying so only repeats what is already on screen.
+      if (isFresh(context, gameId)) clearTransientStatus();
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
       showTransientStatus(requestErrorMessage(error, "No cover or images were found for this game."));
@@ -1103,6 +1112,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     return modal;
   };
 
+  /**
+   * The larger source logo under the title: Steam's mark for Steam games, a
+   * local-machine glyph for everything living on this device. A logo, not a
+   * text badge — the label only exists for assistive tech and the tooltip.
+   */
+  const renderSourceBadge = (detail: GameDetailViewModel): HTMLElement => {
+    const isSteam = detail.source === "steam";
+    const label = isSteam ? "Steam" : "Local";
+    const badge = element("span", "gd-source");
+    badge.dataset.source = detail.source;
+    badge.setAttribute("role", "img");
+    badge.setAttribute("aria-label", `Source: ${label}`);
+    badge.title = label;
+    badge.innerHTML = icon(isSteam ? "steam" : "local");
+    return badge;
+  };
+
   const renderHero = (detail: GameDetailViewModel): HTMLElement => {
     const hero = element("section", "gd-hero");
     hero.append(renderHeroMedia(detail), element("div", "gd-hero__veil"));
@@ -1114,8 +1140,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = element("h1", "gd-hero__title", detail.title);
     title.id = "gd-hero-title";
     copy.append(title);
+    const subline = element("div", "gd-hero__subline");
+    subline.append(renderSourceBadge(detail));
     const metaFacts = buildMetaFacts(detail);
-    if (metaFacts.length > 0) copy.append(renderFactList("gd-meta", metaFacts, true));
+    if (metaFacts.length > 0) subline.append(renderFactList("gd-meta", metaFacts, true));
+    copy.append(subline);
     if (detail.shortDescription) {
       copy.append(element("p", "gd-hero__summary", detail.shortDescription));
     }

@@ -59,6 +59,13 @@ const GAME_STATE_FILE: &str = "game-state.json";
 const MAX_MEDIA_RANGE_CHUNK_BYTES: u64 = 8 * 1_024 * 1_024;
 const MEDIA_MAGIC_PROBE_BYTES: usize = 16;
 const WINE_PREFIXES_DIRECTORY: &str = "wine-prefixes";
+/// The single Orivo-managed Wine profile that every local Windows `.exe` game
+/// is associated with automatically. It is provisioned without the setup
+/// wizard so users never have to add a game via Wine by hand. Its id is a
+/// fixed opaque token so the profile — and its host-owned prefix — is found
+/// and reused across restarts instead of being recreated.
+const AUTO_WINE_PROFILE_ID: &str = "orivo-auto-wine";
+const AUTO_WINE_PROFILE_NAME: &str = "Jeux Windows (.exe)";
 const MAX_WINE_SETUP_SESSIONS: usize = 12;
 const MAX_WINE_SCAN_JOBS: usize = 12;
 const MAX_WINE_IMPORT_SELECTION: usize = 2_000;
@@ -464,6 +471,14 @@ impl AppState {
         // browser's asset protocol tightly scoped and means a moved source
         // folder cannot break the selected game's visual state.
         if hydrate_catalog_media(app, &mut catalog)? {
+            catalog.save_atomically(&catalog_path)?;
+        }
+
+        // Bring every local Windows .exe under the managed default Wine profile
+        // so it launches through Wine-Staging without a manual setup step. This
+        // is a no-op off macOS and on machines without a detected Wine-Staging
+        // installation, so the first paint is never blocked waiting for Wine.
+        if auto_apply_wine_to_direct_games(&mut catalog, &wine_prefix_root) {
             catalog.save_atomically(&catalog_path)?;
         }
 
@@ -946,6 +961,41 @@ fn require_wine_runner_platform() -> Result<(), String> {
     }
 }
 
+/// Whether Orivo is running on an Apple Silicon (M-series) Mac. On such
+/// machines the D3D10/11 → Metal path (DXVK-macOS) is the default graphics
+/// backend so the user never enables it by hand.
+///
+/// This reads the `hw.optional.arm64` capability rather than the compile-time
+/// architecture, so it stays correct even for an x86_64 Orivo build translated
+/// by Rosetta on an M-series Mac. The result never crosses the WebView
+/// boundary; it only selects a value from the closed host-owned graphics enum.
+#[cfg(target_os = "macos")]
+fn macos_is_apple_silicon() -> bool {
+    use std::sync::OnceLock;
+    static APPLE_SILICON: OnceLock<bool> = OnceLock::new();
+    *APPLE_SILICON.get_or_init(|| {
+        let mut value: i64 = 0;
+        let mut size = std::mem::size_of::<i64>();
+        // SAFETY: `sysctlbyname` only writes up to `size` bytes into `value`
+        // and updates `size`; the name is a fixed NUL-terminated string.
+        let result = unsafe {
+            libc::sysctlbyname(
+                b"hw.optional.arm64\0".as_ptr() as *const libc::c_char,
+                &mut value as *mut i64 as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        result == 0 && value == 1
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_is_apple_silicon() -> bool {
+    false
+}
+
 fn next_wine_opaque_id(state: &AppState, kind: &str) -> String {
     let sequence = state
         .wine_operation_sequence
@@ -1074,9 +1124,9 @@ fn wine_profile_view(catalog: &Catalog, profile: &WineProfile) -> WineProfileVie
             WineGraphicsBackend::Auto => "auto",
         },
         graphics_summary: match &profile.graphics.backend {
-            WineGraphicsBackend::WineD3d => "Wine 3D · mode de compatibilité par défaut",
+            WineGraphicsBackend::WineD3d => "Wine 3D · mode de compatibilité",
             WineGraphicsBackend::DxvkMacos => {
-                "DXVK-macOS expérimental · DirectX 10/11 via MoltenVK vers Metal"
+                "DXVK-macOS · DirectX 10/11 via MoltenVK vers Metal (par défaut sur Apple Silicon)"
             }
             WineGraphicsBackend::Dxmt => {
                 "DXMT · DirectX 10/11 via Metal, en attente d’un moteur Wine compatible"
@@ -2078,6 +2128,196 @@ async fn associate_direct_game_with_wine_profile(
     })
 }
 
+/// Best-effort conversion of every local Direct Windows `.exe` in the catalog
+/// into a card backed by the Orivo-managed default Wine profile, so Windows
+/// games launch through Wine-Staging without the user creating a profile or
+/// associating a game by hand.
+///
+/// Every host invariant of the manual association path is preserved: each
+/// executable is canonicalised, scope-checked against a grant derived only
+/// from the folder Orivo already holds for that game, content-fingerprinted,
+/// and reduced to opaque ids before it becomes a runner card. The original
+/// Direct record is retained so the association is fully reversible — deleting
+/// the managed profile restores it. Orivo never bundles Wine, so when no
+/// Wine-Staging installation is detected the games stay Direct and nothing is
+/// changed.
+///
+/// Returns `true` when the catalog was modified. The caller owns locking and
+/// persistence.
+fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Path) -> bool {
+    if !cfg!(target_os = "macos") {
+        // The built-in Wine-Staging runner is macOS-only.
+        return false;
+    }
+
+    let pending = catalog
+        .games
+        .iter()
+        .filter(|game| is_local_direct_windows_game(game))
+        .filter(|game| {
+            !catalog
+                .wine_inventory
+                .iter()
+                .any(|entry| entry.origin_direct_game_id.as_deref() == Some(game.id.as_str()))
+        })
+        .filter_map(|game| {
+            game.executable_path
+                .clone()
+                .map(|executable| (game.id.clone(), executable))
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return false;
+    }
+
+    let cancelled = AtomicBool::new(false);
+    let apple_silicon = macos_is_apple_silicon();
+
+    // Reuse the persisted managed default profile, or provision a new one. A
+    // new profile needs a real, probed Wine-Staging engine and its own
+    // host-owned prefix; without a detected engine the games stay Direct.
+    let mut profile = match catalog.wine_profile(AUTO_WINE_PROFILE_ID).cloned() {
+        Some(profile) if profile.enabled => profile,
+        // Respect an explicit user disable of the managed default profile.
+        Some(_) => return false,
+        None => {
+            let wine_binary = match wine_runner::detect_wine_staging(&cancelled) {
+                Ok(Some(binary)) => match wine_runner::probe_wine_staging(&binary, &cancelled) {
+                    Ok(validated) => validated,
+                    Err(_) => return false,
+                },
+                Ok(None) | Err(_) => return false,
+            };
+            let prefix = match wine_runner::ensure_managed_profile_prefix(
+                wine_prefix_root,
+                AUTO_WINE_PROFILE_ID,
+            ) {
+                Ok(prefix) => prefix,
+                Err(_) => return false,
+            };
+            WineProfile {
+                id: AUTO_WINE_PROFILE_ID.to_string(),
+                display_name: AUTO_WINE_PROFILE_NAME.to_string(),
+                wine_binary,
+                prefix,
+                game_directories: Vec::new(),
+                graphics: WineGraphicsOptions {
+                    // On Apple Silicon, DXVK-macOS is the default so the user
+                    // never enables Metal translation by hand. New game cards
+                    // are Auto+Isolated and still install the pinned, verified
+                    // DXVK runtime lazily on first launch; this profile-wide
+                    // value drives the settings display and any legacy
+                    // shared-prefix game (of which the managed default has
+                    // none).
+                    backend: if apple_silicon {
+                        WineGraphicsBackend::DxvkMacos
+                    } else {
+                        WineGraphicsBackend::WineD3d
+                    },
+                    virtual_desktop: None,
+                },
+                dxmt_engine_supported: None,
+                macos_retina_mode_enabled: None,
+                enabled: true,
+                last_imported_at: None,
+            }
+        }
+    };
+
+    let imported_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+
+    let mut changed = false;
+    for (direct_game_id, executable) in pending {
+        // Canonicalise the stored path and derive a grant no broader than the
+        // executable's own directory — the folder the user already pointed
+        // Orivo at when importing this game. This never widens scope to a
+        // parent tree and never runs a new disk scan.
+        let Ok(canonical) = fs::canonicalize(&executable) else {
+            continue;
+        };
+        let Some(parent) = canonical.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+
+        // Validate the game against a trial profile carrying the derived grant.
+        // This hashes and scope-checks the executable exactly as the manual
+        // association command does.
+        let mut trial = profile.clone();
+        if !trial.game_directories.contains(&parent) {
+            trial.game_directories.push(parent);
+        }
+        if trial.validate().is_err() {
+            continue;
+        }
+        let candidate =
+            match wine_runner::validate_wine_game_for_profile(&trial, &canonical, &cancelled) {
+                Ok(candidate) => candidate,
+                Err(_) => continue,
+            };
+        let Some(direct_game) = catalog
+            .games
+            .iter()
+            .find(|game| game.id == direct_game_id)
+            .cloned()
+            .filter(is_local_direct_windows_game)
+        else {
+            continue;
+        };
+
+        let inventory = WineGameInventoryEntry {
+            profile_id: AUTO_WINE_PROFILE_ID.to_string(),
+            game_ref: candidate.game_ref.clone(),
+            title: candidate.title.clone(),
+            executable_path: candidate.executable_path.clone(),
+            fingerprint: candidate.fingerprint.clone(),
+            imported_at: Some(imported_at),
+            compatibility: WineGameCompatibility::automatic(),
+            origin_direct_game_id: Some(direct_game_id.clone()),
+        };
+        let runner_game =
+            wine_catalog_game_from_direct(AUTO_WINE_PROFILE_ID, &candidate, &direct_game);
+
+        // Apply the association on a candidate clone so a rejected game leaves
+        // the catalog (and the accumulated grant) untouched. The managed
+        // profile carrying the derived grant must be present before the
+        // association's catalog-level scope check runs.
+        let mut next = catalog.clone();
+        if next
+            .wine_profiles
+            .iter_mut()
+            .find(|existing| existing.id == AUTO_WINE_PROFILE_ID)
+            .map(|existing| *existing = trial.clone())
+            .is_none()
+        {
+            next.wine_profiles.push(trial.clone());
+        }
+        if next
+            .associate_direct_game_with_wine_profile(&direct_game_id, inventory, runner_game)
+            .is_err()
+        {
+            continue;
+        }
+        if let Some(persisted) = next
+            .wine_profiles
+            .iter_mut()
+            .find(|persisted| persisted.id == AUTO_WINE_PROFILE_ID)
+        {
+            persisted.last_imported_at = Some(imported_at);
+        }
+        if next.validate().is_err() {
+            continue;
+        }
+        *catalog = next;
+        profile = trial;
+        changed = true;
+    }
+
+    changed
+}
+
 const MAX_DXVK_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
 
 /// The explicit profile action is allowed to change its legacy graphics
@@ -2722,9 +2962,9 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
     // Media is optional; a damaged image must not prevent a valid executable
     // from entering the library.
     let _ = cache_game_media(&app, &mut game);
-    let imported_id = game.id.clone();
+    let direct_id = game.id.clone();
 
-    let response = {
+    let (response, imported_id) = {
         let _mutation = state
             .catalog_mutation
             .lock()
@@ -2735,6 +2975,19 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
             .clone();
         next_catalog.add(game).map_err(|error| error.to_string())?;
+        // A newly imported Windows .exe becomes a Wine-Staging card in the same
+        // transaction, so the returned library already shows it as launchable
+        // without the user opening any Wine setup.
+        auto_apply_wine_to_direct_games(&mut next_catalog, &state.wine_prefix_root);
+        // When the .exe was auto-associated, its Direct card is hidden behind a
+        // managed Wine runner card with a different id. Surface that runner id so
+        // the UI selects the card it can actually see and launch.
+        let imported_id = next_catalog
+            .wine_inventory
+            .iter()
+            .find(|entry| entry.origin_direct_game_id.as_deref() == Some(direct_id.as_str()))
+            .map(|entry| wine_game_id(&entry.profile_id, &entry.game_ref))
+            .unwrap_or_else(|| direct_id.clone());
         persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
         {
             let mut catalog = state
@@ -2747,7 +3000,7 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             .catalog
             .read()
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        library_state(&app, &catalog)
+        (library_state(&app, &catalog), imported_id)
     };
     debug_assert!(response.games.iter().any(|game| game.id == imported_id));
     Ok(ImportResponse {
@@ -3536,12 +3789,14 @@ async fn launch_game(
     let title = game.title.clone();
 
     // A Windows executable must never fall through to the generic direct
-    // launcher on macOS. The UI offers an explicit profile association, while
-    // this host-side check keeps a forged/stale WebView request from invoking
-    // it as a native program.
+    // launcher on macOS. Orivo applies Wine-Staging to every local .exe
+    // automatically (at import, at startup, and whenever the library reloads),
+    // so a game only stays a Direct record here when no Wine-Staging engine was
+    // detected. This host-side check also keeps a forged/stale WebView request
+    // from invoking a Windows binary as a native program.
     if cfg!(target_os = "macos") && is_local_direct_windows_game(&game) {
         return Err(
-            "This is a Windows game. Configure it with an allowed Wine-Staging profile before launching it."
+            "This is a Windows game. Install Wine-Staging so Orivo can run it automatically."
                 .into(),
         );
     }
@@ -4738,6 +4993,36 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
         }
     }
 
+    // A local record with no discovered or fetched artwork borrows the bundled
+    // plate whose title matches its own (case-insensitive, loose), and
+    // otherwise wears the neutral placeholder. This is presentation-only: the
+    // stored record keeps its empty slots, so the post-import artwork search
+    // still sees the gap and can fill it with real art.
+    for game in &mut presentation.games {
+        if game.source != GameSource::Local
+            || (game.cover_path.is_some() && game.artwork_path.is_some())
+        {
+            continue;
+        }
+        let matched = bundled_artwork_for_title(&game.title);
+        let cover = matched.and_then(|entry| entry.cover.clone());
+        let hero = matched.and_then(|entry| entry.hero.clone());
+        if game.cover_path.is_none() {
+            game.cover_path = Some(PathBuf::from(
+                cover
+                    .clone()
+                    .or_else(|| hero.clone())
+                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
+            ));
+        }
+        if game.artwork_path.is_none() {
+            game.artwork_path = Some(PathBuf::from(
+                hero.or(cover)
+                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
+            ));
+        }
+    }
+
     presentation
 }
 
@@ -4906,6 +5191,79 @@ fn game_key(title: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+/// The bundled IGDB artwork manifest shipped with the app. It names the titles
+/// whose covers and heroes exist as `/media/igdb` public assets.
+const BUNDLED_ARTWORK_MANIFEST: &str = include_str!("../../assets/igdb/sources.json");
+
+/// A neutral bundled brand image for games whose artwork was not found. An
+/// unknown game must never wear another game's art (this used to fall through
+/// to the Elden Ring plates).
+const NEUTRAL_ARTWORK_PLACEHOLDER: &str = "/media/orivo-ring-icon.png";
+
+/// One bundled title from the manifest, keyed by its normalized title.
+struct BundledArtwork {
+    key: String,
+    cover: Option<String>,
+    hero: Option<String>,
+}
+
+fn bundled_artwork_index() -> &'static [BundledArtwork] {
+    static INDEX: OnceLock<Vec<BundledArtwork>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let Ok(manifest) = serde_json::from_str::<serde_json::Value>(BUNDLED_ARTWORK_MANIFEST)
+        else {
+            return Vec::new();
+        };
+        let file_of = |asset: &serde_json::Value, slot: &str| {
+            asset
+                .get(slot)
+                .and_then(|slot| slot.get("file"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|file| !file.contains("..") && !file.contains('\\'))
+                .map(|file| format!("/media/igdb/{file}"))
+        };
+        manifest
+            .get("assets")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|asset| {
+                let title = asset.get("title").and_then(serde_json::Value::as_str)?;
+                let key = game_key(title);
+                (!key.is_empty()).then(|| BundledArtwork {
+                    key,
+                    cover: file_of(asset, "cover"),
+                    hero: file_of(asset, "hero"),
+                })
+            })
+            .collect()
+    })
+}
+
+/// Case-insensitive, punctuation-free title lookup with a loose containment
+/// fallback, so an executable-style name ("EldenRing", "witcher3") still finds
+/// its bundled artwork. A containment match requires a stem of at least five
+/// characters so a short junk title cannot alias onto a manifest entry.
+fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
+    const MIN_LOOSE_KEY: usize = 5;
+    let key = game_key(title);
+    if key.is_empty() {
+        return None;
+    }
+    let index = bundled_artwork_index();
+    if let Some(exact) = index.iter().find(|entry| entry.key == key) {
+        return Some(exact);
+    }
+    index.iter().find(|entry| {
+        let (short, long) = if entry.key.len() <= key.len() {
+            (entry.key.as_str(), key.as_str())
+        } else {
+            (key.as_str(), entry.key.as_str())
+        };
+        short.len() >= MIN_LOOSE_KEY && long.contains(short)
+    })
 }
 
 #[cfg(test)]
@@ -5457,6 +5815,53 @@ mod tests {
             game_media_response(&media, &media_request("hero-large.png", Some("bytes=0-")));
         assert_eq!(ranged.status(), tauri::http::StatusCode::PARTIAL_CONTENT);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A freshly imported local game must never wear another game's art: a
+    /// title matching a bundled plate borrows that plate, and an unknown title
+    /// gets the neutral placeholder rather than the Elden Ring fallback.
+    #[test]
+    fn local_games_without_artwork_get_bundled_or_neutral_presentation_art() {
+        let mut stored = Catalog::default();
+        let mut matched = imported_local_game_fixture();
+        matched.id = "local-elden".into();
+        matched.title = "EldenRing".into();
+        let mut unknown = imported_local_game_fixture();
+        unknown.id = "local-hozy".into();
+        unknown.title = "Hozy Playtest".into();
+        stored.games.push(matched);
+        stored.games.push(unknown);
+
+        let presentation = presentation_catalog(&stored, false);
+        let matched = presentation
+            .games
+            .iter()
+            .find(|game| game.id == "local-elden")
+            .unwrap();
+        assert_eq!(
+            matched.cover_path.as_deref(),
+            Some(Path::new("/media/igdb/covers/elden-ring.jpg"))
+        );
+        assert_eq!(
+            matched.artwork_path.as_deref(),
+            Some(Path::new("/media/igdb/heroes/elden-ring-wallpaper.png"))
+        );
+        let unknown = presentation
+            .games
+            .iter()
+            .find(|game| game.id == "local-hozy")
+            .unwrap();
+        assert_eq!(
+            unknown.cover_path.as_deref(),
+            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
+        );
+        assert_eq!(
+            unknown.artwork_path.as_deref(),
+            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
+        );
+        // Presentation enrichment must stay out of the stored catalog so the
+        // post-import artwork search still sees the gap.
+        assert!(stored.games.iter().all(|game| game.cover_path.is_none()));
     }
 
     /// The Library and the detail page resolve artwork through one function.

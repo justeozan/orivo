@@ -167,6 +167,37 @@ describe("game detail page social rendering", () => {
     expect(container.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
   });
 
+  it("shows the source logo and the more menu under the title, and no bookmark", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID));
+
+    // The fallback detail is a local game: the local-machine glyph renders as
+    // a real logo (an inline SVG), not a text badge.
+    const source = container.querySelector(".gd-hero__subline .gd-source");
+    expect(source).not.toBeNull();
+    expect(source?.getAttribute("aria-label")).toBe("Source: Local");
+    expect(source?.querySelector("svg")).not.toBeNull();
+
+    // The "…" actions control lives in the hero copy, below the title.
+    expect(container.querySelector(".gd-hero__copy .gd-more")).not.toBeNull();
+
+    // The bookmark/wishlist control is gone.
+    expect(container.querySelector(".gd-wishlist")).toBeNull();
+  });
+
+  it("shows the Steam mark for a Steam game and no playtime when never played", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    detail.source = "steam";
+    detail.playTimeSeconds = 0;
+    detail.lastPlayedAt = null;
+
+    await mountWith(detail);
+
+    expect(container.querySelector(".gd-source")?.getAttribute("aria-label")).toBe("Source: Steam");
+    // A never-played game shows no "0h" and no empty label at all.
+    expect(container.querySelector(".gd-stats__item[data-fact-id='playtime']")).toBeNull();
+    expect(container.querySelector(".gd-stats__item[data-fact-id='last-played']")).toBeNull();
+  });
+
   it("omits the social row and its sections when the detail ships no social data", async () => {
     const detail = createFallbackGameDetail(GAME_ID);
     detail.friends = [];
