@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost data: blob: https://cdn.cloudflare.steamstatic.com; media-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost game-media: data: blob: https://cdn.cloudflare.steamstatic.com https://cdn.akamai.steamstatic.com https://shared.akamai.steamstatic.com https://store.akamai.steamstatic.com https://upload.wikimedia.org https://images.igdb.com https://lh3.googleusercontent.com https://encrypted-tbn0.gstatic.com; media-src 'self' asset: http://asset.localhost game-media:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPCACHE/media/**/*"]

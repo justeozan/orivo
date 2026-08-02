@@ -23,7 +23,16 @@ export type IconName =
   | "refresh"
   | "folder"
   | "monitor"
-  | "alert";
+  | "alert"
+  | "star"
+  | "thumbs-up"
+  | "user"
+  | "users"
+  | "gamepad"
+  | "cloud"
+  | "windows"
+  | "more"
+  | "check";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -59,6 +68,22 @@ const paths: Record<IconName, string> = {
   folder: '<path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />',
   monitor: '<rect x="3" y="4" width="18" height="13" rx="1" /><path d="M8 21h8M12 17v4" />',
   alert: '<circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5M12 16h.01" />',
+  star:
+    '<path d="m12 3.6 2.55 5.16 5.7.83-4.12 4.02.97 5.67L12 16.9l-5.07 2.68.97-5.67-4.12-4.02 5.7-.83z" />',
+  "thumbs-up":
+    '<path fill="currentColor" stroke="none" d="M2 10.5h3.2V20H2zM7 20V9.6l4.2-6.4a1.6 1.6 0 0 1 2.94 1.05L13.4 8.4h5.3a2 2 0 0 1 1.96 2.42l-1.5 7a2.2 2.2 0 0 1-2.15 1.68z" />',
+  user: '<circle cx="12" cy="8" r="3.6" /><path d="M5.5 20a6.5 6.5 0 0 1 13 0" />',
+  users:
+    '<circle cx="9" cy="8" r="3.2" /><path d="M3.4 19.5a5.6 5.6 0 0 1 11.2 0" /><path d="M15.5 5.1a3.2 3.2 0 0 1 0 6.1M17.4 19.5a5.6 5.6 0 0 0-2.6-4.7" />',
+  gamepad:
+    '<rect x="2.5" y="7.5" width="19" height="10" rx="5" /><path d="M7.5 11v3M6 12.5h3M15.5 11.5h.01M18 13.5h.01" />',
+  cloud:
+    '<path d="M7.2 18.5h9.6a4.3 4.3 0 0 0 .5-8.57 5.8 5.8 0 0 0-11.2-1.2A4 4 0 0 0 7.2 18.5z" />',
+  windows:
+    '<path fill="currentColor" stroke="none" d="M3 5.6 10.6 4.5v6.9H3zM11.7 4.34 21 3v8.4h-9.3zM3 12.6h7.6v6.9L3 18.4zM11.7 12.6H21V21l-9.3-1.35z" />',
+  more:
+    '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none" />',
+  check: '<path d="M20 6.5 9.2 17.3 4 12.1" />',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {

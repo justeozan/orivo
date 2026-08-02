@@ -3,9 +3,11 @@
 Référence visuelle principale du Selector: `assets/moc-images/orivo-full-screen.png`.
 Référence secondaire pour le futur Home / Game Hub: `assets/moc-images/orivo_example_image.png`.
 
-Ce document décrit le système visuel partagé d'Orivo et ses deux modes d'interface. La direction est celle d'un launcher gaming premium: sombre, cinématographique, translucide, dense mais respirant, avec une interface macOS-like et un accent violet froid.
+Ce document décrit le système visuel partagé d'Orivo et ses modes d'interface. La direction est celle d'un launcher gaming premium: sombre, cinématographique, translucide, dense mais respirant, avec une interface macOS-like et un accent violet froid.
 
 Le **Selector fullscreen** est la cible prioritaire du premier prototype. Le **Home / Game Hub** est une surface plus dense, dérivée de la référence secondaire, qui viendra ensuite. Les tokens, la typographie, le verre, les jaquettes et la motion sont partagés, mais la structure et la densité ne le sont pas.
+
+The shipped application is neither of those two references in isolation: it is a routed multi-page shell built on the same tokens, described in **§4.3 Application pages mode**. That section, plus §14 and §15, is the specification a developer follows when adding a new surface.
 
 L'implémentation de référence est le frontend TypeScript/CSS de Tauri v2. Les règles CSS de ce document sont donc la spécification directe du WebView : le verre utilise le vrai `backdrop-filter` du navigateur, pas une image du hero floutée et recopiée dans chaque contrôle.
 
@@ -131,7 +133,9 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 - Le blur est limité aux petites surfaces glass : il ne s'applique ni au hero ni au viewport complet. En l'absence de `backdrop-filter`, les contrôles utilisent une surface Obsidian plus opaque sans modifier la géométrie.
 - Le Selector doit rester utilisable avec une image statique si le backend vidéo, le fichier ou le décodage matériel est indisponible.
 
-### 4.2 Home / Game Hub — référence secondaire
+### 4.2 Home / Game Hub — référence secondaire (surface non livrée)
+
+> **Statut : non implémenté.** Cette section décrit une surface Home / Game Hub qui n'existe pas dans l'application livrée. La navigation réelle est la topbar globale décrite en **§4.3**, et la seule sidebar de l'application est interne à Settings. Ne pas lire cette section comme une description du shell actuel : elle reste ici comme référence visuelle pour un éventuel Home futur.
 
 Le Home / Game Hub reprend les mêmes fondations visuelles, mais ajoute une navigation persistante, des widgets et plusieurs sources d'information. La référence `orivo_example_image.png` sert pour cette surface, pas pour le Selector initial.
 
@@ -168,6 +172,74 @@ Le Home / Game Hub reprend les mêmes fondations visuelles, mais ajoute une navi
 - Grille desktop: contenu fluide, colonne droite 266-300px, gap 28-36px.
 - Max-width global: 1280-1360px apres sidebar.
 - Espacement vertical entre sections: 22-30px.
+
+### 4.3 Application pages mode — shipped shell
+
+Orivo runs as a routed multi-page application. Library, Store, game detail, Settings and not-found are **pages**, not overlays stacked on a single screen. One shell hosts all of them and survives every navigation.
+
+#### Global topbar
+
+- The topbar (`header.topbar`) is rendered exactly once by the shell and is identical on every page. Only *what the search searches* changes; the bar itself is never rebuilt, moved or duplicated per page.
+- Contents, left to right: brand mark (opens the library-sources menu), primary navigation (`Library`, `Store`, `Settings`), the contextual search, then notifications and avatar.
+- Exactly one navigation link carries `aria-current="page"` (and the matching active capsule). A game detail page resolves to the entry it was opened from: `?from=store` marks Store, everything else marks Library.
+- The search keeps its grid cell on every route. A page that cannot search hides it with `visibility: hidden` and disables the input, so the topbar never reflows between pages.
+- `--topbar-height` (92px, declared on `.selector`) is the single source of truth for the vertical space the topbar occupies.
+
+#### Settings sidebar — the only sidebar
+
+- Settings owns the one vertical sidebar in the application (`nav.settings-sidebar`, `role="tablist"`, `aria-orientation="vertical"`). It is internal to the Settings page: it does not exist on Library, Store, game detail or not-found, and it is not a second level of global navigation.
+- Sections behave like tabs: `aria-selected`, `aria-controls`, and roving Arrow / Home / End keyboard navigation scoped to the Settings host.
+- On narrow widths the layout collapses to a single column and the sidebar becomes a static horizontal list instead of a sticky column.
+
+#### Settings is a page, not a modal
+
+This replaces the old modal/backdrop pattern. Settings now has:
+
+- no backdrop and no dimmed page behind it,
+- no close button — leaving is a navigation (another nav entry, or Back),
+- no focus trap,
+- no Escape-to-close.
+
+#### Places vs tasks — the rule for the next surface
+
+- A **place** is a destination: it can be linked to, returned to, and left with Back. Places are pages. A place gets a route, a page host, and a `PageRestoreState`.
+- A **task** is a bounded flow the user starts and then finishes or abandons. It has no address and must not destroy the page underneath. Tasks stay overlays.
+- The Wine wizard is the live example of a task: it floats above whichever page is active, never tears the shell down, and Escape closes it from anywhere.
+- When adding a surface: if it deserves a URL and a Back button, build it as a page. If it is something the user *does* and then dismisses, build it as an overlay task. Do not build a place as an overlay to save routing work.
+
+#### Route grammar
+
+Routes live in the hash. The parser is total: every input resolves to an `AppRoute`, never to a thrown error.
+
+- `#/library` — the default. `#`, `#/` and an empty hash all resolve here.
+- `#/store` — optional `?category=<for-you|short-sessions|strong-stories|relaxing|all-games>`, repeated `?provider=<...>`, and `?q=<text>`. An unknown category falls back to `for-you`; unknown providers are dropped; duplicates collapse. Serialising omits defaults, so the canonical Store URL is bare `#/store`.
+- `#/games/<gameId>?from=library|store` — `from` accepts only those two values, anything else becomes `null`. `gameId` is percent-encoded in the hash.
+- `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `appearance`, `data`, `about`. `#/settings` alone means `general`. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
+- Anything else — not-found, carrying the path it could not resolve. The page names that path and offers one way back to the Library.
+
+Ids and trust across the boundary:
+
+- Game ids crossing IPC are **opaque**: `steam:<appid>`, `local:<sha256>`. They are references the host already owns, never paths, URLs or commands. Never parse them for display; never construct one in the UI.
+- A route segment that fails to decode, or that contains NUL, `/` or `\`, is rejected as not-found rather than repaired.
+- No URL, filesystem path, executable or command line is ever accepted from the WebView. The route carries the opaque id and nothing else; the native host resolves everything else itself.
+
+#### Page lifecycle
+
+Each page implements `mount` / `activate` / `deactivate` and is driven by a lifecycle host wrapping its own `div.app-page`.
+
+- `mount(container)` runs once, lazily, on first activation.
+- `activate({ route, signal, restoreState, isCurrent })` runs on every entry. The host first aborts the previous activation's `AbortSignal` and bumps a generation counter.
+- `deactivate()` returns a `PageRestoreState` (or `null`) and runs only when the route's page actually changes — a change of section, category or query inside the same page is a re-activation, not a remount.
+- The inactive host is `hidden` **and** `inert`. Both are required: `hidden` removes it visually, `inert` takes it out of the tab order, the accessibility tree and hit-testing. A page that is only `hidden` is still reachable by keyboard.
+- **Late async responses are discarded, not applied.** Work started by an activation checks `isCurrent()` (or its `AbortSignal`) before touching the DOM and returns silently otherwise. An abort is a normal outcome and never surfaces as an error toast.
+- `PageRestoreState` is stored per page and replayed only when *returning* to that page — Back, or a repeat visit — never on a fresh navigation. It carries `scrollTop`, `focusKey`, and optionally `selectedGameId`, `query` and `filters`. There is a single scroll field: the Library rail is horizontal and stores its `scrollLeft` in it.
+- Focus restoration happens after layout (`requestAnimationFrame`) and re-checks `isCurrent()` before focusing, so a fast Back-then-forward never steals focus into a page that is no longer visible.
+
+#### CSS ownership
+
+- `styles.css` owns the global layer: tokens, topbar, shell, the `.app-page` hosts, the Library scene and Settings.
+- Every page added on top of the shell owns exactly one stylesheet with a class prefix reserved to it: `store-` in `store-page.css`, `gd-` in `game-detail-page.css`. A page never styles another page's classes and never restyles a shell class.
+- **A page stylesheet must not fight the shell's top padding.** The shell gives scrolling pages their clearance with `.app-page--scroll { padding-top: var(--topbar-height) }`. No negative top margin, no `padding-top: 0` on the host, no repositioning of the host, no re-declaring `position` or `inset` on `.app-page`. A page that needs full-bleed artwork under the topbar draws it inside its own root element instead of cancelling the shell's padding.
 
 ## 5. Hero Cinématique partagé
 
@@ -361,11 +433,32 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - Pas d'images manquantes ou placeholders abstraits.
 - Pas d'elements qui se chevauchent de maniere incoherente; chaque bloc garde sa zone.
 
-## 14. Checklist de Conformite
+## 14. Content Honesty Rules
+
+Orivo shows what it actually knows. These are product rules, not copy suggestions: they decide whether a component may render at all.
+
+- **Never show a fabricated price.** An offer without a price or without a currency renders `Price unavailable` next to its provider — never a guessed figure, a rounded number, a `0`, `Free`, or a struck-through "was" price that was never verified. When a game has no offer at all, say so (`No offer` / `No verified offer`).
+- **Flag stale or missing data explicitly.** An offer is stale when the provider marks it stale, when it has no verification timestamp, or when it was verified more than 24 hours ago. Stale offers are labelled inline (`may be outdated`, `not recently verified`) and carry a visible stale state. A stale price is never presented as a verified one.
+- **Report provider health as it is.** `available`, `degraded`, `unavailable` and `not-configured` are distinct states with the provider's own message. A degraded or unconfigured provider is never rendered as healthy, and its absence is never hidden behind an empty result.
+- **Render a section only when real data backs it.** Friends and Activity are the live examples: they exist in the layout only when the payload actually contains entries. No placeholder rows, no invented avatars, no "no friends yet" filler that implies a feature already ships. An absent section is more honest than an empty one.
+- **Recommendation reasons must be factual.** They are derived from data on hand — tags, genres, platform support, session length, ownership — and are phrased as such (`Available on macOS`, `Works in short sessions`, `Story-rich campaign`). Three at most. Never any AI or cognitive claim: no "our AI picked this", no "learned from your habits", no "because you seem to…". If no factual reason exists, show none.
+- Missing media is a stated fallback state, not an invented image: keep the final geometry, show the fallback surface, and never substitute unrelated artwork.
+
+## 15. Accessibility Baseline
+
+- **Visible focus, always.** `:focus-visible` draws a 2px `#c3b5ff` outline with offset. Focus styling is never removed; a component that needs a different indicator must provide one of at least equal visibility.
+- **Everything is reachable by keyboard.** Interactive elements are real `button` / `input` elements, icon-only controls carry an `aria-label`, and decorative layers are `aria-hidden`. No click handler on a non-focusable element.
+- **Only the active page is focusable.** Inactive page hosts are `hidden` and `inert`, so Tab never lands in a page the user cannot see.
+- **`prefers-reduced-motion` is honoured, twice.** The system query collapses transitions and animations and forces `scroll-behavior: auto`. The Appearance preference mirrors it with `data-motion="reduced"` and wins over the system setting, so the app can be calmed down without changing macOS.
+- **No autoplaying video, anywhere.** Trailers use `controls` and `preload="metadata"` with autoplay off, and start only on explicit user intent. Motion-only embellishments are attached only when motion is allowed.
+- **Keyboard shortcuts are page-scoped.** The only shortcut shared by every page focuses the contextual search (`⌘K` / `Ctrl+K`, or `/` when not typing). Library shortcuts (arrows, Enter, `i`, `Shift+I`) return early unless Library is the active route, so they can never fire from the Store, a game detail or Settings. Escape belongs to whatever task is open — the Wine wizard first, then the library menu — and otherwise blurs the search field.
+- **Announce what changes on its own.** Regions that update without a direct user action use `role="status"` / `aria-live="polite"`; nothing announces assertively.
+
+## 16. Checklist de Conformite
 
 - La premiere impression est une scene de jeu sombre et immersive.
 - **Selector**: aucun panneau lateral permanent; la navigation est horizontale et le hero reste dominant.
-- **Home / Game Hub**: la sidebar est fixe, translucide, macOS-like, avec un etat actif visible.
+- **Home / Game Hub** (surface non livrée, cf. §4.2): la sidebar est fixe, translucide, macOS-like, avec un etat actif visible. Ne s'applique pas au shell actuel, dont la navigation est la topbar globale.
 - L'accent violet apparait sur le logo, l'action primaire, la selection et les progressions.
 - Les cartes laissent percevoir l'arriere-plan par blur et transparence.
 - Les jaquettes portent l'identite visuelle; aucun rail ne semble vide.
@@ -374,3 +467,8 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - Les textes secondaires sont doux, jamais blanc pur massif.
 - Les interactions sont tactiles mais discretes.
 - L'interface reste utilisable en fullscreen desktop et sans overflow global.
+- **Application pages**: the topbar is the same on every page and exactly one navigation link is `aria-current="page"`.
+- **Application pages**: the only sidebar is inside Settings, and Settings has no backdrop, no close button, no focus trap and no Escape-to-close.
+- **Application pages**: every hash resolves to a page, an unknown one included; ids in the URL stay opaque.
+- **Application pages**: the inactive page is `hidden` and `inert`, and Back restores scroll, focus and filters.
+- **Application pages**: nothing on screen is a price, a section or a reason that the data does not actually support.
