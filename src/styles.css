@@ -6,6 +6,18 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background: #0b0b0d;
+  --violet: #7d54f4;
+  --text: #f4f2f7;
+  --muted: #c8c5cf;
+  --ash: #9b97a3;
+  /* The topbar is a floating bar, not a flow element: its real bottom edge is
+     `--topbar-inset-top` + its 40px height = 65px. `--topbar-height` adds the
+     breathing room below it and is the single source of both the page hosts'
+     top padding and the height of the topbar scrim. */
+  --topbar-inset-top: 25px;
+  --topbar-inset-left: 32px;
+  --topbar-inset-right: 34px;
+  --topbar-height: 76px;
 }
 
 @property --cover-glint-angle {
@@ -28,11 +40,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 .icon { width: 18px; height: 18px; flex: none; }
 
+#app { color: var(--text); }
+
 .selector {
-  --violet: #7d54f4;
-  --text: #f4f2f7;
-  --muted: #c8c5cf;
-  --ash: #9b97a3;
   position: relative;
   isolation: isolate;
   min-height: 100svh;
@@ -70,16 +80,37 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .topbar {
   position: absolute;
   z-index: 5;
-  top: 25px;
-  left: 32px;
-  right: 34px;
+  top: var(--topbar-inset-top);
+  left: var(--topbar-inset-left);
+  right: var(--topbar-inset-right);
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, min(352px, 31vw)) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
   min-height: 40px;
+  color: var(--text);
 }
 .topbar.is-library-menu-open { z-index: 25; }
+
+/* The scrim stretches from the topbar back out to the viewport edges, so it is
+   inset by exactly the offsets above. Without it a scrolling page renders
+   straight through the bar and the navigation becomes unreadable. */
+.topbar::before {
+  position: absolute;
+  z-index: -1;
+  top: calc(-1 * var(--topbar-inset-top));
+  right: calc(-1 * var(--topbar-inset-right));
+  left: calc(-1 * var(--topbar-inset-left));
+  height: var(--topbar-height);
+  content: "";
+  pointer-events: none;
+  opacity: 0;
+  background: linear-gradient(180deg, rgba(9,10,14,.94) 0%, rgba(9,10,14,.88) 72%, rgba(9,10,14,0) 100%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+  backdrop-filter: blur(18px) saturate(125%);
+  transition: opacity 160ms ease;
+}
+.topbar--over-content::before { opacity: 1; }
 
 .nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .rail-filters, .controller-hud, .hud-category, .hud-pagination, .hud-controls, .hud-controls > span { display: flex; align-items: center; }
 
@@ -138,7 +169,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .library-source-action + .library-source-action:last-child { border-radius: 0 0 11px 11px; }
 .library-source-action:hover, .library-source-action:focus-visible { color: #fff; background: rgba(255,255,255,.085); }
 .library-source-action:focus-visible { outline-offset: -2px; }
-.library-source-action--connect { min-height: 62px; }
 .library-source-action__icon {
   display: grid;
   width: 32px;
@@ -193,8 +223,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   transition: border-color 160ms ease, background 160ms ease;
 }
 
-.search-control:focus-within { border-color: rgba(218,216,255,.54); background: rgba(27,24,31,.5); }
+/* The whole pill is the focus target, so the ring goes on the pill rather than
+   on the bare input: a 2px ring is the visible indicator, the border tint alone
+   was not one. */
+.search-control:focus-within {
+  border-color: rgba(218,216,255,.86);
+  background: rgba(27,24,31,.5);
+  box-shadow: 0 0 0 2px #c3b5ff, 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
+}
 .search-control .icon { width: 16px; height: 16px; }
+/* The input's own outline is suppressed only because the pill above draws one. */
 .search-control input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
 .search-control input::placeholder { color: #d1c9c5; opacity: .95; }
 .search-shortcut { display: flex; gap: 4px; }
@@ -243,31 +281,41 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   overflow: hidden;
 }
 
+/* The pill hugs its label: a long genre keeps one line and truncates rather
+   than wrapping into an uneven shape. */
 .genre-chip {
-  display: inline-grid;
-  width: 47px;
+  display: inline-flex;
+  max-width: min(320px, 100%);
   height: 29px;
-  padding: 0;
-  place-items: center;
+  align-items: center;
+  align-self: flex-start;
+  padding: 0 12px;
+  overflow: hidden;
   border: 1px solid rgba(255,255,255,.14);
   border-radius: 16px;
   color: #ddd9e0;
   background: rgba(20,18,24,.37);
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   -webkit-backdrop-filter: blur(16px) saturate(130%);
   backdrop-filter: blur(16px) saturate(130%);
 }
 
-.hero-content h1 { display: -webkit-box; overflow: hidden; max-width: 560px; max-height: 1.96em; margin: 14px 0 18px; color: #f4f2f7; font-size: clamp(48px, 4.3vw, 66px); font-weight: 460; letter-spacing: -.046em; line-height: .98; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+/* Long titles wrap between words and are clamped, never broken mid-word. */
+.hero-content h1 { display: -webkit-box; overflow: hidden; max-width: 560px; max-height: 1.96em; margin: 14px 0 18px; color: #f4f2f7; font-size: clamp(48px, 4.3vw, 66px); font-weight: 460; hyphens: none; letter-spacing: -.046em; line-height: .98; overflow-wrap: normal; word-break: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .hero-content h1.is-changing { animation: hero-title-arrive 420ms cubic-bezier(.16, .8, .2, 1) both; }
 .hero-description { display: -webkit-box; overflow: hidden; max-width: 340px; margin: 0; color: #d0cdd4; font-size: 17px; font-weight: 400; line-height: 1.38; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 .hero-meta { flex-wrap: wrap; row-gap: 8px; gap: 24px; margin-top: 11px; color: #c7c2ca; font-size: 14px; }
 .hero-meta > span { display: inline-flex; min-width: 0; align-items: center; gap: 8px; white-space: nowrap; }
+/* The meta's flex `display` rules outrank the UA `[hidden]` rule, so restore it
+   explicitly — otherwise a hidden source or platform chip still paints. */
+.hero-meta [hidden] { display: none !important; }
 .hero-meta .icon { width: 16px; height: 16px; color: #d1cdd5; }
-.hero-source { color: #d7d4dc; }
-.hero-source-icon { display: inline-grid; width: 16px; height: 16px; place-items: center; color: #edeaf0; }
-.hero-source-icon .icon { width: 16px; height: 16px; color: inherit; }
+.hero-source { gap: 9px; color: #e4e1e8; font-weight: 500; }
+.hero-source-icon { display: inline-grid; width: 20px; height: 20px; place-items: center; color: #f2eff5; }
+.hero-source-icon .icon { width: 20px; height: 20px; color: inherit; }
 .hero-source-divider { color: #938d99; font-style: normal; }
 .hero-platform { color: #c7c2ca; }
 .hero-platform.is-compatible { color: #b6dfc1; }
@@ -284,39 +332,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .round-button:hover { background: rgba(255,255,255,.13); transform: translateY(-1px); }
 .round-button .icon { width: 19px; height: 19px; }
 
-.steam-import-panel, .steam-account-panel {
-  position: fixed;
-  z-index: 20;
-  top: 84px;
-  right: 32px;
-  bottom: 28px;
-  display: flex;
-  width: min(460px, calc(100vw - 64px));
-  min-height: 440px;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 18px;
-  color: #f4f2f7;
-  background:
-    linear-gradient(148deg, rgba(54,47,82,.34), rgba(25,23,30,.88) 32%, rgba(17,18,23,.94)),
-    rgba(20,19,25,.9);
-  box-shadow: 0 28px 72px rgba(0,0,0,.54), inset 0 1px rgba(255,255,255,.09);
-  -webkit-backdrop-filter: blur(26px) saturate(135%);
-  backdrop-filter: blur(26px) saturate(135%);
-  animation: steam-panel-enter 220ms cubic-bezier(.2,.8,.2,1) both;
-}
-.steam-import-panel[hidden], .steam-account-panel[hidden] { display: none; }
-.steam-account-panel { z-index: 26; min-height: 420px; max-height: min(720px, calc(100svh - 112px)); }
-.steam-account-backdrop {
-  position: fixed;
-  z-index: 25;
-  inset: 0;
-  background: rgba(4, 5, 9, .28);
-  -webkit-backdrop-filter: blur(1.5px);
-  backdrop-filter: blur(1.5px);
-}
-.steam-account-backdrop[hidden] { display: none; }
+/* The Steam import and Steam account surfaces are cards inside
+   Settings › Libraries & Sources. They are no longer floating dialogs, so the
+   card chrome comes from `.settings-card`. */
 
 .steam-panel-header {
   display: flex;
@@ -593,6 +611,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   flex: none;
   align-items: center;
   justify-content: center;
+  /* A filled glyph (the Steam logo) reaches its own edges, so the gap has to be
+     explicit rather than borrowed from an icon's internal padding. */
+  gap: 8px;
   padding: 0 14px;
   border: 1px solid rgba(255,255,255,.35);
   border-radius: 11px;
@@ -607,7 +628,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .steam-import-button:active:not(:disabled) { transform: translateY(1px) scale(.98); }
 .steam-import-button:disabled { cursor: default; opacity: .42; }
 
-.wine-panel, .wine-settings-panel {
+/* The Wine wizard stays an overlay task; Wine profiles themselves live in
+   Settings › Plugins & Runners. */
+.wine-panel {
   position: fixed;
   z-index: 21;
   top: 84px;
@@ -629,8 +652,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   backdrop-filter: blur(26px) saturate(135%);
   animation: steam-panel-enter 220ms cubic-bezier(.2,.8,.2,1) both;
 }
-.wine-panel[hidden], .wine-settings-panel[hidden] { display: none; }
-.wine-settings-panel { z-index: 20; max-height: min(720px, calc(100svh - 112px)); }
+.wine-panel[hidden] { display: none; }
 .wine-source-mark { color: #f0ddff; background: linear-gradient(145deg, rgba(152,82,188,.43), rgba(73,42,116,.29)); }
 
 .wine-panel-body, .wine-settings-body {
@@ -1158,8 +1180,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 @media (max-width: 860px) {
   body { overflow: auto; }
-  .selector { min-height: 760px; }
-  .topbar { top: 18px; left: 20px; right: 20px; grid-template-columns: 1fr auto; }
+  /* The search drops to its own row below the bar, so the clearance the page
+     hosts owe the topbar grows with it: 18 + 54 + 40 + 12 of breathing room. */
+  :root { --topbar-inset-top: 18px; --topbar-inset-left: 20px; --topbar-inset-right: 20px; --topbar-height: 124px; }
+  /* Keep the narrow-width floor, but never cap the canvas below the viewport:
+     the page hosts are inset: 0 of this box, so a fixed height would strand
+     the rest of a taller window and shorten every internal scroll container. */
+  .selector { min-height: max(760px, 100svh); }
+  .topbar { grid-template-columns: 1fr auto; }
   .primary-nav, .top-divider, .quiet-icon { display: none; }
   .nav-cluster { gap: 0; }
   .profile-cluster { gap: 0; }
@@ -1172,7 +1200,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   .rail-header { padding-right: 24px; }
   .rail-filters { display: none; }
   .controller-hud { display: none; }
-  .steam-import-panel, .steam-account-panel, .wine-panel, .wine-settings-panel {
+  .wine-panel {
     top: 76px;
     right: 16px;
     bottom: 16px;
@@ -1193,7 +1221,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   .hero-actions { margin-top: 14px; }
   .recently-played { bottom: 66px; }
   .controller-hud { bottom: 24px; }
-  .steam-import-panel, .steam-account-panel, .wine-panel, .wine-settings-panel { top: 72px; bottom: 16px; }
+  .wine-panel { top: 72px; bottom: 16px; }
 }
 
 @media (max-height: 740px) and (min-width: 861px) {
@@ -1208,4 +1236,381 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
+
+/* The Appearance preference mirrors the system setting without depending on it. */
+[data-motion="reduced"], [data-motion="reduced"] *, [data-motion="reduced"] *::before, [data-motion="reduced"] *::after {
+  scroll-behavior: auto !important;
+  transition-duration: .01ms !important;
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+}
+
+/* ---------------------------------------------------------------------------
+   Application shell
+   The topbar mounts once and outlives every navigation. Each page owns one
+   absolutely positioned host; only the active host is visible and interactive.
+   --------------------------------------------------------------------------- */
+
+.app-page { position: absolute; inset: 0; }
+.app-page[hidden] { display: none; }
+
+/* The single scroll container in the app, and the single owner of topbar
+   clearance. Pages never add their own top padding or `overflow-y`. */
+.app-page--scroll {
+  padding-top: var(--topbar-height);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(210,200,255,.32) transparent;
+  scrollbar-width: thin;
+}
+
+/* Settings and not-found paint the same base as the Store and detail pages, so
+   no route ever reads as an unfinished, background-less sheet. */
+.app-page--settings, .app-page--not-found {
+  background:
+    radial-gradient(circle at 78% 2%, rgba(84,104,144,.2), transparent 32%),
+    radial-gradient(circle at 18% 28%, rgba(87,69,102,.16), transparent 34%),
+    #090c12;
+}
+
+.library-source-menu__label {
+  margin: 11px 12px 5px;
+  color: #918c9b;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.library-source-menu__label:first-child { margin-top: 7px; }
+
+/* ---------------------------------------------------------------------------
+   Settings page (a normal page: no backdrop, no focus trap, no Escape-to-close)
+   --------------------------------------------------------------------------- */
+
+.settings-layout {
+  display: grid;
+  width: min(1160px, 100%);
+  margin: 0 auto;
+  padding: 6px clamp(22px, 4vw, 56px) 76px;
+  gap: clamp(20px, 3vw, 44px);
+  grid-template-columns: minmax(206px, 246px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.settings-sidebar { position: sticky; top: 0; align-self: start; min-width: 0; }
+.settings-sidebar__title {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  color: #8f8a99;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.settings-sidebar__list { display: grid; gap: 2px; }
+
+.settings-section-link {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: #cdc8d6;
+  background: transparent;
+  text-align: left;
+  transition: background 160ms ease, color 160ms ease;
+}
+.settings-section-link strong { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; }
+.settings-section-link small { color: #8d8895; font-size: 11.5px; line-height: 1.35; }
+.settings-section-link:hover { color: #fff; background: rgba(255,255,255,.06); }
+.settings-section-link.is-active {
+  border-color: rgba(255,255,255,.1);
+  color: #f6f4fa;
+  background: rgba(31,28,36,.74);
+  box-shadow: inset 0 1px rgba(255,255,255,.05);
+}
+.settings-section-link.is-active small { color: #b6afc2; }
+
+.settings-content { min-width: 0; }
+.settings-header { margin: 0 0 20px; }
+.settings-header h1 { margin: 0 0 6px; color: #f5f3f8; font-size: 27px; font-weight: 620; letter-spacing: -.028em; }
+.settings-header p { margin: 0; color: #a29daf; font-size: 13px; }
+
+.settings-panel { display: grid; gap: 16px; }
+.settings-panel[hidden] { display: none; }
+.settings-panel:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 8px; border-radius: 4px; }
+
+.settings-card {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 16px;
+  color: #f1eff5;
+  background: rgba(23,22,28,.72);
+  box-shadow: inset 0 1px rgba(255,255,255,.05);
+}
+.settings-card[hidden] { display: none; }
+
+.settings-card__header {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 15px 18px;
+  border-bottom: 1px solid rgba(255,255,255,.07);
+}
+.settings-card__copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
+.settings-card__copy strong { color: #f7f5fa; font-size: 14.5px; font-weight: 640; letter-spacing: -.014em; }
+.settings-card__copy small { color: #a29daf; font-size: 12px; line-height: 1.45; }
+.settings-card__mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: none;
+  place-items: center;
+  border: 1px solid rgba(192,180,255,.26);
+  border-radius: 12px;
+  color: #e1dbff;
+  background: linear-gradient(145deg, rgba(125,84,244,.42), rgba(66,44,135,.28));
+  box-shadow: inset 0 1px rgba(255,255,255,.12);
+}
+.settings-card__mark .icon { width: 18px; height: 18px; }
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 18px;
+}
+.settings-row + .settings-row { border-top: 1px solid rgba(255,255,255,.06); }
+.settings-row--actions { flex-wrap: wrap; justify-content: flex-start; gap: 10px; }
+.settings-row__copy { display: grid; min-width: 0; gap: 4px; }
+.settings-row__copy strong { color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
+.settings-row__copy small { color: #98939f; font-size: 12px; line-height: 1.5; }
+
+/* `appearance: none` is what stops macOS from drawing its own double caret on
+   top of the chevron below. */
+.settings-select {
+  min-width: 172px;
+  height: 34px;
+  padding: 0 32px 0 12px;
+  -webkit-appearance: none;
+  appearance: none;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 10px;
+  color: #f2eff7;
+  background-color: rgba(12,12,17,.62);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cdc8d6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 14px 14px;
+  font-size: 13px;
+}
+.settings-select:hover { border-color: rgba(255,255,255,.24); }
+.settings-select:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 2px; }
+
+.settings-button {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 10px;
+  color: #f2eff7;
+  background: rgba(255,255,255,.07);
+  font-size: 13px;
+  font-weight: 560;
+  white-space: nowrap;
+  transition: background 160ms ease, transform 160ms ease, opacity 160ms ease;
+}
+.settings-button:hover:not(:disabled) { background: rgba(255,255,255,.13); }
+.settings-button:active:not(:disabled) { transform: translateY(1px); }
+.settings-button:disabled { cursor: default; opacity: .45; }
+/* "Quiet" is a low-emphasis neutral action. Reset and Clear are reversible and
+   touch nothing the user cannot recreate, so they must not read as destructive. */
+.settings-button--quiet { color: #cfcad8; border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.035); }
+.settings-button--quiet:hover:not(:disabled) { color: #f2eff7; background: rgba(255,255,255,.09); }
+.settings-button--primary {
+  border-color: rgba(255,255,255,.42);
+  color: #1a1820;
+  background: linear-gradient(118deg, #f0edff, #b9aff6);
+  font-weight: 640;
+}
+.settings-button--primary:hover:not(:disabled) { filter: brightness(1.05); background: linear-gradient(118deg, #f0edff, #b9aff6); }
+
+.settings-metric { color: #f2eff7; font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-hint { margin: 0; padding: 0 18px 16px; color: #8f8a99; font-size: 12px; line-height: 1.5; }
+
+/* Plugin browser: installed runners up top, a searchable catalogue below. */
+.plugins-group { padding: 13px 18px 6px; }
+.plugins-group + .plugins-group--catalog { border-top: 1px solid rgba(255,255,255,.07); }
+.plugins-group__label {
+  margin: 0 0 9px;
+  color: #8f8a99;
+  font-size: 11px;
+  font-weight: 640;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.plugins-group__list { display: grid; }
+.plugin-row { gap: 13px; padding: 13px 18px; }
+.plugin-row__mark {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+}
+.plugin-row__state {
+  flex: none;
+  color: #a9e6b3;
+  font-size: 12px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+.plugin-open-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 9px;
+  color: #cfcad8;
+  background: rgba(255,255,255,.05);
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.plugin-open-button .icon { width: 15px; height: 15px; }
+.plugin-open-button:hover { color: #f2eff7; background: rgba(255,255,255,.12); }
+.plugin-open-button:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 2px; }
+
+.plugins-search {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 0 12px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 10px;
+  color: #8f8a99;
+  background: rgba(12,12,17,.62);
+}
+.plugins-search:focus-within { border-color: rgba(195,181,255,.7); }
+.plugins-search .icon { width: 15px; height: 15px; flex: none; }
+.plugins-search__input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: #f2eff7;
+  background: transparent;
+  font-size: 13px;
+}
+.plugins-search__input::placeholder { color: #8f8a99; }
+.plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.06); }
+
+.plugin-back-button { height: 30px; padding: 0 11px; }
+.plugin-back-button .icon { width: 14px; height: 14px; }
+
+/* Choices sit in a plain card, not a fieldset: a legend cuts the card's 16px
+   border and types at a different size than every other card title. */
+.settings-choices { display: grid; padding: 6px; }
+.settings-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.settings-choice:hover { background: rgba(255,255,255,.05); }
+.settings-choice:focus-within { background: rgba(255,255,255,.05); }
+.settings-choice input { margin: 3px 0 0; accent-color: #8f6ef7; }
+.settings-choice span { display: grid; gap: 3px; }
+.settings-choice strong { color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
+.settings-choice small { color: #98939f; font-size: 12px; line-height: 1.45; }
+
+.settings-attributions {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 14px 18px 18px 34px;
+  color: #a29daf;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.provider-status-list { display: grid; }
+.provider-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 18px;
+}
+.provider-status-row + .provider-status-row { border-top: 1px solid rgba(255,255,255,.06); }
+.provider-status-row strong { display: block; color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
+.provider-status-row p { margin: 3px 0 0; color: #98939f; font-size: 12px; line-height: 1.45; }
+.provider-health {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+.provider-health--available { border-color: rgba(116,227,146,.32); color: #b6dfc1; background: rgba(30,81,49,.42); }
+.provider-health--degraded { border-color: rgba(240,206,110,.3); color: #e6d5a8; background: rgba(76,62,36,.42); }
+.provider-health--unavailable { border-color: rgba(240,107,110,.3); color: #e2b3b6; background: rgba(76,36,40,.42); }
+.provider-health--not-configured { color: #b3aebd; background: rgba(255,255,255,.06); }
+
+/* Migrated Steam and Wine surfaces sit inside settings cards. */
+.settings-card > .steam-import-body { max-height: min(48vh, 460px); }
+.settings-card > .steam-account-body,
+.settings-card > .wine-settings-body { max-height: none; overflow: visible; }
+.steam-state--idle { justify-items: start; padding: 4px 0 2px; text-align: left; }
+.steam-state--idle h2 { margin-top: 0; }
+.steam-state--idle .settings-button { margin-top: 15px; }
+
+.not-found {
+  display: grid;
+  justify-items: center;
+  gap: 11px;
+  padding: clamp(56px, 13vh, 150px) 24px;
+  text-align: center;
+}
+.not-found__code { margin: 0; color: #a08cf8; font-size: 14px; font-weight: 700; letter-spacing: .18em; }
+.not-found__title { margin: 0; color: #f5f3f8; font-size: 30px; font-weight: 600; letter-spacing: -.03em; }
+.not-found__detail { max-width: 440px; margin: 0 0 12px; color: #a29daf; font-size: 13.5px; line-height: 1.5; }
+
+/* Wallpaper Searcher credentials form in the Plugins settings. */
+.credentials-form { display: grid; gap: 12px; padding: 14px 18px 18px; border-top: 1px solid rgba(255,255,255,.06); }
+.credentials-form__field { display: grid; gap: 5px; }
+.credentials-form__field label { color: #cfcad8; font-size: 12.5px; font-weight: 600; }
+.credentials-form__field input { height: 34px; padding: 0 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; color: #f2eff7; background: rgba(0,0,0,.22); font-size: 13px; }
+.credentials-form__field input:focus { outline: none; border-color: rgba(255,255,255,.38); }
+.credentials-form__field input::placeholder { color: #6f6a79; }
+.credentials-form__field small { color: #8f8a99; font-size: 11.5px; line-height: 1.45; }
+.credentials-form__actions { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+.credentials-form__actions small { color: #8f8a99; font-size: 11.5px; }
+
+@media (max-width: 940px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
+  .settings-sidebar { position: static; }
+  .settings-sidebar__list {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(150px, max-content);
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 6px;
+    scrollbar-width: thin;
+  }
+  .settings-section-link { border-color: rgba(255,255,255,.08); }
 }

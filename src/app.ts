@@ -1,8 +1,41 @@
+import { getTauriVersion, getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type {
+  AppRoute,
+  PageRestoreState,
+  ProviderStatus,
+  SettingsSection,
+  WallpaperCredentials,
+  WallpaperCredentialsUpdate,
+} from "./contracts";
+import { createGameDetailPage } from "./game-detail-page";
 import { icon } from "./icons";
 import { isTauriRuntime, resolveMediaUrl } from "./media";
 import { fallbackLibrary, formatPlayTime, type LibraryGame } from "./mock-library";
+import { type AppPage, PageLifecycleHost } from "./page-lifecycle";
+import { HashRouter } from "./router";
+import {
+  DEFAULT_PREFERENCES,
+  EMPTY_WALLPAPER_CREDENTIALS,
+  SETTINGS_SECTIONS,
+  type DataUsage,
+  type MotionPreference,
+  type Preferences,
+  type PreferencesUpdate,
+  type StartPage,
+  type StoreRegion,
+  defaultProviderStatuses,
+  formatDataSize,
+  formatFreshness,
+  normaliseDataUsage,
+  normalisePreferences,
+  normaliseProviderStatuses,
+  normaliseWallpaperCredentials,
+} from "./settings-model";
+import { createStorePage } from "./store-page";
+import "./game-detail-page.css";
+import "./store-page.css";
 
 type BackendRecord = Record<string, unknown>;
 
@@ -91,13 +124,23 @@ interface WineProfile {
 }
 
 interface WineSettingsState {
-  open: boolean;
   loading: boolean;
   runner: WineRunnerStatus | null;
   profiles: WineProfile[];
   notice: string;
   noticeTone: SteamNoticeTone;
   pendingDeleteProfileId: string;
+}
+
+/** The built-in plugins Orivo ships with; the chevron opens their detail view. */
+type PluginId = "wine" | "wallpaper-searcher";
+/** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
+type PluginView = "list" | PluginId;
+
+interface PluginCatalogEntry {
+  id: string;
+  name: string;
+  summary: string;
 }
 
 interface LaunchFeedback {
@@ -162,9 +205,33 @@ interface State {
   steamAccount: SteamAccountState;
   wineSettings: WineSettingsState;
   launchFeedback: LaunchFeedback | null;
+  preferences: Preferences;
+  dataUsage: DataUsage;
+  providerStatuses: ProviderStatus[];
+  settingsSearch: string;
+  pluginView: PluginView;
+  pluginCatalogSearch: string;
+  wallpaperCredentials: WallpaperCredentials;
+  wallpaperCredentialsSaving: boolean;
+}
+
+export interface MountAppOptions {
+  storePage?: AppPage;
+  gameDetailPage?: AppPage;
 }
 
 const lastUsedFallback = fallbackLibrary[0];
+// The "Available" catalogue is illustrative for now: no emulator ships with
+// Orivo yet, so every Install button is a placeholder until a plugin runtime
+// can fetch and verify a package.
+const AVAILABLE_PLUGINS: readonly PluginCatalogEntry[] = [
+  { id: "astris", name: "Astris Emulator", summary: "Sega Dreamcast titles from disc images." },
+  { id: "ps2", name: "PlayStation 2 Emulator", summary: "Run PS2 discs and ISO images." },
+  { id: "dolphin", name: "Dolphin Emulator", summary: "GameCube and Wii games." },
+  { id: "citra", name: "Citra Emulator", summary: "Nintendo 3DS titles." },
+  { id: "retroarch", name: "RetroArch", summary: "Multi-system emulation front-end." },
+  { id: "mame", name: "MAME", summary: "Classic arcade cabinets." },
+];
 const MAX_RENDERED_STEAM_GAMES = 120;
 const MAX_STEAM_PREVIEW_MEDIA = 16;
 const MAX_STEAM_IMPORT_SELECTION = 2_000;
@@ -177,7 +244,7 @@ const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
 const STEAM_ACCOUNT_LOGIN_PENDING_EVENT = "steam-account-login-pending";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 
-export function mountApp(root: HTMLElement): void {
+export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
   const state: State = {
     games: fallbackLibrary.map((game) => ({ ...game })),
     libraryMediaTokens: new Map(),
@@ -203,7 +270,6 @@ export function mountApp(root: HTMLElement): void {
       apiKeySteamId: "",
     },
     wineSettings: {
-      open: false,
       loading: false,
       runner: null,
       profiles: [],
@@ -212,6 +278,14 @@ export function mountApp(root: HTMLElement): void {
       pendingDeleteProfileId: "",
     },
     launchFeedback: null,
+    preferences: { ...DEFAULT_PREFERENCES },
+    dataUsage: { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null },
+    providerStatuses: defaultProviderStatuses(),
+    settingsSearch: "",
+    pluginView: "list",
+    pluginCatalogSearch: "",
+    wallpaperCredentials: { ...EMPTY_WALLPAPER_CREDENTIALS },
+    wallpaperCredentialsSaving: false,
   };
 
   root.innerHTML = shell();
@@ -235,11 +309,12 @@ export function mountApp(root: HTMLElement): void {
     source: get<HTMLElement>("#hero-source"),
     sourceIcon: get<HTMLElement>("#hero-source-icon"),
     sourceLabel: get<HTMLElement>("#hero-source-label"),
+    sourceDivider: get<HTMLElement>("#hero-source-divider"),
     metadata: get<HTMLElement>("#hero-metadata"),
     platform: get<HTMLElement>("#hero-platform"),
     platformLabel: get<HTMLElement>("#hero-platform-label"),
     cards: get<HTMLElement>("#game-cards"),
-    search: get<HTMLInputElement>("#library-search"),
+    search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
     toast: get<HTMLElement>("#toast"),
@@ -250,14 +325,35 @@ export function mountApp(root: HTMLElement): void {
     steamImportButton: get<HTMLButtonElement>("#steam-import-selected"),
     steamRefresh: get<HTMLButtonElement>("#steam-refresh"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
-    steamAccountBackdrop: get<HTMLElement>("#steam-account-backdrop"),
-    selectorContent: get<HTMLElement>("#selector-content"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
     playButton: get<HTMLButtonElement>("#play-button"),
+    detailsButton: get<HTMLButtonElement>("#details-button"),
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
-    settingsNav: get<HTMLButtonElement>("#settings-nav-button"),
+    pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
+    pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
+    pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
+    pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
+    wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
+    wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
+    wallpaperIgdbClientId: get<HTMLInputElement>("#wallpaper-igdb-client-id"),
+    wallpaperIgdbClientSecret: get<HTMLInputElement>("#wallpaper-igdb-client-secret"),
+    wallpaperGoogleApiKey: get<HTMLInputElement>("#wallpaper-google-api-key"),
+    wallpaperGoogleCseId: get<HTMLInputElement>("#wallpaper-google-cse-id"),
+    libraryPage: get<HTMLElement>("#app-page-library"),
+    storePage: get<HTMLElement>("#app-page-store"),
+    gamePage: get<HTMLElement>("#app-page-game"),
+    settingsPage: get<HTMLElement>("#app-page-settings"),
+    notFoundPage: get<HTMLElement>("#app-page-not-found"),
+    notFoundDetail: get<HTMLElement>("#not-found-detail"),
+    settingsTitle: get<HTMLElement>("#settings-page-title"),
+    settingsDescription: get<HTMLElement>("#settings-page-description"),
+    settingsPanels: Array.from(root.querySelectorAll<HTMLElement>("[data-settings-panel]")),
+    settingsSectionButtons: Array.from(
+      root.querySelectorAll<HTMLButtonElement>("[data-settings-section]"),
+    ),
+    navLinks: Array.from(root.querySelectorAll<HTMLButtonElement>(".primary-nav [data-nav-page]")),
   };
 
   let activeHero = 0;
@@ -268,8 +364,19 @@ export function mountApp(root: HTMLElement): void {
   const pendingLibraryMediaIds = new Map<string, number>();
   const pendingSteamPreviewMediaIds = new Map<string, number>();
   let steamPreviewMediaRefreshQueued = false;
-  let steamReturnFocus: HTMLElement | null = null;
-  let steamAccountReturnFocus: HTMLElement | null = null;
+  let settingsRequest = 0;
+  let currentRoute: AppRoute = { page: "library" };
+
+  // A single router owns every route change. Pages never write the hash
+  // directly: they call `navigate`, the router emits, and the shell decides
+  // which page host activates.
+  const router = new HashRouter();
+  const navigate = (route: AppRoute, options: { replace?: boolean } = {}): void => {
+    router.navigate(route, options);
+  };
+  const openGameDetail = (gameId: string): void => {
+    navigate({ page: "game", gameId, from: "library" });
+  };
 
   const visibleGames = (): LibraryGame[] => {
     const term = state.query.trim().toLocaleLowerCase();
@@ -339,7 +446,7 @@ export function mountApp(root: HTMLElement): void {
       retry.className = "launch-feedback__retry";
       retry.dataset.launchAction = "retry";
       retry.dataset.gameId = feedback.gameId;
-      retry.textContent = "Réessayer en mode compatibilité";
+      retry.textContent = "Retry in compatibility mode";
       refs.launchFeedback.append(retry);
     }
   };
@@ -473,6 +580,7 @@ export function mountApp(root: HTMLElement): void {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "game-card";
+    let pressedWhileDeployed = false;
 
     const media = document.createElement("span");
     media.className = "card-media";
@@ -499,10 +607,26 @@ export function mountApp(root: HTMLElement): void {
     time.className = "card-time";
 
     card.append(media, shade, name, time);
+    card.addEventListener("focus", () => {
+      const id = card.dataset.gameId;
+      if (id && currentRoute.page === "library") selectGame(id, false);
+    });
+    card.addEventListener("mousedown", () => {
+      const id = card.dataset.gameId;
+      pressedWhileDeployed = id !== undefined && id === state.selectedId;
+    });
     card.addEventListener("click", () => {
       const id = card.dataset.gameId;
-      if (id) {
-        selectGame(id);
+      if (!id) return;
+      if (pressedWhileDeployed) {
+        // A second click on the deployed card opens its detail page.
+        // Launching a game stays exclusive to the Play button so a
+        // mis-click never starts a download or a Wine prefix.
+        openGameDetail(id);
+      } else {
+        // First click just deploys the card; the user confirms with a
+        // second click before navigation happens.
+        selectGame(id, false);
       }
     });
     return card;
@@ -525,7 +649,7 @@ export function mountApp(root: HTMLElement): void {
     card.dataset.gameId = game.id;
     card.classList.toggle("is-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
-    card.setAttribute("aria-label", `Select ${game.title}`);
+    card.setAttribute("aria-label", `Open details for ${game.title}`);
 
     assignCardImage(portrait, portraitSource, fallback, index < 7);
     assignCardImage(landscape, landscapeSource, fallback, index < 7);
@@ -534,6 +658,7 @@ export function mountApp(root: HTMLElement): void {
     }
     if (time) {
       time.textContent = formatPlayTime(game.playTimeSeconds);
+      time.hidden = game.playTimeSeconds <= 0;
     }
   };
 
@@ -631,35 +756,55 @@ export function mountApp(root: HTMLElement): void {
     }
     refs.description.textContent = game.description || "Ready for your next session.";
     refs.playTime.textContent = formatPlayTime(game.playTimeSeconds);
-    refs.lastPlayed.textContent = game.lastPlayedAt
-      ? `Last played ${game.lastPlayedAt}`
-      : "Not played yet";
+    if (refs.playTime.parentElement) refs.playTime.parentElement.hidden = game.playTimeSeconds <= 0;
+    // A game that was never launched shows no "last played" chip at all rather
+    // than a "Not played yet" placeholder.
+    refs.lastPlayed.textContent = game.lastPlayedAt ? `Last played ${game.lastPlayedAt}` : "";
+    if (refs.lastPlayed.parentElement) refs.lastPlayed.parentElement.hidden = !game.lastPlayedAt;
     const isSteamInstallable = game.source === "steam" && !game.launchable;
     const sourceName =
       game.source === "steam"
         ? "Steam"
         : game.source === "wine"
-          ? "Wine-Staging"
+          ? "Windows"
           : game.source === "local"
-            ? "This Mac"
+            ? "Local"
             : "";
-    refs.source.hidden = !sourceName;
-    refs.sourceIcon.innerHTML =
-      game.source === "steam" ? icon("steam") : game.source === "wine" ? icon("monitor") : icon("folder");
+    const hasSource = sourceName !== "";
+    // The Play button already states runnability (Play / Install / Unavailable),
+    // so the meta row never repeats runtime, install or compatibility mentions
+    // ("Wine-Staging", "installed", "incompatible…").
+    const cleanMetadata = (game.metadata || "")
+      .split("·")
+      .map((part) => part.trim())
+      .filter(
+        (part) =>
+          part !== "" &&
+          !/steam|wine|installed|ready to play|incompatible|compatible|macos|windows only/i.test(part),
+      )
+      .join(" · ");
+    // Keep the badge only while it carries something; a lone source glyph with
+    // no label (or an empty metadata run) never appears.
+    refs.source.hidden = !hasSource && !cleanMetadata;
+    refs.sourceIcon.hidden = !hasSource;
+    // A real, legible source logo: Steam's mark, the Windows mark for Wine
+    // titles, a folder for local games.
+    refs.sourceIcon.innerHTML = hasSource
+      ? game.source === "steam"
+        ? icon("steam")
+        : game.source === "wine"
+          ? icon("windows")
+          : icon("folder")
+      : "";
+    refs.sourceLabel.hidden = !hasSource;
     refs.sourceLabel.textContent = sourceName;
-    refs.metadata.textContent = game.metadata || "Ready to play";
-    const hostName = platformName(game.hostPlatform);
-    const compatibility = game.compatibleWithHost;
-    const compatibilityLabel =
-      compatibility === true && hostName
-        ? `${hostName} compatible`
-        : compatibility === false && hostName
-          ? `Not supported on ${hostName}`
-          : "";
-    refs.platform.hidden = !compatibilityLabel;
-    refs.platform.classList.toggle("is-compatible", compatibility === true);
-    refs.platform.classList.toggle("is-incompatible", compatibility === false);
-    refs.platformLabel.textContent = compatibilityLabel;
+    refs.metadata.textContent = cleanMetadata;
+    refs.metadata.hidden = !cleanMetadata;
+    refs.sourceDivider.hidden = !(hasSource && cleanMetadata);
+    // Compatibility is conveyed by the Play button, so the platform chip stays
+    // hidden.
+    refs.platform.hidden = true;
+    refs.platformLabel.textContent = "";
     refs.playButton.disabled = !game.launchable && !isSteamInstallable;
     refs.playButton.setAttribute(
       "aria-label",
@@ -744,6 +889,11 @@ export function mountApp(root: HTMLElement): void {
   };
 
   const refreshLibrary = async (importedId?: string): Promise<void> => {
+    // A library refresh mutates state every page reads, not just the Library
+    // DOM, so it is deliberately *not* gated on the Library page still being
+    // active: an import that lands after the user clicked Store must still be
+    // applied. The generation check stays, so an older load never clobbers a
+    // newer one.
     const request = ++libraryRequest;
     const library = await loadLibrary();
     if (request !== libraryRequest || !library) {
@@ -759,6 +909,11 @@ export function mountApp(root: HTMLElement): void {
         ? state.selectedId
         : library.games[0]?.id ?? lastUsedFallback.id;
     renderSelection();
+    // A pending Wine attachment cannot resolve its game until the library has
+    // arrived, so the Wine plugin detail re-renders as soon as it does.
+    if (state.pluginView === "wine") {
+      renderWineSettingsPanel();
+    }
   };
 
   const importGame = async (): Promise<void> => {
@@ -774,12 +929,18 @@ export function mountApp(root: HTMLElement): void {
       await refreshLibrary(importedId);
       if (importedId) {
         showToast("Game added to your library.");
+        // A manual import rarely ships its own artwork, so look one up in the
+        // background and refresh the card once it lands.
+        void invoke("fetch_game_artwork", { gameId: importedId, force: false })
+          .then(() => refreshLibrary(importedId))
+          .catch(() => {
+            // Best-effort: a game with no online match keeps its placeholder.
+          });
       }
     } catch (error) {
       showToast(messageFromError(error, "Could not import this game."));
     }
   };
-
 
   const wineActionButton = (
     action: string,
@@ -829,24 +990,30 @@ export function mountApp(root: HTMLElement): void {
     parent.append(loading);
   };
 
-
   const runnerStatusLabel = (runner: WineRunnerStatus | null): string => {
     if (!runner || runner.state === "checking") {
-      return "Vérification de Wine-Staging…";
+      return "Checking Wine-Staging…";
     }
     if (runner.state === "ready") {
-      return runner.version ? "Prêt · " + runner.version : "Prêt";
+      return runner.version ? "Ready · " + runner.version : "Ready";
     }
     if (runner.state === "unavailable") {
-      return "Wine-Staging introuvable";
+      return "Wine-Staging not found";
     }
     if (runner.state === "invalid") {
-      return "Installation Wine non valide";
+      return "Invalid Wine installation";
     }
-    return "Wine-Staging indisponible";
+    return "Wine-Staging unavailable";
   };
 
-  const appendWineRunnerSummary = (parent: HTMLElement, runner: WineRunnerStatus | null): void => {
+  const appendWineRunnerSummary = (
+    parent: HTMLElement,
+    runner: WineRunnerStatus | null,
+    // Inside the Wine-Staging settings card the surrounding header already says
+    // "Wine-Staging", so the summary names what it reports instead of repeating
+    // the card title.
+    headingText = "Wine-Staging",
+  ): void => {
     const overview = document.createElement("section");
     overview.className = "wine-runner-summary";
     const mark = document.createElement("span");
@@ -855,7 +1022,7 @@ export function mountApp(root: HTMLElement): void {
     mark.setAttribute("aria-hidden", "true");
     const copy = document.createElement("div");
     const heading = document.createElement("h2");
-    heading.textContent = "Wine-Staging";
+    heading.textContent = headingText;
     const message = document.createElement("p");
     message.textContent = runnerStatusLabel(runner);
     copy.append(heading, message);
@@ -866,40 +1033,86 @@ export function mountApp(root: HTMLElement): void {
     }
   };
 
+  const renderPluginCatalogRow = (entry: PluginCatalogEntry): HTMLElement => {
+    const row = document.createElement("div");
+    row.className = "settings-row plugin-catalog-row";
+    const copy = document.createElement("div");
+    copy.className = "settings-row__copy";
+    const name = document.createElement("strong");
+    name.textContent = entry.name;
+    const summary = document.createElement("small");
+    summary.textContent = entry.summary;
+    copy.append(name, summary);
+    const install = document.createElement("button");
+    install.type = "button";
+    install.className = "settings-button";
+    install.dataset.pluginInstall = entry.id;
+    install.setAttribute("aria-label", `Install ${entry.name}`);
+    install.innerHTML = `${icon("download")}<span>Install</span>`;
+    row.append(copy, install);
+    return row;
+  };
 
+  const renderPluginList = (): void => {
+    const showList = state.pluginView === "list";
+    refs.pluginsCatalogPanel.hidden = !showList;
+    refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
+    refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    if (!showList) return;
+    refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
+    const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
+    const matches = AVAILABLE_PLUGINS.filter(
+      (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
+    );
+    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogRow));
+    refs.pluginsCatalogEmpty.hidden = matches.length > 0;
+  };
+
+  const openPluginDetail = (id: PluginId): void => {
+    state.pluginView = id;
+    renderPluginList();
+    renderWineSettingsPanel();
+    if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
+      void refreshWineRunnerSettings();
+    }
+  };
 
   const renderWineSettingsPanel = (): void => {
     const settings = state.wineSettings;
-    refs.wineSettingsPanel.hidden = !settings.open;
+    refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
     refs.wineSettingsPanel.setAttribute("aria-busy", String(settings.loading));
-    if (!settings.open) {
+    if (state.pluginView !== "wine") {
       return;
     }
 
     refs.wineSettingsBody.replaceChildren();
     const body = refs.wineSettingsBody;
     if (settings.loading) {
+      // Progress messages ("Downloading DXVK-macOS…") are set alongside
+      // `loading`, so the notice has to survive the loading state instead of
+      // being replaced by a generic spinner.
+      appendWineNotice(body, settings.notice, settings.noticeTone);
       appendWineLoadingState(
         body,
-        "Chargement des plugins",
-        "Orivo lit l’état local du runner Wine et de ses profils.",
+        "Loading plugins",
+        "Orivo is reading the local Wine runner and its profiles.",
       );
       return;
     }
 
-    appendWineRunnerSummary(body, settings.runner);
+    appendWineRunnerSummary(body, settings.runner, "Runner status");
     appendWineNotice(body, settings.notice, settings.noticeTone);
-
 
     const heading = document.createElement("h2");
     heading.className = "wine-settings-heading";
-    heading.textContent = "Profils Wine";
+    heading.textContent = "Wine profiles";
     body.append(heading);
 
     if (settings.profiles.length === 0) {
       const empty = document.createElement("section");
       empty.className = "wine-directory-empty";
-      empty.textContent = "Aucun profil Wine-Staging n’est encore configuré.";
+      empty.textContent =
+        "No Wine-Staging profile yet. Orivo adds one automatically the first time you import a Windows game while Wine-Staging is installed.";
       body.append(empty);
       return;
     }
@@ -920,19 +1133,19 @@ export function mountApp(root: HTMLElement): void {
       const stateLabel = document.createElement("span");
       stateLabel.className = "wine-profile-state";
       stateLabel.classList.toggle("is-disabled", !profile.enabled);
-      stateLabel.textContent = profile.enabled ? "Actif" : "Désactivé";
+      stateLabel.textContent = profile.enabled ? "Active" : "Disabled";
       profileHeader.append(copy, stateLabel);
       card.append(profileHeader);
 
       const directoryHeading = document.createElement("p");
       directoryHeading.className = "wine-profile-card__label";
-      directoryHeading.textContent = "Dossiers autorisés";
+      directoryHeading.textContent = "Allowed folders";
       card.append(directoryHeading);
       const directories = document.createElement("ul");
       directories.className = "wine-profile-directories";
       if (profile.directories.length === 0) {
         const item = document.createElement("li");
-        item.textContent = "Aucun dossier autorisé";
+        item.textContent = "No allowed folder";
         directories.append(item);
       } else {
         for (const directory of profile.directories) {
@@ -954,32 +1167,31 @@ export function mountApp(root: HTMLElement): void {
       if (profile.graphicsBackend === "dxvk_macos") {
         const warning = document.createElement("p");
         warning.className = "wine-profile-card__warning";
-        warning.textContent =
-          "DXVK-macOS (Metal) est le rendu par défaut sur les Mac Apple Silicon. Réglage expérimental · évitez les jeux protégés par anti-cheat. « Revenir à Wine 3D » reste un choix optionnel.";
+        warning.textContent = "Experimental · avoid games protected by anti-cheat.";
         card.append(warning);
       } else {
         const dxvkHint = document.createElement("p");
         dxvkHint.className = "wine-profile-card__hint";
         dxvkHint.textContent =
-          "Ce profil utilise Wine 3D. Sur les Mac Apple Silicon, DXVK-macOS (Metal) est activé par défaut ; « Activer DXVK-macOS » n’est qu’un réglage optionnel. Orivo prépare DXVK-macOS au premier lancement d’un jeu compatible si nécessaire, sans modifier Wine-Staging ni les préfixes d’autres applications.";
+          "Automatic compatibility · the first time a compatible Wine game launches, Orivo prepares DXVK-macOS for this profile if it is needed, without changing Wine-Staging or any other application’s prefix.";
         card.append(dxvkHint);
       }
 
       const lastImport = document.createElement("p");
       lastImport.className = "wine-profile-card__import";
       const importDetails = [
-        profile.lastImport ? "Dernier import · " + profile.lastImport : "",
+        profile.lastImport ? "Last import · " + profile.lastImport : "",
         profile.lastImportSummary,
       ].filter(Boolean);
-      lastImport.textContent = importDetails.length > 0 ? importDetails.join(" · ") : "Aucun import effectué";
+      lastImport.textContent = importDetails.length > 0 ? importDetails.join(" · ") : "No import yet";
       card.append(lastImport);
 
       if (settings.pendingDeleteProfileId === profile.id) {
         const confirmation = document.createElement("div");
         confirmation.className = "wine-delete-confirmation";
         const prompt = document.createElement("p");
-        prompt.textContent = "Supprimer ce profil Wine ? Ses jeux Wine seront retirés de la bibliothèque.";
-        const confirm = wineActionButton("confirm-delete-wine-profile", "Supprimer le profil", "wine-danger-button");
+        prompt.textContent = "Delete this Wine profile? Its Wine games are removed from your library too.";
+        const confirm = wineActionButton("confirm-delete-wine-profile", "Delete the profile", "wine-danger-button");
         confirm.dataset.profileId = profile.id;
         const cancel = wineActionButton("cancel-delete-wine-profile", "Conserver", "steam-secondary-button");
         confirmation.append(prompt, confirm, cancel);
@@ -989,7 +1201,7 @@ export function mountApp(root: HTMLElement): void {
         actions.className = "wine-profile-card__actions";
         const dxvk = wineActionButton(
           "install-dxvk-macos",
-          profile.graphicsBackend === "dxvk_macos" ? "Réinstaller DXVK-macOS" : "Activer DXVK-macOS",
+          profile.graphicsBackend === "dxvk_macos" ? "Reinstall DXVK-macOS" : "Enable DXVK-macOS",
           "steam-secondary-button",
           "monitor",
         );
@@ -998,7 +1210,7 @@ export function mountApp(root: HTMLElement): void {
         if (profile.graphicsBackend === "dxvk_macos") {
           const wine3d = wineActionButton(
             "use-wine-3d",
-            "Revenir à Wine 3D",
+            "Switch back to Wine 3D",
             "steam-secondary-button",
           );
           wine3d.dataset.profileId = profile.id;
@@ -1006,12 +1218,12 @@ export function mountApp(root: HTMLElement): void {
         }
         const toggle = wineActionButton(
           "toggle-wine-profile",
-          profile.enabled ? "Désactiver" : "Activer",
+          profile.enabled ? "Disable" : "Enable",
           "steam-secondary-button",
         );
         toggle.dataset.profileId = profile.id;
         toggle.dataset.enabled = String(!profile.enabled);
-        const remove = wineActionButton("delete-wine-profile", "Supprimer", "wine-text-button");
+        const remove = wineActionButton("delete-wine-profile", "Delete", "wine-text-button");
         remove.dataset.profileId = profile.id;
         actions.append(dxvk, toggle, remove);
         card.append(actions);
@@ -1021,9 +1233,11 @@ export function mountApp(root: HTMLElement): void {
     body.append(profiles);
   };
 
-
   const refreshWineRunnerSettings = async (render = true): Promise<void> => {
     const settings = state.wineSettings;
+    // Settings loaders share one generation counter: a snapshot that resolves
+    // after the section changed must never overwrite the fresher one.
+    const request = settingsRequest;
     settings.loading = true;
     if (render) {
       renderWineSettingsPanel();
@@ -1034,10 +1248,11 @@ export function mountApp(root: HTMLElement): void {
         state: "unavailable",
         available: false,
         version: "",
-        message: "Les réglages Wine-Staging sont disponibles dans l’app Orivo pour macOS.",
+        message: "Wine-Staging settings are available in the Orivo desktop app for macOS.",
       };
       settings.profiles = [];
       settings.notice = "";
+      settings.noticeTone = "info";
       if (render) {
         renderWineSettingsPanel();
       }
@@ -1046,12 +1261,15 @@ export function mountApp(root: HTMLElement): void {
 
     try {
       const snapshot = normaliseWineRunnerSettings(await invoke<unknown>("get_wine_runner_settings"));
+      if (request !== settingsRequest) return;
       settings.runner = snapshot.runner;
       settings.profiles = snapshot.profiles;
       settings.notice = "";
+      settings.noticeTone = "info";
       settings.pendingDeleteProfileId = "";
     } catch (error) {
-      settings.notice = messageFromError(error, "Les réglages Wine-Staging n’ont pas pu être chargés.");
+      if (request !== settingsRequest) return;
+      settings.notice = messageFromError(error, "Wine-Staging settings could not be loaded.");
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -1060,42 +1278,20 @@ export function mountApp(root: HTMLElement): void {
     }
   };
 
-  const setWineSettingsOpen = (open: boolean): void => {
-    state.wineSettings.open = open;
-    refs.wineSettingsPanel.hidden = !open;
-    if (!open) {
-      state.wineSettings.pendingDeleteProfileId = "";
-      renderWineSettingsPanel();
-      return;
-    }
-    closeLibraryMenu();
-    if (state.steam.open) {
-      state.steam.open = false;
-      renderSteamPanel();
-    }
-    state.wineSettings.notice = "";
-    renderWineSettingsPanel();
-    void refreshWineRunnerSettings();
-    requestAnimationFrame(() => {
-      refs.wineSettingsPanel.querySelector<HTMLButtonElement>("[data-wine-settings-action='close']")?.focus();
-    });
-  };
-
-
   const setWineProfileEnabled = async (profileId: string, enabled: boolean): Promise<void> => {
     if (!profileId || !isTauriRuntime()) {
       return;
     }
-    state.wineSettings.notice = enabled ? "Activation du profil Wine…" : "Désactivation du profil Wine…";
+    state.wineSettings.notice = enabled ? "Enabling the Wine profile…" : "Disabling the Wine profile…";
     state.wineSettings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("set_wine_profile_enabled", { profileId, enabled });
       await refreshWineRunnerSettings(false);
-      state.wineSettings.notice = enabled ? "Profil Wine activé." : "Profil Wine désactivé.";
+      state.wineSettings.notice = enabled ? "Wine profile enabled." : "Wine profile disabled.";
       state.wineSettings.noticeTone = "success";
     } catch (error) {
-      state.wineSettings.notice = messageFromError(error, "L’état du profil Wine n’a pas pu être modifié.");
+      state.wineSettings.notice = messageFromError(error, "The Wine profile state could not be changed.");
       state.wineSettings.noticeTone = "error";
     }
     renderWineSettingsPanel();
@@ -1105,17 +1301,17 @@ export function mountApp(root: HTMLElement): void {
     if (!profileId || !isTauriRuntime()) {
       return;
     }
-    state.wineSettings.notice = "Suppression du profil Wine…";
+    state.wineSettings.notice = "Deleting the Wine profile…";
     state.wineSettings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("delete_wine_profile", { profileId });
       state.wineSettings.pendingDeleteProfileId = "";
       await Promise.all([refreshWineRunnerSettings(false), refreshLibrary()]);
-      state.wineSettings.notice = "Profil Wine supprimé, ainsi que ses jeux Wine de la bibliothèque.";
+      state.wineSettings.notice = "Wine profile deleted, along with its Wine games in your library.";
       state.wineSettings.noticeTone = "success";
     } catch (error) {
-      state.wineSettings.notice = messageFromError(error, "Le profil Wine n’a pas pu être supprimé.");
+      state.wineSettings.notice = messageFromError(error, "The Wine profile could not be deleted.");
       state.wineSettings.noticeTone = "error";
     }
     renderWineSettingsPanel();
@@ -1139,23 +1335,34 @@ export function mountApp(root: HTMLElement): void {
 
   const focusSteamPanel = (): void => {
     requestAnimationFrame(() => {
-      const focusTarget =
-        refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search") ??
-        refs.steamPanel.querySelector<HTMLButtonElement>("[data-steam-action='close']");
-      focusTarget?.focus();
+      refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search")?.focus();
     });
   };
 
   const renderSteamPanel = (): void => {
     const steam = state.steam;
-    refs.steamPanel.hidden = !steam.open;
     refs.steamPanel.setAttribute("aria-busy", String(steam.phase === "scanning" || steam.phase === "importing"));
     const hasAvailablePreview = steam.preview?.status === "available";
-    refs.steamRefresh.hidden = !hasAvailablePreview;
+    refs.steamRefresh.hidden = !hasAvailablePreview || !steam.open;
     refs.steamRefresh.disabled =
       !hasAvailablePreview || steam.phase === "scanning" || steam.phase === "importing";
 
     if (!steam.open) {
+      const idle = document.createElement("section");
+      idle.className = "steam-state steam-state--idle";
+      const heading = document.createElement("h2");
+      heading.textContent = "Import games already installed on this Mac";
+      const message = document.createElement("p");
+      message.textContent =
+        "Orivo reads your local Steam libraries. Nothing leaves this Mac and nothing is imported until you choose.";
+      const scan = document.createElement("button");
+      scan.type = "button";
+      scan.className = "settings-button settings-button--primary";
+      scan.dataset.steamAction = "scan";
+      scan.textContent = "Scan Steam libraries";
+      idle.append(heading, message, scan);
+      refs.steamBody.replaceChildren(idle);
+      refs.steamFooter.hidden = true;
       return;
     }
 
@@ -1383,12 +1590,10 @@ export function mountApp(root: HTMLElement): void {
           : "Import " + selectedCount + " games";
   };
 
-  const setSteamPanelOpen = (open: boolean, trigger?: HTMLElement): void => {
-    if (open && state.steamAccount.open) {
-      closeSteamAccountPanel();
-    }
+  // The Steam import list lives inside Settings › Libraries. "Open" only means
+  // the scanned list is expanded in that card — there is no modal to dismiss.
+  const setSteamPanelOpen = (open: boolean): void => {
     if (open && state.steam.open) {
-      closeLibraryMenu();
       focusSteamPanel();
       return;
     }
@@ -1396,19 +1601,9 @@ export function mountApp(root: HTMLElement): void {
 
     if (!open) {
       renderSteamPanel();
-      if (steamReturnFocus?.isConnected && steamReturnFocus.getClientRects().length > 0) {
-        steamReturnFocus.focus();
-      } else {
-        refs.libraryMenuButton.focus();
-      }
-      steamReturnFocus = null;
       return;
     }
 
-    const activeTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    steamReturnFocus = activeTrigger && refs.libraryMenu.contains(activeTrigger)
-      ? refs.libraryMenuButton
-      : activeTrigger;
     closeLibraryMenu();
     if (state.steam.phase !== "scanning" && state.steam.phase !== "importing") {
       void scanSteamLibrary();
@@ -1432,33 +1627,16 @@ export function mountApp(root: HTMLElement): void {
         refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='connect']") ??
         refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='sync']") ??
         refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='cancel-wait']") ??
-        refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='back']") ??
-        refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='close']");
+        refs.steamAccountPanel.querySelector<HTMLElement>("[data-steam-account-action='back']");
       (primaryAction ?? refs.steamAccountPanel).focus();
     });
-  };
-
-  const closeSteamAccountPanel = (restoreFocus = false): void => {
-    state.steamAccount.open = false;
-    refs.steamAccountPanel.hidden = true;
-    refs.steamAccountBackdrop.hidden = true;
-    refs.selectorContent.removeAttribute("inert");
-    refs.selectorContent.removeAttribute("aria-hidden");
-    if (restoreFocus) {
-      if (steamAccountReturnFocus?.isConnected && steamAccountReturnFocus.getClientRects().length > 0) {
-        steamAccountReturnFocus.focus();
-      } else {
-        refs.libraryMenuButton.focus();
-      }
-    }
-    steamAccountReturnFocus = null;
   };
 
   const accountActionButton = (
     action: string,
     label: string,
     className = "steam-secondary-button",
-    iconName: "library" | "refresh" | "close" | "settings" = "library",
+    iconName: "library" | "refresh" | "close" | "settings" | "steam" = "library",
   ): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
@@ -1472,14 +1650,6 @@ export function mountApp(root: HTMLElement): void {
     const account = state.steamAccount;
     const restoreFocus = refs.steamAccountPanel.contains(document.activeElement);
     refs.steamAccountPanel.hidden = !account.open;
-    refs.steamAccountBackdrop.hidden = !account.open;
-    if (account.open) {
-      refs.selectorContent.setAttribute("inert", "");
-      refs.selectorContent.setAttribute("aria-hidden", "true");
-    } else {
-      refs.selectorContent.removeAttribute("inert");
-      refs.selectorContent.removeAttribute("aria-hidden");
-    }
     refs.steamAccountPanel.setAttribute(
       "aria-busy",
       String(account.phase === "loading" || account.phase === "connecting" || account.phase === "syncing" || account.phase === "saving-api-key"),
@@ -1627,7 +1797,7 @@ export function mountApp(root: HTMLElement): void {
     overview.className = "steam-account-overview";
     const badge = document.createElement("span");
     badge.className = "steam-state__icon";
-    badge.innerHTML = icon(connected ? "library" : "alert");
+    badge.innerHTML = icon(connected ? "steam" : "alert");
     badge.setAttribute("aria-hidden", "true");
     const copy = document.createElement("div");
     const heading = document.createElement("h2");
@@ -1661,7 +1831,7 @@ export function mountApp(root: HTMLElement): void {
       );
     } else {
       actions.append(
-        accountActionButton("connect", "Continue with Steam", "steam-import-button", "library"),
+        accountActionButton("connect", "Continue with Steam", "steam-import-button", "steam"),
         accountActionButton("api-key", "Use an API key", "steam-secondary-button", "settings"),
       );
     }
@@ -1672,6 +1842,10 @@ export function mountApp(root: HTMLElement): void {
   };
 
   const refreshSteamAccountStatus = async (): Promise<void> => {
+    // Shares the settings generation counter with every other settings loader:
+    // a status that resolves after the section changed is stale and must not
+    // overwrite the fresher one (a slow "disconnected" beating a "connected").
+    const request = settingsRequest;
     if (!isTauriRuntime()) {
       state.steamAccount.status = { connected: false, steamId: "", method: "" };
       state.steamAccount.phase = "disconnected";
@@ -1683,6 +1857,7 @@ export function mountApp(root: HTMLElement): void {
 
     try {
       const status = normaliseSteamAccountStatus(await invoke<unknown>("get_steam_account_status"));
+      if (request !== settingsRequest) return;
       if (!status) {
         throw new Error("Steam returned an invalid account status.");
       }
@@ -1692,6 +1867,7 @@ export function mountApp(root: HTMLElement): void {
         state.steamAccount.notice = "";
       }
     } catch (error) {
+      if (request !== settingsRequest) return;
       state.steamAccount.phase = "error";
       state.steamAccount.notice = messageFromError(error, "Steam account status could not be loaded.");
       state.steamAccount.noticeTone = "error";
@@ -1699,30 +1875,23 @@ export function mountApp(root: HTMLElement): void {
     renderSteamAccountPanel();
   };
 
-  const setSteamAccountPanelOpen = (open: boolean, trigger?: HTMLElement): void => {
+  // The Steam account card is part of Settings › Libraries, so "open" simply
+  // tracks whether that section is on screen and its status is worth loading.
+  const setSteamAccountPanelOpen = (open: boolean): void => {
     if (!open) {
       if (state.steamAccount.phase === "connecting" && isTauriRuntime()) {
         void invoke("cancel_steam_web_login");
       }
-      closeSteamAccountPanel(true);
+      state.steamAccount.open = false;
+      renderSteamAccountPanel();
       return;
     }
 
-    if (state.steam.open) {
-      state.steam.open = false;
-      renderSteamPanel();
-    }
-    const activeTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
-    steamAccountReturnFocus = activeTrigger && refs.libraryMenu.contains(activeTrigger)
-      ? refs.libraryMenuButton
-      : activeTrigger;
-    closeLibraryMenu();
     state.steamAccount.open = true;
     state.steamAccount.phase = "loading";
     state.steamAccount.notice = "";
     renderSteamAccountPanel();
     void refreshSteamAccountStatus();
-    focusSteamAccountPanel();
   };
 
   const syncSteamAccountLibrary = async (): Promise<void> => {
@@ -2055,24 +2224,23 @@ export function mountApp(root: HTMLElement): void {
     renderSteamPanel();
   };
 
-
   const installDxvkMacosForProfile = async (profileId: string): Promise<void> => {
     const settings = state.wineSettings;
     if (!profileId || !isTauriRuntime() || settings.loading) {
       return;
     }
     settings.loading = true;
-    settings.notice = "Téléchargement et vérification de DXVK-macOS, puis préparation du préfixe isolé…";
+    settings.notice = "Downloading and verifying DXVK-macOS, then preparing the isolated prefix…";
     settings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("install_dxvk_macos_for_profile", { profileId });
       await refreshWineRunnerSettings(false);
-      settings.notice = "DXVK-macOS est prêt. Orivo l’utilisera automatiquement pour les jeux DirectX 10/11 compatibles de ce profil.";
+      settings.notice = "DXVK-macOS is ready. Orivo uses it automatically for compatible DirectX 10/11 games in this profile.";
       settings.noticeTone = "success";
       showToast(settings.notice);
     } catch (error) {
-      settings.notice = messageFromError(error, "DXVK-macOS n’a pas pu être installé pour ce profil.");
+      settings.notice = messageFromError(error, "DXVK-macOS could not be installed for this profile.");
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -2085,17 +2253,17 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
     settings.loading = true;
-    settings.notice = "Retour à Wine 3D…";
+    settings.notice = "Switching back to Wine 3D…";
     settings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("use_wine_3d_for_profile", { profileId });
       await refreshWineRunnerSettings(false);
-      settings.notice = "Ce profil utilise maintenant Wine 3D. DXVK-macOS reste isolé dans ce profil.";
+      settings.notice = "This profile now uses Wine 3D. DXVK-macOS stays isolated in this profile.";
       settings.noticeTone = "success";
       showToast(settings.notice);
     } catch (error) {
-      settings.notice = messageFromError(error, "Le retour à Wine 3D n’a pas pu être enregistré.");
+      settings.notice = messageFromError(error, "Switching back to Wine 3D could not be saved.");
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -2103,9 +2271,18 @@ export function mountApp(root: HTMLElement): void {
   };
 
   const launchGame = async (requestedGameId?: string): Promise<void> => {
-    const game =
-      (requestedGameId ? state.games.find((candidate) => candidate.id === requestedGameId) : undefined) ??
-      selectedGame();
+    const requested = requestedGameId
+      ? state.games.find((candidate) => candidate.id === requestedGameId)
+      : undefined;
+    // A caller that names a game means *that* game. Falling back to the
+    // Library's current selection here would launch a different game than the
+    // one on screen, which is exactly what a deep link opened before the
+    // library loaded would do.
+    if (requestedGameId && !requested) {
+      showToast("That game is not in your library yet.");
+      return;
+    }
+    const game = requested ?? selectedGame();
     if (!isTauriRuntime()) {
       showToast("Launch is available in the Orivo desktop app.");
       return;
@@ -2120,7 +2297,7 @@ export function mountApp(root: HTMLElement): void {
           state.launchFeedback = {
             gameId: game.id,
             phase: "failed",
-            message: "Ce jeu Wine ne peut pas être lancé avec ce profil.",
+            message: "This Wine game cannot be launched with that profile.",
           };
           renderLaunchFeedback();
         } else {
@@ -2132,11 +2309,11 @@ export function mountApp(root: HTMLElement): void {
         state.launchFeedback = {
           gameId: game.id,
           phase: "launching",
-          message: "Lancement avec Wine-Staging…",
+          message: "Launching with Wine-Staging…",
         };
         renderLaunchFeedback();
       }
-      showToast(game.source === "wine" ? "Préparation de Wine pour " + game.title + "…" : "Launching " + game.title + "…");
+      showToast(game.source === "wine" ? "Preparing Wine for " + game.title + "…" : "Launching " + game.title + "…");
       await invoke("launch_game", { gameId: game.id });
     } catch (error) {
       const message = messageFromError(error, "Could not launch " + game.title + ".");
@@ -2159,17 +2336,268 @@ export function mountApp(root: HTMLElement): void {
     state.launchFeedback = {
       gameId,
       phase: "launching",
-      message: "Préparation du prochain mode de compatibilité Wine…",
+      message: "Preparing the next Wine compatibility mode…",
     };
     renderLaunchFeedback();
     try {
       await invoke("retry_wine_game_in_compatibility", { gameId });
       await launchGame(gameId);
     } catch (error) {
-      const message = messageFromError(error, "Ce mode de compatibilité Wine n’est pas disponible.");
+      const message = messageFromError(error, "That Wine compatibility mode is not available.");
       state.launchFeedback = { gameId, phase: "failed", message };
       renderLaunchFeedback();
       showToast(message);
+    }
+  };
+
+  const applyMotionPreference = (): void => {
+    root.dataset.motion = state.preferences.motion;
+  };
+
+  const renderPreferenceControls = (): void => {
+    const startPage = root.querySelector<HTMLSelectElement>("#preference-start-page");
+    const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
+    if (startPage) startPage.value = state.preferences.startPage;
+    if (storeRegion) storeRegion.value = state.preferences.storeRegion;
+    for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
+      input.checked = input.value === state.preferences.motion;
+    }
+    const showcase = root.querySelector<HTMLInputElement>("#preference-show-showcase");
+    if (showcase) showcase.checked = state.preferences.showShowcaseGames;
+    applyMotionPreference();
+  };
+
+  const renderProviderStatuses = (): void => {
+    const list = root.querySelector<HTMLElement>("#provider-status-list");
+    if (!list) return;
+    const fragment = document.createDocumentFragment();
+    for (const provider of state.providerStatuses) {
+      const row = document.createElement("article");
+      row.className = "provider-status-row";
+      row.dataset.settingsSearchable = "";
+      const copy = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = provider.label;
+      const message = document.createElement("p");
+      message.textContent = provider.message || "No status details available.";
+      copy.append(title, message);
+      const status = document.createElement("span");
+      status.className = `provider-health provider-health--${provider.health}`;
+      status.textContent = provider.health.replace("-", " ");
+      row.append(copy, status);
+      fragment.append(row);
+    }
+    list.replaceChildren(fragment);
+  };
+
+  const renderDataUsage = (): void => {
+    const size = root.querySelector<HTMLElement>("#derived-cache-size");
+    const entries = root.querySelector<HTMLElement>("#derived-cache-entries");
+    const freshness = root.querySelector<HTMLElement>("#derived-cache-freshness");
+    if (size) size.textContent = formatDataSize(state.dataUsage.derivedCacheBytes);
+    if (entries) {
+      entries.textContent = `${state.dataUsage.derivedCacheEntries.toLocaleString()} derived ${
+        state.dataUsage.derivedCacheEntries === 1 ? "entry" : "entries"
+      }`;
+    }
+    if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
+  };
+
+  const renderSettingsSearch = (): void => {
+    const term = state.settingsSearch.trim().toLocaleLowerCase();
+    const activePanel = refs.settingsPanels.find((panel) => !panel.hidden);
+    if (!activePanel) return;
+    for (const item of activePanel.querySelectorAll<HTMLElement>("[data-settings-searchable]")) {
+      item.hidden = Boolean(term) && !item.textContent?.toLocaleLowerCase().includes(term);
+    }
+    // The topbar search only ever filters the visible plugin card; it must not
+    // reveal a plugin detail view the user did not open.
+    renderPluginList();
+  };
+
+  const renderSettingsRoute = (route: Extract<AppRoute, { page: "settings" }>): void => {
+    const definition = SETTINGS_SECTIONS.find((section) => section.id === route.section)!;
+    refs.settingsTitle.textContent = definition.label;
+    refs.settingsDescription.textContent = definition.description;
+    for (const button of refs.settingsSectionButtons) {
+      const active = button.dataset.settingsSection === route.section;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-selected", String(active));
+      // A tablist is one Tab stop: Tab reaches the selected tab, the arrow keys
+      // move between them.
+      button.tabIndex = active ? 0 : -1;
+    }
+    for (const panel of refs.settingsPanels) {
+      panel.hidden = panel.dataset.settingsPanel !== route.section;
+    }
+    renderPreferenceControls();
+    renderProviderStatuses();
+    renderDataUsage();
+    renderSettingsSearch();
+  };
+
+  const loadPreferences = async (request = settingsRequest): Promise<void> => {
+    if (!isTauriRuntime()) {
+      renderPreferenceControls();
+      return;
+    }
+    try {
+      const preferences = normalisePreferences(await invoke<unknown>("get_preferences"));
+      if (request !== settingsRequest) return;
+      state.preferences = preferences;
+      renderPreferenceControls();
+    } catch (error) {
+      if (request === settingsRequest) {
+        showToast(messageFromError(error, "Preferences could not be loaded."));
+      }
+    }
+  };
+
+  const savePreferences = async (update: PreferencesUpdate): Promise<void> => {
+    const previous = state.preferences;
+    state.preferences = update.reset
+      ? { ...DEFAULT_PREFERENCES }
+      : normalisePreferences({ ...previous, ...update });
+    renderPreferenceControls();
+    if (!isTauriRuntime()) return;
+    try {
+      state.preferences = normalisePreferences(
+        await invoke<unknown>("update_preferences", { update }),
+      );
+      renderPreferenceControls();
+      showToast(update.reset ? "Preferences reset to defaults." : "Preferences saved.");
+    } catch (error) {
+      state.preferences = previous;
+      renderPreferenceControls();
+      showToast(messageFromError(error, "Preferences could not be saved."));
+    }
+  };
+
+  const loadProviderStatuses = async (request = settingsRequest): Promise<void> => {
+    if (!isTauriRuntime()) {
+      renderProviderStatuses();
+      return;
+    }
+    try {
+      const result = await invoke<unknown>("get_store_home");
+      if (request !== settingsRequest) return;
+      const statuses = normaliseProviderStatuses(result);
+      if (statuses.length > 0) state.providerStatuses = statuses;
+    } catch {
+      // Provider availability remains explicit even when the Store service is
+      // offline or has not been integrated yet.
+    }
+    if (request === settingsRequest) renderProviderStatuses();
+  };
+
+  const loadDataUsage = async (request = settingsRequest): Promise<void> => {
+    if (!isTauriRuntime()) {
+      renderDataUsage();
+      return;
+    }
+    try {
+      const usage = normaliseDataUsage(await invoke<unknown>("get_data_usage"));
+      if (request !== settingsRequest) return;
+      state.dataUsage = usage;
+      renderDataUsage();
+    } catch (error) {
+      if (request === settingsRequest) {
+        showToast(messageFromError(error, "Data usage could not be loaded."));
+      }
+    }
+  };
+
+  const renderWallpaperCredentials = (): void => {
+    refs.wallpaperIgdbClientId.value = state.wallpaperCredentials.igdbClientId;
+    refs.wallpaperIgdbClientSecret.value = state.wallpaperCredentials.igdbClientSecret;
+    refs.wallpaperGoogleApiKey.value = state.wallpaperCredentials.googleApiKey;
+    refs.wallpaperGoogleCseId.value = state.wallpaperCredentials.googleCseId;
+    refs.wallpaperCredentialsSave.disabled = state.wallpaperCredentialsSaving;
+    refs.wallpaperCredentialsSave.textContent = state.wallpaperCredentialsSaving
+      ? "Saving…"
+      : "Save keys";
+  };
+
+  const loadWallpaperCredentials = async (request = settingsRequest): Promise<void> => {
+    if (!isTauriRuntime()) {
+      renderWallpaperCredentials();
+      return;
+    }
+    try {
+      const credentials = normaliseWallpaperCredentials(
+        await invoke<unknown>("get_wallpaper_credentials"),
+      );
+      if (request !== settingsRequest) return;
+      state.wallpaperCredentials = credentials;
+      renderWallpaperCredentials();
+    } catch (error) {
+      if (request === settingsRequest) {
+        showToast(messageFromError(error, "Wallpaper keys could not be loaded."));
+      }
+    }
+  };
+
+  const saveWallpaperCredentials = async (): Promise<void> => {
+    const update: WallpaperCredentialsUpdate = {
+      igdbClientId: refs.wallpaperIgdbClientId.value.trim(),
+      igdbClientSecret: refs.wallpaperIgdbClientSecret.value.trim(),
+      googleApiKey: refs.wallpaperGoogleApiKey.value.trim(),
+      googleCseId: refs.wallpaperGoogleCseId.value.trim(),
+    };
+    if (!isTauriRuntime()) {
+      state.wallpaperCredentials = { ...EMPTY_WALLPAPER_CREDENTIALS, ...update };
+      renderWallpaperCredentials();
+      showToast("Wallpaper keys are saved in the Orivo desktop app.");
+      return;
+    }
+    const previous = state.wallpaperCredentials;
+    state.wallpaperCredentialsSaving = true;
+    renderWallpaperCredentials();
+    try {
+      state.wallpaperCredentials = normaliseWallpaperCredentials(
+        await invoke<unknown>("update_wallpaper_credentials", { update }),
+      );
+      renderWallpaperCredentials();
+      showToast("Wallpaper keys saved.");
+    } catch (error) {
+      state.wallpaperCredentials = previous;
+      renderWallpaperCredentials();
+      showToast(messageFromError(error, "Wallpaper keys could not be saved."));
+    } finally {
+      state.wallpaperCredentialsSaving = false;
+      renderWallpaperCredentials();
+    }
+  };
+
+  const refreshDerivedData = async (): Promise<void> => {
+    const refresh = root.querySelector<HTMLButtonElement>("#refresh-derived-data");
+    if (refresh) refresh.disabled = true;
+    try {
+      if (isTauriRuntime()) await invoke("refresh_store_sources");
+      await Promise.all([loadProviderStatuses(), loadDataUsage()]);
+      showToast("Derived data refreshed.");
+    } catch (error) {
+      showToast(messageFromError(error, "Derived data could not be refreshed."));
+    } finally {
+      if (refresh) refresh.disabled = false;
+    }
+  };
+
+  const clearDerivedData = async (): Promise<void> => {
+    const clear = root.querySelector<HTMLButtonElement>("#clear-derived-cache");
+    if (clear) clear.disabled = true;
+    try {
+      if (isTauriRuntime()) {
+        state.dataUsage = normaliseDataUsage(await invoke<unknown>("clear_derived_cache"));
+      } else {
+        state.dataUsage = { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null };
+      }
+      renderDataUsage();
+      showToast("Derived cache cleared. Your library and game media were kept.");
+    } catch (error) {
+      showToast(messageFromError(error, "Derived cache could not be cleared."));
+    } finally {
+      if (clear) clear.disabled = false;
     }
   };
 
@@ -2209,10 +2637,11 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
 
-    if (action === "steam-local") {
-      setSteamPanelOpen(true, trigger);
-    } else if (action === "steam-account") {
-      setSteamAccountPanelOpen(true, trigger);
+    if (action === "source-steam" || action === "add-source") {
+      // A single "Sources" entry now covers connecting an account and importing
+      // installed games; both live in Settings › Libraries & Sources.
+      closeLibraryMenu();
+      navigate({ page: "settings", section: "libraries", attachGameId: null });
     } else if (action === "local") {
       void importGame();
     }
@@ -2258,16 +2687,8 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-
   refs.wineSettingsPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
-    const settingsAction =
-      target?.closest<HTMLButtonElement>("[data-wine-settings-action]")?.dataset.wineSettingsAction;
-    if (settingsAction === "close") {
-      setWineSettingsOpen(false);
-      return;
-    }
-
     const button = target?.closest<HTMLButtonElement>("[data-wine-action]");
     const action = button?.dataset.wineAction;
     if (!action) {
@@ -2306,23 +2727,12 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-  refs.wineSettingsPanel.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setWineSettingsOpen(false);
-    }
-  });
-
-  refs.settingsNav.addEventListener("click", () => {
-    setWineSettingsOpen(!state.wineSettings.open);
-  });
-
   refs.steamPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
     const action = target?.closest<HTMLButtonElement>("[data-steam-action]")?.dataset.steamAction;
 
-    if (action === "close") {
-      setSteamPanelOpen(false);
+    if (action === "scan") {
+      setSteamPanelOpen(true);
     } else if (action === "retry" || action === "refresh") {
       void scanSteamLibrary();
     } else if (action === "import") {
@@ -2386,12 +2796,6 @@ export function mountApp(root: HTMLElement): void {
   });
 
   refs.steamPanel.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setSteamPanelOpen(false);
-      return;
-    }
-
     const target = event.target;
     if (
       (event.key !== "ArrowDown" && event.key !== "ArrowUp") ||
@@ -2424,9 +2828,7 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
 
-    if (action === "close") {
-      setSteamAccountPanelOpen(false);
-    } else if (action === "connect") {
+    if (action === "connect") {
       void startSteamWebLogin();
     } else if (action === "cancel-wait") {
       if (isTauriRuntime()) {
@@ -2469,17 +2871,6 @@ export function mountApp(root: HTMLElement): void {
     const apiKey = form.querySelector<HTMLInputElement>("input[name='steam-api-key']")?.value ?? "";
     state.steamAccount.apiKeySteamId = steamId.trim();
     void connectSteamWithApiKey(steamId, apiKey);
-  });
-
-  refs.steamAccountPanel.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setSteamAccountPanelOpen(false);
-    }
-  });
-
-  refs.steamAccountBackdrop.addEventListener("click", () => {
-    setSteamAccountPanelOpen(false);
   });
 
   if (isTauriRuntime()) {
@@ -2541,13 +2932,411 @@ export function mountApp(root: HTMLElement): void {
     });
   }
 
-  refs.search.addEventListener("input", () => {
-    state.query = refs.search.value;
-    const matches = visibleGames();
-    if (matches.length > 0 && !matches.some((game) => game.id === state.selectedId)) {
-      state.selectedId = matches[0].id;
+  const loadAboutVersions = async (request = settingsRequest): Promise<void> => {
+    const appVersion = root.querySelector<HTMLElement>("#about-app-version");
+    const tauriVersion = root.querySelector<HTMLElement>("#about-tauri-version");
+    if (!isTauriRuntime()) {
+      if (appVersion) appVersion.textContent = "Development build";
+      if (tauriVersion) tauriVersion.textContent = "Browser preview";
+      return;
     }
-    renderSelection();
+    try {
+      const [app, tauri] = await Promise.all([getVersion(), getTauriVersion()]);
+      if (request !== settingsRequest) return;
+      if (appVersion) appVersion.textContent = app;
+      if (tauriVersion) tauriVersion.textContent = tauri;
+    } catch {
+      // Version metadata is informational. A missing value must never keep the
+      // About section from rendering its attributions.
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Shell: one topbar, one router, one host per page.
+  // ---------------------------------------------------------------------------
+
+  type NavPage = "library" | "store" | "settings";
+
+  const navPageForRoute = (route: AppRoute): NavPage => {
+    if (route.page === "store") return "store";
+    if (route.page === "settings") return "settings";
+    if (route.page === "game") return route.from === "store" ? "store" : "library";
+    return "library";
+  };
+
+  const syncTopbarSearch = (route: AppRoute): void => {
+    // The topbar is visually identical on every page — the search is never
+    // blanked out, because a 352px hole mid-bar reads as a broken layout. Only
+    // what the field searches changes.
+    if (route.page === "store") {
+      refs.search.placeholder = "Search the store…";
+      refs.search.setAttribute("aria-label", "Search the store");
+      if (document.activeElement !== refs.search) refs.search.value = route.query;
+      return;
+    }
+    if (route.page === "settings") {
+      refs.search.placeholder = "Search settings…";
+      refs.search.setAttribute("aria-label", "Search settings");
+      if (refs.search.value !== state.settingsSearch) refs.search.value = state.settingsSearch;
+      return;
+    }
+    // Library, game detail, and not-found all search the library. From a page
+    // that cannot show the results, Enter takes the query to the Library.
+    refs.search.placeholder = "Search games…";
+    refs.search.setAttribute("aria-label", "Search your library");
+    if (refs.search.value !== state.query) refs.search.value = state.query;
+  };
+
+  const syncTopbar = (route: AppRoute): void => {
+    const current = navPageForRoute(route);
+    // The Library is a full-bleed hero with its own top gradient, so the topbar
+    // floats over it. Every other page scrolls content underneath the bar and
+    // needs an opaque, blurred scrim or that content reads straight through it.
+    refs.topbar.classList.toggle("topbar--over-content", route.page !== "library");
+    for (const link of refs.navLinks) {
+      const active = link.dataset.navPage === current;
+      link.classList.toggle("is-active", active);
+      // Exactly one navigation link is ever marked as the current page.
+      if (active) {
+        link.setAttribute("aria-current", "page");
+      } else {
+        link.removeAttribute("aria-current");
+      }
+    }
+    syncTopbarSearch(route);
+  };
+
+  const libraryPage: AppPage = {
+    mount() {
+      // The Library scene is part of the shell markup, so there is nothing to
+      // build here. Mount stays a no-op to keep hero images warm across visits.
+    },
+    activate(activation) {
+      const restore = activation.restoreState;
+      // The library query is not restored from page state: the topbar owns it
+      // and outlives every navigation, so re-applying a snapshot here would
+      // discard a query typed on another page on the way back.
+      if (restore?.selectedGameId && state.games.some((game) => game.id === restore.selectedGameId)) {
+        state.selectedId = restore.selectedGameId;
+      }
+      renderSelection(true);
+      if (!restore) return;
+      // The rail is a horizontal scroller, so the restored offset is its
+      // `scrollLeft`; `PageRestoreState` keeps a single scroll field.
+      refs.cards.scrollLeft = restore.scrollTop;
+      const focusKey = restore.focusKey;
+      if (!focusKey) return;
+      requestAnimationFrame(() => {
+        if (!activation.isCurrent()) return;
+        Array.from(refs.cards.querySelectorAll<HTMLButtonElement>(".game-card"))
+          .find((card) => card.dataset.gameId === focusKey)
+          ?.focus({ preventScroll: true });
+      });
+    },
+    deactivate(): PageRestoreState | null {
+      closeLibraryMenu();
+      const focused = document.activeElement;
+      const focusKey =
+        focused instanceof HTMLElement && focused.classList.contains("game-card")
+          ? focused.dataset.gameId ?? null
+          : null;
+      return {
+        scrollTop: refs.cards.scrollLeft,
+        focusKey,
+        selectedGameId: state.selectedId,
+      };
+    },
+  };
+
+  const settingsPage: AppPage = {
+    mount() {
+      // Settings is a normal page rendered from the shell markup: no backdrop,
+      // no focus trap, and no Escape-to-close.
+    },
+    activate(activation) {
+      const route = activation.route;
+      if (route.page !== "settings") return;
+      const request = ++settingsRequest;
+      // A deep link that names a game (for example the game detail page's
+      // "Configure Wine" action) opens the Wine runner detail directly;
+      // otherwise the Plugins section opens its plugin browser.
+      state.pluginView = route.section === "plugins" && route.attachGameId ? "wine" : "list";
+      renderSettingsRoute(route);
+      renderPluginList();
+      renderWineSettingsPanel();
+      renderSteamPanel();
+      void loadPreferences(request);
+
+      if (route.section === "libraries") {
+        setSteamAccountPanelOpen(true);
+        void loadProviderStatuses(request);
+      } else if (state.steamAccount.open) {
+        setSteamAccountPanelOpen(false);
+      }
+      if (route.section === "plugins") void refreshWineRunnerSettings();
+      if (route.section === "data") void loadDataUsage(request);
+      if (route.section === "about") void loadAboutVersions(request);
+      if (route.section === "plugins") void loadWallpaperCredentials(request);
+      if (activation.restoreState) refs.settingsPage.scrollTop = activation.restoreState.scrollTop;
+    },
+    deactivate(): PageRestoreState | null {
+      settingsRequest += 1;
+      const scrollTop = refs.settingsPage.scrollTop;
+      state.pluginView = "list";
+      state.wineSettings.pendingDeleteProfileId = "";
+      state.steam.open = false;
+      renderPluginList();
+      renderWineSettingsPanel();
+      renderSteamPanel();
+      // Closing through the setter is what cancels an in-flight Steam web
+      // login; assigning `open` directly orphans the `steam-auth` window.
+      setSteamAccountPanelOpen(false);
+      return { scrollTop, focusKey: null };
+    },
+  };
+
+  const notFoundPage: AppPage = {
+    mount() {
+      // The not-found page is static shell markup with a single way back.
+    },
+    activate(activation) {
+      const route = activation.route;
+      refs.notFoundDetail.textContent =
+        route.page === "not-found" ? `Orivo has no page at “${route.path}”.` : "";
+      requestAnimationFrame(() => {
+        if (!activation.isCurrent()) return;
+        refs.notFoundPage
+          .querySelector<HTMLButtonElement>("[data-app-action='go-library']")
+          ?.focus();
+      });
+    },
+    deactivate(): PageRestoreState | null {
+      return null;
+    },
+  };
+
+  const storePage =
+    options.storePage ?? createStorePage({ navigate: (route) => navigate(route) });
+  const gameDetailPage =
+    options.gameDetailPage ??
+    createGameDetailPage({
+      navigate: (route) => navigate(route),
+      // A deep link opened without history still has somewhere to go back to.
+      back: () => router.back({ page: "library" }),
+      play: (gameId) => {
+        void launchGame(gameId);
+      },
+      // Home art, a refetched cover or a removed game changed the catalog; pull
+      // the library again so its cards and hero reflect it on the way back.
+      onLibraryChanged: () => {
+        void refreshLibrary();
+      },
+    });
+
+  const pageHosts: Record<AppRoute["page"], PageLifecycleHost> = {
+    library: new PageLifecycleHost(refs.libraryPage, libraryPage),
+    store: new PageLifecycleHost(refs.storePage, storePage),
+    game: new PageLifecycleHost(refs.gamePage, gameDetailPage),
+    settings: new PageLifecycleHost(refs.settingsPage, settingsPage),
+    "not-found": new PageLifecycleHost(refs.notFoundPage, notFoundPage),
+  };
+  const restoreStates = new Map<AppRoute["page"], PageRestoreState | null>();
+  let activePage: AppRoute["page"] | null = null;
+
+  const dispatchRoute = (route: AppRoute): void => {
+    currentRoute = route;
+    syncTopbar(route);
+
+    const leaving = activePage !== null && activePage !== route.page;
+    if (leaving && activePage) {
+      restoreStates.set(activePage, pageHosts[activePage].deactivate());
+    }
+    const returning = activePage !== route.page;
+    activePage = route.page;
+    const restore = returning ? restoreStates.get(route.page) ?? null : null;
+    void pageHosts[route.page].activate(route, restore).catch((error: unknown) => {
+      showToast(messageFromError(error, "This page could not be opened."));
+    });
+  };
+
+  for (const link of refs.navLinks) {
+    link.addEventListener("click", () => {
+      const page = link.dataset.navPage;
+      if (page === "store") {
+        if (currentRoute.page === "store") return;
+        navigate({ page: "store", category: "for-you", providers: [], query: "" });
+      } else if (page === "settings") {
+        if (currentRoute.page === "settings") return;
+        navigate({ page: "settings", section: "general", attachGameId: null });
+      } else {
+        navigate({ page: "library" });
+      }
+    });
+  }
+
+  refs.detailsButton.addEventListener("click", () => openGameDetail(selectedGame().id));
+
+  refs.notFoundPage.addEventListener("click", (event) => {
+    const target = event.target as Element | null;
+    if (target?.closest("[data-app-action='go-library']")) {
+      navigate({ page: "library" }, { replace: true });
+    }
+  });
+
+  refs.settingsPage.addEventListener("click", (event) => {
+    const target = event.target as Element | null;
+
+    const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
+      openPluginDetail(pluginId);
+      return;
+    }
+    if (target?.closest("[data-plugin-back]")) {
+      state.pluginView = "list";
+      renderPluginList();
+      renderWineSettingsPanel();
+      return;
+    }
+    const installId = target?.closest<HTMLButtonElement>("[data-plugin-install]")?.dataset
+      .pluginInstall;
+    if (installId) {
+      const entry = AVAILABLE_PLUGINS.find((candidate) => candidate.id === installId);
+      showToast(
+        isTauriRuntime()
+          ? `${entry?.name ?? "That plugin"} is not installable yet.`
+          : `${entry?.name ?? "That plugin"} install is available in the Orivo desktop app.`,
+      );
+      return;
+    }
+
+    const section = target?.closest<HTMLButtonElement>("[data-settings-section]")?.dataset
+      .settingsSection;
+    if (section) {
+      navigate({
+        page: "settings",
+        section: section as SettingsSection,
+        attachGameId: null,
+      });
+      return;
+    }
+
+    const action = target?.closest<HTMLButtonElement>("[data-settings-action]")?.dataset
+      .settingsAction;
+    if (action === "reset-preferences") {
+      void savePreferences({ reset: true });
+    } else if (action === "refresh-derived") {
+      void refreshDerivedData();
+    } else if (action === "clear-derived") {
+      void clearDerivedData();
+    }
+
+    if (target?.closest("#wallpaper-credentials-save")) {
+      void saveWallpaperCredentials();
+    }
+  });
+
+  refs.settingsPage.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target instanceof HTMLSelectElement) {
+      if (target.id === "preference-start-page") {
+        void savePreferences({ startPage: target.value as StartPage });
+      } else if (target.id === "preference-store-region") {
+        void savePreferences({ storeRegion: target.value as StoreRegion });
+      }
+      return;
+    }
+    if (
+      target instanceof HTMLInputElement &&
+      target.name === "motion-preference" &&
+      target.checked
+    ) {
+      void savePreferences({ motion: target.value as MotionPreference });
+    }
+    if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
+      // Toggling the debug demo games re-seeds (or clears) the library.
+      void savePreferences({ showShowcaseGames: target.checked }).then(() => {
+        void refreshLibrary();
+      });
+    }
+  });
+
+  refs.settingsPage.addEventListener("input", (event) => {
+    if (event.target === refs.pluginsCatalogSearch) {
+      state.pluginCatalogSearch = refs.pluginsCatalogSearch.value;
+      renderPluginList();
+    }
+  });
+
+  refs.settingsPage.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLButtonElement) || !target.dataset.settingsSection) return;
+    const buttons = refs.settingsSectionButtons;
+    const index = buttons.indexOf(target);
+    if (index < 0) return;
+
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+      nextIndex = (index + 1) % buttons.length;
+    } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + buttons.length) % buttons.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = buttons.length - 1;
+    }
+    if (nextIndex === null) return;
+
+    event.preventDefault();
+    const next = buttons[nextIndex];
+    next.focus();
+    const section = next.dataset.settingsSection;
+    if (section) {
+      navigate({ page: "settings", section: section as SettingsSection, attachGameId: null });
+    }
+  });
+
+  refs.search.addEventListener("input", () => {
+    const route = currentRoute;
+    const value = refs.search.value;
+    if (route.page === "library") {
+      state.query = value;
+      const matches = visibleGames();
+      if (matches.length > 0 && !matches.some((game) => game.id === state.selectedId)) {
+        state.selectedId = matches[0].id;
+      }
+      renderSelection();
+      return;
+    }
+    if (route.page === "settings") {
+      state.settingsSearch = value;
+      renderSettingsSearch();
+      return;
+    }
+    // Detail and not-found keep the library query warm so Enter can carry it.
+    if (route.page === "game" || route.page === "not-found") {
+      state.query = value;
+    }
+  });
+
+  refs.search.addEventListener("keydown", (event) => {
+    const route = currentRoute;
+    if (event.key !== "Enter") return;
+    if (route.page === "store") {
+      event.preventDefault();
+      navigate({
+        page: "store",
+        category: route.category,
+        providers: [...route.providers],
+        query: refs.search.value.trim(),
+      });
+      return;
+    }
+    if (route.page === "game" || route.page === "not-found") {
+      // The results live in the Library, so Enter goes there with the query.
+      event.preventDefault();
+      state.query = refs.search.value;
+      navigate({ page: "library" });
+    }
   });
 
   document.addEventListener("pointerdown", (event) => {
@@ -2562,61 +3351,10 @@ export function mountApp(root: HTMLElement): void {
   });
 
   window.addEventListener("keydown", (event) => {
-    const target = event.target as HTMLElement | null;
-    if (state.steamAccount.open) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setSteamAccountPanelOpen(false);
-        return;
-      }
-
-      if (event.key === "Tab") {
-        const focusable = Array.from(
-          refs.steamAccountPanel.querySelectorAll<HTMLElement>(
-            "button:not(:disabled), input:not(:disabled), a[href]",
-          ),
-        ).filter((element) => element.getClientRects().length > 0);
-        event.preventDefault();
-        if (focusable.length === 0) {
-          refs.steamAccountPanel.focus();
-          return;
-        }
-        const current = focusable.indexOf(document.activeElement as HTMLElement);
-        const next = event.shiftKey
-          ? current <= 0 ? focusable.length - 1 : current - 1
-          : current >= focusable.length - 1 ? 0 : current + 1;
-        focusable[next]?.focus();
-        return;
-      }
-
-      if (!refs.steamAccountPanel.contains(target)) {
-        event.preventDefault();
-        focusSteamAccountPanel();
-      }
-      return;
-    }
-
-    if (state.wineSettings.open && event.key === "Escape") {
-      event.preventDefault();
-      setWineSettingsOpen(false);
-      return;
-    }
-    if (refs.steamPanel.contains(target)) {
-      return;
-    }
-    if (refs.steamAccountPanel.contains(target)) {
-      return;
-    }
-    if (refs.wineSettingsPanel.contains(target)) {
-      return;
-    }
+    // A key event can be dispatched straight at `window`, so the target is only
+    // usable once it is known to be an element in this document.
+    const target = event.target instanceof HTMLElement ? event.target : null;
     if (refs.libraryMenu.contains(target)) {
-      return;
-    }
-
-    if (state.steam.open && event.key === "Escape") {
-      event.preventDefault();
-      setSteamPanelOpen(false);
       return;
     }
 
@@ -2626,10 +3364,15 @@ export function mountApp(root: HTMLElement): void {
       return;
     }
 
-    const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
+    const typing =
+      target?.tagName === "INPUT" ||
+      target?.tagName === "TEXTAREA" ||
+      target?.tagName === "SELECT" ||
+      target?.isContentEditable === true;
     const commandSearch = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
 
-    if (commandSearch || (!typing && event.key === "/")) {
+    // Focusing the contextual search is the only shortcut shared by every page.
+    if ((commandSearch || (!typing && event.key === "/")) && !refs.search.disabled) {
       event.preventDefault();
       closeLibraryMenu();
       refs.search.focus();
@@ -2638,9 +3381,15 @@ export function mountApp(root: HTMLElement): void {
     }
 
     if (typing) {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && target === refs.search) {
         refs.search.blur();
       }
+      return;
+    }
+
+    // Everything below belongs to the Library page and must never fire while
+    // the Store, a game detail, Settings, or the not-found page is active.
+    if (currentRoute.page !== "library") {
       return;
     }
 
@@ -2656,8 +3405,9 @@ export function mountApp(root: HTMLElement): void {
         moveSelection(1);
         break;
       case "Enter":
+        // Enter opens the detail page. Launching stays on the Play button.
         event.preventDefault();
-        void launchGame();
+        openGameDetail(selectedGame().id);
         break;
       case "i":
       case "I":
@@ -2665,7 +3415,7 @@ export function mountApp(root: HTMLElement): void {
         if (event.shiftKey) {
           void importGame();
         } else {
-          setSteamPanelOpen(true, target ?? undefined);
+          navigate({ page: "settings", section: "libraries", attachGameId: null });
         }
         break;
       case "Escape":
@@ -2676,10 +3426,19 @@ export function mountApp(root: HTMLElement): void {
     }
   });
 
-  renderSelection(true);
   renderSteamPanel();
   renderWineSettingsPanel();
+  renderPreferenceControls();
+  router.start(dispatchRoute);
   void refreshLibrary();
+  void (async () => {
+    await loadPreferences();
+    const hash = window.location.hash;
+    const isDefaultEntry = hash === "" || hash === "#" || hash === "#/";
+    if (isDefaultEntry && state.preferences.startPage === "store") {
+      navigate({ page: "store", category: "for-you", providers: [], query: "" }, { replace: true });
+    }
+  })();
 }
 
 async function loadLibrary(): Promise<LibraryLoad | null> {
@@ -2787,23 +3546,10 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   };
 }
 
-function platformName(platform: LibraryGame["hostPlatform"]): string {
-  switch (platform) {
-    case "windows":
-      return "Windows";
-    case "macos":
-      return "macOS";
-    case "linux":
-      return "Linux";
-    default:
-      return "";
-  }
-}
 
 function immediateMediaUrl(value: string): string {
   return value.startsWith("https://") || value.startsWith("/media/") ? value : "";
 }
-
 
 function nestedRecord(record: BackendRecord, ...keys: string[]): BackendRecord | null {
   for (const key of keys) {
@@ -2853,7 +3599,7 @@ function normaliseWineDirectory(value: unknown): WineDirectory | null {
   }
   return {
     id,
-    label: readString(record, "directoryLabel", "directory_label", "label", "name") || "Dossier de jeux",
+    label: readString(record, "directoryLabel", "directory_label", "label", "name") || "Game folder",
   };
 }
 
@@ -2873,7 +3619,6 @@ function normaliseWineDirectories(value: unknown): WineDirectory[] {
   }
   return directories;
 }
-
 
 function normaliseWineLastImport(record: BackendRecord, fallback = ""): string {
   const supplied = readString(record, "lastImport", "last_import", "lastImportAt", "last_import_at");
@@ -2907,7 +3652,7 @@ function normaliseWineProfile(value: unknown, fallback?: WineProfile): WineProfi
     record.game_directories;
   return {
     id,
-    displayName: readString(record, "displayName", "display_name", "name") || fallback?.displayName || "Profil Wine",
+    displayName: readString(record, "displayName", "display_name", "name") || fallback?.displayName || "Wine profile",
     enabled: readBoolean(record, "enabled") ?? fallback?.enabled ?? true,
     wineLabel:
       readString(record, "wineLabel", "wine_label", "wineVersion", "wine_version", "version") ||
@@ -2928,10 +3673,9 @@ function normaliseWineProfile(value: unknown, fallback?: WineProfile): WineProfi
     graphicsSummary:
       readString(record, "graphicsSummary", "graphics_summary") ||
       fallback?.graphicsSummary ||
-      "Wine 3D · mode de compatibilité par défaut",
+      "Wine 3D · default compatibility mode",
   };
 }
-
 
 function normaliseWineRunnerSettings(value: unknown): { runner: WineRunnerStatus; profiles: WineProfile[] } {
   const record = isRecord(value) ? value : {};
@@ -2956,7 +3700,6 @@ function normaliseWineRunnerSettings(value: unknown): { runner: WineRunnerStatus
     profiles,
   };
 }
-
 
 async function normaliseSteamPreview(result: unknown): Promise<SteamPreview | null> {
   if (!isRecord(result)) {
@@ -3203,54 +3946,57 @@ function messageFromError(error: unknown, fallback: string): string {
 }
 
 function prefersReducedMotion(): boolean {
+  // The Appearance preference wins over the system setting; "system" falls back
+  // to the media query so the default still honours macOS accessibility.
+  if (document.querySelector('[data-motion="reduced"]')) {
+    return true;
+  }
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function shell(): string {
   return `
-    <main class="selector" aria-label="Orivo game selector">
-      <div id="selector-content">
-      <div class="hero-media" aria-hidden="true">
-        <img id="hero-a" class="hero-image" alt="" />
-        <img id="hero-b" class="hero-image" alt="" />
-      </div>
-      <div class="scene-overlay scene-overlay--left" aria-hidden="true"></div>
-      <div class="scene-overlay scene-overlay--bottom" aria-hidden="true"></div>
-      <div class="scene-overlay scene-overlay--top" aria-hidden="true"></div>
-
+      <!-- The topbar is the document banner, so it sits outside the page
+           wrapper: a <header> nested in <main> is not a banner, and each page
+           owns the only <main> on screen. -->
       <header class="topbar" aria-label="Primary navigation" data-tauri-drag-region>
         <div class="nav-cluster">
           <div class="library-menu-control">
-            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="Ouvrir les sources de bibliothèque" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
+            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="Open library sources" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
               <img class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
             </button>
-            <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="Sources de bibliothèque" hidden>
-              <button type="button" class="library-source-action" role="menuitem" data-library-action="steam-local">
-                <span class="library-source-action__icon" aria-hidden="true">${icon("download")}</span>
-                <span class="library-source-action__copy"><strong>Importer les jeux installés</strong><small>Depuis Steam</small></span>
-              </button>
-              <button type="button" class="library-source-action library-source-action--connect" role="menuitem" data-library-action="steam-account">
-                <span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("library")}</span>
-                <span class="library-source-action__copy"><strong>Se connecter à une bibliothèque</strong><small>Votre compte Steam</small></span>
-                ${icon("chevron-right", "library-source-action__chevron")}
-              </button>
+            <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="Library sources" hidden>
+              <p class="library-source-menu__label" id="library-sources-label">Sources</p>
+              <div role="group" aria-labelledby="library-sources-label">
+                <button type="button" class="library-source-action" role="menuitem" data-library-action="source-steam">
+                  <span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>
+                  <span class="library-source-action__copy"><strong>Steam</strong><small>Connect, sync, and import installed games</small></span>
+                  ${icon("chevron-right", "library-source-action__chevron")}
+                </button>
+                <button type="button" class="library-source-action" role="menuitem" data-library-action="add-source">
+                  <span class="library-source-action__icon" aria-hidden="true">${icon("collections")}</span>
+                  <span class="library-source-action__copy"><strong>Add a new source</strong><small>See every library source Orivo can read</small></span>
+                  ${icon("chevron-right", "library-source-action__chevron")}
+                </button>
+              </div>
+              <p class="library-source-menu__label">This Mac</p>
               <button type="button" class="library-source-action" role="menuitem" data-library-action="local">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>Importer un jeu local</strong><small>Depuis ce Mac</small></span>
+                <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on this Mac</small></span>
               </button>
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
           <nav class="primary-nav" aria-label="Orivo navigation">
-            <button type="button" class="nav-link is-active" aria-current="page">${icon("library")}<span>Library</span></button>
-            <button type="button" class="nav-link">${icon("store")}<span>Store</span></button>
-            <button id="settings-nav-button" type="button" class="nav-link">${icon("settings")}<span>Settings</span></button>
+            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page">${icon("library")}<span>Library</span></button>
+            <button type="button" class="nav-link" data-nav-page="store">${icon("store")}<span>Store</span></button>
+            <button type="button" class="nav-link" data-nav-page="settings">${icon("settings")}<span>Settings</span></button>
           </nav>
         </div>
 
-        <label class="search-control">
+        <label class="search-control" id="topbar-search-control">
           ${icon("search")}
-          <input id="library-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search games…" aria-label="Search games" />
+          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search games…" aria-label="Search games" />
           <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
         </label>
 
@@ -3261,12 +4007,22 @@ function shell(): string {
         </div>
       </header>
 
+      <div class="selector">
+      <div id="app-page-library" class="app-page app-page--library">
+      <div class="hero-media" aria-hidden="true">
+        <img id="hero-a" class="hero-image" alt="" />
+        <img id="hero-b" class="hero-image" alt="" />
+      </div>
+      <div class="scene-overlay scene-overlay--left" aria-hidden="true"></div>
+      <div class="scene-overlay scene-overlay--bottom" aria-hidden="true"></div>
+      <div class="scene-overlay scene-overlay--top" aria-hidden="true"></div>
+
       <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="Previous game">${icon("chevron-left")}</button>
       <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="Next game">${icon("chevron-right")}</button>
 
       <section class="hero-content" aria-live="polite">
         <span id="hero-genre" class="genre-chip">RPG</span>
-        <h1 id="hero-title">Elden Ring</h1>
+        <h1 id="hero-title" class="hero-title">Elden Ring</h1>
         <p id="hero-description" class="hero-description"></p>
         <div class="hero-meta" aria-label="Game metadata">
           <span>${icon("clock")}<span id="hero-play-time"></span></span>
@@ -3274,7 +4030,7 @@ function shell(): string {
           <span id="hero-source" class="hero-source">
             <span id="hero-source-icon" class="hero-source-icon" aria-hidden="true"></span>
             <span id="hero-source-label">Steam</span>
-            <i class="hero-source-divider" aria-hidden="true">·</i>
+            <i id="hero-source-divider" class="hero-source-divider" aria-hidden="true">·</i>
             <span id="hero-metadata"></span>
           </span>
           <span id="hero-platform" class="hero-platform" hidden>
@@ -3283,7 +4039,7 @@ function shell(): string {
         </div>
         <div class="hero-actions">
           <button id="play-button" class="play-button" type="button">${icon("play")}<span>Play</span></button>
-          <button class="round-button" type="button" aria-label="Bookmark game">${icon("bookmark")}</button>
+          <button id="details-button" class="round-button" type="button" aria-label="Open game details">${icon("chevron-right")}</button>
         </div>
         <div id="launch-feedback" class="launch-feedback" role="status" aria-live="polite" hidden></div>
       </section>
@@ -3306,68 +4062,317 @@ function shell(): string {
         <span class="hud-pagination" aria-hidden="true"><i></i><i class="is-active"></i><i></i><i></i><i></i></span>
         <span class="hud-controls">
           <span>${icon("navigate")}<em>Navigate</em></span>
-          <span><b class="gamepad-a">A</b><em>Select</em></span>
+          <span><b class="gamepad-a">A</b><em>Open</em></span>
           <span><b class="gamepad-b">B</b><em>Back</em></span>
         </span>
       </footer>
+      </div>
 
-      <aside id="steam-import-panel" class="steam-import-panel" role="complementary" aria-labelledby="steam-import-title" aria-describedby="steam-import-detail" hidden>
-        <header class="steam-panel-header">
-          <div class="steam-panel-title">
-            <span class="steam-source-mark" aria-hidden="true">${icon("download")}</span>
-            <span>
-              <strong id="steam-import-title">Import from Steam</strong>
-              <small id="steam-import-detail">A local Steam source</small>
-            </span>
-          </div>
-          <div class="steam-panel-actions">
-            <button id="steam-refresh" type="button" class="steam-header-button" data-steam-action="refresh" aria-label="Refresh Steam library" hidden>${icon("refresh")}</button>
-            <button type="button" class="steam-header-button" data-steam-action="close" aria-label="Close Steam import">${icon("close")}</button>
-          </div>
-        </header>
-        <div id="steam-import-body" class="steam-import-body"></div>
-        <footer id="steam-import-footer" class="steam-import-footer">
-          <p id="steam-selection-summary"></p>
-          <button id="steam-import-selected" class="steam-import-button" type="button" data-steam-action="import">Import selected</button>
-        </footer>
-      </aside>
+      <div id="app-page-store" class="app-page app-page--scroll"></div>
 
+      <div id="app-page-game" class="app-page app-page--scroll"></div>
 
-      <aside id="wine-settings-panel" class="wine-settings-panel" role="complementary" aria-labelledby="wine-settings-title" hidden>
-        <header class="steam-panel-header">
-          <div class="steam-panel-title">
-            <span class="steam-source-mark wine-source-mark" aria-hidden="true">${icon("settings")}</span>
-            <span>
-              <strong id="wine-settings-title">Plugins et runners</strong>
-              <small>Wine-Staging sur ce Mac</small>
-            </span>
+      <div id="app-page-settings" class="app-page app-page--scroll app-page--settings">
+        <div class="settings-layout">
+          <nav class="settings-sidebar" aria-label="Settings sections">
+            <p class="settings-sidebar__title">Settings</p>
+            <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
+              ${SETTINGS_SECTIONS.map(
+                (section) => `
+              <button type="button" role="tab" class="settings-section-link" id="settings-tab-${section.id}" data-settings-section="${section.id}" aria-controls="settings-panel-${section.id}" aria-selected="false" tabindex="-1">
+                <strong>${section.label}</strong>
+                <small>${section.description}</small>
+              </button>`,
+              ).join("")}
+            </div>
+          </nav>
+
+          <div class="settings-content">
+            <header class="settings-header">
+              <h1 id="settings-page-title">General</h1>
+              <p id="settings-page-description">Startup and store defaults</p>
+            </header>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
+              <div class="settings-card" data-settings-searchable>
+                <div class="settings-row">
+                  <label class="settings-row__copy" for="preference-start-page">
+                    <strong>Start page</strong>
+                    <small>The page Orivo opens on launch.</small>
+                  </label>
+                  <select id="preference-start-page" class="settings-select">
+                    <option value="library">Library</option>
+                    <option value="store">Store</option>
+                  </select>
+                </div>
+                <div class="settings-row">
+                  <label class="settings-row__copy" for="preference-store-region">
+                    <strong>Store region</strong>
+                    <small>Chooses which prices and availability Orivo shows.</small>
+                  </label>
+                  <select id="preference-store-region" class="settings-select">
+                    <option value="automatic">Automatic</option>
+                    <option value="us">United States</option>
+                    <option value="ca">Canada</option>
+                    <option value="gb">United Kingdom</option>
+                    <option value="fr">France</option>
+                    <option value="de">Germany</option>
+                    <option value="jp">Japan</option>
+                    <option value="au">Australia</option>
+                  </select>
+                </div>
+              </div>
+              <div class="settings-card" data-settings-searchable>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>Reset preferences</strong>
+                    <small>Restores the start page, store region, and motion preference. Your library, Wine profiles, Steam connection, wishlist, and media are never touched.</small>
+                  </div>
+                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">Reset preferences</button>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-libraries" data-settings-panel="libraries" aria-labelledby="settings-tab-libraries" tabindex="0" hidden>
+              <section id="steam-account-panel" class="settings-card" data-settings-searchable aria-labelledby="steam-account-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("steam")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="steam-account-title">Steam library</strong>
+                    <small>Private, local-first connection</small>
+                  </div>
+                </header>
+                <div id="steam-account-body" class="steam-account-body"></div>
+              </section>
+
+              <section id="steam-import-panel" class="settings-card" data-settings-searchable aria-labelledby="steam-import-title" aria-describedby="steam-import-detail">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("download")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="steam-import-title">Import installed games</strong>
+                    <small id="steam-import-detail">A local Steam source</small>
+                  </div>
+                  <button id="steam-refresh" type="button" class="steam-header-button" data-steam-action="refresh" aria-label="Refresh Steam library" hidden>${icon("refresh")}</button>
+                </header>
+                <div id="steam-import-body" class="steam-import-body"></div>
+                <footer id="steam-import-footer" class="steam-import-footer" hidden>
+                  <p id="steam-selection-summary"></p>
+                  <button id="steam-import-selected" class="steam-import-button" type="button" data-steam-action="import">Import selected</button>
+                </footer>
+              </section>
+
+              <section class="settings-card" data-settings-searchable aria-labelledby="provider-status-title">
+                <header class="settings-card__header">
+                  <div class="settings-card__copy">
+                    <strong id="provider-status-title">Provider status</strong>
+                    <small>Where store data can come from on this Mac.</small>
+                  </div>
+                </header>
+                <div id="provider-status-list" class="provider-status-list"></div>
+              </section>
+            </section>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
+              <section id="plugins-catalog-panel" class="settings-card" data-settings-searchable aria-labelledby="plugins-catalog-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("grid")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="plugins-catalog-title">Plugins</strong>
+                    <small>Runners that come with Orivo, and emulators you can add.</small>
+                  </div>
+                </header>
+
+                <div class="plugins-group">
+                  <p class="plugins-group__label">Installed</p>
+                  <div class="plugins-group__list">
+                    <div class="settings-row plugin-row">
+                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("monitor")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Wine</strong>
+                        <small>Wine-Staging runner and isolated profiles</small>
+                      </div>
+                      <span class="plugin-row__state">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
+                    </div>
+                    <div class="settings-row plugin-row">
+                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("search")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Wallpaper Searcher</strong>
+                        <small>Finds wallpaper artwork from IGDB and Google Images</small>
+                      </div>
+                      <span class="plugin-row__state">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="plugins-group plugins-group--catalog">
+                  <p class="plugins-group__label">Available</p>
+                  <label class="plugins-search">
+                    ${icon("search")}
+                    <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="Search available plugins…" aria-label="Search available plugins" />
+                  </label>
+                  <div id="plugins-catalog-list"></div>
+                  <p id="plugins-catalog-empty" class="settings-hint" hidden>No plugins match that search.</p>
+                </div>
+              </section>
+
+              <section id="wallpaper-plugin-panel" class="settings-card" aria-labelledby="wallpaper-plugin-title" hidden>
+                <header class="settings-card__header">
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
+                  <span class="settings-card__mark" aria-hidden="true">${icon("search")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
+                    <small>Wallpaper search built into Orivo</small>
+                  </div>
+                </header>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>How it works</strong>
+                    <small>Adds a search panel to the detail page media picker that finds real game artwork from Steam Store, then downloads your choice through Orivo's media pipeline. Steam Store, Wikimedia Commons and Openverse work without any keys; IGDB and Google Images use the keys below.</small>
+                  </div>
+                </div>
+                <div class="credentials-form">
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-igdb-client-id">IGDB Client ID</label>
+                    <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="From the IGDB API site" />
+                    <small>Optional. Enables the IGDB artwork source.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-igdb-client-secret">IGDB Client Secret</label>
+                    <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="From the IGDB API site" />
+                    <small>Optional. Used with the client ID to request an access token.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-google-api-key">Google API Key</label>
+                    <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Google Cloud API key" />
+                    <small>Optional. Enables the Google Custom Search source.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-google-cse-id">Google Search Engine ID</label>
+                    <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Custom search engine ID" />
+                    <small>Optional. The programmatic search engine used with the API key.</small>
+                  </div>
+                  <div class="credentials-form__actions">
+                    <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
+                    <small>Saved keys are picked up immediately — no restart needed.</small>
+                  </div>
+                </div>
+              </section>
+
+              <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>
+                <header class="settings-card__header">
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
+                  <span class="settings-card__mark" aria-hidden="true">${icon("monitor")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="wine-settings-title">Wine-Staging</strong>
+                    <small>Runner health and isolated Wine profiles</small>
+                  </div>
+                </header>
+                <div id="wine-settings-body" class="wine-settings-body"></div>
+              </section>
+            </section>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-appearance" data-settings-panel="appearance" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
+              <section class="settings-card" data-settings-searchable aria-labelledby="motion-preference-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("navigate")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="motion-preference-title">Motion</strong>
+                    <small>Reduced motion turns off hero cross-fades, card transitions, and panel animations.</small>
+                  </div>
+                </header>
+                <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
+                  <label class="settings-choice">
+                    <input type="radio" name="motion-preference" value="system" />
+                    <span><strong>System</strong><small>Follow the macOS reduced-motion setting.</small></span>
+                  </label>
+                  <label class="settings-choice">
+                    <input type="radio" name="motion-preference" value="reduced" />
+                    <span><strong>Reduced</strong><small>Always keep motion to a minimum in Orivo.</small></span>
+                  </label>
+                </div>
+              </section>
+              <section class="settings-card" data-settings-searchable aria-labelledby="showcase-preference-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("grid")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="showcase-preference-title">Demo games (debug)</strong>
+                    <small>Seed the library with the bundled showcase games. Off by default — use it only to test the interface without importing real games.</small>
+                  </div>
+                </header>
+                <div class="settings-choices">
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-show-showcase" />
+                    <span><strong>Show demo games</strong><small>Adds Elden Ring, Cyberpunk 2077 and other fixtures to your library.</small></span>
+                  </label>
+                </div>
+              </section>
+            </section>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
+              <div class="settings-card" data-settings-searchable>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>Derived cache</strong>
+                    <small><span id="derived-cache-entries">0 derived entries</span> · <span id="derived-cache-freshness">Not refreshed yet</span></small>
+                  </div>
+                  <span id="derived-cache-size" class="settings-metric">0 B</span>
+                </div>
+                <div class="settings-row settings-row--actions">
+                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">Refresh now</button>
+                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">Clear derived cache</button>
+                </div>
+                <p class="settings-hint">Clearing removes only recomputed store and media data. Your library, Wine profiles, Steam connection, wishlist, and downloaded media stay on this Mac.</p>
+              </div>
+            </section>
+
+            <section class="settings-panel" role="tabpanel" id="settings-panel-about" data-settings-panel="about" aria-labelledby="settings-tab-about" tabindex="0" hidden>
+              <div class="settings-card" data-settings-searchable>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>Orivo</strong>
+                    <small>A focused, local-first game library.</small>
+                  </div>
+                  <span id="about-app-version" class="settings-metric">—</span>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>Tauri runtime</strong>
+                    <small>The desktop shell Orivo runs inside.</small>
+                  </div>
+                  <span id="about-tauri-version" class="settings-metric">—</span>
+                </div>
+              </div>
+              <div class="settings-card" data-settings-searchable>
+                <header class="settings-card__header">
+                  <div class="settings-card__copy">
+                    <strong>Attributions</strong>
+                    <small>Providers and projects Orivo builds on.</small>
+                  </div>
+                </header>
+                <ul class="settings-attributions">
+                  <li>Steam and the Steam logo are trademarks of Valve Corporation. Orivo is not affiliated with or endorsed by Valve.</li>
+                  <li>Wine and Wine-Staging are provided by the WineHQ project under the LGPL.</li>
+                  <li>DXVK-macOS is provided by the DXVK project contributors.</li>
+                  <li>Store listings, artwork, and prices remain the property of their respective providers.</li>
+                </ul>
+              </div>
+            </section>
           </div>
-          <div class="steam-panel-actions">
-            <button type="button" class="steam-header-button" data-wine-settings-action="close" aria-label="Fermer les réglages Wine">${icon("close")}</button>
-          </div>
-        </header>
-        <div id="wine-settings-body" class="wine-settings-body"></div>
-      </aside>
+        </div>
+      </div>
+
+      <div id="app-page-not-found" class="app-page app-page--scroll app-page--not-found">
+        <section class="not-found">
+          <p class="not-found__code">404</p>
+          <h1 class="not-found__title">This page does not exist</h1>
+          <p id="not-found-detail" class="not-found__detail"></p>
+          <button type="button" class="settings-button settings-button--primary" data-app-action="go-library">Back to Library</button>
+        </section>
+      </div>
 
       <p id="toast" class="toast" role="status" aria-live="polite"></p>
       </div>
-
-      <div id="steam-account-backdrop" class="steam-account-backdrop" aria-hidden="true" hidden></div>
-      <aside id="steam-account-panel" class="steam-account-panel" role="dialog" aria-modal="true" aria-labelledby="steam-account-title" tabindex="-1" hidden>
-        <header class="steam-panel-header">
-          <div class="steam-panel-title">
-            <span class="steam-source-mark" aria-hidden="true">${icon("library")}</span>
-            <span>
-              <strong id="steam-account-title">Steam library</strong>
-              <small>Private, local-first connection</small>
-            </span>
-          </div>
-          <div class="steam-panel-actions">
-            <button type="button" class="steam-header-button" data-steam-account-action="close" aria-label="Close Steam connection">${icon("close")}</button>
-          </div>
-        </header>
-        <div id="steam-account-body" class="steam-account-body"></div>
-      </aside>
-    </main>
   `;
 }
