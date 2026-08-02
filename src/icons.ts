@@ -32,7 +32,8 @@ export type IconName =
   | "cloud"
   | "windows"
   | "more"
-  | "check";
+  | "check"
+  | "leaf";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -83,6 +84,8 @@ const paths: Record<IconName, string> = {
     '<path fill="currentColor" stroke="none" d="M3 5.6 10.6 4.5v6.9H3zM11.7 4.34 21 3v8.4h-9.3zM3 12.6h7.6v6.9L3 18.4zM11.7 12.6H21V21l-9.3-1.35z" />',
   more:
     '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none" />',
+  leaf:
+    '<path d="M4.5 19.5s-.4-7.2 5-11.2C13 5.6 19.5 4.5 19.5 4.5s-.4 6.9-4.2 10.6c-4.3 4.2-10.8 4.4-10.8 4.4Z" /><path d="M4.7 19.3C8.5 14 12 11 16.5 8.8" />',
   check: '<path d="M20 6.5 9.2 17.3 4 12.1" />',
 };
 

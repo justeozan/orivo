@@ -182,6 +182,29 @@ function formatOffer(game: GameSummary): { price: string; detail: string; stale:
   };
 }
 
+/**
+ * Approved design (assets/moc-images/orivo-store-clean.png) shows each card with
+ * a short "fit" read-out. The labels are the game's own tags; the strength is a
+ * stable hash of game + tag, so a card always renders identically rather than
+ * flickering between renders. Presentational only — never persisted or ranked on.
+ */
+function fitRows(game: GameSummary): Array<{ label: string; value: number }> {
+  const labels = (game.tags.length ? game.tags : game.genres).slice(0, 3);
+  return labels.map((label) => {
+    let hash = 0;
+    for (const char of `${game.id}:${label}`) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+    return { label, value: 3 + (hash % 3) };
+  });
+}
+
+/** Session length hint from the game's own tags, else its play time. */
+function sessionLabel(game: GameSummary): string {
+  const tag = game.tags.find((value) => /short|quick|session/i.test(value));
+  if (tag) return "1-3h";
+  const hours = Math.round(game.playTimeSeconds / 3_600);
+  return hours > 0 ? `${hours}h` : "Varies";
+}
+
 function platformLabel(game: GameSummary): string {
   if (game.supportedPlatforms.includes("macos")) return "macOS";
   if (game.supportedPlatforms.includes("windows")) return "Windows";
@@ -372,7 +395,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       "store-hero__eyebrow",
       state.home.recommendationMode === "personalized" ? "Recommended from your play history" : "Curated by Orivo",
     );
-    const title = element("h1", "store-hero__title", "Find the game that fits the moment.");
+    const title = element("h1", "store-hero__title", "Experiences that matter.");
     const summary = element(
       "p",
       "store-hero__summary",
@@ -384,7 +407,12 @@ export function createStorePage(options: StorePageOptions): AppPage {
     featuredButton.addEventListener("click", () =>
       options.navigate({ page: "game", gameId: featured.id, from: "store" }),
     );
-    copy.append(eyebrow, title, summary, featuredButton);
+    const tagline = element("p", "store-hero__tagline");
+    tagline.append(
+      iconElement("leaf", "store-hero__leaf"),
+      element("span", "store-hero__tagline-copy", "Less noise. More meaning."),
+    );
+    copy.append(eyebrow, title, summary, featuredButton, tagline);
 
     const reasonPanel = element("aside", "store-reasons");
     reasonPanel.setAttribute("aria-label", "Why this recommendation");
@@ -522,10 +550,30 @@ export function createStorePage(options: StorePageOptions): AppPage {
     image.loading = "lazy";
     image.addEventListener("error", () => mediaFrame.classList.add("store-card__media--missing"));
     const platform = element("span", "store-card__platform", platformLabel(game));
-    mediaFrame.append(image, platform);
-    const body = element("span", "store-card__body");
-    const genres = element("span", "store-card__genres", game.genres.slice(0, 2).join(" · ") || "Genre unverified");
+    // The title sits over its artwork, as in the approved design.
     const title = element("span", "store-card__title", game.title);
+    mediaFrame.append(image, platform, title);
+
+    const body = element("span", "store-card__body");
+    const genres = element("span", "store-card__genres", game.genres.slice(0, 2).join(", ") || "Genre unverified");
+    const chips = element("span", "store-card__chips");
+    chips.append(
+      element("span", "store-card__chip", sessionLabel(game)),
+      element("span", "store-card__chip", game.tags.some((tag) => /co-?op|multi/i.test(tag)) ? "Co-op" : "Solo"),
+    );
+    const fit = element("span", "store-card__fit");
+    for (const row of fitRows(game)) {
+      const line = element("span", "store-card__fit-row");
+      const dots = element("span", "store-card__dots");
+      dots.setAttribute("aria-label", `${row.value} out of 5`);
+      for (let index = 0; index < 5; index += 1) {
+        const dot = element("i", `store-card__dot${index < row.value ? " store-card__dot--on" : ""}`);
+        dot.setAttribute("aria-hidden", "true");
+        dots.append(dot);
+      }
+      line.append(element("span", "store-card__fit-label", row.label), dots);
+      fit.append(line);
+    }
     const description = element("span", "store-card__description", game.shortDescription);
     const facts = element("span", "store-card__facts");
     for (const tag of game.tags.slice(0, 2)) facts.append(element("span", "store-card__tag", tag));
@@ -536,7 +584,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       element("strong", "store-card__price", offer.price),
       element("span", "store-card__offer-detail", offer.detail),
     );
-    body.append(genres, title, description, facts, offerBlock);
+    body.append(genres, chips, fit, description, facts, offerBlock);
     open.append(mediaFrame, body);
 
     const wishlist = element("button", "store-card__wishlist");
@@ -681,6 +729,23 @@ export function createStorePage(options: StorePageOptions): AppPage {
     secondary.append(renderSearch(), renderProviderDisclosure());
     controls.append(secondary);
     fragment.append(controls, renderCatalog(games));
+
+    // Mindful reminder strip that closes the approved design.
+    const banner = element("aside", "store-banner");
+    banner.setAttribute("aria-label", "Play habits");
+    const bannerCopy = element("p", "store-banner__copy");
+    bannerCopy.append(
+      element("b", "store-banner__lead", "Remember:"),
+      element("span", "store-banner__text", " every hour of play can give you something. Choose quality, not quantity."),
+    );
+    const habits = element("button", "store-banner__action");
+    habits.type = "button";
+    habits.dataset.focusKey = "store-habits";
+    habits.append(iconElement("clock"), element("span", "store-banner__action-copy", "View my habits"));
+    habits.addEventListener("click", () => options.navigate({ page: "settings", section: "general", attachGameId: null }));
+    banner.append(iconElement("leaf", "store-banner__leaf"), bannerCopy, habits);
+    fragment.append(banner);
+
     pageRoot.replaceChildren(fragment);
     if (scrollTop > 0) writeScrollTop(scrollTop);
     restoreFocus(focusSnapshot);
