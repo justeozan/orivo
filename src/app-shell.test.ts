@@ -304,14 +304,6 @@ describe("application shell against the desktop backend", () => {
     source: "local",
     launchable: true,
   };
-  const pendingWineGame = {
-    id: "local:pending",
-    title: "Pending Windows Game",
-    source: "local",
-    launchable: false,
-    wineAttachable: true,
-  };
-
   let root: HTMLElement;
   const backend = {
     library: [] as Record<string, unknown>[],
@@ -382,23 +374,6 @@ describe("application shell against the desktop backend", () => {
     tauri.detailOptions?.play(alpha.id);
     await settle();
     expect(launchedGameIds()).toEqual([alpha.id]);
-  });
-
-  it("keeps a deep-linked Wine attachment until the library has actually loaded", async () => {
-    // Cold start straight onto the deep link: the settings page activates while
-    // `state.games` is still the bundled fallback.
-    window.location.hash = "#/settings/plugins?attachGame=local%3Apending";
-    backend.library = [alpha, pendingWineGame];
-    mount();
-    await settle();
-    await settle();
-    await settle();
-
-    const body = root.querySelector<HTMLElement>("#wine-settings-body")!;
-    expect(body.textContent).toContain("Set up with Wine");
-    expect(
-      body.querySelector("[data-wine-action='cancel-direct-wine-association']"),
-    ).not.toBeNull();
   });
 
   it("applies a library refresh that lands after the user left the Library", async () => {

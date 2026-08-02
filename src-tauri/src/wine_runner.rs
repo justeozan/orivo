@@ -1843,6 +1843,23 @@ pub fn create_managed_prefix(
     Ok(canonical)
 }
 
+/// Create the one-profile prefix beneath the host-managed root, reusing it if
+/// Orivo already created it. Unlike `create_managed_prefix`, this is safe to
+/// call repeatedly for a persistent managed profile (such as the automatic
+/// Windows-games default that Orivo provisions without a setup wizard): a
+/// concurrent symlink swap still fails closed. No plugin or WebView value ever
+/// contributes a prefix component.
+pub fn ensure_managed_profile_prefix(
+    prefix_root: &Path,
+    profile_id: &str,
+) -> Result<PathBuf, WineRunnerError> {
+    if !valid_opaque_id(profile_id) {
+        return Err(WineRunnerError::InvalidProfile);
+    }
+    let expected = managed_prefix_root(prefix_root)?.join(profile_id);
+    ensure_managed_prefix(&expected, prefix_root, profile_id)
+}
+
 fn ensure_managed_prefix(
     prefix: &Path,
     prefix_root: &Path,

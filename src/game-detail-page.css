@@ -137,8 +137,13 @@
 
 /* ----------------------------------------------------------------- status */
 
+/* Out of flow on purpose: this bar appears and expires on a timer, and an
+   in-flow chip would shove the hero and everything under it down and back up
+   each time. It floats in the spot it used to occupy. */
 .gd-status {
-  position: relative;
+  position: absolute;
+  top: 12px;
+  right: var(--gd-mg-right);
   z-index: 5;
   display: flex;
   width: fit-content;
@@ -147,7 +152,7 @@
   align-items: center;
   overflow: hidden;
   gap: 9px;
-  margin: 12px var(--gd-mg-right) 12px auto;
+  margin: 0;
   padding: 8px 12px;
   border: 1px solid var(--gd-line);
   border-radius: var(--gd-r-sm);

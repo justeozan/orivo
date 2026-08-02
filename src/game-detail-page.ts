@@ -277,6 +277,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     dispatch({ type: "status-changed", message });
   };
 
+  /** Drop a pending progress message the moment its result is on screen. */
+  const clearTransientStatus = (): void => {
+    if (statusTimer) clearTimeout(statusTimer);
+    statusTimer = null;
+    dispatch({ type: "status-changed", message: "" });
+  };
+
   const loadDetail = async (context: PageActivation, gameId: string): Promise<void> => {
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId });
@@ -332,7 +339,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (!isFresh(context, gameId)) return;
       options.onLibraryChanged?.();
       await loadDetail(context, gameId);
-      if (isFresh(context, gameId)) showTransientStatus("Cover & images updated.");
+      // The refreshed cover and screenshots are the confirmation; a message
+      // saying so only repeats what is already on screen.
+      if (isFresh(context, gameId)) clearTransientStatus();
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
       showTransientStatus(requestErrorMessage(error, "No cover or images were found for this game."));
