@@ -2229,13 +2229,19 @@ mod tests {
 
     fn write_staging_binary(directory: &Path) -> PathBuf {
         let wine = directory.join("wine");
-        fs::write(&wine, "#!/bin/sh\necho 'wine-10.0 (Staging)'\n").unwrap();
+        fs::write(
+            &wine,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"-u\" ]; then\n  mkdir -p \"$WINEPREFIX\"\n  : > \"$WINEPREFIX/user.reg\"\n  exit 0\nfi\nif [ \"${1:-}\" = \"reg\" ]; then\n  exit 0\nfi\necho 'wine-10.0 (Staging)'\n",
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::symlink;
             let mut permissions = fs::metadata(&wine).unwrap().permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(&wine, permissions).unwrap();
+            symlink(&wine, directory.join("wineboot")).unwrap();
         }
         wine
     }
@@ -2493,15 +2499,11 @@ mod tests {
         let executable = games.join("Game.exe");
         fs::write(&executable, "binary").unwrap();
         let wine = write_staging_binary(&root);
-        let mut profile = profile(&root, wine.clone(), games);
-        profile.graphics.virtual_desktop = Some(WineVirtualDesktop {
-            width: 1280,
-            height: 720,
-        });
+        let profile = profile(&root, wine.clone(), games);
         let canonical_executable = fs::canonicalize(&executable).unwrap();
         let fingerprint =
             content_fingerprint_for(&canonical_executable, &AtomicBool::new(false)).unwrap();
-        let game = WineGameInventoryEntry {
+        let mut game = WineGameInventoryEntry {
             profile_id: profile.id.clone(),
             game_ref: game_reference_for(&canonical_executable),
             title: "Game".into(),
@@ -2511,6 +2513,10 @@ mod tests {
             compatibility: WineGameCompatibility::automatic(),
             origin_direct_game_id: None,
         };
+        game.compatibility.graphics.virtual_desktop = Some(WineVirtualDesktop {
+            width: 1280,
+            height: 720,
+        });
         let intent = WineLaunchIntent::new(&profile.id, &game.game_ref).unwrap();
         let prepared =
             prepare_wine_launch(&profile, &game, &intent, &root.join("prefixes")).unwrap();
@@ -2558,6 +2564,7 @@ mod tests {
                 backend: WineGraphicsBackend::DxvkMacos,
                 virtual_desktop: None,
             },
+            macos_retina_mode_enabled: None,
         };
 
         let command = prepared.command();
@@ -2591,10 +2598,9 @@ mod tests {
         let executable = games.join("Blue Prince.exe");
         fs::write(&executable, "binary").unwrap();
         let wine = write_staging_binary(&root);
-        let mut profile = profile(&root, wine, games);
-        profile.graphics.backend = WineGraphicsBackend::DxvkMacos;
+        let profile = profile(&root, wine, games);
         let canonical_executable = fs::canonicalize(&executable).unwrap();
-        let game = WineGameInventoryEntry {
+        let mut game = WineGameInventoryEntry {
             profile_id: profile.id.clone(),
             game_ref: game_reference_for(&canonical_executable),
             title: "Blue Prince".into(),
@@ -2605,6 +2611,7 @@ mod tests {
             compatibility: WineGameCompatibility::automatic(),
             origin_direct_game_id: None,
         };
+        game.compatibility.graphics.backend = WineGraphicsBackend::DxvkMacos;
         let intent = WineLaunchIntent::new(&profile.id, &game.game_ref).unwrap();
 
         assert!(matches!(

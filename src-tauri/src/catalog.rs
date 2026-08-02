@@ -1,21 +1,23 @@
+use crate::game_detail::{GameDetailError, StagedGameState};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
 
-/// Schema v6 moves Wine graphics selection to the private game inventory.
-/// Existing direct, Steam, generic-runner and Wine records remain
-/// data-preserving; an existing Wine game keeps its old profile backend and
-/// shared prefix rather than being silently moved to a new compatibility
-/// layer.
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+/// Schema v7 replaces path-bearing Direct-game ids with opaque, deterministic
+/// `local:<sha256>` identities and updates every typed Wine association in the
+/// same in-memory migration. Paths remain private launch data and never cross
+/// the WebView identity boundary.
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 const SCHEMA_VERSION_V1: u32 = 1;
 const SCHEMA_VERSION_V2: u32 = 2;
 const SCHEMA_VERSION_V3: u32 = 3;
 const SCHEMA_VERSION_V4: u32 = 4;
 const SCHEMA_VERSION_V5: u32 = 5;
+const SCHEMA_VERSION_V6: u32 = 6;
 
 /// The stable identity for Orivo's first official Wine runner. It is an
 /// opaque runner identifier, never a Wine executable path or command.
@@ -88,6 +90,49 @@ pub struct Catalog {
 pub struct LoadedCatalog {
     pub catalog: Catalog,
     pub migrated_from: Option<u32>,
+    /// Every `old id -> new id` rewrite the migration performed. Durable user
+    /// state that is keyed by game id — `game-state.json` — has to be re-keyed
+    /// with exactly this map before the migrated catalog is published.
+    pub rewritten_game_ids: BTreeMap<String, String>,
+}
+
+impl LoadedCatalog {
+    /// Publish a migrated catalog and the dependent `game-state.json` re-key as
+    /// one unit.
+    ///
+    /// Wishlist flags, media selections and imported media are keyed by game
+    /// id, so a migration that rewrites ids must move both files or neither:
+    /// orphaned state would silently lose the user's selections and would keep
+    /// its imported files pinned in `protected_local_files` forever, where they
+    /// consume the media quota and can never be pruned.
+    ///
+    /// Everything that can fail is done before either file is published. The
+    /// state rewrite is staged and fsynced first, then published with a single
+    /// rename, and if the catalog write still fails the previous state document
+    /// is put back, so the pair can never end up one migrated and one not.
+    pub fn commit_migration(
+        &self,
+        catalog_path: &Path,
+        game_state_path: &Path,
+    ) -> Result<(), CatalogError> {
+        self.catalog.validate()?;
+        let staged = StagedGameState::stage(game_state_path, &self.rewritten_game_ids)
+            .map_err(state_error)?;
+        staged.commit().map_err(state_error)?;
+        match self.catalog.save_atomically(catalog_path) {
+            Ok(()) => Ok(()),
+            Err(error) => match staged.restore() {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(CatalogError::Invalid(format!(
+                    "the catalog migration failed ({error}) and the previous game state could not be restored ({restore_error})"
+                ))),
+            },
+        }
+    }
+}
+
+fn state_error(error: GameDetailError) -> CatalogError {
+    CatalogError::Invalid(format!("game state could not be migrated: {error}"))
 }
 
 /// A Wine prefix owned by Orivo. The host creates and validates it before the
@@ -351,6 +396,15 @@ pub struct Game {
     /// never returned to the WebView.
     #[serde(default)]
     pub cover_source_path: Option<PathBuf>,
+    /// A wallpaper the user explicitly chose on the game detail page as the
+    /// home (Library) background. It outranks discovered and Steam artwork so a
+    /// deliberate choice is never overridden by a store capsule.
+    #[serde(default)]
+    pub home_image_path: Option<PathBuf>,
+    /// A landscape image the user chose for the wide (landscape) card, kept
+    /// separate from the background so each role can be set independently.
+    #[serde(default)]
+    pub landscape_image_path: Option<PathBuf>,
     #[serde(default)]
     pub logo_path: Option<PathBuf>,
     #[serde(default)]
@@ -424,21 +478,29 @@ impl Catalog {
     pub fn load_with_migration(path: &Path) -> Result<LoadedCatalog, CatalogError> {
         let contents = fs::read_to_string(path)?;
         let mut catalog: Self = serde_json::from_str(&contents)?;
+        let mut rewritten_game_ids = BTreeMap::new();
         let migrated_from = match catalog.schema_version {
             CURRENT_SCHEMA_VERSION => None,
+            SCHEMA_VERSION_V6 => {
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                Some(SCHEMA_VERSION_V6)
+            }
             SCHEMA_VERSION_V5 => {
                 migrate_v5_to_v6(&mut catalog);
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 Some(SCHEMA_VERSION_V5)
             }
             SCHEMA_VERSION_V4 => {
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 Some(SCHEMA_VERSION_V4)
             }
             SCHEMA_VERSION_V3 => {
                 migrate_v3_to_v4(&mut catalog);
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 Some(SCHEMA_VERSION_V3)
             }
             SCHEMA_VERSION_V2 => {
@@ -446,6 +508,7 @@ impl Catalog {
                 migrate_v3_to_v4(&mut catalog);
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 Some(SCHEMA_VERSION_V2)
             }
             SCHEMA_VERSION_V1 => {
@@ -454,6 +517,7 @@ impl Catalog {
                 migrate_v3_to_v4(&mut catalog);
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
+                rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 Some(SCHEMA_VERSION_V1)
             }
             found => {
@@ -467,6 +531,7 @@ impl Catalog {
         Ok(LoadedCatalog {
             catalog,
             migrated_from,
+            rewritten_game_ids,
         })
     }
 
@@ -575,6 +640,13 @@ impl Catalog {
             }
             if game.cover_source_path.is_none() {
                 game.cover_source_path = existing.cover_source_path.clone();
+            }
+            // Deliberate home-background / landscape choices survive a re-sync.
+            if game.home_image_path.is_none() {
+                game.home_image_path = existing.home_image_path.clone();
+            }
+            if game.landscape_image_path.is_none() {
+                game.landscape_image_path = existing.landscape_image_path.clone();
             }
             self.games[index] = game;
             return Ok(false);
@@ -767,6 +839,15 @@ impl Catalog {
         candidate.validate()?;
         *self = candidate;
         Ok(inserted)
+    }
+
+    /// Remove a game from the library by its opaque id. Returns whether a game
+    /// was actually removed. The game's own files on disk are never touched;
+    /// this only drops the catalog record.
+    pub fn remove(&mut self, game_id: &str) -> Result<bool, CatalogError> {
+        let before = self.games.len();
+        self.games.retain(|game| game.id != game_id);
+        Ok(self.games.len() != before)
     }
 
     /// Remove an Orivo-owned Wine profile and its private inventory. The
@@ -1132,6 +1213,12 @@ fn preserve_runner_game_state(incoming: &mut Game, existing: &Game) {
     if incoming.cover_source_path.is_none() {
         incoming.cover_source_path = existing.cover_source_path.clone();
     }
+    if incoming.home_image_path.is_none() {
+        incoming.home_image_path = existing.home_image_path.clone();
+    }
+    if incoming.landscape_image_path.is_none() {
+        incoming.landscape_image_path = existing.landscape_image_path.clone();
+    }
     if incoming.logo_path.is_none() {
         incoming.logo_path = existing.logo_path.clone();
     }
@@ -1197,7 +1284,133 @@ fn migrate_v5_to_v6(catalog: &mut Catalog) {
             .unwrap_or_default();
         entry.compatibility = WineGameCompatibility::legacy_profile(graphics);
     }
+    catalog.schema_version = SCHEMA_VERSION_V6;
+}
+
+/// Rewrite path-bearing Direct-game ids to opaque `local:<sha256>` identities
+/// and return the `old id -> new id` map so every store keyed by game id can be
+/// re-keyed with it before anything is persisted.
+fn migrate_v6_to_v7(catalog: &mut Catalog) -> Result<BTreeMap<String, String>, CatalogError> {
+    let path_backed = catalog
+        .games
+        .iter()
+        .enumerate()
+        .filter_map(|(index, game)| {
+            is_path_backed_direct_game(game).then(|| {
+                let executable = game
+                    .executable_path
+                    .as_deref()
+                    .expect("path-backed Direct games have an executable");
+                (index, game.id.clone(), local_game_id(executable))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut base_counts = BTreeMap::<String, usize>::new();
+    for (_, _, base_id) in &path_backed {
+        *base_counts.entry(base_id.clone()).or_default() += 1;
+    }
+
+    // Reserve every provider/runner identity before assigning local ids. A
+    // collision can therefore never overwrite or merge an unrelated record.
+    let path_backed_indexes = path_backed
+        .iter()
+        .map(|(index, _, _)| *index)
+        .collect::<BTreeSet<_>>();
+    let mut assigned = catalog
+        .games
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !path_backed_indexes.contains(index))
+        .map(|(_, game)| game.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut rewritten_ids = BTreeMap::<String, String>::new();
+
+    for (index, old_id, base_id) in path_backed {
+        let path = catalog.games[index]
+            .executable_path
+            .as_deref()
+            .expect("path-backed Direct games have an executable");
+        let base_is_unique = base_counts.get(&base_id) == Some(&1);
+        let next_id = assign_local_game_id(path, &old_id, base_id, base_is_unique, &assigned)?;
+        assigned.insert(next_id.clone());
+        rewritten_ids.insert(old_id, next_id.clone());
+        catalog.games[index].id = next_id;
+    }
+
+    // Wine keeps only a typed catalog reference to a Direct origin. Rewriting
+    // it in this same candidate catalog makes the migration atomic: validation
+    // fails before the caller creates its backup and persists anything.
+    for entry in &mut catalog.wine_inventory {
+        if let Some(origin) = entry.origin_direct_game_id.as_mut()
+            && let Some(rewritten) = rewritten_ids.get(origin)
+        {
+            *origin = rewritten.clone();
+        }
+    }
     catalog.schema_version = CURRENT_SCHEMA_VERSION;
+    Ok(rewritten_ids)
+}
+
+/// Salted retries exist only to break an identity collision, and a SHA-256
+/// namespace makes even one collision unreachable in practice. The bound
+/// guarantees the search terminates: a pathological catalog gets a real error
+/// instead of a loop that can never advance.
+const MAX_LOCAL_ID_COLLISION_ATTEMPTS: u32 = 1_024;
+
+fn assign_local_game_id(
+    executable_path: &Path,
+    old_id: &str,
+    base_id: String,
+    base_is_unique: bool,
+    assigned: &BTreeSet<String>,
+) -> Result<String, CatalogError> {
+    let mut next_id = if base_is_unique && !assigned.contains(&base_id) {
+        base_id
+    } else {
+        local_game_id_with_salt(executable_path, old_id.as_bytes(), 0)
+    };
+    let mut nonce = 1_u32;
+    while assigned.contains(&next_id) {
+        if nonce > MAX_LOCAL_ID_COLLISION_ATTEMPTS {
+            // The old id is never quoted here: legacy ids could be executable
+            // paths, which is precisely what this migration removes.
+            return Err(CatalogError::Invalid(format!(
+                "could not derive a unique local game id after {MAX_LOCAL_ID_COLLISION_ATTEMPTS} attempts"
+            )));
+        }
+        next_id = local_game_id_with_salt(executable_path, old_id.as_bytes(), nonce);
+        nonce += 1;
+    }
+    Ok(next_id)
+}
+
+fn is_path_backed_direct_game(game: &Game) -> bool {
+    game.source == GameSource::Local
+        && matches!(&game.launch_target, LaunchTarget::Direct)
+        && game
+            .executable_path
+            .as_deref()
+            .is_some_and(Path::is_absolute)
+}
+
+/// Derive an opaque identity without ever serialising the source path into an
+/// IPC-visible field. The domain tag keeps this namespace separate from media
+/// and executable-content hashes used elsewhere.
+pub fn local_game_id(executable_path: &Path) -> String {
+    local_game_id_with_salt(executable_path, &[], 0)
+}
+
+fn local_game_id_with_salt(executable_path: &Path, salt: &[u8], nonce: u32) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"orivo-local-game-id-v1\0");
+    digest.update(executable_path.to_string_lossy().as_bytes());
+    if !salt.is_empty() || nonce != 0 {
+        digest.update(b"\0collision\0");
+        digest.update(salt);
+        digest.update(nonce.to_le_bytes());
+    }
+    format!("local:{:x}", digest.finalize())
 }
 
 pub fn default_path() -> PathBuf {
@@ -1251,7 +1464,7 @@ impl Game {
             title
         };
         let artwork_path = discover_artwork(&selected_path, &executable_path);
-        let id = executable_path.to_string_lossy().to_string();
+        let id = local_game_id(&executable_path);
 
         Ok(Self {
             id,
@@ -1269,6 +1482,8 @@ impl Game {
             artwork_path,
             cover_source_path: None,
             cover_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -1459,6 +1674,9 @@ fn discover_artwork(selected_path: &Path, executable_path: &Path) -> Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_detail::{
+        GameMediaAsset, GameMediaKind, GameMediaOrigin, GameStateDocument, GameStateStore,
+    };
 
     #[test]
     fn creates_a_manual_import_from_an_executable() {
@@ -1672,6 +1890,458 @@ mod tests {
     }
 
     #[test]
+    fn upgrades_v6_path_ids_and_wine_origins_without_exposing_the_path() {
+        let path = temporary_catalog_path("v6-local-id");
+        let v6 = r#"{
+  "schema_version": 6,
+  "future_catalog_field": { "keep": true },
+  "games": [
+    {
+      "id": "/Games/Windows/Blue Prince/BLUE PRINCE.exe",
+      "title": "Blue Prince",
+      "executable_path": "/Games/Windows/Blue Prince/BLUE PRINCE.exe",
+      "future_game_field": "preserved"
+    },
+    {
+      "id": "runner:wine-game-blue-prince",
+      "title": "Blue Prince (Wine)",
+      "source": "local",
+      "launch_target": {
+        "kind": "runner",
+        "runner_id": "com.orivo.wine-staging",
+        "profile_id": "wine-profile-1",
+        "game_ref": "wine-game-blue-prince"
+      }
+    },
+    {
+      "id": "steam:480",
+      "title": "Spacewar",
+      "source": "steam",
+      "source_id": "480",
+      "launch_target": { "kind": "steam", "app_id": 480 }
+    }
+  ],
+  "wine_profiles": [
+    {
+      "id": "wine-profile-1",
+      "display_name": "Windows games",
+      "wine_binary": "/Applications/Wine Staging.app/Contents/Resources/wine/bin/wine",
+      "prefix": "/Users/orivo/Library/Application Support/Orivo/wine-prefixes/wine-profile-1",
+      "game_directories": ["/Games/Windows"],
+      "enabled": true
+    }
+  ],
+  "wine_inventory": [
+    {
+      "profile_id": "wine-profile-1",
+      "game_ref": "wine-game-blue-prince",
+      "title": "Blue Prince",
+      "executable_path": "/Games/Windows/Blue Prince/BLUE PRINCE.exe",
+      "fingerprint": "sha256:abc123",
+      "origin_direct_game_id": "/Games/Windows/Blue Prince/BLUE PRINCE.exe"
+    }
+  ]
+}"#;
+        fs::write(&path, v6).unwrap();
+
+        let loaded = Catalog::load_with_migration(&path).unwrap();
+        let direct = loaded
+            .catalog
+            .games
+            .iter()
+            .find(|game| matches!(&game.launch_target, LaunchTarget::Direct))
+            .unwrap();
+
+        assert_eq!(loaded.migrated_from, Some(SCHEMA_VERSION_V6));
+        assert!(direct.id.starts_with("local:"));
+        assert_eq!(direct.id.len(), "local:".len() + 64);
+        assert!(!direct.id.contains("Games"));
+        assert_eq!(
+            loaded.catalog.wine_inventory[0]
+                .origin_direct_game_id
+                .as_deref(),
+            Some(direct.id.as_str())
+        );
+        assert!(
+            loaded
+                .catalog
+                .games
+                .iter()
+                .any(|game| game.id == "steam:480")
+        );
+        assert_eq!(
+            direct.extra.get("future_game_field"),
+            Some(&serde_json::Value::String("preserved".into()))
+        );
+        assert_eq!(
+            loaded.catalog.extra.get("future_catalog_field"),
+            Some(&serde_json::json!({ "keep": true }))
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), v6);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v7_local_id_migration_is_idempotent() {
+        let path = temporary_catalog_path("v7-idempotent");
+        let mut catalog = Catalog {
+            schema_version: SCHEMA_VERSION_V6,
+            games: vec![direct_windows_game()],
+            ..Catalog::default()
+        };
+        catalog.schema_version = SCHEMA_VERSION_V6;
+        fs::write(&path, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
+
+        let first = Catalog::load_with_migration(&path).unwrap().catalog;
+        first.save_atomically(&path).unwrap();
+        let second = Catalog::load_with_migration(&path).unwrap();
+
+        assert_eq!(second.migrated_from, None);
+        assert_eq!(second.catalog, first);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn v7_migration_keeps_same_path_records_distinct_without_title_merging() {
+        let path = temporary_catalog_path("v7-collision");
+        let mut first = direct_windows_game();
+        first.id = "/Games/Windows/Blue Prince/BLUE PRINCE.exe".into();
+        first.title = "First record".into();
+        let mut second = first.clone();
+        second.id = "legacy-local-blue-prince".into();
+        second.title = "Second record".into();
+        let catalog = Catalog {
+            schema_version: SCHEMA_VERSION_V6,
+            games: vec![first, second],
+            ..Catalog::default()
+        };
+        fs::write(&path, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
+
+        let migrated = Catalog::load_with_migration(&path).unwrap().catalog;
+        let ids = migrated
+            .games
+            .iter()
+            .map(|game| game.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(migrated.games.len(), 2);
+        assert_eq!(ids.len(), 2);
+        assert!(
+            ids.iter()
+                .all(|id| id.starts_with("local:") && id.len() == 70)
+        );
+        assert_eq!(migrated.games[0].title, "First record");
+        assert_eq!(migrated.games[1].title, "Second record");
+        fs::remove_file(path).unwrap();
+    }
+
+    fn temporary_migration_directory(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "orivo-migration-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn write_v6_catalog(path: &Path) {
+        let catalog = Catalog {
+            schema_version: SCHEMA_VERSION_V6,
+            games: vec![direct_windows_game(), steam_game("Spacewar")],
+            ..Catalog::default()
+        };
+        fs::write(path, serde_json::to_string_pretty(&catalog).unwrap()).unwrap();
+    }
+
+    fn imported_media(id: &str, kind: GameMediaKind, file: &str) -> GameMediaAsset {
+        GameMediaAsset {
+            id: id.into(),
+            kind,
+            title: "Imported".into(),
+            source_url: None,
+            poster_url: None,
+            origin: GameMediaOrigin::Imported,
+            local_file: Some(file.into()),
+            mime_type: Some("image/png".into()),
+            byte_size: 1_024,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn migrated_direct_id() -> String {
+        local_game_id(Path::new("/Games/Windows/Blue Prince/BLUE PRINCE.exe"))
+    }
+
+    fn state_document(path: &Path) -> GameStateDocument {
+        GameStateStore::load(path.to_path_buf())
+            .unwrap()
+            .snapshot()
+            .unwrap()
+    }
+
+    #[test]
+    fn v7_migration_rekeys_wishlist_selection_and_imported_media_with_the_catalog() {
+        let directory = temporary_migration_directory("state-rekey");
+        let catalog_path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        write_v6_catalog(&catalog_path);
+
+        let state = GameStateStore::load(state_path.clone()).unwrap();
+        state.set_wishlist("local-blue-prince", true).unwrap();
+        state
+            .register_and_select_media(
+                "local-blue-prince",
+                imported_media("media:import-1", GameMediaKind::Wallpaper, "import-1.png"),
+            )
+            .unwrap();
+        state
+            .register_media(
+                "local-blue-prince",
+                imported_media("media:import-2", GameMediaKind::Cover, "import-2.png"),
+            )
+            .unwrap();
+        state.set_wishlist("steam:480", true).unwrap();
+        drop(state);
+
+        let loaded = Catalog::load_with_migration(&catalog_path).unwrap();
+        loaded.commit_migration(&catalog_path, &state_path).unwrap();
+
+        let migrated_id = migrated_direct_id();
+        assert_eq!(loaded.catalog.games[0].id, migrated_id);
+        assert_eq!(
+            loaded.rewritten_game_ids.get("local-blue-prince"),
+            Some(&migrated_id)
+        );
+
+        let document = state_document(&state_path);
+        assert!(!document.games.contains_key("local-blue-prince"));
+        let migrated = document.games.get(&migrated_id).unwrap();
+        assert!(migrated.wishlisted);
+        assert_eq!(
+            migrated.selected_media.get(&GameMediaKind::Wallpaper),
+            Some(&"media:import-1".to_string())
+        );
+        assert_eq!(migrated.media.len(), 2);
+        assert_eq!(
+            migrated.media["media:import-2"].local_file.as_deref(),
+            Some("import-2.png")
+        );
+        // Ids the migration never touched keep their own state.
+        assert!(document.games["steam:480"].wishlisted);
+
+        // The orphaned-quota regression: imported files stay reachable from the
+        // live game id instead of pinning the media quota forever.
+        let protected = GameStateStore::load(state_path)
+            .unwrap()
+            .protected_local_files()
+            .unwrap();
+        assert!(protected.contains("import-1.png"));
+        assert!(protected.contains("import-2.png"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn v7_game_state_rekey_is_idempotent_across_two_runs() {
+        let directory = temporary_migration_directory("state-idempotent");
+        let catalog_path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        write_v6_catalog(&catalog_path);
+
+        let state = GameStateStore::load(state_path.clone()).unwrap();
+        state.set_wishlist("local-blue-prince", true).unwrap();
+        state
+            .register_and_select_media(
+                "local-blue-prince",
+                imported_media("media:import-1", GameMediaKind::Wallpaper, "import-1.png"),
+            )
+            .unwrap();
+        drop(state);
+
+        let first = Catalog::load_with_migration(&catalog_path).unwrap();
+        first.commit_migration(&catalog_path, &state_path).unwrap();
+        let after_first = state_document(&state_path);
+
+        // Replaying the identical rewrite must not duplicate, drop, or
+        // double-rewrite anything.
+        StagedGameState::stage(&state_path, &first.rewritten_game_ids)
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(state_document(&state_path), after_first);
+
+        // A second startup no longer migrates, and committing again is a no-op.
+        let second = Catalog::load_with_migration(&catalog_path).unwrap();
+        assert_eq!(second.migrated_from, None);
+        assert!(second.rewritten_game_ids.is_empty());
+        second.commit_migration(&catalog_path, &state_path).unwrap();
+
+        let after_second = state_document(&state_path);
+        assert_eq!(after_second, after_first);
+        assert_eq!(after_second.games.len(), 1);
+        assert!(after_second.games.contains_key(&migrated_direct_id()));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn v7_game_state_rekey_merges_entries_present_under_both_ids() {
+        let directory = temporary_migration_directory("state-merge");
+        let catalog_path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        write_v6_catalog(&catalog_path);
+        let migrated_id = migrated_direct_id();
+
+        let state = GameStateStore::load(state_path.clone()).unwrap();
+        state.set_wishlist("local-blue-prince", true).unwrap();
+        state
+            .register_and_select_media(
+                "local-blue-prince",
+                imported_media("media:old-wallpaper", GameMediaKind::Wallpaper, "old.png"),
+            )
+            .unwrap();
+        state
+            .register_and_select_media(
+                &migrated_id,
+                imported_media("media:new-wallpaper", GameMediaKind::Wallpaper, "new.png"),
+            )
+            .unwrap();
+        state
+            .register_and_select_media(
+                &migrated_id,
+                imported_media("media:new-cover", GameMediaKind::Cover, "new-cover.png"),
+            )
+            .unwrap();
+        drop(state);
+
+        Catalog::load_with_migration(&catalog_path)
+            .unwrap()
+            .commit_migration(&catalog_path, &state_path)
+            .unwrap();
+
+        let document = state_document(&state_path);
+        assert_eq!(document.games.len(), 1);
+        let merged = document.games.get(&migrated_id).unwrap();
+        // Precedence: the migrated entry wins the kinds it selects, the
+        // pre-existing entry keeps every kind the winner leaves free, and no
+        // registration is lost.
+        assert!(merged.wishlisted);
+        assert_eq!(
+            merged.selected_media.get(&GameMediaKind::Wallpaper),
+            Some(&"media:old-wallpaper".to_string())
+        );
+        assert_eq!(
+            merged.selected_media.get(&GameMediaKind::Cover),
+            Some(&"media:new-cover".to_string())
+        );
+        assert_eq!(merged.media.len(), 3);
+
+        let protected = GameStateStore::load(state_path)
+            .unwrap()
+            .protected_local_files()
+            .unwrap();
+        for file in ["old.png", "new.png", "new-cover.png"] {
+            assert!(protected.contains(file));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_failed_catalog_write_leaves_the_catalog_and_game_state_pre_migration() {
+        let directory = temporary_migration_directory("state-rollback");
+        let catalog_path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        write_v6_catalog(&catalog_path);
+
+        let state = GameStateStore::load(state_path.clone()).unwrap();
+        state.set_wishlist("local-blue-prince", true).unwrap();
+        state
+            .register_and_select_media(
+                "local-blue-prince",
+                imported_media("media:import-1", GameMediaKind::Wallpaper, "import-1.png"),
+            )
+            .unwrap();
+        drop(state);
+        let before = fs::read_to_string(&state_path).unwrap();
+
+        // A regular file cannot become a parent directory, so publishing the
+        // catalog fails after the game state has already been written.
+        let blocked_parent = directory.join("blocked");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        let loaded = Catalog::load_with_migration(&catalog_path).unwrap();
+        assert!(
+            loaded
+                .commit_migration(&blocked_parent.join("catalog.json"), &state_path)
+                .is_err()
+        );
+
+        assert_eq!(fs::read_to_string(&state_path).unwrap(), before);
+        let document = state_document(&state_path);
+        assert!(document.games.contains_key("local-blue-prince"));
+        assert!(!document.games.contains_key(&migrated_direct_id()));
+        let on_disk: Catalog =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        assert_eq!(on_disk.schema_version, SCHEMA_VERSION_V6);
+        assert_eq!(on_disk.games[0].id, "local-blue-prince");
+        assert!(!directory.join("game-state.json.migrating").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_missing_game_state_document_is_not_a_migration_failure() {
+        let directory = temporary_migration_directory("state-missing");
+        let catalog_path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        write_v6_catalog(&catalog_path);
+
+        Catalog::load_with_migration(&catalog_path)
+            .unwrap()
+            .commit_migration(&catalog_path, &state_path)
+            .unwrap();
+
+        assert!(!state_path.exists());
+        let reloaded = Catalog::load(&catalog_path).unwrap();
+        assert_eq!(reloaded.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(reloaded.games[0].id, migrated_direct_id());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_id_assignment_errors_instead_of_looping_when_every_nonce_collides() {
+        let executable = Path::new("/Games/Windows/Blue Prince/BLUE PRINCE.exe");
+        let old_id = "local-blue-prince";
+        let base_id = local_game_id(executable);
+        let mut assigned = BTreeSet::from([base_id.clone()]);
+        for nonce in 0..=MAX_LOCAL_ID_COLLISION_ATTEMPTS {
+            assigned.insert(local_game_id_with_salt(
+                executable,
+                old_id.as_bytes(),
+                nonce,
+            ));
+        }
+
+        assert!(matches!(
+            assign_local_game_id(executable, old_id, base_id, true, &assigned),
+            Err(CatalogError::Invalid(message))
+                if message.contains("unique local game id") && !message.contains("Blue Prince")
+        ));
+    }
+
+    #[test]
+    fn new_local_game_identity_is_opaque_and_stable() {
+        let path = Path::new("/Users/private/Games/Nightfall/Nightfall");
+        let first = Game::from_executable(path).unwrap();
+        let second = Game::from_executable(path).unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert!(first.id.starts_with("local:"));
+        assert_eq!(first.id.len(), 70);
+        assert!(!first.id.contains("private"));
+    }
+
+    #[test]
     fn wine_profile_defaults_enabled_when_read_from_persistence() {
         let profile: WineProfile = serde_json::from_value(serde_json::json!({
             "id": "wine-profile-1",
@@ -1735,6 +2405,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -1804,6 +2476,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -1832,6 +2506,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -2140,6 +2816,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -2165,6 +2843,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: Some(PathBuf::from("/cache/blue-prince-cover.jpg")),
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: Some("2026-08-01T00:00:00Z".into()),
@@ -2194,6 +2874,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,
@@ -2261,6 +2943,8 @@ mod tests {
             artwork_source_path: None,
             cover_path: None,
             cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
             logo_path: None,
             hero_video_path: None,
             last_played_at: None,

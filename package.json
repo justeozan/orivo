@@ -8,6 +8,9 @@
     "dev": "vite",
     "build": "pnpm typecheck && vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
@@ -15,10 +18,13 @@
     "@tauri-apps/api": "2.11.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "2.11.4",
     "@types/node": "26.1.1",
     "esbuild": "0.27.3",
+    "jsdom": "^30.0.1",
     "typescript": "7.0.2",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "vitest": "^4.1.10"
   }
 }

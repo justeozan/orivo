@@ -37,3 +37,17 @@ image maquette de reference : orivo-cognitive-scan-page.png
 
 Page ma gallerie :
 - les jeux auquel j'ai le plus joué
+
+
+Petits soucis que je vois à regler rapidement :
+- remettre les 3 petits points en dessous du titre de jeu
+- à l'ajout d'un jeu local, les images de jeu ne sont pas recherché, il prennent actuellement l'image d'elden ring tout le temps.
+- Hozy Playtest n'a pas de couverture
+- certain jeu n'ont pas de wallppaper 4k (ceux de steam) mais c'est normal ça venait avant le patch, et de toute facon ce sera reglable avec le selecteur de wallpaper.
+- s'il n' ya pas dheure de jeu alors ne pas afficher
+- afficher un vrai logo source plus grand (steam ou local)
+- ne pas afficher la mention "wine-staging", "incompatible for macos", ni "installed" car le bouton play le mentionne deja
+- on peut enlever le bouton bookmark
+- le genre du jeu est parfois wrap, et la pill devient moche.
+- les long titres de jeu sont wrap et donc coupé en plein milieu, il faut pas les wrap
+- dans le modal en haut à gauche, dans le menu, il y a 2 boutons qui font doubblons: "importé les jeux installé (steam)" et "se connecter à une bibliothèque" , qui devrais donc les deux etres remplacé par "Sources" et apres Steam si on ajouter "steam", et "ajouter une nouvel source"
