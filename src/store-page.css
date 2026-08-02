@@ -1,11 +1,12 @@
 .store-page {
-  --store-accent: #c9bdff;
-  --store-accent-strong: #9e88ff;
-  --store-text: #f6f4f8;
-  --store-muted: #bcb7c3;
-  --store-dim: #8d8795;
-  --store-surface: rgba(19, 21, 29, 0.82);
-  --store-line: rgba(255, 255, 255, 0.12);
+  /* Mindful sage-green accent (branch design) instead of the violet default. */
+  --store-accent: #8fca9c;
+  --store-accent-strong: #83d3a4;
+  --store-text: #f1f4f3;
+  --store-muted: #aeb4b3;
+  --store-dim: #838c8a;
+  --store-surface: rgba(18, 22, 27, 0.82);
+  --store-line: rgba(255, 255, 255, 0.1);
   /* One radius scale, shared with the game detail page:
      xs = thumbs and badges, sm = toasts and popovers, md = cards and panels,
      lg = heroes, pill = every interactive chip or button. */
@@ -26,10 +27,12 @@
   min-height: 100%;
   padding: 0 clamp(24px, 3vw, 48px) clamp(24px, 3.5svh, 48px);
   color: var(--store-text);
+  /* Calm misty-mountain ambiance from the branch design, held far back behind a
+     heavy veil so cards and text keep their contrast. */
   background:
-    radial-gradient(circle at 78% 2%, rgba(84, 104, 144, 0.2), transparent 32%),
-    radial-gradient(circle at 18% 28%, rgba(87, 69, 102, 0.16), transparent 34%),
-    #090c12;
+    linear-gradient(180deg, rgba(8, 11, 13, 0.82) 0%, rgba(8, 11, 13, 0.93) 46%, #080b0d 100%),
+    url("/media/store/hero-mountains.jpg") top center / cover no-repeat fixed,
+    #080b0d;
 }
 
 .store-page::before {
@@ -179,10 +182,10 @@
 .store-hero__title {
   max-width: 620px;
   margin: 0;
-  font-size: clamp(26px, 2.4vw, 38px);
-  font-weight: 670;
-  line-height: 1.04;
-  letter-spacing: -0.042em;
+  font-size: clamp(28px, 2.7vw, 44px);
+  font-weight: 500;
+  line-height: 1.03;
+  letter-spacing: -0.034em;
   text-wrap: balance;
 }
 
@@ -208,8 +211,8 @@
 }
 
 .store-hero__action:hover {
-  border-color: rgba(213, 204, 255, 0.56);
-  background: rgba(92, 75, 132, 0.48);
+  border-color: rgba(143, 202, 156, 0.5);
+  background: rgba(46, 74, 56, 0.5);
   transform: translateY(-1px);
 }
 
@@ -272,10 +275,10 @@
 .store-reasons__item .store-icon {
   width: 21px;
   height: 21px;
-  border: 1px solid rgba(201, 189, 255, 0.2);
+  border: 1px solid rgba(143, 202, 156, 0.24);
   border-radius: var(--store-r-xs);
-  color: #c9bdff;
-  background: rgba(201, 189, 255, 0.08);
+  color: #96d3a6;
+  background: rgba(143, 202, 156, 0.1);
 }
 
 .store-reasons__item .store-icon .icon {
@@ -390,9 +393,9 @@
 .store-filter-pill--active,
 .store-provider-pill--active {
   color: #fff;
-  border-color: rgba(196, 183, 255, 0.46);
-  background: rgba(106, 87, 157, 0.38);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 7px 18px rgba(31, 20, 54, 0.24);
+  border-color: rgba(143, 202, 156, 0.42);
+  background: rgba(60, 96, 74, 0.44);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 7px 18px rgba(18, 40, 28, 0.26);
 }
 
 .store-provider-pill__dot {
@@ -439,7 +442,7 @@
 }
 
 .store-inline-search:focus-within {
-  border-color: rgba(201, 189, 255, 0.45);
+  border-color: rgba(143, 202, 156, 0.45);
 }
 
 .store-inline-search__input {
@@ -577,8 +580,8 @@
 .store-refresh-button:hover,
 .store-load-more:hover {
   color: #fff;
-  border-color: rgba(201, 189, 255, 0.32);
-  background: rgba(61, 51, 84, 0.52);
+  border-color: rgba(143, 202, 156, 0.34);
+  background: rgba(40, 62, 48, 0.54);
 }
 
 .store-refresh-button:disabled {
@@ -614,16 +617,17 @@
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--store-r-md);
-  background: linear-gradient(180deg, rgba(29, 33, 43, 0.86), rgba(12, 15, 21, 0.94));
-  box-shadow: var(--store-elev-card), inset 0 1px rgba(255, 255, 255, 0.045);
+  background: linear-gradient(180deg, rgba(20, 25, 30, 0.74), rgba(11, 14, 18, 0.9));
+  box-shadow: var(--store-elev-card), inset 0 1px rgba(255, 255, 255, 0.05);
   transition: border-color 180ms ease, transform 180ms cubic-bezier(0.2, 0.72, 0.2, 1), box-shadow 180ms ease;
+  backdrop-filter: blur(10px);
 }
 
 .store-card:hover,
 .store-card:focus-within {
   z-index: 2;
-  border-color: rgba(201, 189, 255, 0.43);
-  box-shadow: 0 25px 56px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(201, 189, 255, 0.06);
+  border-color: rgba(143, 202, 156, 0.4);
+  box-shadow: 0 25px 56px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(143, 202, 156, 0.08);
   transform: translateY(-4px);
 }
 
@@ -646,8 +650,8 @@
   aspect-ratio: 4 / 4.15;
   overflow: hidden;
   background:
-    radial-gradient(circle at 65% 25%, rgba(171, 151, 219, 0.28), transparent 30%),
-    linear-gradient(145deg, #2a2f3b, #11151d 70%);
+    radial-gradient(circle at 65% 25%, rgba(120, 170, 135, 0.24), transparent 30%),
+    linear-gradient(145deg, #232a30, #11151b 70%);
 }
 
 .store-card__cover {
