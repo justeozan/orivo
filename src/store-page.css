@@ -1,1184 +1,975 @@
+/* ---------------------------------------------------------------------------
+   Store — "Découvrir"
+   Reference: .context/store-nosidebar.png, a 1536×1024 viewport at DPR 2.
+   Every length below is measured off that file (image px ÷ 2 = CSS px), so the
+   numbers look arbitrary on purpose: they are the design, not a scale.
+
+   The page paints one full-bleed photograph and floats every surface over it.
+   Nothing is opaque except the card bodies, which have to stay readable over
+   any artwork.
+   --------------------------------------------------------------------------- */
+
 .store-page {
-  /* Mindful sage-green accent (branch design) instead of the violet default. */
-  --store-accent: #8fca9c;
-  --store-accent-strong: #83d3a4;
-  --store-text: #f1f4f3;
-  --store-muted: #aeb4b3;
-  --store-dim: #838c8a;
-  --store-surface: rgba(18, 22, 27, 0.82);
-  --store-line: rgba(255, 255, 255, 0.1);
-  /* One radius scale, shared with the game detail page:
-     xs = thumbs and badges, sm = toasts and popovers, md = cards and panels,
-     lg = heroes, pill = every interactive chip or button. */
-  --store-r-xs: 10px;
-  --store-r-sm: 14px;
-  --store-r-md: 18px;
-  --store-r-lg: 24px;
-  --store-r-pill: 999px;
-  --store-elev-card: 0 16px 40px rgba(0, 0, 0, 0.28);
-  --store-elev-hero: 0 24px 60px rgba(0, 0, 0, 0.34);
+  /* Layout */
+  --pad: 46px;
+  --card-w: 276px;
+  --card-gap: 16px;
+  --card-radius: 14px;
+
+  /* The page never scrolls: it is exactly one screen tall. Every vertical step
+     is a clamp indexed on the viewport height, so at the design's 1536×1024 the
+     middle value resolves to the measured pixel and anything shorter shrinks
+     smoothly instead of pushing content out of view. */
+  --pad-top: clamp(66px, 11.836svh, 121.2px);
+  --pad-bottom: clamp(12px, 2.344svh, 24px);
+  --gap-eyebrow: clamp(3px, 0.82svh, 8.4px);
+  --gap-lead: clamp(10px, 2.207svh, 22.6px);
+  --gap-action: clamp(12px, 2.52svh, 25.8px);
+  --gap-shelf: clamp(14px, 3.535svh, 36.2px);
+  --gap-label: clamp(7px, 1.348svh, 13.8px);
+  --gap-row: clamp(8px, 1.5625svh, 16px);
+  --size-title: clamp(26px, 4.6875svh, 48px);
+  --lh-title: clamp(28px, 4.98svh, 51px);
+  --size-eyebrow: clamp(12px, 1.4648svh, 15px);
+  --lh-eyebrow: clamp(16px, 1.953svh, 20px);
+  --size-lead: clamp(12.5px, 1.5625svh, 16px);
+  --lh-lead: clamp(18px, 2.246svh, 23px);
+  --h-action: clamp(34px, 4.492svh, 46px);
+  --h-chipbar: clamp(36px, 4.492svh, 46px);
+  --h-banner: clamp(54px, 7.422svh, 76px);
+  --card-max-h: 400px;
+
+  /* Glass. One recipe, three densities. */
+  --glass: rgba(18, 20, 24, 0.42);
+  --glass-strong: rgba(14, 16, 20, 0.55);
+  --glass-card: rgba(10, 12, 15, 0.82);
+  --glass-line: rgba(255, 255, 255, 0.09);
+  --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  --glass-lift: 0 18px 44px rgba(0, 0, 0, 0.3);
+  --blur: blur(26px) saturate(140%);
+
+  /* Ink */
+  /* Every ink below is sampled off the design over two different backdrops, so
+     these are opaque values, not white at some alpha. */
+  --ink: #ffffff;
+  --ink-2: #f1f4f3;
+  --ink-3: #c8cdcc;
+  --ink-4: #adb3b2;
+  --accent: #82b3c7;
+  /* One accent, three uses: the leaf, the section label and the stat dots. */
+  --leaf: #8fca9c;
+  --dot-on: #8fca9c;
+  --dot-off: rgba(255, 255, 255, 0.128);
+
   position: relative;
-  display: block;
-  width: 100%;
-  /* The shell host (`.app-page--scroll`) is the only scroll container and the
-     only owner of topbar clearance. This page adds neither: no height, no
-     overflow (an `overflow-x` alone would silently make `overflow-y` a
-     scroller), and no top padding. */
-  min-height: 100%;
-  padding: 0 clamp(24px, 3vw, 48px) clamp(24px, 3.5svh, 48px);
-  color: var(--store-text);
-  /* Calm misty-mountain ambiance from the branch design, held far back behind a
-     heavy veil so cards and text keep their contrast. */
-  background:
-    linear-gradient(180deg, rgba(8, 11, 13, 0.82) 0%, rgba(8, 11, 13, 0.93) 46%, #080b0d 100%),
-    url("/media/store/hero-mountains.jpg") top center / cover no-repeat fixed,
-    #080b0d;
-}
-
-.store-page::before {
-  position: fixed;
-  z-index: 0;
-  inset: 0;
-  pointer-events: none;
-  content: "";
-  background-image: linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px);
-  background-size: 100% 4px;
-  opacity: 0.2;
-}
-
-.store-page .store-icon {
-  display: inline-grid;
-  flex: none;
-  place-items: center;
-}
-
-.store-page .store-icon .icon {
-  width: 16px;
-  height: 16px;
-}
-
-.store-status {
-  position: relative;
-  z-index: 4;
   display: flex;
-  width: fit-content;
-  max-width: min(620px, 100%);
-  min-height: 34px;
-  align-items: center;
+  height: 100%;
   overflow: hidden;
-  gap: 9px;
-  margin: 0 0 10px auto;
-  padding: 8px 12px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-sm);
-  color: #e8e4eb;
-  background: rgba(13, 16, 23, 0.8);
-  box-shadow: var(--store-elev-card);
-  font-size: 12px;
-  backdrop-filter: blur(18px);
+  flex-direction: column;
+  isolation: isolate;
+  color: var(--ink);
 }
 
-/* House style forbids circular spinners (DESIGN.md 13): work in progress is an
-   indeterminate bar that rides the bottom edge of the toast. */
-.store-status--loading::after,
-.store-status--refreshing::after {
+/* The Store owns no topbar clearance — the hero runs underneath the bar, which
+   is transparent on this route — and it never scrolls. The shelf is the only
+   thing that moves, and it moves sideways. */
+.app-page--store { overflow: hidden; }
+
+/* ---------------------------------------------------------------------------
+   Backdrop — one photograph, two stacked layers so a preview crossfades
+   --------------------------------------------------------------------------- */
+
+.store-backdrop {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  background: #07080b;
+  pointer-events: none;
+}
+
+.store-backdrop__layer {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  content: "";
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--store-accent) 42%,
-    var(--store-accent-strong) 58%,
-    transparent 100%
-  );
-  background-size: 45% 100%;
-  background-repeat: no-repeat;
-  animation: store-progress 1.4s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-}
-
-.store-status--offline,
-.store-status--error {
-  border-color: rgba(240, 171, 116, 0.35);
-  color: #f4ceb1;
-}
-
-.store-status__copy {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.store-hero {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  /* Sized so the hero plus the filter bar still leave a full card row above
-     the fold at 1536x1024 (see assets/moc-images/orivo-store-clean.png). */
-  min-height: clamp(180px, 20svh, 250px);
-  grid-template-columns: minmax(0, 1.5fr) minmax(256px, 0.58fr);
-  align-items: end;
-  gap: clamp(20px, 3vw, 48px);
-  overflow: hidden;
-  padding: clamp(16px, 1.8vw, 28px);
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: var(--store-r-lg);
-  background: #121722;
-  box-shadow: var(--store-elev-hero), inset 0 1px rgba(255, 255, 255, 0.06);
-}
-
-.store-hero__image {
-  position: absolute;
-  z-index: -3;
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: 60% center;
-  opacity: 0.72;
-  transform: scale(1.015);
-  animation: store-hero-arrive 900ms cubic-bezier(0.2, 0.72, 0.2, 1) both;
-}
-
-.store-hero__image.store-media--missing {
   opacity: 0;
+  object-fit: cover;
+  object-position: center 42%;
+  transform: scale(1.015);
+  transition: opacity 520ms cubic-bezier(0.2, 0.8, 0.2, 1), transform 1400ms ease-out;
 }
 
-.store-hero__veil {
+.store-backdrop__layer.is-active {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.store-backdrop__scrim {
   position: absolute;
-  z-index: -2;
   inset: 0;
-  background:
-    linear-gradient(90deg, rgba(7, 10, 15, 0.94) 2%, rgba(7, 10, 15, 0.66) 43%, rgba(7, 10, 15, 0.24) 74%),
-    linear-gradient(0deg, rgba(7, 10, 15, 0.8), transparent 65%),
-    linear-gradient(180deg, rgba(7, 10, 15, 0.28), transparent 40%);
 }
 
-.store-hero__copy {
-  display: grid;
-  max-width: 640px;
-  align-self: center;
-  gap: 8px;
+/* Left: keeps the headline legible over a bright sky. */
+.store-backdrop__scrim--left {
+  background: linear-gradient(
+    90deg,
+    rgba(6, 7, 10, 0.75) 0%,
+    rgba(6, 7, 10, 0.53) 13%,
+    rgba(6, 7, 10, 0.36) 18%,
+    rgba(6, 7, 10, 0.21) 29%,
+    rgba(6, 7, 10, 0.14) 40%,
+    rgba(6, 7, 10, 0.04) 60%,
+    rgba(6, 7, 10, 0) 75%
+  );
 }
 
-.store-hero__eyebrow,
-.store-hero__summary,
-.store-reasons__eyebrow,
-.store-reasons__basis,
-.store-catalog__count {
-  margin: 0;
+/* Bottom: the shelf, the filters and the banner all sit on near-black. */
+.store-backdrop__scrim--bottom {
+  background: linear-gradient(
+    0deg,
+    rgba(11, 11, 13, 1) 0%,
+    rgba(11, 11, 13, 1) 41%,
+    rgba(11, 11, 13, 0.8) 51%,
+    rgba(11, 11, 13, 0.55) 58%,
+    rgba(11, 11, 13, 0.22) 66%,
+    rgba(11, 11, 13, 0) 71%
+  );
 }
 
-.store-hero__eyebrow {
-  color: #ded8f7;
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+/* Game artwork is often far brighter than the default photograph, so the veil
+   deepens only while a card is previewed — the shelf at rest keeps the exact
+   contrast of the approved design. */
+.store-page--previewing .store-backdrop__scrim--left {
+  background: linear-gradient(
+    90deg,
+    rgba(6, 7, 10, 0.9) 0%,
+    rgba(6, 7, 10, 0.66) 30%,
+    rgba(6, 7, 10, 0.24) 60%,
+    rgba(6, 7, 10, 0.06) 100%
+  );
 }
 
-.store-hero__title {
-  max-width: 620px;
-  margin: 0;
-  font-size: clamp(28px, 2.7vw, 44px);
-  font-weight: 500;
-  line-height: 1.03;
-  letter-spacing: -0.034em;
-  text-wrap: balance;
-}
-
-.store-hero__summary {
-  max-width: 520px;
-  color: #d0ccd4;
-  font-size: clamp(12px, 0.85vw, 14px);
-  line-height: 1.45;
-}
-
-.store-hero__action {
-  width: fit-content;
-  min-height: 36px;
-  margin-top: 2px;
-  padding: 0 17px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: var(--store-r-pill);
-  color: #fcfbff;
-  background: rgba(17, 21, 29, 0.64);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.07);
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
-  backdrop-filter: blur(16px);
-}
-
-.store-hero__action:hover {
-  border-color: rgba(143, 202, 156, 0.5);
-  background: rgba(46, 74, 56, 0.5);
-  transform: translateY(-1px);
-}
-
-.store-hero__action:focus-visible,
-.store-filter-pill:focus-visible,
-.store-provider-pill:focus-visible,
-.store-inline-search__input:focus-visible,
-.store-card__open:focus-visible,
-.store-card__wishlist:focus-visible,
-.store-refresh-button:focus-visible,
-.store-load-more:focus-visible,
-.store-provider-statuses__summary:focus-visible {
-  outline: 2px solid var(--store-accent);
-  outline-offset: 3px;
-}
-
-.store-reasons {
-  display: grid;
-  align-self: center;
-  gap: 7px;
-  padding: 14px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: var(--store-r-md);
-  background: rgba(14, 19, 28, 0.52);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.06), var(--store-elev-card);
-  backdrop-filter: blur(22px) saturate(120%);
-}
-
-.store-reasons__eyebrow {
-  color: #c6badf;
-  font-size: 11px;
-  font-weight: 680;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.store-reasons__title {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 620;
-  letter-spacing: -0.025em;
-}
-
-.store-reasons__list {
-  display: grid;
-  gap: 6px;
-  margin: 1px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.store-reasons__item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: #e7e4ea;
-  font-size: 12px;
-}
-
-.store-reasons__item .store-icon {
-  width: 21px;
-  height: 21px;
-  border: 1px solid rgba(143, 202, 156, 0.24);
-  border-radius: var(--store-r-xs);
-  color: #96d3a6;
-  background: rgba(143, 202, 156, 0.1);
-}
-
-.store-reasons__item .store-icon .icon {
-  width: 13px;
-  height: 13px;
-}
-
-.store-reasons__fact {
-  line-height: 1.35;
-}
-
-.store-reasons__basis {
-  padding-top: 7px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-  color: #aaa5b0;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.store-controls {
-  position: relative;
-  z-index: 3;
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 12px;
-}
-
-/* From 1000px up, search and source notices fold onto the category row: two
-   control rows instead of three, which is what keeps the first card row above
-   the fold on a 700px-tall laptop. */
-@media (min-width: 1000px) {
-  .store-controls {
-    grid-template-areas:
-      "categories secondary"
-      "providers providers";
-    grid-template-columns: minmax(0, 1fr) auto;
-    column-gap: 20px;
-  }
-
-  .store-category-filters {
-    grid-area: categories;
-  }
-
-  .store-provider-filters {
-    grid-area: providers;
-  }
-
-  .store-controls__secondary {
-    display: flex;
-    grid-area: secondary;
-    justify-content: flex-end;
-  }
-
-  .store-controls__secondary .store-inline-search {
-    width: clamp(200px, 20vw, 300px);
-  }
-}
-
-.store-category-filters,
-.store-provider-filters {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  overflow-x: auto;
-  padding: 2px;
-  /* When the row runs out of room its last pill fades instead of being cut
-     flush against whatever sits beside it, so the clip reads as "scroll me".
-     A row that fits only ever fades empty space. */
-  mask-image: linear-gradient(90deg, #000 calc(100% - 30px), transparent 100%);
-  scrollbar-width: none;
-}
-
-.store-category-filters::-webkit-scrollbar,
-.store-provider-filters::-webkit-scrollbar,
-.store-card-rail::-webkit-scrollbar {
+.store-backdrop__scrim--top {
+  /* No separate top scrim is detectable in the design: the left scrim alone
+     accounts for the darkening at the top edge. */
   display: none;
 }
 
-.store-filter-pill,
-.store-provider-pill {
+.store-page__body {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  flex: 1;
+  flex-direction: column;
+  padding: var(--pad-top) var(--pad) var(--pad-bottom);
+}
+
+/* ---------------------------------------------------------------------------
+   Hero
+   --------------------------------------------------------------------------- */
+
+.store-hero {
+  position: relative;
+  display: flex;
   flex: none;
-  min-height: 34px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-pill);
-  color: #bdb9c3;
-  background: rgba(16, 20, 28, 0.68);
-  transition: color 150ms ease, border-color 150ms ease, background 150ms ease, transform 150ms ease;
-  backdrop-filter: blur(14px);
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 40px;
 }
 
-.store-filter-pill {
-  padding: 0 16px;
-  font-size: 12px;
-}
-
-.store-provider-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 13px;
-  font-size: 12px;
-}
-
-.store-filter-pill:hover,
-.store-provider-pill:hover {
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.25);
-  transform: translateY(-1px);
-}
-
-.store-filter-pill--active,
-.store-provider-pill--active {
-  color: #fff;
-  border-color: rgba(143, 202, 156, 0.42);
-  background: rgba(60, 96, 74, 0.44);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08), 0 7px 18px rgba(18, 40, 28, 0.26);
-}
-
-.store-provider-pill__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #8c8792;
-  box-shadow: 0 0 0 3px rgba(140, 135, 146, 0.1);
-}
-
-.store-provider-pill[data-health="available"] .store-provider-pill__dot {
-  background: #82caa0;
-  box-shadow: 0 0 0 3px rgba(130, 202, 160, 0.12);
-}
-
-.store-provider-pill[data-health="degraded"] .store-provider-pill__dot {
-  background: #e3b678;
-  box-shadow: 0 0 0 3px rgba(227, 182, 120, 0.11);
-}
-
-.store-provider-pill[data-health="not-configured"] .store-provider-pill__dot,
-.store-provider-pill[data-health="unavailable"] .store-provider-pill__dot {
-  background: #807b86;
-}
-
-.store-controls__secondary {
-  display: grid;
-  grid-template-columns: minmax(220px, 360px) minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-
-/* Same height and radius as the filter pills it sits beside. */
-.store-inline-search {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  gap: 10px;
-  padding: 0 14px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-pill);
-  color: var(--store-dim);
-  background: rgba(13, 17, 24, 0.72);
-}
-
-.store-inline-search:focus-within {
-  border-color: rgba(143, 202, 156, 0.45);
-}
-
-.store-inline-search__input {
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  outline: 0;
-  color: #f6f4f8;
-  background: transparent;
-  font-size: 12px;
-}
-
-.store-inline-search__input::placeholder {
-  color: #8c8794;
-}
-
-.store-provider-statuses {
-  min-width: 0;
-  justify-self: end;
-  color: var(--store-muted);
-  font-size: 12px;
-}
-
-.store-provider-statuses[open] {
+.store-hero__copy {
   position: relative;
-  z-index: 10;
+  display: flex;
+  min-width: 0;
+  max-width: 430px;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
-/* Kept as a `list-item` so the native disclosure marker survives; the
-   line-height fills the 34px control height the pills use. */
-.store-provider-statuses__summary {
-  min-height: 34px;
-  padding: 8px 14px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-pill);
-  background: rgba(13, 17, 24, 0.72);
-  cursor: pointer;
-  line-height: 16px;
-  list-style-position: inside;
-}
-
-.store-provider-statuses__list {
-  position: absolute;
-  top: calc(100% + 7px);
-  right: 0;
-  display: grid;
-  width: min(520px, calc(100vw - 48px));
-  gap: 1px;
-  overflow: hidden;
+.store-hero__eyebrow {
   margin: 0;
-  padding: 6px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-sm);
-  background: rgba(13, 17, 24, 0.96);
-  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.5);
-  list-style: none;
-  backdrop-filter: blur(22px);
+  color: #d8dddc;
+  font-size: var(--size-eyebrow);
+  line-height: var(--lh-eyebrow);
 }
 
-.store-provider-statuses__item {
-  display: grid;
-  grid-template-columns: 125px minmax(0, 1fr);
-  gap: 12px;
-  padding: 9px 10px;
-  border-radius: var(--store-r-xs);
-}
-
-.store-provider-statuses__item:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.store-provider-statuses__name {
-  color: #f1eef4;
-  font-weight: 610;
-}
-
-.store-provider-statuses__message {
-  color: #aaa5b0;
-  line-height: 1.4;
-}
-
-.store-catalog {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  gap: 9px;
-}
-
-.store-catalog__header {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-}
-
-/* Title and count share one line: a stacked pair costs ~18px of the vertical
-   budget the first card row needs. */
-.store-catalog__heading-group {
-  display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
-}
-
-.store-catalog__title {
-  margin: 0;
-  font-size: clamp(18px, 1.35vw, 22px);
-  font-weight: 630;
-  letter-spacing: -0.035em;
-}
-
-.store-catalog__count {
-  color: var(--store-dim);
-  font-size: 12px;
-}
-
-.store-refresh-button,
-.store-load-more {
-  display: inline-flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 15px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-pill);
-  color: #d8d4dc;
-  background: rgba(19, 23, 31, 0.76);
-  font-size: 12px;
-  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
-}
-
-.store-refresh-button:hover,
-.store-load-more:hover {
-  color: #fff;
-  border-color: rgba(143, 202, 156, 0.34);
-  background: rgba(40, 62, 48, 0.54);
-}
-
-.store-refresh-button:disabled {
-  position: relative;
-  cursor: wait;
+.store-hero__title {
+  display: -webkit-box;
   overflow: hidden;
-  opacity: 0.65;
+  height: calc(2 * var(--lh-title));
+  margin: var(--gap-eyebrow) 0 0;
+  color: var(--ink);
+  font-size: var(--size-title);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: var(--lh-title);
+  text-wrap: balance;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-/* Bar, not spinner (DESIGN.md 13). */
-.store-refresh-button:disabled::after {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  content: "";
-  background: linear-gradient(90deg, transparent, var(--store-accent), transparent);
-  background-size: 45% 100%;
-  background-repeat: no-repeat;
-  animation: store-progress 1.4s cubic-bezier(0.5, 0, 0.5, 1) infinite;
-}
-
-.store-card-rail {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: clamp(12px, 1.25vw, 20px);
-}
-
-.store-card {
-  position: relative;
-  min-width: 0;
+.store-hero__lead {
+  display: -webkit-box;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: var(--store-r-md);
-  background: linear-gradient(180deg, rgba(20, 25, 30, 0.74), rgba(11, 14, 18, 0.9));
-  box-shadow: var(--store-elev-card), inset 0 1px rgba(255, 255, 255, 0.05);
-  transition: border-color 180ms ease, transform 180ms cubic-bezier(0.2, 0.72, 0.2, 1), box-shadow 180ms ease;
+  height: calc(2 * var(--lh-lead));
+  margin: var(--gap-lead) 0 0;
+  max-width: 460px;
+  color: var(--ink-3);
+  font-size: var(--size-lead);
+  line-height: var(--lh-lead);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.store-hero__action {
+  height: var(--h-action);
+  margin-top: var(--gap-action);
+  padding: 0 23px;
+  /* The stroke in the design is top-weighted, not a flat ring: the button is a
+     hairline catching the light, with the photograph showing straight through. */
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--ink-2);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02)) padding-box,
+    linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.02) 60%) border-box;
+  font-size: 16px;
+  font-weight: 400;
+  transition: background 160ms ease, transform 160ms ease;
+  -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
 }
 
-.store-card:hover,
-.store-card:focus-within {
+.store-hero__action:hover {
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.09)) padding-box,
+    linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.06) 60%) border-box;
+}
+
+.store-hero__action:active { transform: scale(0.985); }
+
+/* The cheapest verified offer for the card being previewed. It is taken out of
+   flow on purpose: appearing and disappearing must not move the headline, the
+   shelf, or anything else on the page. */
+.store-hero__offer {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin: clamp(4px, 0.98svh, 10px) 0 0;
+  color: var(--ink-3);
+  font-size: 13px;
+  opacity: 1;
+  white-space: nowrap;
+  transition: opacity 180ms ease;
+}
+
+/* Kept in the DOM and merely invisible, so no reflow can happen at all. */
+.store-hero__offer[hidden] {
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* --- Highlights card ------------------------------------------------------ */
+
+.store-highlights {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  width: 344px;
+  flex: none;
+  padding: clamp(12px, 1.953svh, 20px) 25px clamp(13px, 2.148svh, 22px);
+  border: 1px solid rgba(255, 255, 255, 0.145);
+  border-radius: 18px;
+  /* Measured off the design: a lifted blue-grey, not near-black, and only
+     lightly blurred — the ridge behind it stays faintly readable. */
+  background: rgba(46, 56, 68, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  backdrop-filter: blur(24px) saturate(130%);
+}
+
+.store-highlights__list {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: clamp(9px, 1.855svh, 19px);
+  list-style: none;
+}
+
+.store-highlight {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 250px);
+  align-items: start;
+  gap: 24px;
+}
+
+.store-highlight__icon {
+  display: grid;
+  height: 20px;
+  place-items: center;
+  color: #e9ecea;
+}
+
+.store-highlight__icon .icon {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.6;
+}
+
+.store-highlight__title {
+  overflow: hidden;
+  margin: 0;
+  color: #f3f5f4;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.store-highlight__text {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 3px 0 0;
+  color: #a9b0b1;
+  font-size: 12.5px;
+  line-height: 17px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* --- "Découvrir pourquoi" panel ------------------------------------------- */
+
+.store-why {
+  position: absolute;
+  z-index: 3;
+  top: 120px;
+  left: 0;
+  width: min(430px, 100%);
+  padding: 20px 22px 22px;
+  border: 1px solid var(--glass-line);
+  border-radius: 16px;
+  background: rgba(12, 14, 18, 0.72);
+  box-shadow: var(--glass-sheen), 0 26px 60px rgba(0, 0, 0, 0.44);
+  animation: store-why-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  -webkit-backdrop-filter: blur(34px) saturate(150%);
+  backdrop-filter: blur(34px) saturate(150%);
+}
+
+@keyframes store-why-in {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+
+.store-why[hidden] { display: none; }
+
+.store-why__title {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.store-why__text {
+  margin: 0 0 10px;
+  color: rgba(255, 255, 255, 0.66);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.store-why__text:last-child { margin-bottom: 0; }
+
+.store-why__close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--ink-3);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.store-why__close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.13); }
+.store-why__close .icon { width: 13px; height: 13px; }
+
+/* ---------------------------------------------------------------------------
+   Shelf
+   --------------------------------------------------------------------------- */
+
+.store-shelf {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  margin-top: var(--gap-shelf);
+}
+
+.store-shelf__label {
+  display: flex;
+  /* The design places this row well inside the shelf rather than on the page
+     gutter; reproduced literally, and capped so it stays sane when narrow. */
+  margin: 0 0 var(--gap-label) min(302px, 21vw);
+  align-items: center;
+  gap: 11.5px;
+  flex: none;
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.store-shelf__leaf { color: var(--leaf); }
+.store-shelf__leaf .icon { width: 16px; height: 16px; }
+
+.store-shelf__lead { color: #eef1ef; font-weight: 600; }
+.store-shelf__tail { color: #ccd1d0; font-weight: 400; }
+
+.store-rail {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: flex-start;
+}
+
+.store-rail__track {
+  display: flex;
+  width: 100%;
+  /* `overflow-x: auto` forces a vertical scrollport too, which would clip the
+     featured card's outer glow. The 3px inset gives the glow room and the
+     matching negative margin plus extra height hands the row back its exact
+     measured height. */
+  height: calc(100% + 6px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: flex-start;
+  padding: 3px;
+  margin: -3px;
+  gap: var(--card-gap);
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.store-rail__track::-webkit-scrollbar { display: none; }
+.store-rail__track[hidden] { display: none; }
+
+.store-rail__arrow {
+  position: absolute;
   z-index: 2;
-  border-color: rgba(143, 202, 156, 0.4);
-  box-shadow: 0 25px 56px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(143, 202, 156, 0.08);
-  transform: translateY(-4px);
+  top: 50%;
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  /* What makes this disc visible in the design is the blur, not a fill: the
+     background only lifts by ~1.5%, and no ring is detectable at all. */
+  border: 0;
+  border-radius: 50%;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.015);
+  transform: translateY(-50%);
+  transition: background 160ms ease, transform 160ms ease;
+  -webkit-backdrop-filter: blur(14px) saturate(120%);
+  backdrop-filter: blur(14px) saturate(120%);
+}
+
+.store-rail__arrow:hover {
+  background: rgba(255, 255, 255, 0.1);
+  transform: translateY(-50%) scale(1.06);
+}
+
+.store-rail__arrow[hidden] { display: none; }
+.store-rail__arrow .icon { width: 16px; height: 16px; stroke-width: 1.7; }
+.store-rail__arrow--previous { left: -12px; }
+.store-rail__arrow--next { right: -12px; }
+
+/* ---------------------------------------------------------------------------
+   Card
+   --------------------------------------------------------------------------- */
+
+.store-card {
+  position: relative;
+  width: var(--card-w);
+  height: min(100%, var(--card-max-h));
+  flex: none;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--card-radius);
+  background: #0a0c0e;
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+
+/* The recommendation Orivo is making. At rest that is the first card; while a
+   card is previewed it follows the pointer. */
+.store-card--featured {
+  /* Exactly two pixels of signal in the design: a solid inner stroke and one
+     outer ring at 72% of it. No wider halo is present. */
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(130, 179, 199, 0.72);
 }
 
 .store-card__open {
-  display: grid;
+  display: flex;
   width: 100%;
+  height: 100%;
   padding: 0;
+  flex-direction: column;
   color: inherit;
   background: transparent;
   text-align: left;
 }
 
-.store-card__open:focus-visible {
-  outline-offset: -3px;
-}
+.store-card__open:focus-visible { outline-offset: -4px; }
 
 .store-card__media {
   position: relative;
-  display: block;
-  aspect-ratio: 4 / 4.15;
+  min-height: 84px;
+  /* The body's content height is fixed; the artwork takes whatever is left, so
+     a shorter window loses picture rather than losing a row of facts. */
+  flex: 1 1 auto;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 65% 25%, rgba(120, 170, 135, 0.24), transparent 30%),
-    linear-gradient(145deg, #232a30, #11151b 70%);
+  background: #14161b;
 }
 
-.store-card__cover {
+.store-card__art {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 520ms cubic-bezier(0.2, 0.72, 0.2, 1), filter 220ms ease;
+  object-position: center 42%;
+  transition: transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.store-card:hover .store-card__cover,
-.store-card:focus-within .store-card__cover {
-  transform: scale(1.035);
-  filter: saturate(1.05) contrast(1.025);
-}
+.store-card:hover .store-card__art { transform: scale(1.035); }
 
-.store-card__media::after {
+/* Capsule art reads as its own title block, so the veil under it only has to
+   carry the price chip, not a line of text. */
+.store-card__media--wordmark .store-card__veil { height: 34%; opacity: 0.55; }
+.store-card__media--missing .store-card__art { opacity: 0; }
+
+/* Reads the title back off any artwork. */
+.store-card__veil {
   position: absolute;
-  inset: 50% 0 0;
-  content: "";
-  background: linear-gradient(0deg, rgba(10, 13, 18, 0.83), transparent);
+  inset: auto 0 0;
+  /* A straight ramp, measured: 0 at 52% of the media height to .95 at its foot. */
+  height: 52%;
+  background: linear-gradient(0deg, rgba(10, 12, 14, 0.95) 0%, rgba(10, 12, 14, 0) 100%);
 }
 
-.store-card__media--missing .store-card__cover {
-  opacity: 0;
-}
-
-/* Card type scale: 11px meta / 12px body / 13px price / 17-18px title.
-   Four steps, nothing under 11px. */
-.store-card__platform {
+.store-card__title {
   position: absolute;
-  z-index: 2;
-  top: 10px;
-  left: 10px;
-  padding: 4px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: var(--store-r-pill);
-  color: #f0edf3;
-  background: rgba(9, 12, 17, 0.66);
-  font-size: 11px;
-  backdrop-filter: blur(12px);
-}
-
-.store-card__body {
-  display: grid;
-  align-content: start;
-  gap: 6px;
-  padding: 12px 13px 13px;
-}
-
-.store-card__genres {
+  right: 16px;
+  bottom: 17px;
+  left: 16px;
   overflow: hidden;
-  color: #a9a3af;
-  font-size: 11px;
-  font-weight: 620;
-  letter-spacing: 0.07em;
+  color: #eef1f0;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  line-height: 1;
   text-overflow: ellipsis;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
-.store-card__title {
-  overflow: hidden;
-  color: #f8f6fa;
-  font-size: clamp(16px, 1.2vw, 18px);
-  font-weight: 640;
-  letter-spacing: -0.026em;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.store-card__title--long { font-size: 13px; letter-spacing: 0.08em; }
 
-/* The min-heights match the clamped maximum so every card in a row keeps the
-   same internal rhythm without growing past it. */
-.store-card__description {
-  display: -webkit-box;
-  overflow: hidden;
-  min-height: 35px;
-  color: #aaa6af;
-  font-size: 12px;
-  line-height: 1.45;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.store-card__facts {
-  display: flex;
-  min-height: 20px;
-  gap: 5px;
-  overflow: hidden;
-}
-
-.store-card__tag {
-  flex: none;
-  padding: 3px 9px;
-  border-radius: var(--store-r-pill);
-  color: #bbb5c2;
-  background: rgba(255, 255, 255, 0.055);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.store-card__offer {
-  display: grid;
-  min-width: 0;
-  gap: 1px;
-  margin-top: 2px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
+/* The price is real, verified and region-correct — but the shelf at rest is a
+   reading surface, so it only surfaces on the card being considered. */
 .store-card__price {
+  position: absolute;
+  top: 11px;
+  left: 11px;
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  color: var(--ink);
+  background: rgba(10, 12, 15, 0.62);
+  box-shadow: var(--glass-sheen);
+  opacity: 0;
+  font-size: 12px;
+  font-weight: 500;
+  transition: opacity 180ms ease;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+.store-card--previewing .store-card__price,
+.store-card:focus-within .store-card__price { opacity: 1; }
+.store-card__price:empty { display: none; }
+
+.store-card__body {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  padding: clamp(7px, 1.081svh, 11.07px) 16px clamp(11px, 1.777svh, 18.2px);
+}
+
+.store-card__genres {
   overflow: hidden;
-  color: #e7e2ec;
+  color: #c6cbc9;
   font-size: 13px;
-  font-weight: 620;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.store-card__offer-detail {
+.store-card__chips {
+  display: flex;
+  margin-top: clamp(6px, 0.97svh, 9.93px);
+  gap: 8px;
+}
+
+.store-card__chip {
+  display: inline-flex;
+  height: clamp(21px, 2.637svh, 27px);
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  color: #dfe3e1;
+  background: rgba(255, 255, 255, 0.07);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.store-card__stats {
+  display: flex;
+  margin-top: clamp(4px, 0.615svh, 6.3px);
+  flex-direction: column;
+}
+
+.store-card__stat {
+  display: grid;
+  height: clamp(17px, 2.15svh, 22px);
+  grid-template-columns: 96px auto;
+  align-items: center;
+}
+
+.store-card__stat-label {
   overflow: hidden;
-  color: #8f8996;
-  font-size: 11px;
+  color: #adb3b2;
+  font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.store-card__offer--stale .store-card__offer-detail {
-  color: #c3a27a;
+.store-card__dots { display: flex; gap: 4px; }
+
+.store-card__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dot-off);
 }
+
+.store-card__dot--on {
+  background: var(--dot-on);
+  box-shadow: 0 0 4px rgba(143, 202, 156, 0.4);
+}
+
+.store-card__tagline {
+  /* Exactly one line on every card: a tagline that wrapped would make one card
+     taller than its neighbours and break the shelf's shared baselines. */
+  overflow: hidden;
+  height: 17px;
+  margin-top: clamp(6px, 1.123svh, 11.5px);
+  color: #8d9391;
+  font-size: 12.5px;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The longest curated lines are set a half-step down rather than clipped. */
+.store-card__tagline--long { font-size: 11.5px; letter-spacing: -0.005em; }
 
 .store-card__wishlist {
   position: absolute;
-  z-index: 4;
-  top: 10px;
-  right: 10px;
+  z-index: 2;
+  top: 14px;
+  right: 12px;
   display: grid;
   width: 34px;
   height: 34px;
-  padding: 0;
   place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 50%;
-  color: #fff;
-  background: rgba(8, 11, 16, 0.56);
-  opacity: 0.86;
-  transition: opacity 150ms ease, color 150ms ease, background 150ms ease, transform 150ms ease;
-  backdrop-filter: blur(12px);
+  color: var(--ink);
+  background: transparent;
+  opacity: 0;
+  transition: opacity 180ms ease, background 180ms ease, transform 160ms ease;
 }
 
-.store-card__wishlist:hover {
-  opacity: 1;
-  transform: scale(1.06);
-}
+.store-card:hover .store-card__wishlist,
+.store-card--featured .store-card__wishlist,
+.store-card__wishlist:focus-visible,
+.store-card__wishlist[aria-pressed="true"] { opacity: 1; }
 
-.store-card__wishlist--active {
-  color: #17121f;
-  background: var(--store-accent);
-}
+.store-card__wishlist:hover { background: rgba(0, 0, 0, 0.3); transform: scale(1.08); }
+.store-card__wishlist .icon { width: 22px; height: 22px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5)); }
+.store-card__wishlist[aria-pressed="true"] { color: #ff8fa8; }
 
-.store-card--skeleton {
-  pointer-events: none;
-  opacity: 0.6;
-}
-
-.store-card__skeleton-media,
-.store-card__skeleton-copy {
-  display: block;
-  background: linear-gradient(100deg, rgba(255, 255, 255, 0.035) 25%, rgba(255, 255, 255, 0.09) 45%, rgba(255, 255, 255, 0.035) 65%);
-  background-size: 220% 100%;
-  animation: store-skeleton 1.45s ease-in-out infinite;
-}
-
-.store-card__skeleton-media {
-  aspect-ratio: 4 / 4.15;
-}
-
-.store-card__skeleton-copy {
-  height: 112px;
-  margin: 13px;
-  border-radius: var(--store-r-xs);
-}
+/* --- Empty shelf ---------------------------------------------------------- */
 
 .store-empty {
-  display: grid;
-  min-height: 240px;
-  place-items: center;
-  align-content: center;
-  gap: 10px;
-  padding: 32px;
-  border: 1px dashed rgba(255, 255, 255, 0.15);
-  border-radius: var(--store-r-md);
-  color: var(--store-dim);
+  display: flex;
+  width: 100%;
+  height: min(100%, var(--card-max-h));
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: var(--card-radius);
+  color: var(--ink-3);
   text-align: center;
-  background: rgba(18, 22, 30, 0.55);
 }
 
-.store-empty .store-icon .icon {
-  width: 25px;
-  height: 25px;
+.store-empty[hidden] { display: none; }
+.store-empty .icon { width: 22px; height: 22px; }
+.store-empty__title { margin: 4px 0 0; color: var(--ink); font-size: 16px; font-weight: 600; }
+.store-empty__copy { margin: 0; max-width: 420px; font-size: 13px; line-height: 1.45; }
+
+/* ---------------------------------------------------------------------------
+   Filter bar
+   --------------------------------------------------------------------------- */
+
+.store-filters {
+  display: flex;
+  flex: none;
+  margin-top: var(--gap-row);
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
 }
 
-.store-empty__title {
+.store-chipbar {
+  display: flex;
+  height: var(--h-chipbar);
+  align-items: center;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+}
+
+.store-chip {
+  display: inline-flex;
+  height: clamp(28px, 3.32svh, 34px);
+  align-items: center;
+  gap: 9.5px;
+  padding: 0 14px;
+  border-radius: 999px;
+  /* Selected and unselected share one ink in the design; only the pill moves. */
+  color: var(--ink-2);
+  background: transparent;
+  font-size: clamp(13px, 1.5625svh, 16px);
+  font-weight: 400;
+  white-space: nowrap;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.store-chip:hover { background: rgba(255, 255, 255, 0.05); }
+
+.store-chip--active {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.store-chip--platform { padding: 0 12px; }
+.store-chip__icon { display: grid; place-items: center; }
+.store-chip__icon .icon { width: 16px; height: 16px; }
+.store-chip__caret .icon { width: 13px; height: 13px; }
+
+/* PC is the only platform Orivo launches natively today, so its selected state
+   carries the same blue as the Windows glyph rather than plain white. */
+.store-chip--platform.store-chip--active[data-platform="pc"] {
+  color: #eaf1f7;
+  background: rgba(76, 146, 222, 0.2);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.085);
+}
+
+.store-chip--platform.store-chip--active[data-platform="pc"] .store-chip__icon { color: #5a9fe0; }
+
+.store-platform-group { position: relative; }
+
+.store-more-panel {
+  position: absolute;
+  z-index: 6;
+  right: 0;
+  bottom: calc(100% + 10px);
+  width: 320px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--glass-line);
+  border-radius: 14px;
+  background: rgba(12, 14, 18, 0.76);
+  box-shadow: var(--glass-sheen), 0 24px 56px rgba(0, 0, 0, 0.46);
+  -webkit-backdrop-filter: blur(32px) saturate(150%);
+  backdrop-filter: blur(32px) saturate(150%);
+}
+
+.store-more-panel[hidden] { display: none; }
+
+.store-more-panel__title {
+  margin: 0 0 8px;
+  color: var(--ink-4);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.store-more-panel__list {
+  display: flex;
   margin: 0;
-  color: #ddd9e1;
-  font-size: 17px;
+  padding: 0;
+  flex-direction: column;
+  gap: 9px;
+  list-style: none;
 }
 
-.store-empty__copy {
-  max-width: 500px;
+.store-more-panel__item {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.store-more-panel__dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #7c8798;
+}
+
+.store-more-panel__item[data-health="available"] .store-more-panel__dot { background: var(--dot-on); }
+.store-more-panel__item[data-health="degraded"] .store-more-panel__dot { background: #e8c46a; }
+.store-more-panel__item[data-health="unavailable"] .store-more-panel__dot { background: #e78a8a; }
+
+.store-more-panel__name { display: block; color: var(--ink); font-size: 13px; font-weight: 500; }
+.store-more-panel__message { display: block; color: var(--ink-4); font-size: 12px; line-height: 1.35; }
+
+/* ---------------------------------------------------------------------------
+   Mindful banner
+   --------------------------------------------------------------------------- */
+
+.store-banner {
+  display: flex;
+  height: var(--h-banner);
+  flex: none;
+  margin-top: var(--gap-row);
+  align-items: center;
+  gap: 24px;
+  padding: 0 22px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.037);
+  -webkit-backdrop-filter: var(--blur);
+  backdrop-filter: var(--blur);
+}
+
+.store-banner__leaf { color: var(--leaf); }
+.store-banner__leaf .icon { width: 18px; height: 18px; }
+
+.store-banner__copy {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
+  flex: 1;
+  color: #adb3b2;
+  font-size: 14px;
+  line-height: 21px;
+  white-space: pre-line;
 }
 
-.store-load-more {
-  justify-self: center;
-  margin-top: 8px;
-  padding-inline: 20px;
+.store-banner__lead { color: #e4e7e6; font-weight: 600; }
+
+.store-banner__action {
+  display: inline-flex;
+  height: clamp(34px, 4.297svh, 44px);
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 12px;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.03);
+  font-size: clamp(13px, 1.5625svh, 16px);
+  white-space: nowrap;
+  transition: background 160ms ease;
 }
 
-@keyframes store-progress {
-  from { background-position: -60% 0; }
-  to { background-position: 160% 0; }
+.store-banner__action:hover { background: rgba(255, 255, 255, 0.08); }
+.store-banner__action .icon { width: 17px; height: 17px; }
+
+/* ---------------------------------------------------------------------------
+   Status
+   --------------------------------------------------------------------------- */
+
+.store-status {
+  position: fixed;
+  z-index: 8;
+  bottom: 22px;
+  left: 50%;
+  display: flex;
+  max-width: min(520px, calc(100vw - 48px));
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  color: var(--ink);
+  background: rgba(14, 16, 20, 0.86);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  transform: translateX(-50%);
+  font-size: 13px;
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
 }
 
-@keyframes store-hero-arrive {
-  from { opacity: 0; transform: scale(1.045); }
-  to { opacity: 0.72; transform: scale(1.015); }
+.store-status[hidden] { display: none; }
+.store-status .icon { width: 16px; height: 16px; flex: none; }
+.store-status--error { border-color: rgba(231, 138, 138, 0.4); }
+.store-status--error .icon { color: #e78a8a; }
+
+.store-icon { display: inline-grid; place-items: center; }
+
+/* ---------------------------------------------------------------------------
+   Narrow windows. The design is authored at 1536×1024; below that the shelf
+   keeps its card size and scrolls, and the hero panel drops under the copy.
+   --------------------------------------------------------------------------- */
+
+@media (max-width: 1320px) {
+  .store-page { --pad: 32px; }
+  .store-highlights { width: 310px; padding: clamp(11px, 1.76svh, 18px) 18px; }
+  .store-highlight { gap: 16px; }
+  .store-hero__copy { max-width: 400px; }
 }
 
-@keyframes store-skeleton {
-  from { background-position: 120% 0; }
-  to { background-position: -120% 0; }
+/* Below this the two hero columns genuinely stop fitting side by side, so the
+   panel drops under the copy and the shelf keeps the room it has left. */
+@media (max-width: 940px) {
+  .store-page { --pad: 24px; }
+  .store-hero { flex-direction: column; gap: clamp(10px, 1.95svh, 20px); }
+  .store-highlights { width: 100%; max-width: 520px; margin-top: 0; }
+  .store-highlights__list { gap: clamp(7px, 1.17svh, 12px); }
+  .store-filters { flex-wrap: nowrap; }
+  .store-chipbar { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .store-chipbar::-webkit-scrollbar { display: none; }
 }
 
-@media (max-width: 1200px) {
-  .store-page {
-    padding-inline: 28px;
-  }
-
-  .store-hero {
-    min-height: 220px;
-    grid-template-columns: minmax(0, 1.25fr) minmax(232px, 0.72fr);
-    gap: 24px;
-    padding: 22px;
-  }
-
-  /* The rail is the one element allowed to scroll sideways. */
-  .store-card-rail {
-    grid-auto-columns: clamp(214px, 25vw, 248px);
-    grid-template-columns: none;
-    grid-auto-flow: column;
-    overflow-x: auto;
-    overflow-y: visible;
-    padding: 3px 3px 12px;
-    scroll-snap-type: x proximity;
-  }
-
-  .store-card {
-    scroll-snap-align: start;
-  }
-}
-
-@media (max-width: 820px) {
-  .store-page {
-    padding: 0 18px 32px;
-  }
-
-  .store-hero {
-    min-height: 380px;
-    grid-template-columns: 1fr;
-    align-content: end;
-    gap: 18px;
-    padding: 22px;
-  }
-
-  .store-hero__copy {
-    align-self: end;
-  }
-
-  .store-reasons {
-    width: min(100%, 480px);
-    padding: 16px;
-  }
-
-  .store-controls__secondary {
-    grid-template-columns: 1fr;
-  }
-
-  .store-provider-statuses {
-    justify-self: stretch;
-  }
-
-  .store-provider-statuses__summary {
-    width: 100%;
-  }
-
-  .store-provider-statuses__list {
-    right: auto;
-    left: 0;
-  }
-
-  .store-card-rail {
-    grid-auto-columns: min(76vw, 260px);
-  }
-}
-
-/* Short viewports (laptop 1040x700 and similar) trade hero drama for catalog:
-   the first card row has to start well before the fold. Everything dropped
-   here is still reachable — the hero blurb repeats the catalog heading, the
-   extra reasons and the card blurb live on the game page. */
-@media (max-height: 820px) {
-  .store-hero {
-    min-height: 128px;
-    gap: 20px;
-    padding: 14px 16px;
-  }
-
-  .store-hero__copy {
-    gap: 6px;
-  }
-
-  .store-hero__title {
-    font-size: clamp(22px, 2.2vw, 28px);
-  }
-
-  .store-hero__summary {
-    display: none;
-  }
-
-  .store-hero__action {
-    min-height: 32px;
-  }
-
-  .store-reasons {
-    gap: 5px;
-    padding: 12px 13px;
-  }
-
-  .store-reasons__title {
-    font-size: 15px;
-  }
-
-  .store-reasons__item:nth-child(n + 3),
-  .store-reasons__basis {
-    display: none;
-  }
-
-  .store-controls {
-    gap: 6px;
-    margin: 8px 0 10px;
-  }
-
-  .store-filter-pill,
-  .store-provider-pill,
-  .store-inline-search {
-    min-height: 32px;
-  }
-
-  .store-provider-statuses__summary {
-    min-height: 32px;
-    padding: 7px 13px;
-  }
-
-  .store-catalog {
-    gap: 8px;
-  }
-
-  .store-catalog__header {
-    min-height: 30px;
-  }
-
-  .store-refresh-button,
-  .store-load-more {
-    min-height: 32px;
-  }
-
-  .store-card__media,
-  .store-card__skeleton-media {
-    aspect-ratio: 4 / 3.6;
-  }
-
-  .store-card__description {
-    display: none;
-  }
-
-  .store-card__body {
-    gap: 5px;
-    padding: 10px 12px 12px;
-  }
+/* Very short windows cannot show a five-row card, so the least load-bearing
+   line goes first rather than the layout breaking. */
+@media (max-height: 700px) {
+  .store-card__tagline { display: none; }
+  .store-highlight__text { -webkit-line-clamp: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .store-page .store-hero__image,
-  .store-page .store-card__cover,
-  .store-page .store-card,
-  .store-page .store-filter-pill,
-  .store-page .store-provider-pill,
-  .store-page .store-hero__action,
-  .store-page .store-card__wishlist {
-    animation: none;
-    transition-duration: 0.01ms;
-  }
-
-  .store-page .store-card:hover,
-  .store-page .store-card:focus-within,
-  .store-page .store-filter-pill:hover,
-  .store-page .store-provider-pill:hover,
-  .store-page .store-hero__action:hover {
-    transform: none;
-  }
-}
-
-/* ---------------------------------------------------------------------------
-   Approved store design (assets/moc-images/orivo-store-clean.png):
-   title over artwork, session chips, sage "fit" dots, mindful reminder strip.
-   --------------------------------------------------------------------------- */
-
-.store-hero__tagline {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0 0;
-  color: #ccd3d1;
-  font-size: 13px;
-}
-.store-hero__leaf { color: var(--store-accent); }
-.store-hero__leaf .icon { width: 15px; height: 15px; }
-.store-hero__tagline-copy { font-weight: 500; }
-
-/* Card: artwork carries the title, body carries the facts. */
-.store-card__media { aspect-ratio: 4 / 4.6; }
-.store-card__title {
-  position: absolute;
-  z-index: 2;
-  right: 14px;
-  bottom: 12px;
-  left: 14px;
-  letter-spacing: 0.02em;
-  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.85);
-  white-space: normal;
-}
-.store-card__genres {
-  color: #b9bfbd;
-  font-size: 11.5px;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  text-transform: none;
-}
-.store-card__chips { display: flex; gap: 7px; }
-.store-card__chip {
-  padding: 4px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--store-r-xs);
-  color: #dde2e0;
-  background: rgba(255, 255, 255, 0.07);
-  font-size: 11.5px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.store-card__fit { display: grid; gap: 6px; margin-top: 2px; }
-.store-card__fit-row { display: flex; align-items: center; gap: 10px; }
-.store-card__fit-label {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  color: #a9b0ae;
-  font-size: 11.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.store-card__dots { display: flex; flex: none; gap: 4px; }
-.store-card__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.14);
-}
-.store-card__dot--on {
-  background: var(--store-accent);
-  box-shadow: 0 0 5px rgba(143, 202, 156, 0.4);
-}
-.store-card__description { color: #8d9391; }
-
-/* Reminder strip. */
-.store-banner {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 16px;
-  padding: 14px 18px;
-  border: 1px solid var(--store-line);
-  border-radius: var(--store-r-md);
-  background: rgba(255, 255, 255, 0.035);
-  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
-  backdrop-filter: blur(20px) saturate(120%);
-}
-.store-banner__leaf { flex: none; color: var(--store-accent); }
-.store-banner__leaf .icon { width: 22px; height: 22px; }
-.store-banner__copy { flex: 1; margin: 0; color: #adb3b2; font-size: 13px; line-height: 1.5; }
-.store-banner__lead { color: #e4e7e6; font-weight: 620; }
-.store-banner__action {
-  display: inline-flex;
-  min-height: 40px;
-  flex: none;
-  align-items: center;
-  gap: 9px;
-  padding: 0 17px;
-  border: 1px solid var(--store-line-bright, rgba(255, 255, 255, 0.14));
-  border-radius: var(--store-r-sm);
-  color: #e9ecec;
-  background: rgba(255, 255, 255, 0.06);
-  font-size: 12.5px;
-  font-weight: 500;
-  transition: background 160ms ease;
-}
-.store-banner__action:hover { background: rgba(255, 255, 255, 0.12); }
-.store-banner__action:focus-visible { outline: 2px solid var(--store-accent); outline-offset: 3px; }
-
-@media (max-height: 820px) {
-  .store-card__media { aspect-ratio: 4 / 4; }
-  .store-card__fit-row:nth-child(3) { display: none; }
-  .store-hero__tagline { display: none; }
-  .store-banner { padding: 11px 15px; }
-}
-@media (max-width: 820px) {
-  .store-banner { flex-wrap: wrap; }
+  .store-backdrop__layer,
+  .store-card__art { transition: none; }
+  .store-rail__track { scroll-behavior: auto; }
+  .store-why { animation: none; }
 }

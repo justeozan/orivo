@@ -4484,6 +4484,25 @@ fn library_state(app: &AppHandle, stored_catalog: &Catalog) -> LibraryState {
     }
 }
 
+/// The library, reduced to what the store needs in order never to sell a game
+/// twice. It is derived from exactly the rows `get_library` returns — the same
+/// catalog handle, read through the same projection — so the store and the
+/// library can never disagree about what is owned.
+fn owned_library_games(app: &AppHandle, state: &AppState) -> Result<Vec<store::OwnedGame>, String> {
+    let catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    Ok(library_state(app, &catalog)
+        .games
+        .into_iter()
+        .map(|game| store::OwnedGame {
+            id: game.id,
+            title: game.title,
+        })
+        .collect())
+}
+
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {
     // Wallpapers the user deliberately chose on the detail page. Each role is
     // independent: the background never overrides a card cover and vice versa.

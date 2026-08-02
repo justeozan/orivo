@@ -87,7 +87,7 @@ describe("createInitialStoreState", () => {
 
     expect(state.phase).toBe("loading");
     expect(state.category).toBe("for-you");
-    expect(state.providers).toEqual([]);
+    expect(state.platforms).toEqual([]);
     expect(state.query).toBe("");
     expect(state.browseGames).toBeNull();
     expect(state.nextCursor).toBeNull();
@@ -129,14 +129,14 @@ describe("reduceStorePageState", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready", browseGames: [game()] }), {
       type: "activate",
       category: "relaxing",
-      providers: ["steam"],
+      platforms: [],
       query: "unrailed",
       online: true,
     });
 
     expect(next.phase).toBe("ready");
     expect(next.category).toBe("relaxing");
-    expect(next.providers).toEqual(["steam"]);
+    expect(next.platforms).toEqual(["steam"]);
     expect(next.query).toBe("unrailed");
     expect(next.browseGames).toBeNull();
     expect(next.errorMessage).toBe("");
@@ -146,7 +146,7 @@ describe("reduceStorePageState", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready" }), {
       type: "activate",
       category: "for-you",
-      providers: [],
+      platforms: [],
       query: "",
       online: false,
     });
@@ -302,10 +302,10 @@ describe("reduceStorePageState", () => {
     expect(byCategory.nextCursor).toBeNull();
 
     const byProvider = reduceStorePageState(browsing, {
-      type: "providers-changed",
-      providers: ["steam", "apple"],
+      type: "platforms-changed",
+      platforms: [],
     });
-    expect(byProvider.providers).toEqual(["steam", "apple"]);
+    expect(byProvider.platforms).toEqual(["steam", "apple"]);
     expect(byProvider.browseGames).toBeNull();
 
     const byQuery = reduceStorePageState(browsing, { type: "query-changed", query: "hades" });
@@ -384,7 +384,7 @@ describe("selectStoreGames", () => {
   });
 
   it("combines the category filter with the provider filter", () => {
-    const state = stateWith({ home, category: "short-sessions", providers: ["steam"] });
+    const state = stateWith({ home, category: "short-sessions", platforms: [] });
 
     expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["short-steam"]);
   });
@@ -414,7 +414,7 @@ describe("selectStoreGames", () => {
   });
 
   it("returns an empty list rather than inventing results", () => {
-    expect(selectStoreGames(stateWith({ home, providers: ["google-play"] }))).toEqual([]);
+    expect(selectStoreGames(stateWith({ home, platforms: [] }))).toEqual([]);
   });
 });
 

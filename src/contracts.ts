@@ -3,15 +3,31 @@ export type GameId = string;
 export type GameSource = "steam" | "wine" | "local" | "showcase" | "store";
 export type StoreProvider =
   | "steam"
+  | "instant-gaming"
+  | "epic"
+  | "gog"
+  | "humble"
+  | "fanatical"
+  | "green-man-gaming"
   | "ubisoft"
   | "microsoft"
+  | "playstation"
+  | "nintendo"
   | "apple"
-  | "google-play"
-  | "instant-gaming";
+  | "google-play";
+
+/**
+ * What the shopper filters on. A provider is a shop; a platform is the machine
+ * the game runs on. One platform is served by several providers, so the two
+ * stay separate: the filter bar speaks platforms, the price logic speaks
+ * providers.
+ */
+export type StorePlatform = "pc" | "playstation" | "xbox" | "switch" | "emulators";
 
 export type ProviderHealth = "available" | "degraded" | "unavailable" | "not-configured";
 export type StoreCategory =
   | "for-you"
+  | "good-for-brain"
   | "short-sessions"
   | "strong-stories"
   | "relaxing"
@@ -93,6 +109,37 @@ export interface ProviderStatus {
   refreshedAt: string | null;
 }
 
+/** One "fit" read-out row on a Store card: a French label and a 1-5 strength. */
+export interface StoreFitStat {
+  label: string;
+  value: number;
+}
+
+/** One row of the hero's right-hand panel. */
+export interface StoreHighlight {
+  icon: string;
+  title: string;
+  text: string;
+}
+
+/**
+ * Editorial copy Orivo writes about a game, keyed by game id and merged onto
+ * whatever the catalog returns. It is presentation only: it never influences
+ * ranking, and a game without an entry still renders from its own facts.
+ */
+export interface StoreCuration {
+  genres: string[];
+  duration: string;
+  mode: string;
+  stats: StoreFitStat[];
+  tagline: string;
+  heroTitle: string;
+  heroLead: string;
+  highlights: StoreHighlight[];
+  categories: StoreCategory[];
+  platforms: StorePlatform[];
+}
+
 export interface GameSummary {
   id: GameId;
   title: string;
@@ -111,6 +158,8 @@ export interface GameSummary {
   lastPlayedAt: string | null;
   recommendationReasons: string[];
   offers: StoreOffer[];
+  /** Present only for Store games Orivo has written editorial copy for. */
+  curation?: StoreCuration;
 }
 
 export interface GameDetailView extends GameSummary {
@@ -139,7 +188,7 @@ export type AppRoute =
   | {
       page: "store";
       category: StoreCategory;
-      providers: StoreProvider[];
+      platforms: StorePlatform[];
       query: string;
     }
   | { page: "game"; gameId: GameId; from: "library" | "store" | null }

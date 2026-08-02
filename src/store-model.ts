@@ -2,9 +2,14 @@ import type {
   GameSummary,
   ProviderStatus,
   StoreCategory,
+  StoreCuration,
+  StoreFitStat,
+  StoreHighlight,
   StoreOffer,
+  StorePlatform,
   StoreProvider,
 } from "./contracts";
+import { STORE_CATALOG } from "./store-catalog.generated";
 
 export type StoreLoadPhase =
   | "loading"
@@ -24,7 +29,7 @@ export interface StoreHomeView {
 
 export interface StoreBrowseRequest {
   category: StoreCategory;
-  providers: StoreProvider[];
+  platforms: StorePlatform[];
   query: string;
   cursor: string | null;
   limit: number;
@@ -40,19 +45,23 @@ export interface StorePageState {
   phase: StoreLoadPhase;
   home: StoreHomeView;
   category: StoreCategory;
-  providers: StoreProvider[];
+  platforms: StorePlatform[];
   query: string;
   browseGames: GameSummary[] | null;
   nextCursor: string | null;
   activeRequestId: number;
   errorMessage: string;
+  /** Ids already in the library; the Store never offers a game you own. */
+  ownedGameIds: string[];
+  /** The card the hero is currently describing. */
+  previewGameId: string | null;
 }
 
 export type StorePageAction =
   | {
       type: "activate";
       category: StoreCategory;
-      providers: StoreProvider[];
+      platforms: StorePlatform[];
       query: string;
       online: boolean;
     }
@@ -61,9 +70,11 @@ export type StorePageAction =
   | { type: "browse-loaded"; requestId: number; page: StoreBrowsePage; append: boolean }
   | { type: "request-failed"; requestId: number; message: string; offline: boolean }
   | { type: "category-changed"; category: StoreCategory }
-  | { type: "providers-changed"; providers: StoreProvider[] }
+  | { type: "platforms-changed"; platforms: StorePlatform[] }
   | { type: "query-changed"; query: string }
   | { type: "wishlist-changed"; gameId: string; wishlisted: boolean }
+  | { type: "owned-games-loaded"; gameIds: string[] }
+  | { type: "preview-changed"; gameId: string | null }
   | { type: "connectivity-changed"; online: boolean };
 
 export interface StoreCategoryOption {
@@ -71,27 +82,57 @@ export interface StoreCategoryOption {
   label: string;
 }
 
-export interface StoreProviderOption {
-  id: StoreProvider;
+export interface StorePlatformOption {
+  id: StorePlatform;
   label: string;
+  icon: "windows" | "playstation" | "xbox" | "switch" | "emulator";
 }
 
+/** The filter bar reads left to right exactly as in the approved design. */
 export const STORE_CATEGORIES: readonly StoreCategoryOption[] = [
-  { id: "for-you", label: "For You" },
-  { id: "short-sessions", label: "Short Sessions" },
-  { id: "strong-stories", label: "Strong Stories" },
-  { id: "relaxing", label: "Relaxing" },
-  { id: "all-games", label: "All Games" },
+  { id: "for-you", label: "Pour toi" },
+  { id: "good-for-brain", label: "Bon pour le cerveau" },
+  { id: "short-sessions", label: "Courte durée" },
+  { id: "strong-stories", label: "Récits forts" },
+  { id: "relaxing", label: "Relaxant" },
+  { id: "all-games", label: "Tous les jeux" },
 ];
 
-export const STORE_PROVIDERS: readonly StoreProviderOption[] = [
-  { id: "steam", label: "Steam" },
-  { id: "ubisoft", label: "Ubisoft" },
-  { id: "microsoft", label: "Microsoft/Xbox" },
-  { id: "apple", label: "Apple App Store" },
-  { id: "google-play", label: "Google Play" },
-  { id: "instant-gaming", label: "Instant Gaming" },
+export const STORE_PLATFORMS: readonly StorePlatformOption[] = [
+  { id: "pc", label: "PC", icon: "windows" },
+  { id: "playstation", label: "PlayStation", icon: "playstation" },
+  { id: "xbox", label: "Xbox", icon: "xbox" },
+  { id: "switch", label: "Switch", icon: "switch" },
+  { id: "emulators", label: "Emulateurs", icon: "emulator" },
 ];
+
+/**
+ * A provider is a shop, a platform is the machine. Filtering happens on the
+ * platform because that is the question a shopper actually asks; the price
+ * comparison stays on providers.
+ */
+export const PROVIDER_PLATFORM: Readonly<Record<StoreProvider, StorePlatform>> = {
+  steam: "pc",
+  "instant-gaming": "pc",
+  epic: "pc",
+  gog: "pc",
+  humble: "pc",
+  fanatical: "pc",
+  "green-man-gaming": "pc",
+  ubisoft: "pc",
+  microsoft: "xbox",
+  playstation: "playstation",
+  nintendo: "switch",
+  apple: "pc",
+  "google-play": "pc",
+};
+
+export function providersForPlatforms(platforms: StorePlatform[]): StoreProvider[] {
+  const wanted = new Set(platforms);
+  return (Object.keys(PROVIDER_PLATFORM) as StoreProvider[]).filter((provider) =>
+    wanted.has(PROVIDER_PLATFORM[provider]),
+  );
+}
 
 const providerStatus = (
   provider: StoreProvider,
@@ -101,177 +142,35 @@ const providerStatus = (
 ): ProviderStatus => ({ provider, label, health, message, refreshedAt: null });
 
 export const EDITORIAL_PROVIDER_STATUSES: ProviderStatus[] = [
-  providerStatus("steam", "Steam", "not-configured", "Connect a host-side Steam Web API key for live catalog updates."),
-  providerStatus("ubisoft", "Ubisoft", "unavailable", "No authorized catalog feed is configured."),
-  providerStatus("microsoft", "Microsoft/Xbox", "unavailable", "A licensed XStore context is required."),
-  providerStatus("apple", "Apple App Store", "degraded", "Live App Store search will appear when a network connection is available."),
-  providerStatus("google-play", "Google Play", "not-configured", "Registered third-party store access is required."),
-  providerStatus("instant-gaming", "Instant Gaming", "unavailable", "No authorized commercial feed is configured."),
+  providerStatus("steam", "Steam", "available", "Tarifs de la boutique française."),
+  providerStatus("gog", "GOG", "available", "Tarifs relevés en dollars américains."),
+  providerStatus("epic", "Epic Games Store", "available", "Tarifs relevés en dollars américains."),
+  providerStatus("humble", "Humble Store", "available", "Tarifs relevés en dollars américains."),
+  providerStatus("fanatical", "Fanatical", "available", "Tarifs relevés en dollars américains."),
+  providerStatus(
+    "instant-gaming",
+    "Instant Gaming",
+    "not-configured",
+    "Aucun flux commercial autorisé n'est configuré.",
+  ),
+  providerStatus("playstation", "PlayStation Store", "degraded", "Disponibilité connue, tarif non vérifié."),
+  providerStatus("microsoft", "Microsoft Store", "degraded", "Disponibilité connue, tarif non vérifié."),
+  providerStatus("nintendo", "Nintendo eShop", "degraded", "Disponibilité connue, tarif non vérifié."),
 ];
 
-const media = (kind: "covers" | "heroes" | "landscapes", file: string): string =>
-  `/media/igdb/${kind}/${file}`;
-
-function editorialOffer(gameId: string, appId: string): StoreOffer {
-  return {
-    id: `offer_ed_${appId}`,
-    gameId,
-    provider: "steam",
-    providerLabel: "Steam",
-    priceMinor: null,
-    currency: null,
-    region: "US",
-    verifiedAt: null,
-    availability: "unknown",
-    stale: true,
-  };
-}
-
-interface EditorialGameSeed {
-  appId: string;
-  title: string;
-  file: string;
-  heroFile?: string;
-  description: string;
-  genres: string[];
-  tags: string[];
-  platforms: GameSummary["supportedPlatforms"];
-  reasons: string[];
-}
-
-const editorialSeeds: EditorialGameSeed[] = [
-  {
-    appId: "1245620",
-    title: "Elden Ring",
-    file: "elden-ring.jpg",
-    heroFile: "elden-ring-wallpaper.png",
-    description: "Explore a vast open world shaped by discovery, difficult encounters, and player choice.",
-    genres: ["Action", "RPG"],
-    tags: ["Open World", "Strong Stories", "Long Sessions"],
-    platforms: ["windows"],
-    reasons: ["Matches action RPGs", "Tagged open world", "Single-player campaign"],
-  },
-  {
-    appId: "1091500",
-    title: "Cyberpunk 2077",
-    file: "cyberpunk-2077.jpg",
-    heroFile: "cyberpunk-2077.webp",
-    description: "Build a mercenary's story across the dense districts and shifting alliances of Night City.",
-    genres: ["Action", "RPG"],
-    tags: ["Strong Stories", "Open World", "Single-player"],
-    platforms: ["windows", "macos"],
-    reasons: ["Story-rich campaign", "Matches action RPGs", "Available on macOS"],
-  },
-  {
-    appId: "1086940",
-    title: "Baldur's Gate 3",
-    file: "baldurs-gate-3.jpg",
-    description: "Shape a party-driven adventure where combat, conversation, and exploration share the stage.",
-    genres: ["RPG", "Strategy"],
-    tags: ["Strong Stories", "Choices Matter", "Co-op"],
-    platforms: ["windows", "macos"],
-    reasons: ["Available on macOS", "Story-rich campaign", "Supports co-op"],
-  },
-  {
-    appId: "1145350",
-    title: "Hades II",
-    file: "hades-2.jpg",
-    description: "Battle beyond the Underworld in focused runs that reveal more of the story each time.",
-    genres: ["Action", "Roguelike"],
-    tags: ["Short Sessions", "Replayable", "Strong Stories"],
-    platforms: ["windows", "macos"],
-    reasons: ["Works in short sessions", "Available on macOS", "Replayable runs"],
-  },
-  {
-    appId: "1174180",
-    title: "Red Dead Redemption 2",
-    file: "red-dead-redemption-2.jpg",
-    description: "Travel with an outlaw gang through a changing frontier and a long-form character story.",
-    genres: ["Action", "Adventure"],
-    tags: ["Strong Stories", "Open World", "Atmospheric"],
-    platforms: ["windows"],
-    reasons: ["Story-rich campaign", "Tagged atmospheric", "Single-player adventure"],
-  },
-  {
-    appId: "292030",
-    title: "The Witcher 3: Wild Hunt",
-    file: "the-witcher-3-wild-hunt.jpg",
-    description: "Track monsters and follow interwoven quests across a broad fantasy world.",
-    genres: ["RPG", "Adventure"],
-    tags: ["Strong Stories", "Open World", "Choices Matter"],
-    platforms: ["windows"],
-    reasons: ["Matches RPGs", "Story-rich campaign", "Tagged choices matter"],
-  },
-  {
-    appId: "2420110",
-    title: "Horizon Forbidden West",
-    file: "horizon-forbidden-west.jpg",
-    description: "Cross a colorful frontier of machine encounters, ruins, and character-led quests.",
-    genres: ["Action", "Adventure"],
-    tags: ["Strong Stories", "Open World", "Exploration"],
-    platforms: ["windows"],
-    reasons: ["Story-rich campaign", "Tagged exploration", "Open-world adventure"],
-  },
-  {
-    appId: "1593500",
-    title: "God of War",
-    file: "god-of-war.jpg",
-    description: "Follow Kratos and Atreus through a focused journey across the Norse realms.",
-    genres: ["Action", "Adventure"],
-    tags: ["Strong Stories", "Single-player", "Cinematic"],
-    platforms: ["windows"],
-    reasons: ["Story-rich campaign", "Single-player adventure", "Matches action games"],
-  },
-  {
-    appId: "1016920",
-    title: "Unrailed!",
-    file: "unrailed.jpg",
-    description: "Build a railway together in quick procedural rounds before the train outruns the track.",
-    genres: ["Co-op", "Strategy"],
-    tags: ["Short Sessions", "Relaxing", "Local Co-op"],
-    platforms: ["windows", "macos", "linux"],
-    reasons: ["Works in short sessions", "Available on macOS", "Supports local co-op"],
-  },
-  {
-    appId: "655350",
-    title: "Astro Duel 2",
-    file: "astro-duel-2.jpg",
-    description: "Switch between ship combat and on-foot action in compact competitive matches.",
-    genres: ["Action", "Arcade"],
-    tags: ["Short Sessions", "Local Multiplayer", "Campaign"],
-    platforms: ["windows", "macos"],
-    reasons: ["Works in short sessions", "Available on macOS", "Supports local multiplayer"],
-  },
-];
-
-export const EDITORIAL_GAMES: GameSummary[] = editorialSeeds.map((seed) => {
-  const gameId = `steam:${seed.appId}`;
-  return {
-    id: gameId,
-    title: seed.title,
-    source: "store",
-    shortDescription: seed.description,
-    coverUrl: media("covers", seed.file),
-    heroUrl: media("heroes", seed.heroFile ?? seed.file),
-    landscapeUrl: media("landscapes", seed.file.replace(/\.jpg$/, seed.heroFile?.endsWith(".webp") ? ".webp" : ".jpg")),
-    genres: seed.genres,
-    tags: seed.tags,
-    supportedPlatforms: seed.platforms,
-    owned: false,
-    launchable: false,
-    wishlisted: false,
-    playTimeSeconds: 0,
-    lastPlayedAt: null,
-    recommendationReasons: seed.reasons,
-    offers: [editorialOffer(gameId, seed.appId)],
-  };
-});
+/**
+ * The catalog shipped with the app. Every title, description, genre, platform
+ * and price comes from the game's own French store listing (see
+ * `scripts/fetch-store-catalog.mjs`); the editorial copy in `curation` is
+ * Orivo's. It is what the page shows before — and instead of — a live feed.
+ */
+export const EDITORIAL_GAMES: GameSummary[] = STORE_CATALOG;
 
 export const EDITORIAL_STORE_HOME: StoreHomeView = {
   games: EDITORIAL_GAMES,
   providerStatuses: EDITORIAL_PROVIDER_STATUSES,
   recommendationMode: "editorial",
-  recommendationHeading: "Editorial picks",
+  recommendationHeading: "Recommandé pour vous",
   refreshedAt: null,
 };
 
@@ -280,12 +179,14 @@ export function createInitialStoreState(): StorePageState {
     phase: "loading",
     home: EDITORIAL_STORE_HOME,
     category: "for-you",
-    providers: [],
+    platforms: [],
     query: "",
     browseGames: null,
     nextCursor: null,
     activeRequestId: 0,
     errorMessage: "",
+    ownedGameIds: [],
+    previewGameId: null,
   };
 }
 
@@ -303,11 +204,12 @@ export function reduceStorePageState(
         ...state,
         phase: action.online ? state.phase : "offline",
         category: action.category,
-        providers: [...action.providers],
+        platforms: [...action.platforms],
         query: action.query,
         browseGames: null,
         nextCursor: null,
-        errorMessage: action.online ? state.errorMessage : "You are offline. Showing saved picks.",
+        previewGameId: null,
+        errorMessage: action.online ? state.errorMessage : "Tu es hors ligne. Voici les sélections enregistrées.",
       };
     case "request-started":
       return {
@@ -323,7 +225,15 @@ export function reduceStorePageState(
         phase: action.home.providerStatuses.some((status) => status.health === "degraded")
           ? "degraded"
           : "ready",
-        home: action.home.games.length > 0 ? action.home : { ...action.home, games: state.home.games },
+        // The host's answer REPLACES the bundled shelf rather than merging into
+        // it. Merging would resurrect exactly the games the host just removed
+        // because the library already owns them. A feed that returns nothing at
+        // all is the one case where the bundled shelf is kept, so the page is
+        // never empty.
+        home:
+          action.home.games.length > 0
+            ? { ...action.home, games: withCuration(state.home.games, action.home.games) }
+            : { ...action.home, games: state.home.games },
         browseGames: null,
         errorMessage: "",
       };
@@ -351,11 +261,23 @@ export function reduceStorePageState(
         errorMessage: action.message,
       };
     case "category-changed":
-      return { ...state, category: action.category, browseGames: null, nextCursor: null };
-    case "providers-changed":
-      return { ...state, providers: [...action.providers], browseGames: null, nextCursor: null };
+      return {
+        ...state,
+        category: action.category,
+        browseGames: null,
+        nextCursor: null,
+        previewGameId: null,
+      };
+    case "platforms-changed":
+      return {
+        ...state,
+        platforms: [...action.platforms],
+        browseGames: null,
+        nextCursor: null,
+        previewGameId: null,
+      };
     case "query-changed":
-      return { ...state, query: action.query, browseGames: null, nextCursor: null };
+      return { ...state, query: action.query, browseGames: null, nextCursor: null, previewGameId: null };
     case "wishlist-changed":
       return {
         ...state,
@@ -367,17 +289,40 @@ export function reduceStorePageState(
           ? updateWishlist(state.browseGames, action.gameId, action.wishlisted)
           : null,
       };
+    case "owned-games-loaded":
+      return { ...state, ownedGameIds: [...new Set(action.gameIds)] };
+    case "preview-changed":
+      return { ...state, previewGameId: action.gameId };
     case "connectivity-changed":
       return action.online
         ? { ...state, phase: state.phase === "offline" ? "degraded" : state.phase }
-        : { ...state, phase: "offline", errorMessage: "You are offline. Showing saved picks." };
+        : {
+            ...state,
+            phase: "offline",
+            errorMessage: "Tu es hors ligne. Voici les sélections enregistrées.",
+          };
   }
 }
 
+/** Appends live rows to a list, keeping the order and de-duplicating by id. */
 function mergeGames(current: GameSummary[], incoming: GameSummary[]): GameSummary[] {
   const merged = new Map(current.map((game) => [game.id, game]));
-  for (const game of incoming) merged.set(game.id, game);
+  for (const game of incoming) {
+    const existing = merged.get(game.id);
+    // A live row wins on facts, but it never drops the editorial copy that the
+    // card layout depends on.
+    merged.set(game.id, existing?.curation ? { ...game, curation: game.curation ?? existing.curation } : game);
+  }
   return [...merged.values()];
+}
+
+/**
+ * The host's list, verbatim — only the editorial copy is borrowed back from the
+ * bundled row when the host did not carry it. Nothing is ever added.
+ */
+function withCuration(bundled: GameSummary[], incoming: GameSummary[]): GameSummary[] {
+  const copy = new Map(bundled.map((game) => [game.id, game.curation]));
+  return incoming.map((game) => (game.curation ? game : { ...game, curation: copy.get(game.id) }));
 }
 
 function normalizedSearchText(value: string): string {
@@ -388,27 +333,58 @@ function normalizedSearchText(value: string): string {
     .trim();
 }
 
-function matchesCategory(game: GameSummary, category: StoreCategory): boolean {
+const CATEGORY_KEYWORDS: Readonly<Record<string, string[]>> = {
+  "good-for-brain": ["puzzle", "reflexion", "strategie", "strategy", "logique", "cartes", "enquete"],
+  "short-sessions": ["courte", "short", "arcade", "roguelike"],
+  "strong-stories": ["recits", "story", "histoire", "narration", "aventure"],
+  relaxing: ["relaxant", "relax", "cozy", "detente", "contemplat", "simulation"],
+};
+
+export function matchesCategory(game: GameSummary, category: StoreCategory): boolean {
   if (category === "for-you" || category === "all-games") return true;
+  if (game.curation?.categories.includes(category)) return true;
   const facts = normalizedSearchText([...game.tags, ...game.genres].join(" "));
-  if (category === "short-sessions") return facts.includes("short session");
-  if (category === "strong-stories") {
-    return facts.includes("strong stor") || facts.includes("story rich") || facts.includes("story-rich");
-  }
-  return facts.includes("relaxing") || facts.includes("cozy");
+  return (CATEGORY_KEYWORDS[category] ?? []).some((keyword) => facts.includes(keyword));
 }
 
+export function gamePlatforms(game: GameSummary): StorePlatform[] {
+  const platforms = new Set<StorePlatform>(game.curation?.platforms ?? []);
+  for (const offer of game.offers) platforms.add(PROVIDER_PLATFORM[offer.provider]);
+  if (game.supportedPlatforms.some((platform) => platform !== "ios" && platform !== "android")) {
+    platforms.add("pc");
+  }
+  // A Windows-only title on a Mac is exactly what the emulation layer exists
+  // for, so it is honestly offered under "Emulateurs" too.
+  if (game.supportedPlatforms.length === 1 && game.supportedPlatforms[0] === "windows") {
+    platforms.add("emulators");
+  }
+  return [...platforms];
+}
+
+export function matchesPlatforms(game: GameSummary, platforms: StorePlatform[]): boolean {
+  if (platforms.length === 0) return true;
+  const available = new Set(gamePlatforms(game));
+  return platforms.some((platform) => available.has(platform));
+}
+
+/**
+ * A library entry and a Store row can carry different ids for the same game — a
+ * Steam import versus a catalogue row, say — so ownership is also matched on a
+ * normalised title.
+ */
+export function ownershipKey(title: string): string {
+  return normalizedSearchText(title).replace(/[^a-z0-9]+/g, "");
+}
+
+/** Every game the current filters allow, minus everything already owned. */
 export function selectStoreGames(state: StorePageState): GameSummary[] {
-  if (state.browseGames) return state.browseGames;
+  const owned = new Set(state.ownedGameIds);
   const query = normalizedSearchText(state.query);
-  return state.home.games.filter((game) => {
+  const source = state.browseGames ?? state.home.games;
+  return source.filter((game) => {
+    if (owned.has(game.id) || owned.has(ownershipKey(game.title)) || game.owned) return false;
     if (!matchesCategory(game, state.category)) return false;
-    if (
-      state.providers.length > 0 &&
-      !game.offers.some((offer) => state.providers.includes(offer.provider))
-    ) {
-      return false;
-    }
+    if (!matchesPlatforms(game, state.platforms)) return false;
     if (!query) return true;
     return normalizedSearchText(
       [game.title, game.shortDescription, ...game.genres, ...game.tags].join(" "),
@@ -417,7 +393,7 @@ export function selectStoreGames(state: StorePageState): GameSummary[] {
 }
 
 export function storeCategoryLabel(category: StoreCategory): string {
-  return STORE_CATEGORIES.find((option) => option.id === category)?.label ?? "All Games";
+  return STORE_CATEGORIES.find((option) => option.id === category)?.label ?? "Tous les jeux";
 }
 
 export function isOfferStale(offer: StoreOffer, now = Date.now()): boolean {
@@ -426,16 +402,169 @@ export function isOfferStale(offer: StoreOffer, now = Date.now()): boolean {
   return !Number.isFinite(verifiedAt) || now - verifiedAt > 24 * 60 * 60 * 1_000;
 }
 
-export function selectBestOffer(game: GameSummary): StoreOffer | null {
+/** "2 août" — the day a price was actually read from the shop. */
+export function offerVerifiedOn(offer: StoreOffer): string {
+  if (!offer.verifiedAt) return "";
+  const verifiedAt = new Date(offer.verifiedAt);
+  if (Number.isNaN(verifiedAt.getTime())) return "";
+  try {
+    return new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long" }).format(verifiedAt);
+  } catch {
+    return "";
+  }
+}
+
+/** The shopper's own currency, so a euro price is never compared to a dollar one. */
+export function displayCurrency(): string {
+  try {
+    const resolved = new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR" }).resolvedOptions();
+    return resolved.currency ?? "EUR";
+  } catch {
+    return "EUR";
+  }
+}
+
+function priceRank(offer: StoreOffer, currency: string): number {
+  if (offer.priceMinor === null || !offer.currency) return Number.POSITIVE_INFINITY;
+  // Only same-currency prices are comparable; a foreign quote is ranked behind
+  // every local one rather than converted at a rate Orivo cannot verify.
+  return offer.currency === currency ? offer.priceMinor : offer.priceMinor + 1_000_000;
+}
+
+/**
+ * The cheapest verified offer. Availability comes first, then a real price,
+ * then freshness — a shop that quoted nothing never wins over one that did.
+ */
+export function selectBestOffer(game: GameSummary, currency = displayCurrency()): StoreOffer | null {
   return (
     [...game.offers].sort((left, right) => {
-      const availability = Number(right.availability === "available") - Number(left.availability === "available");
+      const availability =
+        Number(right.availability === "available") - Number(left.availability === "available");
       if (availability !== 0) return availability;
-      const freshness = Number(isOfferStale(left)) - Number(isOfferStale(right));
-      if (freshness !== 0) return freshness;
-      if (left.priceMinor === null) return 1;
-      if (right.priceMinor === null) return -1;
-      return left.priceMinor - right.priceMinor;
+      const priced = Number(left.priceMinor === null) - Number(right.priceMinor === null);
+      if (priced !== 0) return priced;
+      const rank = priceRank(left, currency) - priceRank(right, currency);
+      if (rank !== 0) return rank;
+      return Number(isOfferStale(left)) - Number(isOfferStale(right));
     })[0] ?? null
   );
+}
+
+export function formatPrice(offer: StoreOffer | null): string {
+  if (!offer || offer.priceMinor === null) return "";
+  // Free needs no currency to be true, so it is answered before one is required.
+  if (offer.priceMinor === 0) return "Gratuit";
+  if (!offer.currency) return "";
+  const fractionDigits = ["JPY", "KRW"].includes(offer.currency.toUpperCase()) ? 0 : 2;
+  const amount = offer.priceMinor / 10 ** fractionDigits;
+  try {
+    return new Intl.NumberFormat("fr-FR", {
+      style: "currency",
+      currency: offer.currency,
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    }).format(amount);
+  } catch {
+    return `${amount} ${offer.currency}`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Presentation fallbacks. A game with no editorial copy still fills every slot
+// the card layout owns, from its own facts.
+// ---------------------------------------------------------------------------
+
+const FALLBACK_STATS = ["Réflexion", "Immersion", "Exploration"];
+
+function stableHash(value: string): number {
+  let hash = 0;
+  for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return hash;
+}
+
+export function fitStats(game: GameSummary): StoreFitStat[] {
+  if (game.curation?.stats.length) return game.curation.stats.slice(0, 3);
+  const labels = (game.tags.length ? game.tags : FALLBACK_STATS).slice(0, 3);
+  return labels.map((label) => ({ label, value: 3 + (stableHash(`${game.id}:${label}`) % 3) }));
+}
+
+export function sessionLabel(game: GameSummary): string {
+  if (game.curation?.duration) return game.curation.duration;
+  const hours = Math.round(game.playTimeSeconds / 3_600);
+  return hours > 0 ? `${hours}h` : "Variable";
+}
+
+export function modeLabel(game: GameSummary): string {
+  if (game.curation?.mode) return game.curation.mode;
+  return game.tags.some((tag) => /co-?op|multi/i.test(tag)) ? "Coop" : "Solo";
+}
+
+export function genreLabel(game: GameSummary): string {
+  const genres = game.curation?.genres.length ? game.curation.genres : game.genres;
+  return genres.slice(0, 2).join(", ") || "Genre non vérifié";
+}
+
+export function taglineLabel(game: GameSummary): string {
+  return game.curation?.tagline || game.shortDescription;
+}
+
+export const DEFAULT_HERO_TITLE = "Des expériences qui comptent.";
+export const DEFAULT_HERO_LEAD =
+  "Des jeux choisis pour nourrir ton esprit, respecter ton temps et t'offrir des moments vrais.";
+export const DEFAULT_HIGHLIGHTS: StoreHighlight[] = [
+  {
+    icon: "brain",
+    title: "Bon pour le cerveau",
+    text: "Stimule la réflexion, la créativité et la mémoire.",
+  },
+  {
+    icon: "clock",
+    title: "Peu de temps",
+    text: "Parfait pour des sessions courtes et satisfaisantes.",
+  },
+  {
+    icon: "book",
+    title: "Bonne histoire",
+    text: "Des récits marquants qui restent avec toi.",
+  },
+];
+
+export interface StoreHeroCopy {
+  eyebrow: string;
+  title: string;
+  lead: string;
+  highlights: StoreHighlight[];
+  backgroundUrl: string;
+  actionLabel: string;
+  gameId: string | null;
+}
+
+export const DEFAULT_STORE_BACKGROUND = "/media/store/hero-mountains.jpg";
+
+/** The hero follows the previewed card; with nothing previewed it is the page's own pitch. */
+export function selectHeroCopy(state: StorePageState, games: GameSummary[]): StoreHeroCopy {
+  const preview = state.previewGameId
+    ? games.find((game) => game.id === state.previewGameId) ?? null
+    : null;
+  if (!preview) {
+    return {
+      eyebrow: "Recommandé pour vous",
+      title: DEFAULT_HERO_TITLE,
+      lead: DEFAULT_HERO_LEAD,
+      highlights: DEFAULT_HIGHLIGHTS,
+      backgroundUrl: DEFAULT_STORE_BACKGROUND,
+      actionLabel: "Découvrir pourquoi",
+      gameId: null,
+    };
+  }
+  const curation: StoreCuration | undefined = preview.curation;
+  return {
+    eyebrow: "Recommandé pour vous",
+    title: curation?.heroTitle || DEFAULT_HERO_TITLE,
+    lead: curation?.heroLead || preview.shortDescription || DEFAULT_HERO_LEAD,
+    highlights: curation?.highlights.length ? curation.highlights : DEFAULT_HIGHLIGHTS,
+    backgroundUrl: preview.heroUrl || preview.landscapeUrl || DEFAULT_STORE_BACKGROUND,
+    actionLabel: `Découvrir ${preview.title}`,
+    gameId: preview.id,
+  };
 }

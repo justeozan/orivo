@@ -33,7 +33,25 @@ export type IconName =
   | "windows"
   | "more"
   | "check"
-  | "leaf";
+  | "leaf"
+  | "heart"
+  | "heart-filled"
+  | "brain"
+  | "book"
+  | "compass"
+  | "sparkle"
+  | "puzzle"
+  | "moon"
+  | "palette"
+  | "arrow-left"
+  | "arrow-right"
+  | "chevron-up"
+  | "playstation"
+  | "xbox"
+  | "switch"
+  | "emulator"
+  | "chart"
+  | "sun";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -87,6 +105,40 @@ const paths: Record<IconName, string> = {
   leaf:
     '<path d="M4.5 19.5s-.4-7.2 5-11.2C13 5.6 19.5 4.5 19.5 4.5s-.4 6.9-4.2 10.6c-4.3 4.2-10.8 4.4-10.8 4.4Z" /><path d="M4.7 19.3C8.5 14 12 11 16.5 8.8" />',
   check: '<path d="M20 6.5 9.2 17.3 4 12.1" />',
+  heart:
+    '<path d="M12 20.3 4.6 13a4.7 4.7 0 0 1 6.6-6.7l.8.8.8-.8A4.7 4.7 0 0 1 19.4 13Z" />',
+  // Same geometry as `heart`, filled instead of stroked, so the wishlist
+  // toggle does not jump in size when it flips on.
+  "heart-filled":
+    '<path fill="currentColor" stroke="none" d="M12 20.3 4.6 13a4.7 4.7 0 0 1 6.6-6.7l.8.8.8-.8A4.7 4.7 0 0 1 19.4 13Z" />',
+  // The split-brain glyph from the design's "Bon pour le cerveau" row: two
+  // lobes with a visible seam, not a literal anatomical drawing.
+  brain:
+    '<path d="M12 3.8v14.8" /><path d="M10.2 5.4a3.7 4 0 0 0-4.6 2.6 3.2 3.5 0 0 0-1 5.4 3.3 3.6 0 0 0 5.1 4.4 1.8 2 0 0 0 .5-1.9" /><path d="M13.8 5.4a3.7 4 0 0 1 4.6 2.6 3.2 3.5 0 0 1 1 5.4 3.3 3.6 0 0 1-5.1 4.4 1.8 2 0 0 1-.5-1.9" />',
+  book: '<path d="M4 5.2h5.1c1.6 0 2.9 1 2.9 2.3v11c0-1-1.1-1.8-2.5-1.8H4Z" /><path d="M20 5.2h-5.1c-1.6 0-2.9 1-2.9 2.3v11c0-1 1.1-1.8 2.5-1.8H20Z" />',
+  compass: '<circle cx="12" cy="12" r="8.5" /><path d="m15.2 8.8-1.9 4.5-4.5 1.9 1.9-4.5z" />',
+  sparkle:
+    '<path d="M12 3.5c0 6 2.5 8.5 8.5 8.5-6 0-8.5 2.5-8.5 8.5 0-6-2.5-8.5-8.5-8.5 6 0 8.5-2.5 8.5-8.5Z" />',
+  puzzle:
+    '<path d="M9.7 5.3a1.9 1.9 0 0 1 3.8 0h3.6a1.6 1.6 0 0 1 1.6 1.6v3.5a1.9 1.9 0 0 0 0 3.8v3.5a1.6 1.6 0 0 1-1.6 1.6H6.5a1.6 1.6 0 0 1-1.6-1.6V6.9a1.6 1.6 0 0 1 1.6-1.6z" />',
+  moon: '<path d="M20 14.4A8.4 8.4 0 0 1 9.6 4 8.4 8.4 0 1 0 20 14.4Z" />',
+  palette:
+    '<path d="M12 20.5a8.5 8.5 0 1 1 8.5-8.5c0 2-1.6 3-3.3 3h-1.6a2 2 0 0 0-1.4 3.4c.5.6.2 2.1-2.2 2.1Z" /><circle cx="8.2" cy="12.4" r="1" fill="currentColor" stroke="none" /><circle cx="9.8" cy="8.6" r="1" fill="currentColor" stroke="none" /><circle cx="14" cy="8" r="1" fill="currentColor" stroke="none" />',
+  "arrow-left": '<path d="M19 12H5m0 0 6-6m-6 6 6 6" />',
+  "arrow-right": '<path d="M5 12h14m0 0-6-6m6 6-6 6" />',
+  "chevron-up": '<path d="m6 15 6-6 6 6" />',
+  // Simplified platform marks: legible at 15px, no vendor artwork copied.
+  playstation:
+    '<path d="M8.8 3.6v16.8" /><path d="M8.8 3.6c4 1 6 2.7 6 5.1 0 2.1-1.5 3.2-3.6 3.2H8.8M8.8 16.2c-1.2 1-2.4 1.4-3.4 1.2M15.4 16.5h4" />',
+  xbox:
+    '<circle cx="12" cy="12" r="8.5" /><path d="M6.6 5.9c2.6 1.1 4.4 3 5.4 5 1-2 2.8-3.9 5.4-5" /><path d="M6.6 18.1c1.5-3.6 3.3-6.2 5.4-7.8 2.1 1.6 3.9 4.2 5.4 7.8" />',
+  switch:
+    '<rect x="3.6" y="3.6" width="7" height="16.8" rx="3" /><rect x="13.4" y="3.6" width="7" height="16.8" rx="3" /><circle cx="7.1" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="16.9" cy="16" r="1.1" fill="currentColor" stroke="none" />',
+  emulator:
+    '<rect x="2.8" y="6.4" width="18.4" height="11.2" rx="2.4" /><path d="M6.6 12h2.8M8 10.6v2.8" /><circle cx="16" cy="11.4" r=".9" fill="currentColor" stroke="none" /><circle cx="18" cy="13.4" r=".9" fill="currentColor" stroke="none" />',
+  chart:
+    '<rect x="4.8" y="12" width="2.9" height="6.6" rx=".5" /><rect x="10.2" y="5.9" width="4.1" height="12.7" rx=".6" /><rect x="16.3" y="13.3" width="2.9" height="5.3" rx=".5" /><path d="M3.2 18.6h17.6" />',
+  sun: '<circle cx="12" cy="12" r="3.4" /><path d="M12 3.4v2.2M12 18.4v2.2M3.4 12h2.2M18.4 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M18 6l-1.6 1.6M7.6 16.4 6 18" />',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {

@@ -71,7 +71,7 @@ function browsePage(overrides: Partial<StoreBrowsePage> = {}): StoreBrowsePage {
 }
 
 function storeRoute(overrides: Partial<Extract<AppRoute, { page: "store" }>> = {}): AppRoute {
-  return { page: "store", category: "for-you", providers: [], query: "", ...overrides };
+  return { page: "store", category: "for-you", platforms: [], query: "", ...overrides };
 }
 
 interface RecordedClient {
@@ -92,6 +92,10 @@ function createFakeClient(overrides: Partial<StorePageClient> = {}): RecordedCli
       commands.push("getHome");
       homeSignals.push(signal);
       return overrides.getHome ? overrides.getHome(signal) : homeView();
+    },
+    async listOwnedGameIds(signal) {
+      commands.push("listOwnedGameIds");
+      return overrides.listOwnedGameIds ? overrides.listOwnedGameIds(signal) : [];
     },
     async browse(request, signal) {
       commands.push("browse");
@@ -240,7 +244,7 @@ describe("Store page filtering", () => {
     expect(mounted.navigations.at(-1)).toEqual({
       page: "store",
       category: "short-sessions",
-      providers: ["steam"],
+      platforms: [],
       query: "",
     });
     expect(fake.browseRequests).toEqual([]);
@@ -253,14 +257,14 @@ describe("Store page filtering", () => {
     });
     const mounted = mountStore(fake.client);
     await mounted.host.activate(
-      storeRoute({ category: "short-sessions", providers: ["steam"], query: "unrailed" }),
+      storeRoute({ category: "short-sessions", platforms: [], query: "unrailed" }),
     );
     await flush();
 
     expect(fake.browseRequests).toEqual([
       {
         category: "short-sessions",
-        providers: ["steam"],
+        platforms: [],
         query: "unrailed",
         cursor: null,
         limit: 30,
@@ -559,7 +563,7 @@ describe("Store page lifecycle", () => {
     const mounted = mountStore(fake.client);
     const route = storeRoute({
       category: "short-sessions",
-      providers: ["steam"],
+      platforms: [],
       query: "unrailed",
     });
 
