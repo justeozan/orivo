@@ -1,19 +1,25 @@
 mod catalog;
+mod game_detail;
+mod game_media;
 mod launcher;
 mod plugin_manifest;
 mod plugin_registry;
 mod plugin_runtime;
+mod preferences;
 mod steam;
 mod steam_account;
+mod store;
+mod wallpaper_credentials;
+mod wallpaper_search;
 mod wine_runner;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
@@ -21,10 +27,14 @@ use std::{
 };
 
 use catalog::{
-    Catalog, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID, WineGameCompatibility,
-    WineGameInventoryEntry, WineGraphicsBackend, WineGraphicsOptions, WineProfile,
+    Catalog, CatalogError, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID,
+    WineGameCompatibility, WineGameInventoryEntry, WineGraphicsBackend, WineGraphicsOptions,
+    WineProfile,
 };
 use futures_util::StreamExt;
+use game_detail::{
+    GameDetailError, GameDetailService, GameDetailView, WishlistMutationView, media_source_url,
+};
 use plugin_manifest::HostCompatibility;
 use plugin_registry::{PLUGINS_DIRECTORY, PluginRegistry, RunnerPluginView};
 use plugin_runtime::PluginRuntime;
@@ -37,7 +47,17 @@ use tauri::{
 };
 
 const CATALOG_FILE: &str = "catalog.json";
+/// Enough distinct backups of one source schema to survive repeated recovery
+/// attempts without letting a loop fill the data directory.
+const MAX_CATALOG_BACKUPS_PER_SCHEMA: u32 = 32;
 const MEDIA_DIRECTORY: &str = "media";
+/// Wishlist and media selections live outside `catalog.json`: they are user
+/// state, not owned-library facts, and must survive a catalog migration.
+const GAME_STATE_FILE: &str = "game-state.json";
+/// An open-ended range request never streams a whole video into memory. The
+/// WebView simply asks for the next window when it needs more.
+const MAX_MEDIA_RANGE_CHUNK_BYTES: u64 = 8 * 1_024 * 1_024;
+const MEDIA_MAGIC_PROBE_BYTES: usize = 16;
 const WINE_PREFIXES_DIRECTORY: &str = "wine-prefixes";
 const MAX_WINE_SETUP_SESSIONS: usize = 12;
 const MAX_WINE_SCAN_JOBS: usize = 12;
@@ -52,6 +72,10 @@ const STEAM_STORE_METADATA_SYNC_BUDGET: Duration = Duration::from_secs(8);
 const MAX_MEDIA_FILE_BYTES: u64 = 20 * 1_024 * 1_024;
 const MAX_MEDIA_CACHE_BYTES_PER_OPERATION: u64 = 128 * 1_024 * 1_024;
 const STEAM_AUTH_WINDOW_LABEL: &str = "steam-auth";
+/// Every application event is addressed to this one window. A broadcast would
+/// also reach the capability-free Steam sign-in WebView, which has no business
+/// seeing an account identifier or a launch status.
+const MAIN_WINDOW_LABEL: &str = "main";
 const STEAM_EXPLORE_URL: &str = "https://store.steampowered.com/explore/";
 const STEAM_ACCOUNT_CONNECTED_EVENT: &str = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "steam-account-login-cancelled";
@@ -60,6 +84,10 @@ const STEAM_ACCOUNT_LOGIN_PENDING_EVENT: &str = "steam-account-login-pending";
 const WINE_LAUNCH_STATUS_EVENT: &str = "wine-launch-status";
 const WINE_EARLY_EXIT_WINDOW: Duration = Duration::from_secs(8);
 static MEDIA_CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// The detail projection is derived state built once during setup. Keeping the
+/// handle here lets every catalog write refresh it through one choke point,
+/// including the background workers that only own catalog handles.
+static DETAIL_PROJECTION: OnceLock<Arc<GameDetailService>> = OnceLock::new();
 
 // This runs only in the dedicated, capability-free Steam authentication
 // window. It returns two short strings rather than the page HTML, and the
@@ -428,7 +456,9 @@ impl AppState {
         let app_data = app.path().app_data_dir()?;
         let plugin_root = app_data.join(PLUGINS_DIRECTORY);
         let wine_prefix_root = app_data.join(WINE_PREFIXES_DIRECTORY);
-        let mut catalog = load_or_migrate_catalog(&catalog_path)?;
+        // The game-state document is re-keyed with the catalog it belongs to,
+        // before `GameStateStore` reads it during setup.
+        let mut catalog = load_or_migrate_catalog(&catalog_path, &app_data.join(GAME_STATE_FILE))?;
 
         // Imported artwork is copied once into the app cache. That keeps the
         // browser's asset protocol tightly scoped and means a moved source
@@ -457,12 +487,67 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let state = AppState::load(app.handle())?;
+            let app_data = app.path().app_data_dir()?;
+
+            // The detail projection is derived from the catalog that was just
+            // loaded. Reading `catalog.json` a second time could observe a
+            // different file and make the Library and the detail page disagree.
+            let game_state = Arc::new(game_detail::GameStateStore::load(
+                app_data.join(GAME_STATE_FILE),
+            )?);
+            // The same media cache the Library resolves against. Both sides
+            // call one resolver, so handing it the same directory is what makes
+            // imported artwork resolve to the same URL on both pages.
+            let detail = Arc::new(
+                GameDetailService::new(game_state)
+                    .with_media_cache_dir(media_cache_dir(app.handle()).ok()),
+            );
+            {
+                let catalog = state
+                    .catalog
+                    .read()
+                    .map_err(|_| "the game catalog is temporarily unavailable")?;
+                project_presentation_catalog(&detail, &catalog)?;
+            }
+
+            // Media resolution must go through the same service instance the
+            // detail commands read, otherwise an imported asset would not be
+            // visible to the page that asked for it.
+            let media = game_media::GameMediaService::new(
+                Arc::clone(&detail),
+                app_data.join(game_media::MEDIA_DIRECTORY),
+            )?;
+
+            // Two live services would let one instance answer the WebView while
+            // catalog writes refresh the other, so a second setup is a hard
+            // startup failure rather than a silently divergent projection.
+            DETAIL_PROJECTION
+                .set(Arc::clone(&detail))
+                .map_err(|_| "the game detail projection is already initialised")?;
             app.manage(state);
+            app.manage(detail);
+            app.manage(media);
+            // The same credential store backs both the Settings commands and
+            // the wallpaper search, so a saved key is used without a restart.
+            let wallpaper_credentials = Arc::new(wallpaper_credentials::WallpaperCredentialsService::load(
+                app_data.join(wallpaper_credentials::CREDENTIALS_FILE),
+            ));
+            app.manage(Arc::clone(&wallpaper_credentials));
+            app.manage(wallpaper_search::WallpaperSearchService::new(wallpaper_credentials));
             Ok(())
+        })
+        // Media files stay behind a host-owned scheme instead of a broad
+        // filesystem grant: the WebView can only name an opaque file inside
+        // the app's own media directory.
+        .register_uri_scheme_protocol(game_media::GAME_MEDIA_URI_SCHEME, |context, request| {
+            game_media_scheme_response(context.app_handle(), &request)
         })
         .invoke_handler(tauri::generate_handler![
             get_library,
             import_game,
+            fetch_game_artwork,
+            remove_game,
+            set_home_image,
             get_steam_import_preview,
             get_steam_preview_media,
             import_steam_games,
@@ -496,10 +581,317 @@ pub fn run() {
             set_wine_profile_enabled,
             delete_wine_profile,
             launch_game,
-            install_steam_game
+            install_steam_game,
+            get_game_detail,
+            set_game_wishlist,
+            store::get_store_home,
+            store::browse_store_games,
+            store::refresh_store_sources,
+            store::open_store_offer,
+            game_media::select_game_media,
+            game_media::export_game_media,
+            game_media::import_game_media,
+            game_media::cancel_game_media_download,
+            wallpaper_search::search_wallpapers,
+            wallpaper_search::import_wallpaper_candidate,
+            wallpaper_credentials::get_wallpaper_credentials,
+            wallpaper_credentials::update_wallpaper_credentials,
+            preferences::get_preferences,
+            preferences::update_preferences,
+            preferences::get_data_usage,
+            preferences::clear_derived_cache
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orivo");
+}
+
+/// `GameDetailError` carries IO and parse detail that must never reach a
+/// WebView. Every detail command answers with one short, actionable sentence.
+fn game_detail_message(error: GameDetailError) -> String {
+    match error {
+        GameDetailError::NotFound => "This game is no longer in your library.".into(),
+        GameDetailError::Invalid(_) => "Orivo could not read this game request.".into(),
+        GameDetailError::Io(_) | GameDetailError::Json(_) => {
+            "Orivo could not save this game's state. Try again.".into()
+        }
+        GameDetailError::Unavailable(_) => "Game details are temporarily unavailable.".into(),
+    }
+}
+
+#[tauri::command]
+fn get_game_detail(
+    game_id: String,
+    detail: State<'_, Arc<GameDetailService>>,
+) -> Result<Option<GameDetailView>, String> {
+    game_detail::get_game_detail(detail.inner(), game_id).map_err(game_detail_message)
+}
+
+#[tauri::command]
+fn set_game_wishlist(
+    game_id: String,
+    wishlisted: bool,
+    detail: State<'_, Arc<GameDetailService>>,
+) -> Result<WishlistMutationView, String> {
+    game_detail::set_game_wishlist(detail.inner(), game_id, wishlisted).map_err(game_detail_message)
+}
+
+/// The single catalog write path. Persisting and republishing the derived
+/// detail projection together is what keeps the detail page and the Store from
+/// serving a snapshot the Library has already replaced.
+fn persist_catalog(catalog: &Catalog, path: &Path) -> Result<(), CatalogError> {
+    catalog.save_atomically(path)?;
+    refresh_detail_projection(catalog);
+    Ok(())
+}
+
+/// A stale projection must never fail a mutation that is already durable on
+/// disk: the next successful write republishes the same data.
+fn refresh_detail_projection(catalog: &Catalog) {
+    if let Some(detail) = DETAIL_PROJECTION.get()
+        && project_presentation_catalog(detail, catalog).is_err()
+    {
+        eprintln!("orivo: the game detail projection could not be refreshed");
+    }
+}
+
+/// The detail page must resolve exactly what the Library renders. The Library
+/// paints `presentation_catalog`, so projecting the raw stored catalog would
+/// leave every showcase card — the whole library on a fresh profile — pointing
+/// at a game the detail service has never heard of.
+fn project_presentation_catalog(
+    detail: &GameDetailService,
+    stored_catalog: &Catalog,
+) -> Result<(), GameDetailError> {
+    // The detail projection is a reachability superset: it always includes the
+    // showcase games so that, when the debug toggle surfaces them, their detail
+    // pages resolve. The Library alone decides whether they are shown.
+    let presentation = presentation_catalog(stored_catalog, true);
+    match detail.replace_catalog(&presentation) {
+        Ok(()) => Ok(()),
+        // One record the detail service refuses must not freeze the projection
+        // at its startup contents: drop that record and keep the rest current.
+        Err(_) => detail.replace_catalog(&projectable_catalog(detail, &presentation)),
+    }
+}
+
+fn projectable_catalog(detail: &GameDetailService, presentation: &Catalog) -> Catalog {
+    let mut template = presentation.clone();
+    template.games.clear();
+    let mut projectable = template.clone();
+    for game in &presentation.games {
+        let mut candidate = template.clone();
+        candidate.games = vec![game.clone()];
+        if GameDetailService::from_catalog(
+            &candidate,
+            Arc::clone(detail.state()),
+            detail.media_cache_dir().map(Path::to_path_buf),
+        )
+        .is_ok()
+        {
+            projectable.games.push(game.clone());
+        } else {
+            // `{:?}` so a hostile identifier cannot forge log lines.
+            eprintln!(
+                "orivo: game {:?} was skipped by the detail projection",
+                game.id
+            );
+        }
+    }
+    projectable
+}
+
+/// Resolve the one opaque file name a `game-media:` request may address.
+/// Everything else — nested paths, absolute paths, traversal, percent escapes —
+/// fails the opaque-name check and is answered with 404.
+fn game_media_requested_file(uri: &str) -> Option<&str> {
+    let path = uri.split(['?', '#']).next().unwrap_or(uri);
+    // `game-media:<name>` carries no authority, so it arrives whole; the
+    // `//authority/<name>` forms come from the platforms that rewrite a custom
+    // scheme onto an http origin.
+    let (_, rest) = path.split_once(':')?;
+    let rest = match rest.strip_prefix("//") {
+        Some(authority_and_path) => authority_and_path.split_once('/')?.1,
+        None => rest,
+    };
+    // Exactly one opaque segment. A request that tries to describe a path at
+    // all is refused rather than reinterpreted.
+    if rest.contains('/') {
+        return None;
+    }
+    game_detail::valid_opaque_file_name(rest).then_some(rest)
+}
+
+/// Parse a single byte range. Multi-range requests and unusable specs return
+/// `None`; the caller decides between a full body and 416.
+fn parse_media_byte_range(header_value: &str, length: u64) -> Option<(u64, u64)> {
+    let spec = header_value.trim().strip_prefix("bytes=")?.trim();
+    if spec.contains(',') || length == 0 {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    let (start, end) = match (start.trim(), end.trim()) {
+        ("", "") => return None,
+        // A suffix range asks for the final N bytes.
+        ("", suffix) => {
+            let suffix = suffix.parse::<u64>().ok()?.min(length);
+            if suffix == 0 {
+                return None;
+            }
+            (length - suffix, length - 1)
+        }
+        (start, "") => (start.parse::<u64>().ok()?, length - 1),
+        (start, end) => (start.parse::<u64>().ok()?, end.parse::<u64>().ok()?),
+    };
+    if start > end || start >= length {
+        return None;
+    }
+    let end = end.min(length - 1);
+    // Serving fewer bytes than requested is allowed and keeps a 250 MB video
+    // from being buffered in one response.
+    let end = end.min(start.saturating_add(MAX_MEDIA_RANGE_CHUNK_BYTES - 1));
+    Some((start, end))
+}
+
+fn read_media_slice(path: &Path, start: u64, length: u64) -> Option<Vec<u8>> {
+    let mut file = fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut body = vec![0_u8; usize::try_from(length).ok()?];
+    file.read_exact(&mut body).ok()?;
+    Some(body)
+}
+
+/// The format is sniffed from the file itself. A stored file name is never
+/// allowed to declare what the WebView should treat the bytes as, nor how much
+/// of them may be answered at once.
+fn media_format(path: &Path) -> Option<game_media::MediaFormat> {
+    let mut head = [0_u8; MEDIA_MAGIC_PROBE_BYTES];
+    let read = fs::File::open(path)
+        .and_then(|mut file| file.read(&mut head))
+        .unwrap_or(0);
+    game_media::MediaFormat::from_magic(&head[..read])
+}
+
+fn media_content_type(format: Option<game_media::MediaFormat>) -> &'static str {
+    format
+        .map(game_media::MediaFormat::mime)
+        .unwrap_or("application/octet-stream")
+}
+
+/// How much of a file a request without a `Range` header may be answered with.
+///
+/// Images are served whole: they are already bounded by the import cap, and an
+/// unrequested 206 is what a WebView renders as a broken `<img>`. Only video —
+/// and anything whose format could not be established — keeps the bounded
+/// window, because reading a 250 MB file into one `Vec` on the protocol thread
+/// is never worth it and a `<video>` asks for the rest with a `Range`.
+fn unranged_media_chunk(format: Option<game_media::MediaFormat>, length: u64) -> u64 {
+    let limit = match format {
+        Some(game_media::MediaFormat::Mp4) | None => MAX_MEDIA_RANGE_CHUNK_BYTES,
+        Some(_) => game_media::MAX_IMAGE_BYTES.max(MAX_MEDIA_RANGE_CHUNK_BYTES),
+    };
+    limit.min(length)
+}
+
+fn media_scheme_error(status: tauri::http::StatusCode) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header(tauri::http::header::CONTENT_TYPE, "text/plain")
+        .body(Vec::new())
+        .unwrap_or_default()
+}
+
+fn game_media_scheme_response(
+    app: &AppHandle,
+    request: &tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+    };
+    game_media_response(&app_data.join(game_media::MEDIA_DIRECTORY), request)
+}
+
+fn game_media_response(
+    media_dir: &Path,
+    request: &tauri::http::Request<Vec<u8>>,
+) -> tauri::http::Response<Vec<u8>> {
+    let uri = request.uri().to_string();
+    let Some(file_name) = game_media_requested_file(&uri) else {
+        return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+    };
+    let path = media_dir.join(file_name);
+    // A symlink planted under an opaque-looking name must never be followed:
+    // the scheme only ever serves a regular file this app wrote itself.
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+    }
+
+    let length = metadata.len();
+    let format = media_format(&path);
+    let content_type = media_content_type(format);
+    let requested_range = request
+        .headers()
+        .get(tauri::http::header::RANGE)
+        .and_then(|value| value.to_str().ok());
+
+    let Some(range) = requested_range else {
+        // An image is answered whole with a 200; video keeps the bounded window
+        // and lets the element ask for the rest.
+        let chunk = unranged_media_chunk(format, length);
+        let Some(body) = read_media_slice(&path, 0, chunk) else {
+            return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+        };
+        if chunk == length {
+            return tauri::http::Response::builder()
+                .status(tauri::http::StatusCode::OK)
+                .header(tauri::http::header::CONTENT_TYPE, content_type)
+                .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+                .header(tauri::http::header::CONTENT_LENGTH, length)
+                .body(body)
+                .unwrap_or_else(|_| media_scheme_error(tauri::http::StatusCode::NOT_FOUND));
+        }
+        return tauri::http::Response::builder()
+            .status(tauri::http::StatusCode::PARTIAL_CONTENT)
+            .header(tauri::http::header::CONTENT_TYPE, content_type)
+            .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+            .header(
+                tauri::http::header::CONTENT_RANGE,
+                format!("bytes 0-{}/{length}", chunk - 1),
+            )
+            .header(tauri::http::header::CONTENT_LENGTH, body.len())
+            .body(body)
+            .unwrap_or_else(|_| media_scheme_error(tauri::http::StatusCode::NOT_FOUND));
+    };
+
+    // `<video>` seeks with ranges. An unsatisfiable range gets 416 with the
+    // real size so the element can retry instead of failing playback.
+    let Some((start, end)) = parse_media_byte_range(range, length) else {
+        return tauri::http::Response::builder()
+            .status(tauri::http::StatusCode::RANGE_NOT_SATISFIABLE)
+            .header(
+                tauri::http::header::CONTENT_RANGE,
+                format!("bytes */{length}"),
+            )
+            .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+            .body(Vec::new())
+            .unwrap_or_else(|_| media_scheme_error(tauri::http::StatusCode::NOT_FOUND));
+    };
+    let Some(body) = read_media_slice(&path, start, end - start + 1) else {
+        return media_scheme_error(tauri::http::StatusCode::NOT_FOUND);
+    };
+    tauri::http::Response::builder()
+        .status(tauri::http::StatusCode::PARTIAL_CONTENT)
+        .header(tauri::http::header::CONTENT_TYPE, content_type)
+        .header(tauri::http::header::ACCEPT_RANGES, "bytes")
+        .header(
+            tauri::http::header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{length}"),
+        )
+        .header(tauri::http::header::CONTENT_LENGTH, body.len())
+        .body(body)
+        .unwrap_or_else(|_| media_scheme_error(tauri::http::StatusCode::NOT_FOUND))
 }
 
 /// Plugins are discovered only after a user explicitly opens the emulator
@@ -1009,7 +1401,7 @@ fn set_wine_profile_enabled(
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "This Wine profile is no longer available.".to_string())?;
     profile.enabled = enabled;
-    next.save_atomically(&state.catalog_path)
+    persist_catalog(&next, &state.catalog_path)
         .map_err(|_| "Orivo could not save this Wine profile change. Try again.".to_string())?;
     let response = wine_settings_view(&next);
     let mut catalog = state
@@ -1059,7 +1451,7 @@ fn delete_wine_profile(
     {
         return Err("This Wine profile is no longer available.".into());
     }
-    next.save_atomically(&state.catalog_path)
+    persist_catalog(&next, &state.catalog_path)
         .map_err(|_| "Orivo could not save this Wine profile change. Try again.".to_string())?;
     let response = wine_settings_view(&next);
     let mut catalog = state
@@ -1232,7 +1624,7 @@ async fn create_wine_profile(
         .clone();
     next.upsert_wine_profile(profile.clone())
         .map_err(|_| "This Wine profile could not be created.".to_string())?;
-    next.save_atomically(&state.catalog_path)
+    persist_catalog(&next, &state.catalog_path)
         .map_err(|_| "Orivo could not save this Wine profile. Try again.".to_string())?;
     let profile_view = wine_profile_view(&next, &profile);
     {
@@ -1525,6 +1917,8 @@ fn wine_catalog_game(profile_id: &str, candidate: &wine_runner::ScannedWineGame)
         artwork_source_path: None,
         cover_path: None,
         cover_source_path: None,
+        home_image_path: None,
+        landscape_image_path: None,
         logo_path: None,
         hero_video_path: None,
         last_played_at: None,
@@ -1671,7 +2065,7 @@ async fn associate_direct_game_with_wine_profile(
     {
         profile.last_imported_at = Some(imported_at);
     }
-    next.save_atomically(&state.catalog_path).map_err(|_| {
+    persist_catalog(&next, &state.catalog_path).map_err(|_| {
         "Orivo could not save this Wine association. Your library was left unchanged.".to_string()
     })?;
     let mut catalog = state
@@ -1852,7 +2246,7 @@ async fn install_verified_dxvk_macos_for_profile(
                 entry.compatibility.last_backend = None;
             }
         }
-        next.save_atomically(&catalog_path).map_err(|_| {
+        persist_catalog(&next, &catalog_path).map_err(|_| {
             "DXVK-macOS was installed, but Orivo could not save this profile setting. Reinstall it and try again."
                 .to_string()
         })?;
@@ -1919,7 +2313,8 @@ async fn ensure_dxvk_macos_for_automatic_game(
         return Ok(false);
     }
 
-    let _ = app.emit(
+    let _ = app.emit_to(
+        MAIN_WINDOW_LABEL,
         WINE_LAUNCH_STATUS_EVENT,
         WineLaunchStatusEvent {
             game_id: game_id.to_string(),
@@ -1977,7 +2372,7 @@ fn use_wine_3d_for_profile(
         entry.compatibility.graphics.backend = WineGraphicsBackend::WineD3d;
         entry.compatibility.last_backend = Some(WineGraphicsBackend::WineD3d);
     }
-    next.save_atomically(&state.catalog_path)
+    persist_catalog(&next, &state.catalog_path)
         .map_err(|_| "Orivo could not save this graphics setting. Try again.".to_string())?;
     let response = wine_settings_view(&next);
     let mut catalog = state
@@ -2060,7 +2455,7 @@ async fn retry_wine_game_in_compatibility(
         }
         inventory.compatibility.rejected_backends.push(current);
         inventory.compatibility.last_backend = None;
-        next.save_atomically(&catalog_path).map_err(|_| {
+        persist_catalog(&next, &catalog_path).map_err(|_| {
             "Orivo could not save this compatibility retry. The game was not launched.".to_string()
         })?;
         let mut catalog = catalog_state
@@ -2283,7 +2678,7 @@ async fn import_wine_games(
             profile.last_imported_at = Some(imported_at);
         }
     }
-    next.save_atomically(&state.catalog_path).map_err(|_| {
+    persist_catalog(&next, &state.catalog_path).map_err(|_| {
         "Orivo could not save these Wine games. Your library was left unchanged.".to_string()
     })?;
     let mut catalog = state
@@ -2340,9 +2735,7 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
             .clone();
         next_catalog.add(game).map_err(|error| error.to_string())?;
-        next_catalog
-            .save_atomically(&state.catalog_path)
-            .map_err(|error| error.to_string())?;
+        persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
         {
             let mut catalog = state
                 .catalog
@@ -2361,6 +2754,275 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
         games: response.games,
         imported_id: Some(imported_id),
     })
+}
+
+/// Download best-effort cover/hero art for a game via the keyless Steam Store
+/// and persist it onto the catalog record, so both the library card and the
+/// detail hero paint it. Used right after a manual import and from the game
+/// detail page's "Search cover & images" action.
+#[tauri::command]
+async fn fetch_game_artwork(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    wallpaper: State<'_, wallpaper_search::WallpaperSearchService>,
+    game_id: String,
+    force: bool,
+) -> Result<(), String> {
+    let (title, has_art) = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let game = catalog
+            .games
+            .iter()
+            .find(|game| game.id == game_id)
+            .ok_or_else(|| "This game is no longer in your library.".to_string())?;
+        (
+            game.title.clone(),
+            game.artwork_path.is_some() || game.cover_path.is_some(),
+        )
+    };
+    // The post-import pass (`force = false`) only fills a gap: a game that
+    // already found local art keeps it. The detail page's explicit "Search
+    // cover & images" passes `force = true` to re-run and replace.
+    if has_art && !force {
+        return Ok(());
+    }
+    let url = wallpaper
+        .top_artwork_url(&title)
+        .await
+        .ok_or_else(|| format!("No cover art was found for \u{201c}{title}\u{201d}."))?;
+    // Only Steam's own CDNs are trusted for a background download.
+    let trusted = ["steamstatic.com", "steampowered.com", "akamai"];
+    if !trusted.iter().any(|host| url.contains(host)) {
+        return Err("The located artwork came from an untrusted source.".to_string());
+    }
+    let bytes = download_artwork_bytes(&url).await?;
+    let cache_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    let extension = if url
+        .split('?')
+        .next()
+        .unwrap_or(&url)
+        .to_ascii_lowercase()
+        .ends_with(".png")
+    {
+        "png"
+    } else {
+        "jpg"
+    };
+    let stem = cache_stem(&game_id);
+    // A fresh filename each time so the WebView never serves a stale cached
+    // image (the asset URL is keyed by path), and it repaints without a restart.
+    remove_cached_artwork(&cache_dir, &format!("{stem}-fetched-"));
+    let path = cache_dir.join(format!("{stem}-fetched-{}.{extension}", cache_nonce()));
+    fs::write(&path, &bytes).map_err(|error| error.to_string())?;
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next_catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+        return Err("This game is no longer in your library.".to_string());
+    };
+    game.artwork_path = Some(path.clone());
+    game.artwork_source_path = Some(path.clone());
+    game.cover_path = Some(path.clone());
+    game.cover_source_path = Some(path);
+    persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+    {
+        let mut catalog = state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        *catalog = next_catalog;
+    }
+    Ok(())
+}
+
+async fn download_artwork_bytes(url: &str) -> Result<Vec<u8>, String> {
+    const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|_| "The artwork download could not be started.".to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "The artwork could not be downloaded.".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "The artwork server returned status {}.",
+            response.status()
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "The artwork download was interrupted.".to_string())?;
+    if bytes.len() > MAX_ARTWORK_BYTES {
+        return Err("The artwork file was too large to store.".to_string());
+    }
+    Ok(bytes.to_vec())
+}
+
+/// A filesystem-safe stem derived from an opaque game id.
+fn cache_stem(game_id: &str) -> String {
+    game_id
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
+}
+
+/// A monotonic-ish suffix so each cached artwork file has a unique path, which
+/// forces the WebView to reload it instead of serving a stale cached copy.
+fn cache_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0)
+}
+
+/// Best-effort removal of a game's prior cached artwork sharing `prefix`, so the
+/// cache does not accumulate a copy per change.
+fn remove_cached_artwork(cache_dir: &Path, prefix: &str) {
+    if let Ok(entries) = fs::read_dir(cache_dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(prefix))
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Remove a game from the library. The game's own files are never deleted; this
+/// only drops the catalog record so its card and detail page disappear.
+#[tauri::command]
+fn remove_game(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    game_id: String,
+) -> Result<LibraryState, String> {
+    {
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next_catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        if next_catalog
+            .remove(&game_id)
+            .map_err(|error| error.to_string())?
+        {
+            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            *catalog = next_catalog;
+        }
+    }
+    let catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    Ok(library_state(&app, &catalog))
+}
+
+/// Promote a chosen media asset to the game's home (Library) background art, so
+/// the wallpaper picked on the detail page is the image the home screen paints.
+/// The asset is copied into the artwork cache; the game's own files are never
+/// touched.
+#[tauri::command]
+fn set_home_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    detail: State<'_, Arc<GameDetailService>>,
+    media: State<'_, game_media::GameMediaService>,
+    game_id: String,
+    media_id: String,
+    role: String,
+) -> Result<(), String> {
+    let asset = detail
+        .media_asset(&game_id, &media_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "That image is no longer available.".to_string())?;
+    let file = asset
+        .local_file
+        .ok_or_else(|| "That image has not been downloaded yet.".to_string())?;
+    let source = media.media_root().join(&file);
+    if !source.is_file() {
+        return Err("That image could not be found on disk.".to_string());
+    }
+    // The chosen image fills one role: the home background, the portrait card
+    // cover, or the wide landscape card — each stored independently.
+    let prefix = match role.as_str() {
+        "cover" => "usercover",
+        "landscape" => "landscape",
+        _ => "home",
+    };
+    // Copy the chosen asset into the artwork cache the WebView resolves against.
+    let cache_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("jpg");
+    let stem = cache_stem(&game_id);
+    // A fresh filename each time so the card repaints live instead of showing
+    // the WebView's cached copy of a stable path (no restart needed).
+    remove_cached_artwork(&cache_dir, &format!("{stem}-{prefix}-"));
+    let dest = cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
+    fs::copy(&source, &dest).map_err(|error| error.to_string())?;
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next_catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    {
+        let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+            return Err("This game is no longer in your library.".to_string());
+        };
+        match role.as_str() {
+            "cover" => {
+                game.cover_path = Some(dest.clone());
+                game.cover_source_path = Some(dest);
+            }
+            "landscape" => {
+                game.landscape_image_path = Some(dest);
+            }
+            _ => {
+                game.home_image_path = Some(dest);
+            }
+        }
+    }
+    persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+    {
+        let mut catalog = state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        *catalog = next_catalog;
+    }
+    Ok(())
 }
 
 /// Scan Steam outside the Tauri command/UI executor. Discovery does no writes,
@@ -2477,8 +3139,7 @@ async fn import_steam_games(
             }
         }
         if !imported_ids.is_empty() || !updated_ids.is_empty() {
-            next_catalog
-                .save_atomically(&state.catalog_path)
+            persist_catalog(&next_catalog, &state.catalog_path)
                 .map_err(|error| error.to_string())?;
             let mut catalog = state
                 .catalog
@@ -2575,7 +3236,8 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            let _ = app_for_close.emit(STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT, ());
+            let _ =
+                app_for_close.emit_to(MAIN_WINDOW_LABEL, STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT, ());
         }
     });
 
@@ -2628,7 +3290,11 @@ fn attempt_steam_web_login(
             let Some((steam_id, access_token)) = steam_account::web_login_from_eval(&raw_result)
             else {
                 if notify_if_pending {
-                    let _ = app_for_callback.emit(STEAM_ACCOUNT_LOGIN_PENDING_EVENT, ());
+                    let _ = app_for_callback.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        STEAM_ACCOUNT_LOGIN_PENDING_EVENT,
+                        (),
+                    );
                 }
                 return;
             };
@@ -2641,7 +3307,8 @@ fn attempt_steam_web_login(
 
             match steam_account::save_web_login(steam_id.clone(), access_token) {
                 Ok(()) => {
-                    let _ = app_for_callback.emit(
+                    let _ = app_for_callback.emit_to(
+                        MAIN_WINDOW_LABEL,
                         STEAM_ACCOUNT_CONNECTED_EVENT,
                         steam_account::SteamAccountConnectedEvent { steam_id },
                     );
@@ -2652,8 +3319,11 @@ fn attempt_steam_web_login(
                     // allow a later page load to retry without exposing a
                     // secret or an OS error string to the WebView.
                     settled.store(false, Ordering::Release);
-                    let _ =
-                        app_for_callback.emit(STEAM_ACCOUNT_LOGIN_FAILED_EVENT, error.to_string());
+                    let _ = app_for_callback.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        STEAM_ACCOUNT_LOGIN_FAILED_EVENT,
+                        error.to_string(),
+                    );
                 }
             }
         })
@@ -2717,8 +3387,7 @@ async fn sync_steam_account_library(
             }
         }
         if imported_games > 0 || updated_games > 0 {
-            next_catalog
-                .save_atomically(&state.catalog_path)
+            persist_catalog(&next_catalog, &state.catalog_path)
                 .map_err(|error| error.to_string())?;
             let mut catalog = state
                 .catalog
@@ -2775,7 +3444,8 @@ fn monitor_wine_startup(
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => {
-                    let _ = app.emit(
+                    let _ = app.emit_to(
+            MAIN_WINDOW_LABEL,
                         WINE_LAUNCH_STATUS_EVENT,
                         WineLaunchStatusEvent {
                             game_id,
@@ -2787,7 +3457,8 @@ fn monitor_wine_startup(
                     return;
                 }
                 Err(_) => {
-                    let _ = app.emit(
+                    let _ = app.emit_to(
+            MAIN_WINDOW_LABEL,
                         WINE_LAUNCH_STATUS_EVENT,
                         WineLaunchStatusEvent {
                             game_id,
@@ -2799,7 +3470,8 @@ fn monitor_wine_startup(
                     return;
                 }
                 Ok(None) if Instant::now() >= deadline => {
-                    let _ = app.emit(
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
                         WINE_LAUNCH_STATUS_EVENT,
                         WineLaunchStatusEvent {
                             game_id,
@@ -2980,7 +3652,7 @@ async fn launch_game(
                     return Err(wine_runner::WineRunnerError::InvalidProfile);
                 }
                 current_inventory.compatibility.last_backend = Some(selected_backend);
-                next.save_atomically(&catalog_path)
+                persist_catalog(&next, &catalog_path)
                     .map_err(|_| wine_runner::WineRunnerError::InvalidProfile)?;
                 let mut catalog = current_catalog
                     .write()
@@ -3161,6 +3833,8 @@ fn owned_steam_game_to_catalog_game(
         artwork_source_path,
         cover_path: None,
         cover_source_path,
+        home_image_path: None,
+        landscape_image_path: None,
         logo_path: None,
         hero_video_path: None,
         last_played_at: None,
@@ -3427,9 +4101,9 @@ fn steam_preview_game(
     // scoped cache. Source asset paths remain Rust-only, including for games
     // that have not been imported yet.
     let cover_url =
-        imported_game.and_then(|game| media_source(game.cover_path.as_deref(), cache_dir));
+        imported_game.and_then(|game| media_source_url(game.cover_path.as_deref(), cache_dir));
     let hero_url =
-        imported_game.and_then(|game| media_source(game.artwork_path.as_deref(), cache_dir));
+        imported_game.and_then(|game| media_source_url(game.artwork_path.as_deref(), cache_dir));
     SteamPreviewGame {
         app_id: steam_game.app_id.to_string(),
         title: steam_game.title,
@@ -3452,8 +4126,8 @@ fn steam_preview_media_views(
     media
         .into_iter()
         .filter_map(|(app_id, media)| {
-            let cover_url = media_source(media.cover_path.as_deref(), cache_dir.as_deref());
-            let hero_url = media_source(media.hero_path.as_deref(), cache_dir.as_deref());
+            let cover_url = media_source_url(media.cover_path.as_deref(), cache_dir.as_deref());
+            let hero_url = media_source_url(media.hero_path.as_deref(), cache_dir.as_deref());
             (cover_url.is_some() || hero_url.is_some()).then_some(SteamPreviewMediaView {
                 app_id: app_id.to_string(),
                 cover_url,
@@ -3481,6 +4155,8 @@ fn steam_game_to_catalog_game(steam_game: steam::SteamGame) -> Game {
         artwork_source_path: steam_game.hero_path,
         cover_path: None,
         cover_source_path: steam_game.cover_path,
+        home_image_path: None,
+        landscape_image_path: None,
         logo_path: None,
         hero_video_path: None,
         last_played_at: None,
@@ -3496,12 +4172,18 @@ fn resolved_catalog_path(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
     Ok(app.path().app_data_dir()?.join(CATALOG_FILE))
 }
 
-fn load_or_migrate_catalog(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
+/// A migration that rewrites game ids also has to move the wishlist, media
+/// selections and imported files that are keyed by them, so the catalog and the
+/// game-state document are published as one unit rather than one at a time.
+fn load_or_migrate_catalog(
+    path: &Path,
+    game_state_path: &Path,
+) -> Result<Catalog, Box<dyn std::error::Error>> {
     if path.is_file() {
         let loaded = Catalog::load_with_migration(path)?;
-        if loaded.migrated_from.is_some() {
-            backup_catalog(path)?;
-            loaded.catalog.save_atomically(path)?;
+        if let Some(migrated_from) = loaded.migrated_from {
+            backup_catalog(path, migrated_from)?;
+            loaded.commit_migration(path, game_state_path)?;
         }
         return Ok(loaded.catalog);
     }
@@ -3519,10 +4201,53 @@ fn load_or_migrate_catalog(path: &Path) -> Result<Catalog, Box<dyn std::error::E
     Ok(Catalog::default())
 }
 
-fn backup_catalog(path: &Path) -> Result<(), std::io::Error> {
-    let backup = path.with_extension("json.bak");
-    fs::copy(path, backup)?;
-    Ok(())
+/// The pre-migration catalog is the only copy of the user's library in the
+/// older format, so the backup is both versioned and published atomically: a
+/// later migration cannot overwrite an earlier one, and a crash halfway through
+/// leaves a `.part` file rather than a truncated backup.
+fn backup_catalog(path: &Path, migrated_from: u32) -> Result<PathBuf, std::io::Error> {
+    let bytes = fs::read(path)?;
+    let backup = unused_backup_path(path, migrated_from)?;
+    let staging = backup.with_extension("bak.part");
+    let outcome = (|| -> Result<(), std::io::Error> {
+        // `remove_file` unlinks a symlink instead of following it, and
+        // `create_new` refuses anything that reappears underneath us.
+        let _ = fs::remove_file(&staging);
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staging)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&staging, &backup)
+    })();
+    if outcome.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    outcome.map(|()| backup)
+}
+
+fn unused_backup_path(path: &Path, migrated_from: u32) -> Result<PathBuf, std::io::Error> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(CATALOG_FILE);
+    for attempt in 0..MAX_CATALOG_BACKUPS_PER_SCHEMA {
+        let suffix = if attempt == 0 {
+            String::new()
+        } else {
+            format!("-{attempt}")
+        };
+        let candidate = path.with_file_name(format!("{file_name}.v{migrated_from}{suffix}.bak"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "too many catalog backups already exist for this schema version",
+    ))
 }
 
 fn media_cache_dir(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
@@ -3745,7 +4470,11 @@ fn stable_hash(value: &str) -> u64 {
 
 fn library_state(app: &AppHandle, stored_catalog: &Catalog) -> LibraryState {
     let cache_dir = media_cache_dir(app).ok();
-    let presentation = presentation_catalog(stored_catalog);
+    let include_showcase = preferences::PreferencesService::from_app(app)
+        .and_then(|service| service.load())
+        .map(|preferences| preferences.show_showcase_games)
+        .unwrap_or(false);
+    let presentation = presentation_catalog(stored_catalog, include_showcase);
     LibraryState {
         games: presentation
             .games
@@ -3756,8 +4485,12 @@ fn library_state(app: &AppHandle, stored_catalog: &Catalog) -> LibraryState {
 }
 
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {
-    let local_hero = media_source(game.artwork_path.as_deref(), cache_dir);
-    let local_cover = media_source(game.cover_path.as_deref(), cache_dir);
+    // Wallpapers the user deliberately chose on the detail page. Each role is
+    // independent: the background never overrides a card cover and vice versa.
+    let home_image = media_source_url(game.home_image_path.as_deref(), cache_dir);
+    let landscape_image = media_source_url(game.landscape_image_path.as_deref(), cache_dir);
+    let local_hero = media_source_url(game.artwork_path.as_deref(), cache_dir);
+    let local_cover = media_source_url(game.cover_path.as_deref(), cache_dir);
     // Steam exposes distinct artwork roles for its library. Its landscape
     // capsule is the publisher's official branded wallpaper, while the wide
     // library hero belongs to the selected horizontal card. Do not reuse a
@@ -3791,13 +4524,16 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             }
         }
         .into(),
-        hero_url: steam_wallpaper.clone().or_else(|| local_hero.clone()),
+        hero_url: home_image
+            .or_else(|| steam_wallpaper.clone())
+            .or_else(|| local_hero.clone()),
         cover_url: local_cover
             .clone()
             .or_else(|| steam_cover.clone())
             .or_else(|| local_hero.clone())
             .or_else(|| steam_wallpaper.clone()),
-        landscape_url: steam_landscape
+        landscape_url: landscape_image
+            .or_else(|| steam_landscape)
             .or_else(|| local_hero.clone())
             .or_else(|| steam_wallpaper.clone())
             .or_else(|| local_cover.clone())
@@ -3902,28 +4638,17 @@ fn genre_for_game(game: &Game) -> String {
     .into()
 }
 
-fn media_source(path: Option<&Path>, cache_dir: Option<&Path>) -> Option<String> {
-    let path = path?;
-    let as_string = path.to_string_lossy();
-    if as_string.starts_with("/media/") {
-        return Some(as_string.into_owned());
-    }
-    let cache_dir = cache_dir?;
-    if path.starts_with(cache_dir) && path.is_file() {
-        return path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .map(|file_name| format!("cache:{file_name}"));
-    }
-    None
-}
-
 /// The fixed rail is a visual fixture, not persisted user data. Local records
 /// of matching games retain their launch configuration while borrowing the
 /// bundled editorial artwork. Steam records replace a matching fixture whole:
 /// their Store artwork, source badge and no-session state must stay authentic.
-fn presentation_catalog(stored_catalog: &Catalog) -> Catalog {
+fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Catalog {
+    // The bundled demo (showcase) games are a debug fixture, off by default so a
+    // real library shows only the user's own games.
     let mut presentation = showcase_catalog();
+    if !include_showcase {
+        presentation.games.clear();
+    }
     // Profiles and the private executable inventory do not change rail
     // presentation, but they let runner cards derive a safe launchable state
     // without projecting a path across IPC.
@@ -4146,6 +4871,8 @@ fn showcase_game(
         artwork_source_path: None,
         cover_path: Some(cover_path),
         cover_source_path: None,
+        home_image_path: None,
+        landscape_image_path: None,
         logo_path: None,
         hero_video_path: None,
         last_played_at: Some(last_played_at.into()),
@@ -4181,6 +4908,59 @@ mod tests {
                 .as_ref()
                 .is_some_and(|path| path.to_string_lossy().starts_with("showcase://"))
         }));
+    }
+
+    #[test]
+    fn game_media_scheme_accepts_only_an_opaque_file_inside_its_own_directory() {
+        // The three URL shapes the platforms produce for one minted preview.
+        assert_eq!(
+            game_media_requested_file("game-media:cover-abc123.jpg"),
+            Some("cover-abc123.jpg")
+        );
+        assert_eq!(
+            game_media_requested_file("game-media://localhost/cover-abc123.jpg"),
+            Some("cover-abc123.jpg")
+        );
+        assert_eq!(
+            game_media_requested_file("http://game-media.localhost/cover-abc123.jpg?v=2"),
+            Some("cover-abc123.jpg")
+        );
+
+        for hostile in [
+            "game-media:../../catalog.json",
+            "game-media://localhost/..%2f..%2fcatalog.json",
+            "game-media:/etc/passwd",
+            "game-media:.hidden",
+            "game-media:",
+            "game-media://localhost/",
+        ] {
+            assert_eq!(game_media_requested_file(hostile), None, "{hostile}");
+        }
+    }
+
+    #[test]
+    fn media_range_requests_stay_inside_the_file_and_below_one_chunk() {
+        assert_eq!(parse_media_byte_range("bytes=0-99", 1_000), Some((0, 99)));
+        assert_eq!(
+            parse_media_byte_range("bytes=990-", 1_000),
+            Some((990, 999))
+        );
+        assert_eq!(parse_media_byte_range("bytes=-10", 1_000), Some((990, 999)));
+        // A clamped end is a legal short answer and bounds the response size.
+        assert_eq!(
+            parse_media_byte_range("bytes=0-", 64 * 1_024 * 1_024),
+            Some((0, MAX_MEDIA_RANGE_CHUNK_BYTES - 1))
+        );
+        for unusable in [
+            "bytes=1000-1200",
+            "bytes=500-100",
+            "bytes=0-10,20-30",
+            "items=0-10",
+            "bytes=-",
+            "bytes=abc-def",
+        ] {
+            assert_eq!(parse_media_byte_range(unusable, 1_000), None, "{unusable}");
+        }
     }
 
     #[test]
@@ -4333,7 +5113,7 @@ mod tests {
         steam_game.title = "Elden Ring".into();
         catalog.games.push(steam_game);
 
-        let presentation = presentation_catalog(&catalog);
+        let presentation = presentation_catalog(&catalog, true);
         let game = presentation
             .games
             .iter()
@@ -4397,16 +5177,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_migration_writes_a_backup_before_persisting_v5() {
-        let root = std::env::temp_dir().join(format!(
-            "orivo-catalog-migration-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
+    fn catalog_migration_writes_a_versioned_backup_before_persisting_current_schema() {
+        let root = temporary_directory("catalog-migration");
         let catalog_path = root.join("catalog.json");
         fs::write(
             &catalog_path,
@@ -4414,21 +5186,415 @@ mod tests {
         )
         .unwrap();
 
-        let catalog = load_or_migrate_catalog(&catalog_path).unwrap();
-        let backup = catalog_path.with_extension("json.bak");
+        let catalog = load_or_migrate_catalog(&catalog_path, &root.join(GAME_STATE_FILE)).unwrap();
+        let backup = root.join("catalog.json.v1.bak");
 
         assert_eq!(catalog.schema_version, catalog::CURRENT_SCHEMA_VERSION);
-        assert!(
-            fs::read_to_string(&backup)
-                .unwrap()
-                .contains("\"schema_version\":1")
+        let backed_up = fs::read_to_string(&backup).unwrap();
+        assert!(backed_up.contains("\"schema_version\":1"));
+        assert!(backed_up.contains("\"id\":\"local\""));
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted["schema_version"],
+            serde_json::Value::from(catalog::CURRENT_SCHEMA_VERSION)
         );
-        assert!(
-            fs::read_to_string(&catalog_path)
-                .unwrap()
-                .contains("\"schema_version\": 5")
+        // Nothing half-written survives a successful backup.
+        assert!(!root.join("catalog.json.v1.bak.part").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_migration_that_rewrites_ids_moves_the_game_state_with_it() {
+        let root = temporary_directory("catalog-migration-state");
+        let catalog_path = root.join("catalog.json");
+        let state_path = root.join(GAME_STATE_FILE);
+        fs::write(
+            &catalog_path,
+            r#"{"schema_version":1,"games":[{"id":"local","title":"Local","executable_path":"/Games/Local"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &state_path,
+            r#"{"schema_version":1,"games":{"local":{"wishlisted":true}}}"#,
+        )
+        .unwrap();
+
+        let catalog = load_or_migrate_catalog(&catalog_path, &state_path).unwrap();
+        let migrated_id = catalog.games[0].id.clone();
+        assert_ne!(migrated_id, "local");
+
+        // Wishlist and media selections are keyed by game id, so an id rewrite
+        // that left them behind would silently drop them.
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert!(state["games"].get("local").is_none());
+        assert_eq!(
+            state["games"][migrated_id.as_str()]["wishlisted"],
+            serde_json::Value::Bool(true)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_later_migration_never_clobbers_an_earlier_backup() {
+        let root = temporary_directory("catalog-backup-versions");
+        let catalog_path = root.join("catalog.json");
+        fs::write(
+            &catalog_path,
+            r#"{"schema_version":1,"games":[{"id":"first","title":"First","executable_path":"/Games/First"}]}"#,
+        )
+        .unwrap();
+        load_or_migrate_catalog(&catalog_path, &root.join(GAME_STATE_FILE)).unwrap();
+
+        // A restored, still-legacy file is migrated again later. The only copy
+        // of the first pre-migration library must survive that.
+        fs::write(
+            &catalog_path,
+            r#"{"schema_version":1,"games":[{"id":"second","title":"Second","executable_path":"/Games/Second"}]}"#,
+        )
+        .unwrap();
+        load_or_migrate_catalog(&catalog_path, &root.join(GAME_STATE_FILE)).unwrap();
+
+        assert!(
+            fs::read_to_string(root.join("catalog.json.v1.bak"))
+                .unwrap()
+                .contains("\"id\":\"first\"")
+        );
+        assert!(
+            fs::read_to_string(root.join("catalog.json.v1-1.bak"))
+                .unwrap()
+                .contains("\"id\":\"second\"")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_fresh_profile_resolves_every_library_card_on_the_detail_page() {
+        // A fresh profile has no `catalog.json`, so every card the Library
+        // paints comes from the showcase rail. Projecting the stored catalog
+        // instead of the presentation one left all of them dead on click.
+        let stored = Catalog::default();
+        let detail = detail_projection();
+        project_presentation_catalog(&detail, &stored).unwrap();
+
+        let library = presentation_catalog(&stored, true);
+        assert!(!library.games.is_empty());
+        for game in &library.games {
+            let view = game_detail::get_game_detail(&detail, game.id.clone())
+                .unwrap()
+                .unwrap_or_else(|| panic!("{} has no detail page", game.id));
+            assert_eq!(view.summary.id, game.id);
+            assert!(!view.summary.cover_url.is_empty(), "{}", game.id);
+            assert!(
+                game_detail::set_game_wishlist(&detail, game.id.clone(), true).is_ok(),
+                "{}",
+                game.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_detail_projection_uses_the_same_identities_as_the_library() {
+        // A Steam record replaces the fixture it matches by title, so the
+        // fixture id stops existing the moment the library is rendered.
+        let mut stored = Catalog::default();
+        let mut steam_game = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        steam_game.title = "Elden Ring".into();
+        stored.games.push(steam_game);
+
+        let detail = detail_projection();
+        project_presentation_catalog(&detail, &stored).unwrap();
+
+        assert!(detail.contains("steam:480").unwrap());
+        assert!(!detail.contains("showcase-elden-ring").unwrap());
+        assert!(detail.contains("showcase-cyberpunk-2077").unwrap());
+    }
+
+    #[test]
+    fn one_unprojectable_record_does_not_freeze_the_whole_projection() {
+        let detail = detail_projection();
+        let mut stored = Catalog::default();
+        let mut broken = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        broken.id = "not an opaque id".into();
+        broken.title = "Broken".into();
+        stored.games.push(broken);
+        let mut healthy = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        healthy.id = "steam:570".into();
+        healthy.title = "Healthy".into();
+        stored.games.push(healthy);
+
+        project_presentation_catalog(&detail, &stored).unwrap();
+        assert!(!detail.contains("not an opaque id").unwrap());
+        assert!(detail.contains("steam:570").unwrap());
+        assert!(detail.contains("showcase-elden-ring").unwrap());
+
+        // The projection keeps following later writes rather than freezing on
+        // the record it had to drop.
+        let mut added = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        added.id = "steam:571".into();
+        added.title = "Added Later".into();
+        stored.games.push(added);
+        project_presentation_catalog(&detail, &stored).unwrap();
+        assert!(detail.contains("steam:571").unwrap());
+        assert!(detail.contains("steam:570").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_media_scheme_never_follows_a_symlink_planted_in_its_directory() {
+        let root = temporary_directory("media-symlink");
+        let media = root.join(game_media::MEDIA_DIRECTORY);
+        fs::create_dir_all(&media).unwrap();
+        let outside = root.join("catalog.json");
+        fs::write(&outside, b"\x89PNG\r\n\x1a\nprivate").unwrap();
+        std::os::unix::fs::symlink(&outside, media.join("cover-planted.png")).unwrap();
+        fs::write(media.join("cover-real.png"), b"\x89PNG\r\n\x1a\nreal").unwrap();
+
+        let planted = game_media_response(&media, &media_request("cover-planted.png", None));
+        assert_eq!(planted.status(), tauri::http::StatusCode::NOT_FOUND);
+        assert!(planted.body().is_empty());
+
+        // The file the app wrote itself is still served.
+        let real = game_media_response(&media, &media_request("cover-real.png", None));
+        assert_eq!(real.status(), tauri::http::StatusCode::OK);
+        assert_eq!(real.body(), b"\x89PNG\r\n\x1a\nreal");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_media_request_without_a_range_header_is_clamped_to_one_chunk() {
+        let root = temporary_directory("media-chunk");
+        let media = root.join(game_media::MEDIA_DIRECTORY);
+        fs::create_dir_all(&media).unwrap();
+        let large = media_bytes(
+            MP4_MAGIC,
+            usize::try_from(MAX_MEDIA_RANGE_CHUNK_BYTES).unwrap() + 4_096,
+        );
+        fs::write(media.join("trailer-large.mp4"), &large).unwrap();
+        fs::write(media.join("cover-small.png"), b"\x89PNG\r\n\x1a\nsmall").unwrap();
+
+        // No `Range` header: a 250 MB video must not be buffered whole on the
+        // protocol thread just because the WebView did not ask for a window.
+        // The format is sniffed from the bytes, so the file name cannot opt out.
+        let response = game_media_response(&media, &media_request("trailer-large.mp4", None));
+        assert_eq!(response.status(), tauri::http::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.body().len(),
+            usize::try_from(MAX_MEDIA_RANGE_CHUNK_BYTES).unwrap()
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_RANGE)
+                .unwrap(),
+            format!(
+                "bytes 0-{}/{}",
+                MAX_MEDIA_RANGE_CHUNK_BYTES - 1,
+                large.len()
+            )
+            .as_str()
+        );
+
+        // Anything that already fits in one chunk is still answered whole.
+        let small = game_media_response(&media, &media_request("cover-small.png", None));
+        assert_eq!(small.status(), tauri::http::StatusCode::OK);
+        assert_eq!(small.body(), b"\x89PNG\r\n\x1a\nsmall");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A 12 MB cover is over the video chunk bound but well under the image
+    /// import cap. Answering it with a 206 nobody asked for is what a WebView
+    /// renders as a broken `<img>`, so the whole file must come back as a 200.
+    #[test]
+    fn an_image_larger_than_one_chunk_is_served_whole_without_a_range_header() {
+        let root = temporary_directory("media-whole-image");
+        let media = root.join(game_media::MEDIA_DIRECTORY);
+        fs::create_dir_all(&media).unwrap();
+        let image = media_bytes(PNG_MAGIC, 12 * 1_024 * 1_024);
+        assert!(u64::try_from(image.len()).unwrap() > MAX_MEDIA_RANGE_CHUNK_BYTES);
+        assert!(u64::try_from(image.len()).unwrap() <= game_media::MAX_IMAGE_BYTES);
+        fs::write(media.join("hero-large.png"), &image).unwrap();
+
+        let response = game_media_response(&media, &media_request("hero-large.png", None));
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        assert_eq!(response.body().as_slice(), image.as_slice());
+        assert!(
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_RANGE)
+                .is_none()
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "image/png"
+        );
+
+        // A ranged request is still answered as a bounded 206.
+        let ranged =
+            game_media_response(&media, &media_request("hero-large.png", Some("bytes=0-")));
+        assert_eq!(ranged.status(), tauri::http::StatusCode::PARTIAL_CONTENT);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The Library and the detail page resolve artwork through one function.
+    /// Asserting both here is what stops the two projections from drifting back
+    /// apart: imported art used to be a `cache:` token in the Library and an
+    /// empty string on the detail page.
+    #[test]
+    fn imported_cache_artwork_resolves_identically_on_the_library_and_the_detail_page() {
+        let root = temporary_directory("media-agreement");
+        let cache_dir = root.join(MEDIA_DIRECTORY);
+        fs::create_dir_all(&cache_dir).unwrap();
+        let artwork = cache_dir.join("0123456789abcdef-hero.jpg");
+        let cover = cache_dir.join("0123456789abcdef-cover.jpg");
+        fs::write(&artwork, b"\xff\xd8\xffhero").unwrap();
+        fs::write(&cover, b"\xff\xd8\xffcover").unwrap();
+
+        let mut game = imported_local_game_fixture();
+        game.artwork_path = Some(artwork);
+        game.cover_path = Some(cover);
+        let mut stored = Catalog::default();
+        stored.games.push(game.clone());
+
+        let presentation = presentation_catalog(&stored, true);
+        let library = game_view(&game, &presentation, Some(cache_dir.as_path()));
+
+        let detail = Arc::new(
+            GameDetailService::new(Arc::new(game_detail::GameStateStore::in_memory_for_tests()))
+                .with_media_cache_dir(Some(cache_dir.clone())),
+        );
+        project_presentation_catalog(&detail, &stored).unwrap();
+        let projected = game_detail::get_game_detail(&detail, game.id.clone())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            library.cover_url.as_deref(),
+            Some("cache:0123456789abcdef-cover.jpg")
+        );
+        assert_eq!(
+            library.hero_url.as_deref(),
+            Some("cache:0123456789abcdef-hero.jpg")
+        );
+        assert_eq!(projected.summary.cover_url, library.cover_url.unwrap());
+        assert_eq!(projected.summary.hero_url, library.hero_url.unwrap());
+        assert_eq!(
+            projected.summary.landscape_url,
+            library.landscape_url.unwrap()
+        );
+        assert_eq!(projected.media.len(), 2);
+    }
+
+    #[test]
+    fn the_shared_media_resolver_refuses_traversal_and_anything_outside_its_roots() {
+        let root = temporary_directory("media-resolver");
+        let cache_dir = root.join(MEDIA_DIRECTORY);
+        fs::create_dir_all(&cache_dir).unwrap();
+        let outside = root.join("catalog.json");
+        fs::write(&outside, b"private").unwrap();
+        let cached = cache_dir.join("0123456789abcdef-cover.jpg");
+        fs::write(&cached, b"\xff\xd8\xffcover").unwrap();
+        let resolve =
+            |path: PathBuf| media_source_url(Some(path.as_path()), Some(cache_dir.as_path()));
+
+        // The two accepted shapes.
+        assert_eq!(
+            resolve(PathBuf::from("/media/igdb/covers/elden-ring.jpg")).as_deref(),
+            Some("/media/igdb/covers/elden-ring.jpg")
+        );
+        assert_eq!(
+            resolve(cached.clone()).as_deref(),
+            Some("cache:0123456789abcdef-cover.jpg")
+        );
+
+        // Traversal out of either root, a Windows separator, a control
+        // character, a file that only looks like it is in the cache, and a
+        // directory are all refused rather than reinterpreted.
+        assert_eq!(resolve(PathBuf::from("/media/../../etc/passwd")), None);
+        assert_eq!(resolve(PathBuf::from("/media/..\\secret.png")), None);
+        assert_eq!(resolve(PathBuf::from("/media/cover\n.png")), None);
+        assert_eq!(resolve(cache_dir.join("..").join("catalog.json")), None);
+        assert_eq!(resolve(outside), None);
+        assert_eq!(resolve(cache_dir.clone()), None);
+        assert_eq!(resolve(cache_dir.join("missing.jpg")), None);
+        // A cache token may only ever name a bare opaque file.
+        assert_eq!(resolve(cache_dir.join(".hidden.jpg")), None);
+        // Without a cache directory only bundled media stays addressable.
+        assert_eq!(media_source_url(Some(cached.as_path()), None), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+    /// An MP4 is recognised by `ftyp` at offset four, never by its extension.
+    const MP4_MAGIC: &[u8] = b"\0\0\0\x18ftypisom";
+
+    fn media_bytes(magic: &[u8], length: usize) -> Vec<u8> {
+        let mut bytes = magic.to_vec();
+        bytes.resize(length, 0x42);
+        bytes
+    }
+
+    /// A local record whose artwork was copied into Orivo's own media cache.
+    /// The title deliberately matches no showcase fixture, so the presentation
+    /// catalog keeps the imported paths instead of borrowing bundled artwork.
+    fn imported_local_game_fixture() -> Game {
+        Game {
+            id: "local-imported-artwork".into(),
+            title: "Imported Artwork Fixture".into(),
+            executable_path: Some(PathBuf::from("/Applications/Fixture.app")),
+            source: GameSource::Local,
+            source_id: None,
+            launch_target: LaunchTarget::Direct,
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: Some("An imported local game.".into()),
+            metadata: Some("Ready to play".into()),
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
+            logo_path: None,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn temporary_directory(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "orivo-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn detail_projection() -> Arc<GameDetailService> {
+        Arc::new(GameDetailService::new(Arc::new(
+            game_detail::GameStateStore::in_memory_for_tests(),
+        )))
+    }
+
+    /// The http-origin form the platforms rewrite `game-media:` into.
+    fn media_request(file_name: &str, range: Option<&str>) -> tauri::http::Request<Vec<u8>> {
+        let mut builder =
+            tauri::http::Request::builder().uri(format!("http://game-media.localhost/{file_name}"));
+        if let Some(range) = range {
+            builder = builder.header(tauri::http::header::RANGE, range);
+        }
+        builder.body(Vec::new()).unwrap()
     }
 
     fn steam_game_fixture() -> steam::SteamGame {
