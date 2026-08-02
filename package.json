@@ -17,7 +17,9 @@
     "store:build": "node scripts/build-store-catalog.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "2.11.1"
+    "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-process": "^2",
+    "@tauri-apps/plugin-updater": "^2"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
