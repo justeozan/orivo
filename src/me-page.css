@@ -220,6 +220,13 @@
   line-height: 1.62;
 }
 
+/* Navigation clavier / manette : anneau de focus commun aux cibles de la page. */
+.me-metric-card:focus-visible,
+.me-profile__stat:focus-visible {
+  outline: 2px solid #c3b5ff;
+  outline-offset: 3px;
+}
+
 @media (max-width: 640px) {
   .me-metrics__grid {
     grid-template-columns: 1fr;

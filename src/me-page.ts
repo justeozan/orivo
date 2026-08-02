@@ -81,6 +81,11 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     const card = element("article", "me-metric-card");
     card.dataset.metric = metric.id;
     card.dataset.band = scoreBand(metric.score);
+    // Rend la carte atteignable au clavier/à la manette : sans cela la page
+    // « Moi » ne contient aucun élément focusable et devient un cul-de-sac.
+    card.tabIndex = 0;
+    card.dataset.focusKey = `metric-${metric.id}`;
+    if (!card.hasAttribute("role")) card.setAttribute("role", "group");
 
     const head = element("div", "me-metric-card__head");
     const title = element("h3", "me-metric-card__label", metric.label);
@@ -126,8 +131,12 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     title.id = "me-profile-title";
 
     const stats = element("dl", "me-profile__stats");
+    let statIndex = 0;
     const stat = (label: string, value: string): HTMLElement => {
       const block = element("div", "me-profile__stat");
+      block.tabIndex = 0;
+      block.dataset.focusKey = `stat-${statIndex}`;
+      statIndex += 1;
       block.append(
         element("dt", "me-profile__stat-label", label),
         element("dd", "me-profile__stat-value", value),
@@ -155,9 +164,26 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     if (scrollTop > 0) writeScrollTop(scrollTop);
   };
 
+  /**
+   * Clé de focus courante : uniquement si le focus est réellement dans la page
+   * (sinon on renverrait la clé d'un élément d'une autre page).
+   */
+  const readFocusKey = (): string | null => {
+    if (!pageRoot) return null;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !pageRoot.contains(active)) return null;
+    return active.dataset.focusKey ?? null;
+  };
+
   const restorePageState = (restoreState: PageRestoreState | null): void => {
     if (!pageRoot || !restoreState) return;
     writeScrollTop(Math.max(0, restoreState.scrollTop));
+    const { focusKey } = restoreState;
+    if (!focusKey) return;
+    const target = pageRoot.querySelector<HTMLElement>(
+      `[data-focus-key="${CSS.escape(focusKey)}"]`,
+    );
+    target?.focus({ preventScroll: true });
   };
 
   return {
@@ -182,7 +208,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     deactivate() {
       const restoreState: PageRestoreState = {
         scrollTop: readScrollTop(),
-        focusKey: null,
+        focusKey: readFocusKey(),
       };
       activation = null;
       return restoreState;

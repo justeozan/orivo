@@ -1631,3 +1631,35 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   }
   .settings-section-link { border-color: rgba(255,255,255,.08); }
 }
+
+/* Spatial navigation (keyboard arrows + gamepad) */
+[data-nav-focus] {
+  outline: 2px solid #c3b5ff;
+  outline-offset: 3px;
+  scroll-margin: 24px;
+}
+/* the page roots are tabindex=-1 landing pads, never show a ring on them */
+.app-page [data-nav-focus].app-page,
+main[data-nav-focus] {
+  outline: none;
+}
+.game-card[data-nav-focus] {
+  outline-offset: 5px;
+}
+.store-card__open[data-nav-focus] {
+  outline-offset: -4px;
+}
+body[data-input-mode="pointer"] [data-nav-focus] {
+  outline: none;
+}
+/* controller hint bar: only meaningful once a pad is connected */
+.controller-hud {
+  transition: opacity 160ms ease;
+}
+body:not([data-gamepad="connected"]) .controller-hud {
+  opacity: 0.35;
+}
+body[data-gamepad="connected"] .controller-hud {
+  opacity: 1;
+}
+.gamepad-x { color: #7fb6ff; background: #1e3a55; }

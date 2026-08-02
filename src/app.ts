@@ -35,6 +35,8 @@ import {
 } from "./settings-model";
 import { createMePage } from "./me-page";
 import { createStorePage } from "./store-page";
+import { createSpatialNav } from "./spatial-nav";
+import { createGamepadBridge } from "./gamepad";
 import "./game-detail-page.css";
 import "./me-page.css";
 import "./store-page.css";
@@ -654,6 +656,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const fallback = steamAssetUrl(game, "header.jpg");
 
     card.dataset.gameId = game.id;
+    // Spatial navigation verbs: A opens the game's page, Enter starts it.
+    card.dataset.navOpen = game.id;
+    card.dataset.navLaunch = game.id;
     card.classList.toggle("is-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
     card.setAttribute("aria-label", `Open details for ${game.title}`);
@@ -3061,7 +3066,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // blanked out, because a 352px hole mid-bar reads as a broken layout. Only
     // what the field searches changes.
     if (route.page === "store") {
-      refs.search.placeholder = "Search games…";
+      refs.search.placeholder = "Search the store…";
       refs.search.setAttribute("aria-label", "Search the store");
       if (document.activeElement !== refs.search) refs.search.value = route.query;
       return;
@@ -3517,19 +3522,34 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
+    // With nothing focused there is no geometry to navigate from, so the rail
+    // keeps its own 1-D shortcuts. Once a card holds focus, spatial navigation
+    // takes over and can also walk off the rail to the rest of the page.
+    const onRail = target?.classList.contains("game-card") === true;
+    const adrift = target === null || target === document.body;
+
     switch (event.key) {
       case "ArrowLeft":
       case "ArrowUp":
+        if (!adrift) break;
         event.preventDefault();
         moveSelection(-1);
         break;
       case "ArrowRight":
       case "ArrowDown":
+        if (!adrift) break;
         event.preventDefault();
         moveSelection(1);
         break;
       case "Enter":
-        // Enter opens the detail page. Launching stays on the Play button.
+        // Enter launches the selected game outright; A opens its page first.
+        if (!adrift && !onRail) break;
+        event.preventDefault();
+        void launchGame(selectedGame().id);
+        break;
+      case "a":
+      case "A":
+        if (!adrift) break;
         event.preventDefault();
         openGameDetail(selectedGame().id);
         break;
@@ -3550,10 +3570,48 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  // Arrow keys, then the same verbs on a controller. The engine reads the live
+  // DOM, so pages only have to stay focusable — they never register anything.
+  const spatialNav = createSpatialNav({
+    openGame: (gameId) => {
+      openGameDetail(gameId);
+    },
+    launchGame: (gameId) => {
+      void launchGame(gameId);
+    },
+    back: () => {
+      router.back({ page: "library" });
+    },
+  });
+
+  createGamepadBridge({
+    move: (direction) => spatialNav.move(direction),
+    activate: () => void spatialNav.activate(),
+    back: () => spatialNav.back(),
+    launch: () => {
+      if (!spatialNav.launchFocused()) spatialNav.activate();
+    },
+    focusSearch: () => {
+      if (refs.search.disabled) return;
+      refs.search.focus();
+      refs.search.select();
+    },
+    cycleNav: (delta) => {
+      const links = refs.navLinks;
+      const index = links.findIndex((link) => link.classList.contains("is-active"));
+      links[(index + delta + links.length) % links.length]?.click();
+    },
+    scroll: (delta) => spatialNav.scrollBy(delta),
+    onActivity: () => spatialNav.setInputMode("gamepad"),
+  });
+
   renderSteamPanel();
   renderWineSettingsPanel();
   renderPreferenceControls();
-  router.start(dispatchRoute);
+  router.start((route) => {
+    dispatchRoute(route);
+    spatialNav.enterPage();
+  });
   void refreshLibrary();
   void (async () => {
     await loadPreferences();
@@ -4190,6 +4248,7 @@ function shell(): string {
         <span class="hud-controls">
           <span>${icon("navigate")}<em>Navigate</em></span>
           <span><b class="gamepad-a">A</b><em>Open</em></span>
+          <span><b class="gamepad-x">X</b><em>Play</em></span>
           <span><b class="gamepad-b">B</b><em>Back</em></span>
         </span>
       </footer>
