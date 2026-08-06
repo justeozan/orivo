@@ -25,6 +25,11 @@ pub struct WallpaperCredentialsDto {
     pub igdb_client_secret: String,
     pub google_api_key: String,
     pub google_cse_id: String,
+    /// Optional. SteamGridDB is the one source that publishes 4K-class art for
+    /// all three library roles, so a reset prefers it when a key is present and
+    /// falls back to Steam's official artwork when it is not.
+    #[serde(default)]
+    pub steamgriddb_api_key: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -34,6 +39,7 @@ pub struct WallpaperCredentialsUpdate {
     pub igdb_client_secret: Option<String>,
     pub google_api_key: Option<String>,
     pub google_cse_id: Option<String>,
+    pub steamgriddb_api_key: Option<String>,
 }
 
 /// Shared, mutable credential store. The same instance backs the Settings
@@ -67,6 +73,12 @@ impl WallpaperCredentialsService {
         }
     }
 
+    /// The SteamGridDB key, or `None` when the user has not entered one.
+    pub fn steamgriddb_api_key(&self) -> Option<String> {
+        let key = self.dto().steamgriddb_api_key;
+        (!key.is_empty()).then_some(key)
+    }
+
     pub fn dto(&self) -> WallpaperCredentialsDto {
         self.inner
             .lock()
@@ -87,6 +99,9 @@ impl WallpaperCredentialsService {
         }
         if let Some(value) = update.google_cse_id {
             next.google_cse_id = value.trim().to_owned();
+        }
+        if let Some(value) = update.steamgriddb_api_key {
+            next.steamgriddb_api_key = value.trim().to_owned();
         }
         self.save(&next)?;
         Ok(next)
@@ -132,6 +147,7 @@ fn trim_all(dto: WallpaperCredentialsDto) -> WallpaperCredentialsDto {
         igdb_client_secret: dto.igdb_client_secret.trim().to_owned(),
         google_api_key: dto.google_api_key.trim().to_owned(),
         google_cse_id: dto.google_cse_id.trim().to_owned(),
+        steamgriddb_api_key: dto.steamgriddb_api_key.trim().to_owned(),
     }
 }
 
@@ -210,6 +226,7 @@ mod tests {
                 igdb_client_secret: String::new(),
                 google_api_key: "key".into(),
                 google_cse_id: String::new(),
+                steamgriddb_api_key: String::new(),
             }
         );
     }

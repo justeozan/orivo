@@ -1,6 +1,56 @@
 export type GameId = string;
 
-export type GameSource = "steam" | "wine" | "local" | "showcase" | "store";
+/**
+ * A store Orivo can sign into and read an owned library from. These tokens are
+ * the single vocabulary shared by the backend's launch targets, the Sources
+ * list and the source badge, so a game can never be labelled by one name and
+ * launched by another.
+ */
+export type ConnectedSource =
+  | "epic"
+  | "gog"
+  | "ubisoft"
+  | "xbox"
+  | "microsoft-store"
+  | "instant-gaming";
+
+export type GameSource =
+  | "steam"
+  | "wine"
+  | "local"
+  | "showcase"
+  | "store"
+  | ConnectedSource;
+
+/**
+ * How a store proves who you are. `token` stores an OAuth credential in the
+ * system keychain and syncs in the background afterwards; `session` has no
+ * account API at all, so its sign-in window stays signed in and each sync runs
+ * inside it. The UI says which, because the two feel different to use.
+ */
+export type SourceConnectStyle = "token" | "session";
+
+export interface SourceAccountStatus {
+  provider: ConnectedSource;
+  label: string;
+  description: string;
+  connected: boolean;
+  accountLabel: string;
+  style: SourceConnectStyle;
+  /** Other sources that share this one's sign-in (Xbox and Microsoft Store). */
+  sharesSignInWith: ConnectedSource[];
+  launchable: boolean;
+}
+
+export interface SourceSyncResult {
+  provider: ConnectedSource;
+  label: string;
+  totalGames: number;
+  importedGames: number;
+  updatedGames: number;
+  /** Entries the store returned that Orivo could not read. Never hidden. */
+  skippedGames: number;
+}
 export type StoreProvider =
   | "steam"
   | "instant-gaming"
@@ -84,6 +134,12 @@ export interface WallpaperCredentials {
   igdbClientSecret: string;
   googleApiKey: string;
   googleCseId: string;
+  /**
+   * Optional. SteamGridDB is the one source with 4K-class art for all three
+   * library roles, so "Reset the covers" prefers it when a key is present and
+   * falls back to Steam's official artwork when it is not.
+   */
+  steamgriddbApiKey: string;
 }
 
 export type WallpaperCredentialsUpdate = Partial<WallpaperCredentials>;

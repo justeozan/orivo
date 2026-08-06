@@ -1607,6 +1607,84 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   line-height: 1.5;
 }
 
+/* Connected libraries: one row per store, each with its own state and its own
+   actions, so a sign-in in progress never greys out the rest of the list. */
+.source-accounts-body { display: grid; }
+.source-account-list { display: grid; }
+.source-account-entry { display: grid; }
+.source-account-entry .steam-notice { margin: 0 18px 13px; }
+.source-account-row { align-items: center; gap: 16px; padding: 16px 18px; }
+.source-account-row + .source-account-row,
+.source-account-entry + .source-account-row,
+.source-account-row + .source-account-entry { border-top: 1px solid rgba(255,255,255,.05); }
+/* The logo is the logo: no plate, no border, no tint behind it. A brand mark
+   carries its own colours and must not inherit the row's. */
+.source-account-row__mark {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  place-items: center;
+  color: #e8e5ee;
+}
+.source-account-row__mark .icon { width: 30px; height: 30px; }
+.source-account-row__mark .icon--brand { color: inherit; }
+/* Every title starts at the same x. Without this the copy block is sized by
+   its own content and drifts, so each store's name began somewhere different. */
+.source-account-row__copy { flex: 1; gap: 5px; text-align: left; }
+.source-account-row__copy strong { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.source-account-row__description,
+.source-account-row__summary { color: #8b8794; font-size: 11.5px; line-height: 1.45; }
+.source-account-row__summary { color: #a8a3b2; }
+.source-account-row__confirm { margin: 4px 0 0; color: #e6e2ec; font-size: 12.5px; }
+.source-account-row__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.source-account-row__actions .steam-import-button,
+.source-account-row__actions .steam-secondary-button { min-height: 32px; }
+.source-account-row__connect { min-width: 104px; justify-content: center; }
+.source-account-row__actions .steam-spinner { width: 16px; height: 16px; flex: none; border-width: 1.5px; }
+.source-account-row__waiting { color: #a29daf; font-size: 12px; }
+/* The price-feed state, as a quiet dot beside the name. A red "Unavailable"
+   pill on every row read as an error about the store rather than a note about
+   its optional price data. */
+.source-account-row__dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 999px;
+  background: #6a6572;
+}
+.source-account-row__dot--available { background: #58c98a; }
+.source-account-row__dot--degraded { background: #d8b25c; }
+.source-account-row__dot--unavailable { background: #c9636a; }
+.source-account-row__dot--not-configured { background: #56525e; }
+.source-providers { border-top: 1px solid rgba(255,255,255,.06); }
+.source-providers__label {
+  margin: 0;
+  padding: 14px 18px 6px;
+  color: #8b8794;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.source-providers .provider-status-row + .provider-status-row { border-top: 1px solid rgba(255,255,255,.06); }
+/* Aligned with the text column above it, not centred in the card. */
+.source-account-shared {
+  margin: -6px 0 0;
+  padding: 0 18px 14px 66px;
+  color: #7d7986;
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-align: left;
+}
+
 .provider-status-list { display: grid; }
 .provider-status-row {
   display: flex;

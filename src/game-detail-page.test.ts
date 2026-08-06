@@ -36,6 +36,9 @@ function clientWithDetail(detail: ReturnType<typeof createFallbackGameDetail>): 
       return detail;
     },
     async setWishlist() {},
+    async resetArtwork() {
+      return { title: "Test", replaced: ["cover", "landscape", "background"] as const };
+    },
     async selectMedia() {
       return [];
     },
@@ -71,12 +74,15 @@ afterEach(() => {
   container.remove();
 });
 
-async function mountWith(detail: ReturnType<typeof createFallbackGameDetail>): Promise<PageLifecycleHost> {
+async function mountWith(
+  detail: ReturnType<typeof createFallbackGameDetail>,
+  overrides: Partial<GameDetailPageClient> = {},
+): Promise<PageLifecycleHost> {
   const page = createGameDetailPage({
     navigate: () => {},
     back: () => {},
     play: () => {},
-    client: clientWithDetail(detail),
+    client: { ...clientWithDetail(detail), ...overrides },
   });
   host = new PageLifecycleHost(container, page);
   await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
@@ -210,5 +216,42 @@ describe("game detail page social rendering", () => {
     expect(container.querySelector(".gd-friends")).toBeNull();
     expect(container.querySelector(".gd-activity")).toBeNull();
     expect(container.querySelector(".gd-related")).toBeNull();
+  });
+});
+
+describe("resetting the covers", () => {
+  it("refills all three roles through one action", async () => {
+    const requested: string[] = [];
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork(gameId) {
+        requested.push(gameId);
+        return { title: "Test", replaced: ["cover", "landscape", "background"] };
+      },
+    });
+
+    // The action replaced the old single-image search, which downloaded one
+    // picture and used it as cover, landscape and background at once.
+    const entry = container.querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']");
+    expect(entry?.textContent).toContain("Reset the covers");
+    entry!.click();
+    await flush();
+    expect(requested).toEqual([GAME_ID]);
+  });
+
+  it("says which role it could not find art for instead of reporting success", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork() {
+        return { title: "Test", replaced: ["cover", "background"] };
+      },
+    });
+
+    container.querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']")!.click();
+    await flush();
+
+    // A game whose publisher never uploaded a wide capsule keeps the landscape
+    // image it had, and the page says so rather than claiming a clean result.
+    expect(container.textContent).toContain("no landscape cover was found");
   });
 });

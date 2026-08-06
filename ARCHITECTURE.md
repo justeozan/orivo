@@ -157,6 +157,37 @@ Source externe -> Adapter -> Normalizer -> Catalog service -> SQLite
 
 Le domaine ne depend jamais d'un format proprietaire de fournisseur. Les IDs externes sont conserves comme references d'import, avec un ID Orivo stable.
 
+#### Comptes de boutiques connectes
+
+`src-tauri/src/sources.rs` porte la frontiere commune des comptes connectes
+(Epic Games, GOG, Ubisoft Connect, Xbox, Microsoft Store, Instant Gaming), et
+chaque `source_*.rs` implemente un fournisseur. Trois regles y sont non
+negociables:
+
+1. **Aucun secret ne traverse l'IPC.** Les identifiants restent dans le trousseau
+   du systeme. Le WebView apprend seulement si une source est connectee et sous
+   quel nom d'affichage.
+2. **Une reponse de fournisseur est une entree non fiable.** Les identifiants
+   passent la grammaire de jetons opaques du catalogue et les URLs d'artwork une
+   liste d'hotes autorises par fournisseur. Une reponse ne peut donc jamais
+   devenir un chemin de fichier, un argument de processus ni une origine
+   arbitraire dans la fenetre principale.
+3. **Une reponse partielle reste une reponse.** Un jeu illisible est ignore et
+   compte, jamais une synchronisation echouee. Le compte est affiche.
+
+Deux styles de connexion coexistent, parce que la moitie de ces boutiques ne
+publie pas d'API de compte utilisable:
+
+| Style | Boutiques | Fonctionnement |
+| --- | --- | --- |
+| `Token` | Epic, GOG, Microsoft | La fenetre de connexion remet un code a usage unique, Rust l'echange contre un credential OAuth conserve dans le trousseau, puis chaque synchronisation est faite sans fenetre. |
+| `Session` | Ubisoft Connect, Instant Gaming | Aucune API de compte publique. La fenetre de connexion reste connectee et la synchronisation s'execute *dans* cette origine authentifiee, en ne renvoyant qu'une liste compacte de jeux. Aucun secret durable ne sort de la fenetre. |
+
+Un enregistrement issu d'un compte connecte utilise `LaunchTarget::Provider`.
+Il ne porte ni chemin, ni repertoire de travail, ni arguments: l'hote transforme
+son jeton opaque en une seule URI fixe et percent-encodee vers le client de la
+boutique, et seulement si ce client est installe sur la machine.
+
 ### 6.2 Plugins
 
 Le runtime plugin recommande est **Wasmtime + WebAssembly Component Model + WIT**.

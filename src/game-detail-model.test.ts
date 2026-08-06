@@ -5,6 +5,7 @@ import {
   createGameDetailPage,
   type GameDetailPageClient,
   type GameDetailPageOptions,
+  type WallpaperRole,
 } from "./game-detail-page";
 import {
   availableMediaKinds,
@@ -756,6 +757,7 @@ function stubClient(overrides: Partial<GameDetailPageClient> = {}): GameDetailPa
     importWallpaper: async () => [],
     openOffer: async () => undefined,
     searchArtwork: async () => undefined,
+    resetArtwork: async () => ({ title: "Test", replaced: ["cover", "landscape", "background"] as WallpaperRole[] }),
     removeGame: async () => undefined,
     setHomeImage: async () => undefined,
     ...overrides,

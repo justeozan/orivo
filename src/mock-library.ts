@@ -1,8 +1,10 @@
+import type { ConnectedSource } from "./contracts";
+
 export interface LibraryGame {
   id: string;
   title: string;
   /** Presentation source returned by the desktop catalog; fixture entries can omit it. */
-  source?: "steam" | "wine" | "local" | "showcase";
+  source?: "steam" | "wine" | "local" | "showcase" | ConnectedSource;
   description: string;
   metadata: string;
   genre: string;

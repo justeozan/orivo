@@ -76,6 +76,7 @@ describe("settings model", () => {
       igdbClientSecret: "secret",
       googleApiKey: "",
       googleCseId: "",
+      steamgriddbApiKey: "",
     });
     expect(normaliseWallpaperCredentials(null)).toEqual(EMPTY_WALLPAPER_CREDENTIALS);
   });
