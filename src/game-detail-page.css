@@ -474,6 +474,21 @@
   min-width: 0;
 }
 
+/* The store mark that opens the row: each connected store's own logo, sized
+   above the 18px the global `.icon` rule would otherwise give it, because it
+   reads as a logo here rather than as one more glyph in the fact list. */
+.gd-source {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  color: #e8e5ec;
+}
+
+.gd-source .icon {
+  width: 26px;
+  height: 26px;
+}
+
 /* ------------------------------------------------------------ fact lists */
 
 .gd-meta,
