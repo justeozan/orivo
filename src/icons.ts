@@ -52,6 +52,11 @@ export type IconName =
   | "switch"
   | "emulator"
   | "chart"
+  | "epic"
+  | "gog"
+  | "ubisoft"
+  | "microsoft"
+  | "instant-gaming"
   | "sun"
   | "cover"
   | "landscape"
@@ -153,10 +158,77 @@ const paths: Record<IconName, string> = {
   landscape: '<rect x="3" y="5.4" width="18" height="13.2" rx="2" />',
   background:
     '<rect x="3" y="5.4" width="18" height="13.2" rx="2" /><circle cx="8.3" cy="9.9" r="1.4" /><path d="m3.4 16.9 4.3-4 2.9 2.7 3.3-3.4 4.7 4.7" />',
+  // Connected-store marks, drawn as the recognisable brand shapes so a card
+  // reads at a glance. These are solid, filled marks rather than the outline
+  // style above, because that is what makes a store logo legible at 20px.
+  // Epic: the launcher's shield, drawn as an outline with a solid "E".
+  // A filled shield turns into a white blob at 20px, which is exactly what it
+  // looked like on the library badge; the outline keeps the silhouette while
+  // letting the letter carry the mark.
+  epic:
+    '<path d="M5.9 3.2h12.2c.8 0 1.4.6 1.4 1.4v9.7c0 1.3-.5 1.8-1.4 2.3l-5.8 3c-.2.1-.4.1-.6 0l-5.8-3c-.9-.5-1.4-1-1.4-2.3V4.6c0-.8.6-1.4 1.4-1.4Z" stroke-width="1.6" /><path fill="currentColor" stroke="none" d="M9.2 6.9h5.6v1.6h-3.8v1.7h3v1.6h-3v1.8h3.9v1.6H9.2z" />',
+  // GOG: the round mark carrying its "G". The stepped inner counters of the
+  // full wordmark collapse into an unreadable "20" at this size, so the circle
+  // is drawn as an outline and the letter carries the mark.
+  gog:
+    '<circle cx="12" cy="12" r="8.7" stroke-width="1.6" /><path fill="currentColor" stroke="none" d="M12.2 7.3c1.4 0 2.6.5 3.5 1.4l-1.3 1.3a3.1 3.1 0 1 0-2.2 5.3 3.1 3.1 0 0 0 2.8-1.7h-2.8v-1.8h4.8v1a4.9 4.9 0 1 1-4.8-5.5Z" />',
+  // Ubisoft: the open spiral of the Ubisoft mark.
+  ubisoft:
+    '<path fill="currentColor" stroke="none" d="M12 2.6c-4 0-7.4 2.6-8.7 6.2l1.7.6C6.1 6.5 8.8 4.4 12 4.4a7.6 7.6 0 0 1 0 15.2c-2.7 0-5-1.4-6.3-3.6l-1.6.9A9.4 9.4 0 1 0 12 2.6Zm0 4.5a4.9 4.9 0 0 0-4.7 3.5l1.8.5A3 3 0 1 1 12 15a3 3 0 0 1-2.3-1.1l-1.4 1.2A4.9 4.9 0 1 0 12 7.1Z" />',
+  // Microsoft: the four-square mark, shared by Xbox's PC library.
+  microsoft:
+    '<path fill="currentColor" stroke="none" d="M3 3h8.4v8.4H3zM12.6 3H21v8.4h-8.4zM3 12.6h8.4V21H3zM12.6 12.6H21V21h-8.4z" />',
+  // Instant Gaming sells keys, so its mark is a key rather than a storefront.
+  "instant-gaming":
+    '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M8.6 6.4a5.6 5.6 0 1 0 0 11.2 5.6 5.6 0 0 0 5.3-3.8h1.6v2.4h2.3v-2.4h1.1v2.4h2.3v-4.6h-7.3A5.6 5.6 0 0 0 8.6 6.4Zm0 3.6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" />',
+};
+
+/**
+ * Full-colour brand marks, used where a logo is presented as itself rather than
+ * as a small status glyph — the Settings list of connectable stores.
+ *
+ * The library, the hero badge and the detail page keep the monochrome marks
+ * above, which inherit `currentColor` and therefore read white on the artwork.
+ */
+const brandPaths: Partial<Record<IconName, string>> = {
+  steam: '<circle cx="12" cy="12" r="11.2" fill="#1b2838" />' + paths.steam.replace('fill="currentColor"', 'fill="#ffffff"'),
+  // Epic's mark as it is presented on a dark surface: a light shield carrying
+  // the dark "E", rather than the outline the white library badge uses.
+  epic:
+    '<path fill="#f4f3f7" stroke="none" d="M5.9 3.2h12.2c.8 0 1.4.6 1.4 1.4v9.7c0 1.3-.5 1.8-1.4 2.3l-5.8 3c-.2.1-.4.1-.6 0l-5.8-3c-.9-.5-1.4-1-1.4-2.3V4.6c0-.8.6-1.4 1.4-1.4Z" />' +
+    '<path fill="#2a2a2a" stroke="none" d="M9.2 6.9h5.6v1.6h-3.8v1.7h3v1.6h-3v1.8h3.9v1.6H9.2z" />',
+  gog: paths.gog.replace('fill="currentColor"', 'fill="#a04ff5"'),
+  ubisoft: paths.ubisoft.replace('fill="currentColor"', 'fill="#0b7fda"'),
+  xbox: '<circle cx="12" cy="12" r="9.4" fill="#107c10" stroke="none" />' +
+    '<path d="M6.6 5.9c2.6 1.1 4.4 3 5.4 5 1-2 2.8-3.9 5.4-5" stroke="#ffffff" /><path d="M6.6 18.1c1.5-3.6 3.3-6.2 5.4-7.8 2.1 1.6 3.9 4.2 5.4 7.8" stroke="#ffffff" />',
+  // The Microsoft mark is the one case where the colours carry the identity.
+  microsoft:
+    '<path fill="#f25022" stroke="none" d="M3 3h8.4v8.4H3z" />' +
+    '<path fill="#7fba00" stroke="none" d="M12.6 3H21v8.4h-8.4z" />' +
+    '<path fill="#00a4ef" stroke="none" d="M3 12.6h8.4V21H3z" />' +
+    '<path fill="#ffb900" stroke="none" d="M12.6 12.6H21V21h-8.4z" />',
+  "instant-gaming": paths["instant-gaming"].replace('fill="currentColor"', 'fill="#f76b15"'),
 };
 
 export function icon(name: IconName, className = "", label?: string): string {
+  return svg(name, paths[name], className, label);
+}
+
+/**
+ * The brand's own colours where one exists, and the monochrome mark otherwise.
+ * A store without a colour variant is not a gap: Xbox, Microsoft and the rest
+ * that do have one simply present as themselves, and the others still read.
+ */
+export function brandIcon(name: IconName, className = "", label?: string): string {
+  return svg(name, brandPaths[name] ?? paths[name], `${className} icon--brand`.trim(), label);
+}
+
+export function hasBrandIcon(name: IconName): boolean {
+  return brandPaths[name] !== undefined;
+}
+
+function svg(name: IconName, body: string, className: string, label?: string): string {
   const title = label ? `<title>${label}</title>` : "";
   const viewBox = name === "orivo" ? "0 0 32 30" : "0 0 24 24";
-  return `<svg class="icon ${className}" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="${label ? "false" : "true"}"${label ? ' role="img"' : ""}>${title}${paths[name]}</svg>`;
+  return `<svg class="icon ${className}" viewBox="${viewBox}" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="${label ? "false" : "true"}"${label ? ' role="img"' : ""}>${title}${body}</svg>`;
 }

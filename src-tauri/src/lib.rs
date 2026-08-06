@@ -1,4 +1,5 @@
 mod catalog;
+mod game_artwork;
 mod game_detail;
 mod game_media;
 mod launcher;
@@ -8,6 +9,12 @@ mod plugin_installer;
 mod plugin_runtime;
 mod preferences;
 mod quiky_installer;
+mod source_epic;
+mod source_gog;
+mod source_instant_gaming;
+mod source_microsoft;
+mod source_ubisoft;
+mod sources;
 mod steam;
 mod steam_account;
 mod store;
@@ -90,6 +97,30 @@ const STEAM_ACCOUNT_CONNECTED_EVENT: &str = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT: &str = "steam-account-login-failed";
 const STEAM_ACCOUNT_LOGIN_PENDING_EVENT: &str = "steam-account-login-pending";
+const SOURCE_ACCOUNT_CONNECTED_EVENT: &str = "source-account-authenticated";
+const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "source-account-login-cancelled";
+const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT: &str = "source-account-login-failed";
+const SOURCE_LIBRARY_SYNCED_EVENT: &str = "source-library-synced";
+/// A first sign-in involves a password, a second factor and often a consent
+/// screen, so the window is given room before Orivo gives up on it.
+const SOURCE_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
+/// A re-sync should find an existing session immediately. Waiting minutes here
+/// would only hide a session that has actually lapsed.
+const SOURCE_RESYNC_TIMEOUT: Duration = Duration::from_secs(75);
+const SOURCE_POLL_INTERVAL: Duration = Duration::from_millis(400);
+const SOURCE_SESSION_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Filling in missing artwork is an enhancement, never something a sync waits
+/// on. Whatever the budget does not reach is picked up by the next sync.
+const SOURCE_ARTWORK_BUDGET: Duration = Duration::from_secs(25);
+const MAX_SOURCE_ARTWORK_LOOKUPS: usize = 400;
+const MAX_CONCURRENT_SOURCE_ARTWORK_LOOKUPS: usize = 4;
+/// Repeated in-page failures mean the store is unreachable from this window,
+/// not that the next attempt will land.
+const MAX_SOURCE_SESSION_FAILURES: u32 = 3;
+/// How long the in-page library request may take once it has started.
+const SOURCE_SESSION_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
+const SOURCE_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+const SOURCE_EVAL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WINE_LAUNCH_STATUS_EVENT: &str = "wine-launch-status";
 const WINE_EARLY_EXIT_WINDOW: Duration = Duration::from_secs(8);
 static MEDIA_CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -144,6 +175,10 @@ struct AppState {
     /// The active dedicated Steam sign-in window. It only tracks whether the
     /// one-time token extraction was consumed; no credential is held here.
     steam_auth_settled: Mutex<Option<Arc<AtomicBool>>>,
+    /// One in-flight sign-in per connected store, keyed by the credential
+    /// namespace its window belongs to. It holds the outcome slot the command
+    /// awaits, never a provider secret.
+    source_logins: Mutex<BTreeMap<String, Arc<SourceLoginSession>>>,
     /// Ephemeral setup grants hold native-picker selections until a profile is
     /// explicitly created. The WebView sees only opaque ids and labels.
     wine_setups: Arc<Mutex<BTreeMap<String, WineSetupSession>>>,
@@ -493,6 +528,7 @@ impl AppState {
             catalog_mutation: Arc::new(Mutex::new(())),
             steam_preview: Mutex::new(None),
             steam_auth_settled: Mutex::new(None),
+            source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
@@ -548,6 +584,11 @@ pub fn run() {
             app.manage(state);
             app.manage(detail);
             app.manage(media);
+            // Which stores are connected is answered from this secret-free
+            // directory. Without it, merely opening Settings would read every
+            // keychain item and macOS would ask for the keychain password once
+            // per store, every time.
+            sources::set_connections_path(app_data.join(sources::CONNECTIONS_FILE));
             // The same credential store backs both the Settings commands and
             // the wallpaper search, so a saved key is used without a restart.
             let wallpaper_credentials = Arc::new(wallpaper_credentials::WallpaperCredentialsService::load(
@@ -586,6 +627,7 @@ pub fn run() {
             get_library,
             import_game,
             fetch_game_artwork,
+            reset_game_artwork,
             remove_game,
             set_home_image,
             get_steam_import_preview,
@@ -598,6 +640,11 @@ pub fn run() {
             connect_steam_with_api_key,
             sync_steam_account_library,
             disconnect_steam_account,
+            get_source_accounts,
+            connect_source_account,
+            cancel_source_login,
+            sync_source_library,
+            disconnect_source_account,
             get_runner_plugins,
             get_wine_runner_status,
             begin_wine_profile_setup,
@@ -2693,9 +2740,10 @@ async fn retry_wine_game_in_compatibility(
                 } if runner_id == WINE_STAGING_RUNNER_ID => {
                     Some((profile_id.clone(), game_ref.clone()))
                 }
-                LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Runner { .. } => {
-                    None
-                }
+                LaunchTarget::Direct
+                | LaunchTarget::Steam { .. }
+                | LaunchTarget::Runner { .. }
+                | LaunchTarget::Provider { .. } => None,
             })
             .ok_or_else(|| "This Wine game is no longer available.".to_string())?;
         let inventory = next
@@ -3187,6 +3235,145 @@ async fn fetch_game_artwork(
         *catalog = next_catalog;
     }
     Ok(())
+}
+
+/// Refill every artwork role from a reliable, high-resolution source.
+///
+/// This is what the detail page's "Reset the covers" runs. It replaces the old
+/// behaviour of downloading one image and using it as cover, landscape and
+/// background at once — which is why a game synced from Xbox or the Microsoft
+/// Store ended up with a small square thumbnail everywhere, or with nothing.
+///
+/// A role Orivo cannot find art for keeps whatever it had; the response says
+/// which roles were actually replaced, so a partial result never reads as a
+/// complete one.
+#[tauri::command]
+async fn reset_game_artwork(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    credentials: State<'_, Arc<wallpaper_credentials::WallpaperCredentialsService>>,
+    game_id: String,
+) -> Result<ArtworkResetResponse, String> {
+    let title = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        catalog
+            .games
+            .iter()
+            .find(|game| game.id == game_id)
+            .map(|game| game.title.clone())
+            .ok_or_else(|| "This game is no longer in your library.".to_string())?
+    };
+
+    let artwork = game_artwork::resolve(&title, credentials.steamgriddb_api_key().as_deref()).await;
+    if artwork.is_empty() {
+        return Err(format!(
+            "No artwork was found for \u{201c}{title}\u{201d}."
+        ));
+    }
+
+    let cache_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    let stem = cache_stem(&game_id);
+    let mut downloaded = Vec::new();
+    for role in game_artwork::ArtworkRole::all() {
+        // Candidates are ordered best-first; the first one that actually
+        // exists wins. A publisher who never uploaded a library hero is a
+        // normal case, not an error.
+        for url in artwork.for_role(role) {
+            if !game_artwork::is_trusted_artwork_url(url) {
+                continue;
+            }
+            let Ok(bytes) = download_artwork_bytes(url).await else {
+                continue;
+            };
+            let extension = if url
+                .split('?')
+                .next()
+                .unwrap_or(url)
+                .to_ascii_lowercase()
+                .ends_with(".png")
+            {
+                "png"
+            } else {
+                "jpg"
+            };
+            let prefix = match role {
+                game_artwork::ArtworkRole::Cover => "usercover",
+                game_artwork::ArtworkRole::Landscape => "landscape",
+                game_artwork::ArtworkRole::Background => "home",
+            };
+            // A fresh filename each time, so the WebView repaints instead of
+            // serving its cached copy of a stable path.
+            remove_cached_artwork(&cache_dir, &format!("{stem}-{prefix}-"));
+            let path = cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
+            if fs::write(&path, &bytes).is_ok() {
+                downloaded.push((role, path));
+                break;
+            }
+        }
+    }
+
+    if downloaded.is_empty() {
+        return Err(format!(
+            "The artwork for \u{201c}{title}\u{201d} could not be downloaded."
+        ));
+    }
+
+    let mut replaced = Vec::new();
+    {
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next_catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        {
+            let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+                return Err("This game is no longer in your library.".to_string());
+            };
+            for (role, path) in downloaded {
+                match role {
+                    game_artwork::ArtworkRole::Cover => {
+                        game.cover_path = Some(path.clone());
+                        game.cover_source_path = Some(path);
+                    }
+                    game_artwork::ArtworkRole::Landscape => {
+                        game.landscape_image_path = Some(path);
+                    }
+                    game_artwork::ArtworkRole::Background => {
+                        // The background also backs the hero, so a store's own
+                        // low-resolution art stops winning the fallback chain.
+                        game.home_image_path = Some(path.clone());
+                        game.artwork_path = Some(path.clone());
+                        game.artwork_source_path = Some(path);
+                    }
+                }
+                replaced.push(role.token().to_string());
+            }
+        }
+        persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+        let mut catalog = state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        *catalog = next_catalog;
+    }
+
+    Ok(ArtworkResetResponse { title, replaced })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtworkResetResponse {
+    title: String,
+    /// The roles actually replaced: `cover`, `landscape`, `background`.
+    replaced: Vec<String>,
 }
 
 async fn download_artwork_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -3776,6 +3963,841 @@ async fn disconnect_steam_account() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Connected store accounts
+// ---------------------------------------------------------------------------
+
+/// The slot a `connect_source_account` call awaits. The sign-in window's own
+/// callbacks fill it in; nothing but a presentation-safe status or a single
+/// sentence ever lands here.
+#[derive(Debug)]
+struct SourceLoginSession {
+    outcome: Mutex<Option<Result<sources::SourceAccountStatus, String>>>,
+    settled: AtomicBool,
+}
+
+impl SourceLoginSession {
+    fn new() -> Self {
+        Self {
+            outcome: Mutex::new(None),
+            settled: AtomicBool::new(false),
+        }
+    }
+
+    /// Record the first outcome and ignore every later one. A page load, a
+    /// navigation and the window's own close handler can all race to finish the
+    /// same sign-in; only one of them may decide how it ended.
+    fn settle(&self, outcome: Result<sources::SourceAccountStatus, String>) -> bool {
+        if self
+            .settled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        if let Ok(mut slot) = self.outcome.lock() {
+            *slot = Some(outcome);
+        }
+        true
+    }
+
+    fn take(&self) -> Option<Result<sources::SourceAccountStatus, String>> {
+        self.outcome.lock().ok()?.take()
+    }
+}
+
+fn source_window_label(provider: sources::SourceProvider) -> String {
+    // Xbox and Microsoft Store share a sign-in, so they share a window too.
+    format!(
+        "source-auth-{}",
+        match provider.credential_namespace() {
+            sources::CredentialNamespace::Epic => "epic",
+            sources::CredentialNamespace::Gog => "gog",
+            sources::CredentialNamespace::Microsoft => "microsoft",
+            sources::CredentialNamespace::Ubisoft => "ubisoft",
+            sources::CredentialNamespace::InstantGaming => "instant-gaming",
+        }
+    )
+}
+
+fn parse_source_provider(provider: &str) -> Result<sources::SourceProvider, String> {
+    sources::SourceProvider::from_token(provider)
+        .ok_or_else(|| "Orivo does not know that library source.".to_string())
+}
+
+/// Sign-in roams: a store can hand identity off to its own login host, and a
+/// second factor can be served by a third party. The window is capability-free
+/// and every credential is read only on that provider's own exact page, so
+/// permitting HTTPS navigation keeps the flows working without granting the
+/// page any access to Orivo.
+fn is_allowed_source_auth_navigation(url: &Url) -> bool {
+    url.scheme() == "https"
+}
+
+#[tauri::command]
+async fn get_source_accounts() -> Result<Vec<sources::SourceAccountStatus>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        sources::SourceProvider::all()
+            .into_iter()
+            .map(|provider| {
+                // A keychain that will not open is reported as "not connected"
+                // rather than failing the whole list: the other five sources
+                // are still perfectly usable.
+                sources::status(provider).unwrap_or_else(|error| {
+                    eprintln!("{} account status is unavailable: {error}", provider.label());
+                    sources::status_from_credential(provider, None)
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("Library source status did not finish: {error}"))
+}
+
+/// Open a store's own sign-in window and resolve once the account is connected.
+///
+/// Token-style stores settle from the window's page-load callback; session-style
+/// stores have no token to hand over, so this waits for the user to sign in and
+/// then performs the first sync inside the window itself.
+#[tauri::command]
+async fn connect_source_account(
+    provider: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<sources::SourceAccountStatus, String> {
+    let provider = parse_source_provider(&provider)?;
+    match provider.connect_style() {
+        sources::ConnectStyle::Token => connect_token_source(provider, &app, &state).await,
+        sources::ConnectStyle::Session => {
+            let synced = session_sync(provider, &app, SOURCE_CONNECT_TIMEOUT, true).await;
+            match synced {
+                Ok(result) => {
+                    let credential = sources::StoredSourceCredential::Session {
+                        account_label: result.account_label.clone(),
+                    };
+                    sources::save_credential(provider, &credential)
+                        .map_err(|error| error.to_string())?;
+                    let response =
+                        import_source_library(&state, provider, result.library).await?;
+                    close_source_window(&app, provider);
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        SOURCE_ACCOUNT_CONNECTED_EVENT,
+                        sources::SourceAccountEvent {
+                            provider: provider.token().to_string(),
+                            account_label: result.account_label,
+                        },
+                    );
+                    let _ = app.emit_to(MAIN_WINDOW_LABEL, SOURCE_LIBRARY_SYNCED_EVENT, &response);
+                    sources::status(provider).map_err(|error| error.to_string())
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        SOURCE_ACCOUNT_LOGIN_FAILED_EVENT,
+                        sources::SourceLoginFailedEvent {
+                            provider: provider.token().to_string(),
+                            message: message.clone(),
+                        },
+                    );
+                    Err(message)
+                }
+            }
+        }
+    }
+}
+
+async fn connect_token_source(
+    provider: sources::SourceProvider,
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<sources::SourceAccountStatus, String> {
+    let label = source_window_label(provider);
+    let session = Arc::new(SourceLoginSession::new());
+    // A second click while a window is already open focuses it and joins the
+    // sign-in in flight, instead of stacking another window on top of it.
+    let existing = {
+        let mut sessions = state
+            .source_logins
+            .lock()
+            .map_err(|_| "The sign-in state is temporarily unavailable.".to_string())?;
+        match app.get_webview_window(&label) {
+            Some(window) => match sessions.get(&label).cloned() {
+                Some(existing) => {
+                    let _ = window.show().and_then(|_| window.set_focus());
+                    Some(existing)
+                }
+                // A window with no sign-in behind it is a leftover: its
+                // callbacks are gone, so nothing would ever settle. Replace it.
+                None => {
+                    let _ = window.close();
+                    sessions.insert(label.clone(), Arc::clone(&session));
+                    None
+                }
+            },
+            None => {
+                sessions.insert(label.clone(), Arc::clone(&session));
+                None
+            }
+        }
+    };
+    if let Some(existing) = existing {
+        return await_source_login(existing, provider).await;
+    }
+
+    let login_url = match provider {
+        sources::SourceProvider::Epic => source_epic::login_url(),
+        sources::SourceProvider::Gog => source_gog::login_url(),
+        sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore => {
+            source_microsoft::login_url()
+        }
+        other => return Err(sources::SourceError::Unsupported(other).to_string()),
+    };
+    let initial_url = Url::parse(&login_url)
+        .map_err(|_| format!("The {} sign-in URL is invalid.", provider.label()))?;
+
+    let session_for_navigation = Arc::clone(&session);
+    let app_for_navigation = app.clone();
+    let session_for_page_load = Arc::clone(&session);
+    let app_for_page_load = app.clone();
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        label.clone(),
+        WebviewUrl::External(initial_url),
+    )
+    .title(format!("Connect {} to Orivo", provider.label()))
+    .inner_size(640.0, 760.0)
+    .min_inner_size(460.0, 580.0)
+    .center()
+    // A token-style sign-in leaves nothing behind: the credential belongs in
+    // the keychain, not in a browser session inside Orivo's app data.
+    .incognito(true)
+    .on_navigation(move |url| {
+        // GOG returns its authorization code in the redirect URL itself, so it
+        // is read here — no script ever runs inside the sign-in page.
+        if provider == sources::SourceProvider::Gog
+            && let Some(code) = source_gog::authorization_code_from_url(url)
+        {
+            finish_gog_login(&app_for_navigation, Arc::clone(&session_for_navigation), code);
+        }
+        is_allowed_source_auth_navigation(url)
+    })
+    .on_new_window(|_, _| NewWindowResponse::Deny)
+    .on_page_load(move |window, payload| {
+        if payload.event() != PageLoadEvent::Finished {
+            return;
+        }
+        let url = payload.url();
+        match provider {
+            sources::SourceProvider::Epic if source_epic::is_authorization_page(url) => {
+                extract_epic_login(&app_for_page_load, &window, Arc::clone(&session_for_page_load));
+            }
+            sources::SourceProvider::Gog => {
+                if let Some(code) = source_gog::authorization_code_from_url(url) {
+                    finish_gog_login(
+                        &app_for_page_load,
+                        Arc::clone(&session_for_page_load),
+                        code,
+                    );
+                }
+            }
+            sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
+                if source_microsoft::is_redirect_page(url) =>
+            {
+                extract_microsoft_login(
+                    &app_for_page_load,
+                    &window,
+                    provider,
+                    Arc::clone(&session_for_page_load),
+                );
+            }
+            _ => {}
+        }
+    })
+    .build()
+    .map_err(|error| {
+        format!(
+            "The {} sign-in window could not open: {error}",
+            provider.label()
+        )
+    })?;
+
+    let session_for_close = Arc::clone(&session);
+    let app_for_close = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed)
+            && session_for_close.settle(Err(format!(
+                "The {} sign-in window was closed before the account was connected.",
+                provider.label()
+            )))
+        {
+            let _ = app_for_close.emit_to(
+                MAIN_WINDOW_LABEL,
+                SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT,
+                sources::SourceAccountEvent {
+                    provider: provider.token().to_string(),
+                    account_label: String::new(),
+                },
+            );
+        }
+    });
+
+    let outcome = await_source_login(session, provider).await;
+    if let Ok(mut sessions) = state.source_logins.lock() {
+        sessions.remove(&label);
+    }
+    outcome
+}
+
+/// Wait for the sign-in window to settle. The deadline exists so a window the
+/// user walked away from cannot leave a command pending forever.
+async fn await_source_login(
+    session: Arc<SourceLoginSession>,
+    provider: sources::SourceProvider,
+) -> Result<sources::SourceAccountStatus, String> {
+    let deadline = Instant::now() + SOURCE_CONNECT_TIMEOUT;
+    loop {
+        if let Some(outcome) = session.take() {
+            return outcome;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "The {} sign-in did not finish in time. Try connecting again.",
+                provider.label()
+            ));
+        }
+        tokio::time::sleep(SOURCE_POLL_INTERVAL).await;
+    }
+}
+
+fn extract_epic_login(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    session: Arc<SourceLoginSession>,
+) {
+    let app = app.clone();
+    let login_window = window.clone();
+    let _ = window.eval_with_callback(
+        source_epic::AUTHORIZATION_EXTRACTION_SCRIPT,
+        move |raw_result| {
+            let Some(code) = source_epic::authorization_code_from_eval(&raw_result) else {
+                // Epic sometimes renders the redirect page before its body has
+                // the code. A later page load retries; nothing is settled here.
+                return;
+            };
+            let app = app.clone();
+            let session = Arc::clone(&session);
+            let login_window = login_window.clone();
+            tauri::async_runtime::spawn(async move {
+                let outcome = source_epic::connect(code).await;
+                settle_token_login(
+                    &app,
+                    sources::SourceProvider::Epic,
+                    session,
+                    login_window,
+                    outcome,
+                );
+            });
+        },
+    );
+}
+
+fn finish_gog_login(app: &AppHandle, session: Arc<SourceLoginSession>, code: String) {
+    if session.settled.load(Ordering::Acquire) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = source_gog::connect(code).await;
+        let window = app.get_webview_window(&source_window_label(sources::SourceProvider::Gog));
+        settle_token_login_optional(
+            &app,
+            sources::SourceProvider::Gog,
+            session,
+            window,
+            outcome,
+        );
+    });
+}
+
+fn extract_microsoft_login(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    provider: sources::SourceProvider,
+    session: Arc<SourceLoginSession>,
+) {
+    let app = app.clone();
+    let login_window = window.clone();
+    let _ = window.eval_with_callback(source_microsoft::TOKEN_EXTRACTION_SCRIPT, move |raw| {
+        let Some(token) = source_microsoft::token_from_eval(&raw) else {
+            return;
+        };
+        let app = app.clone();
+        let session = Arc::clone(&session);
+        let login_window = login_window.clone();
+        tauri::async_runtime::spawn(async move {
+            let outcome = source_microsoft::connect(token).await;
+            settle_token_login(&app, provider, session, login_window, outcome);
+        });
+    });
+}
+
+fn settle_token_login(
+    app: &AppHandle,
+    provider: sources::SourceProvider,
+    session: Arc<SourceLoginSession>,
+    window: WebviewWindow,
+    outcome: Result<sources::StoredSourceCredential, sources::SourceError>,
+) {
+    settle_token_login_optional(app, provider, session, Some(window), outcome);
+}
+
+fn settle_token_login_optional(
+    app: &AppHandle,
+    provider: sources::SourceProvider,
+    session: Arc<SourceLoginSession>,
+    window: Option<WebviewWindow>,
+    outcome: Result<sources::StoredSourceCredential, sources::SourceError>,
+) {
+    match outcome {
+        Ok(credential) => {
+            let account_label = credential.account_label().to_string();
+            let status = sources::status_from_credential(provider, Some(&credential));
+            if session.settle(Ok(status)) {
+                let _ = app.emit_to(
+                    MAIN_WINDOW_LABEL,
+                    SOURCE_ACCOUNT_CONNECTED_EVENT,
+                    sources::SourceAccountEvent {
+                        provider: provider.token().to_string(),
+                        account_label,
+                    },
+                );
+                // Close only after the credential is saved, so a keychain
+                // failure leaves the window available for another attempt.
+                if let Some(window) = window {
+                    let _ = window.close();
+                }
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if session.settle(Err(message.clone())) {
+                let _ = app.emit_to(
+                    MAIN_WINDOW_LABEL,
+                    SOURCE_ACCOUNT_LOGIN_FAILED_EVENT,
+                    sources::SourceLoginFailedEvent {
+                        provider: provider.token().to_string(),
+                        message,
+                    },
+                );
+                if let Some(window) = window {
+                    let _ = window.close();
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn cancel_source_login(provider: String, app: AppHandle) -> Result<(), String> {
+    let provider = parse_source_provider(&provider)?;
+    close_source_window(&app, provider);
+    Ok(())
+}
+
+fn close_source_window(app: &AppHandle, provider: sources::SourceProvider) {
+    if let Some(window) = app.get_webview_window(&source_window_label(provider)) {
+        let _ = window.close();
+    }
+}
+
+/// Pull one connected store's library and fold it into the catalog.
+#[tauri::command]
+async fn sync_source_library(
+    provider: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<sources::SourceSyncResponse, String> {
+    let provider = parse_source_provider(&provider)?;
+    // Being connected is checked before any window opens, so a re-sync of a
+    // disconnected store says so instead of asking the user to sign in again.
+    sources::require_credential(provider).map_err(|error| error.to_string())?;
+
+    let library = match provider {
+        sources::SourceProvider::Epic => source_epic::fetch_library().await,
+        sources::SourceProvider::Gog => source_gog::fetch_library().await,
+        sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore => {
+            source_microsoft::fetch_library(provider).await
+        }
+        sources::SourceProvider::Ubisoft | sources::SourceProvider::InstantGaming => {
+            let result = session_sync(provider, &app, SOURCE_RESYNC_TIMEOUT, false).await;
+            match result {
+                Ok(result) => {
+                    close_source_window(&app, provider);
+                    Ok(result.library)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    let response = import_source_library(&state, provider, library).await?;
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, SOURCE_LIBRARY_SYNCED_EVENT, &response);
+    Ok(response)
+}
+
+/// Drive a session-style sync inside the store's own signed-in window.
+///
+/// The window is opened if it is not already there, then polled: while the user
+/// is still signing in the script answers `signed-out`, which is a reason to
+/// keep waiting rather than to fail.
+async fn session_sync(
+    provider: sources::SourceProvider,
+    app: &AppHandle,
+    timeout: Duration,
+    wait_for_sign_in: bool,
+) -> Result<sources::SessionSyncResult, sources::SourceError> {
+    let (library_url, start_script, is_library_page): (
+        &str,
+        &str,
+        fn(&Url) -> bool,
+    ) = match provider {
+        sources::SourceProvider::Ubisoft => (
+            source_ubisoft::LIBRARY_URL,
+            source_ubisoft::SYNC_START_SCRIPT,
+            source_ubisoft::is_library_page,
+        ),
+        sources::SourceProvider::InstantGaming => (
+            source_instant_gaming::LIBRARY_URL,
+            source_instant_gaming::SYNC_START_SCRIPT,
+            source_instant_gaming::is_library_page,
+        ),
+        other => return Err(sources::SourceError::Unsupported(other)),
+    };
+
+    let label = source_window_label(provider);
+    let window = match app.get_webview_window(&label) {
+        Some(window) => {
+            let _ = window.show().and_then(|_| window.set_focus());
+            window
+        }
+        None => {
+            let url = Url::parse(library_url)
+                .map_err(|_| sources::SourceError::Unsupported(provider))?;
+            WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
+                .title(format!("Connect {} to Orivo", provider.label()))
+                .inner_size(900.0, 820.0)
+                .min_inner_size(560.0, 620.0)
+                .center()
+                // Deliberately *not* incognito: this store has no token to
+                // keep, so its own signed-in session is the connection. It
+                // lives in Orivo's WebView data store and is cleared when the
+                // source is disconnected.
+                .on_navigation(is_allowed_source_auth_navigation)
+                .on_new_window(|_, _| NewWindowResponse::Deny)
+                .build()
+                .map_err(|_| sources::SourceError::Network(provider))?
+        }
+    };
+
+    let deadline = Instant::now() + timeout;
+    let mut last_settled = None;
+    let mut failures = 0;
+    while Instant::now() < deadline {
+        if app.get_webview_window(&label).is_none() {
+            return Err(last_settled.unwrap_or(sources::SourceError::NotConnected(provider)));
+        }
+        // Only run the sync on the store's own page. During sign-in the window
+        // is on an identity host, where the script has nothing to read.
+        if window.url().is_ok_and(|url| is_library_page(&url)) {
+            let started = eval_string(&window, start_script, SOURCE_EVAL_TIMEOUT).await;
+            if started.is_some() {
+                let settle_deadline = Instant::now() + SOURCE_SESSION_SCRIPT_TIMEOUT;
+                while Instant::now() < settle_deadline {
+                    tokio::time::sleep(SOURCE_POLL_INTERVAL).await;
+                    let Some(raw) =
+                        eval_string(&window, sources::SESSION_POLL_SCRIPT, SOURCE_EVAL_TIMEOUT)
+                            .await
+                    else {
+                        continue;
+                    };
+                    let result = sources::session_result_from_eval(provider, &raw);
+                    match result.state {
+                        sources::SessionSyncState::Ready => return Ok(result),
+                        sources::SessionSyncState::Idle
+                        | sources::SessionSyncState::Pending => continue,
+                        // The store answered in a shape this build cannot read.
+                        // Waiting out the deadline would only make Orivo look
+                        // stuck; say so now so the user can act on it.
+                        sources::SessionSyncState::Unsupported => {
+                            return Err(sources::SourceError::UnexpectedResponse(provider));
+                        }
+                        // Not signed in yet. While connecting that is the
+                        // normal state, so keep the window open and retry; on a
+                        // re-sync it means the session lapsed, and pretending
+                        // otherwise would just spin behind a spinner.
+                        sources::SessionSyncState::SignedOut if !wait_for_sign_in => {
+                            return Err(sources::SourceError::SessionExpired(provider));
+                        }
+                        state => {
+                            if state == sources::SessionSyncState::Failed {
+                                failures += 1;
+                            }
+                            last_settled = sources::session_error(provider, state);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // A store that fails repeatedly is not going to succeed by being asked
+        // again for another four minutes.
+        if failures >= MAX_SOURCE_SESSION_FAILURES {
+            return Err(last_settled.unwrap_or(sources::SourceError::Network(provider)));
+        }
+        tokio::time::sleep(SOURCE_SESSION_RETRY_INTERVAL).await;
+    }
+
+    Err(last_settled.unwrap_or(sources::SourceError::SessionExpired(provider)))
+}
+
+/// Evaluate one expression in a window and return its result. `eval_with_callback`
+/// is callback-shaped, so the value is parked in a slot the caller polls; the
+/// timeout keeps a page that never answers from stalling a sync.
+async fn eval_string(
+    window: &WebviewWindow,
+    script: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let slot = Arc::new(Mutex::new(None::<String>));
+    let sink = Arc::clone(&slot);
+    window
+        .eval_with_callback(script, move |result| {
+            if let Ok(mut sink) = sink.lock() {
+                *sink = Some(result);
+            }
+        })
+        .ok()?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(mut slot) = slot.lock()
+            && let Some(value) = slot.take()
+        {
+            return Some(value);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(SOURCE_EVAL_POLL_INTERVAL).await;
+    }
+}
+
+/// Fold a connector's normalised library into the catalog through the single
+/// catalog write path, exactly as a Steam sync does.
+async fn import_source_library(
+    state: &State<'_, AppState>,
+    provider: sources::SourceProvider,
+    mut library: sources::SourceLibrary,
+) -> Result<sources::SourceSyncResponse, String> {
+    fill_missing_source_artwork(&mut library).await;
+    let total_games = library.games.len() as u32;
+    let mut skipped_games = library.skipped;
+    let mut imported_games = 0;
+    let mut updated_games = 0;
+    {
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next_catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        for game in library.games {
+            let record = source_library_game_to_catalog_game(provider, game);
+            match next_catalog.upsert_source(record) {
+                Ok(true) => imported_games += 1,
+                Ok(false) => updated_games += 1,
+                // One rejected record is a dropped game, never a failed sync.
+                Err(error) => {
+                    eprintln!("{} game was not imported: {error}", provider.label());
+                    skipped_games = skipped_games.saturating_add(1);
+                }
+            }
+        }
+        if imported_games > 0 || updated_games > 0 {
+            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            *catalog = next_catalog;
+        }
+    }
+
+    Ok(sources::SourceSyncResponse {
+        provider: provider.token().to_string(),
+        label: provider.label().to_string(),
+        total_games,
+        imported_games,
+        updated_games,
+        skipped_games,
+    })
+}
+
+/// Give a synced game real artwork when its own store published none.
+///
+/// Xbox and the Microsoft Store are the clear case: their title history returns
+/// one small square image, or nothing, so those games arrived with no cover at
+/// all. Resolving the title against Steam's public store yields the same three
+/// CDN URLs an imported Steam game already uses — nothing is downloaded here.
+///
+/// It is bounded on purpose. A large library must not make a sync wait on one
+/// lookup per game, and anything the budget does not reach is simply picked up
+/// by the next sync, because only games that found artwork stop being missing.
+async fn fill_missing_source_artwork(library: &mut sources::SourceLibrary) {
+    let pending = library
+        .games
+        .iter()
+        .enumerate()
+        .filter(|(_, game)| game.cover_url.is_none() || game.landscape_url.is_none())
+        .map(|(index, game)| (index, game.title.clone()))
+        .take(MAX_SOURCE_ARTWORK_LOOKUPS)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return;
+    }
+
+    let lookups = futures_util::stream::iter(pending.into_iter().map(|(index, title)| async move {
+        game_artwork::resolve_steam_only(&title)
+            .await
+            .map(|artwork| (index, artwork))
+    }))
+    .buffer_unordered(MAX_CONCURRENT_SOURCE_ARTWORK_LOOKUPS)
+    .filter_map(|result| async move { result })
+    .collect::<Vec<_>>();
+
+    let resolved = match tokio::time::timeout(SOURCE_ARTWORK_BUDGET, lookups).await {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            eprintln!(
+                "Artwork lookup exceeded the {} second sync budget; the next sync continues it",
+                SOURCE_ARTWORK_BUDGET.as_secs()
+            );
+            Vec::new()
+        }
+    };
+
+    for (index, artwork) in resolved {
+        let Some(game) = library.games.get_mut(index) else {
+            continue;
+        };
+        // Never overwrite art the store itself provided; only fill the gaps.
+        if game.cover_url.is_none() {
+            game.cover_url = artwork.cover.first().cloned();
+        }
+        if game.landscape_url.is_none() {
+            game.landscape_url = artwork.landscape.first().cloned();
+        }
+        if game.hero_url.is_none() {
+            game.hero_url = artwork.background.first().cloned();
+        }
+    }
+}
+
+fn source_library_game_to_catalog_game(
+    provider: sources::SourceProvider,
+    game: sources::SourceLibraryGame,
+) -> Game {
+    let mut extra = BTreeMap::new();
+    for (key, value) in [
+        (catalog::SOURCE_COVER_URL_KEY, game.cover_url),
+        (catalog::SOURCE_HERO_URL_KEY, game.hero_url),
+        (catalog::SOURCE_LANDSCAPE_URL_KEY, game.landscape_url),
+        (catalog::SOURCE_GENRE_KEY, game.genre),
+    ] {
+        if let Some(value) = value {
+            extra.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+
+    Game {
+        id: format!("{}:{}", provider.token(), game.source_id),
+        title: game.title,
+        executable_path: None,
+        source: provider.catalog_source(),
+        source_id: Some(game.source_id),
+        launch_target: LaunchTarget::Provider {
+            provider: provider.token().to_string(),
+            app_ref: game.launch_ref,
+        },
+        installation_path: None,
+        working_directory: None,
+        arguments: Vec::new(),
+        description: game.description,
+        metadata: None,
+        artwork_path: None,
+        artwork_source_path: None,
+        cover_path: None,
+        cover_source_path: None,
+        home_image_path: None,
+        landscape_image_path: None,
+        logo_path: None,
+        hero_video_path: None,
+        last_played_at: game.last_played_at,
+        play_time_seconds: game.play_time_seconds,
+        extra,
+    }
+}
+
+/// Sign a store out. Games already imported stay in the library unless the user
+/// explicitly asks to forget them, which mirrors how disconnecting Steam works.
+#[tauri::command]
+async fn disconnect_source_account(
+    provider: String,
+    forget_games: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<u32, String> {
+    let provider = parse_source_provider(&provider)?;
+    close_source_window(&app, provider);
+    tauri::async_runtime::spawn_blocking(move || sources::disconnect(provider))
+        .await
+        .map_err(|error| format!("The disconnect did not finish: {error}"))?
+        .map_err(|error| error.to_string())?;
+
+    if !forget_games {
+        return Ok(0);
+    }
+    let removed = {
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next_catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        let removed = next_catalog.remove_source_games(provider.catalog_source());
+        if removed > 0 {
+            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            let mut catalog = state
+                .catalog
+                .write()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            *catalog = next_catalog;
+        }
+        removed
+    };
+    Ok(removed as u32)
+}
+
 fn monitor_wine_startup(
     app: AppHandle,
     game_id: String,
@@ -3872,7 +4894,10 @@ async fn launch_game(
                     })?;
                 Some((profile, inventory, game_ref.clone()))
             }
-            LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Runner { .. } => None,
+            LaunchTarget::Direct
+            | LaunchTarget::Steam { .. }
+            | LaunchTarget::Runner { .. }
+            | LaunchTarget::Provider { .. } => None,
         };
         (game, wine_launch)
     };
@@ -4063,7 +5088,7 @@ async fn install_steam_game(
     let title = game.title.clone();
     let app_id = match game.launch_target {
         LaunchTarget::Steam { app_id } => app_id,
-        LaunchTarget::Direct | LaunchTarget::Runner { .. } => {
+        LaunchTarget::Direct | LaunchTarget::Runner { .. } | LaunchTarget::Provider { .. } => {
             return Err("Only Steam library games can be installed from Orivo.".into());
         }
     };
@@ -4880,6 +5905,11 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
     let steam_wallpaper = steam_store_asset_url(game, "capsule_616x353.jpg");
     let steam_cover = steam_store_asset_url(game, "library_600x900.jpg");
     let steam_landscape = steam_store_asset_url(game, "library_hero.jpg");
+    // Artwork a connected store published for its own game, already held to
+    // that provider's host allowlist when the sync persisted it.
+    let source_cover = source_asset_url(game, catalog::SOURCE_COVER_URL_KEY);
+    let source_hero = source_asset_url(game, catalog::SOURCE_HERO_URL_KEY);
+    let source_landscape = source_asset_url(game, catalog::SOURCE_LANDSCAPE_URL_KEY);
     let host_platform = current_host_platform();
     let supported_platforms = steam_supported_platforms(game);
     let compatible_with_host = steam_compatibility(game, host_platform, &supported_platforms);
@@ -4897,27 +5927,39 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
         genre: genre_for_game(game),
         source: match &game.launch_target {
             LaunchTarget::Runner { runner_id, .. } if runner_id == WINE_STAGING_RUNNER_ID => "wine",
-            LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Runner { .. } => {
-                match &game.source {
-                    GameSource::Steam => "steam",
-                    GameSource::Local => "local",
-                }
-            }
+            LaunchTarget::Direct
+            | LaunchTarget::Steam { .. }
+            | LaunchTarget::Runner { .. }
+            | LaunchTarget::Provider { .. } => match &game.source {
+                GameSource::Steam => "steam",
+                GameSource::Local => "local",
+                // Every connected store answers with its own provider token, so
+                // the badge, the Sources list and the launch target can never
+                // name the same game differently.
+                connected => connected.provider_token().unwrap_or("local"),
+            },
         }
         .into(),
         hero_url: home_image
             .or_else(|| steam_wallpaper.clone())
+            .or_else(|| source_hero.clone())
             .or_else(|| local_hero.clone()),
         cover_url: local_cover
             .clone()
             .or_else(|| steam_cover.clone())
-            .or_else(|| local_hero.clone())
-            .or_else(|| steam_wallpaper.clone()),
-        landscape_url: landscape_image
-            .or_else(|| store_landscape)
-            .or_else(|| steam_landscape)
+            .or_else(|| source_cover.clone())
             .or_else(|| local_hero.clone())
             .or_else(|| steam_wallpaper.clone())
+            .or_else(|| source_hero.clone()),
+        landscape_url: landscape_image
+            // A wallpaper picked in the Store outranks anything a provider
+            // published, because it is the one the player chose by hand.
+            .or_else(|| store_landscape)
+            .or_else(|| steam_landscape)
+            .or_else(|| source_landscape.clone())
+            .or_else(|| local_hero.clone())
+            .or_else(|| steam_wallpaper.clone())
+            .or_else(|| source_hero.clone())
             .or_else(|| local_cover.clone())
             .or(steam_cover),
         last_played_at: game.last_played_at.clone().unwrap_or_default(),
@@ -4943,6 +5985,10 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             // Third-party runner execution is still deliberately unavailable
             // until its WIT host can resolve a typed intent and grants.
             LaunchTarget::Runner { .. } => false,
+            // A connected-store game is launchable only where that store's own
+            // client is installed. Xbox and Instant Gaming have no client to
+            // hand a launch to at all, so they are never launchable.
+            LaunchTarget::Provider { provider, .. } => launcher::provider_launchable(provider),
         },
         host_platform: host_platform.into(),
         supported_platforms,
@@ -4994,14 +6040,27 @@ fn steam_store_asset_url(game: &Game, asset: &str) -> Option<String> {
         LaunchTarget::Steam { app_id } if *app_id > 0 => Some(format!(
             "https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/{asset}"
         )),
-        LaunchTarget::Steam { .. } | LaunchTarget::Direct | LaunchTarget::Runner { .. } => None,
+        LaunchTarget::Steam { .. }
+        | LaunchTarget::Direct
+        | LaunchTarget::Runner { .. }
+        | LaunchTarget::Provider { .. } => None,
     }
+}
+
+/// The Library counterpart of the detail projection's rule: a connected store's
+/// artwork URL is returned only when it is still an absolute HTTPS URL. The
+/// host allowlist was applied when the sync wrote it; this guards a record that
+/// predates the check or was edited on disk.
+fn source_asset_url(game: &Game, key: &str) -> Option<String> {
+    let url = game.extra.get(key)?.as_str()?;
+    (url.starts_with("https://") && !url.chars().any(char::is_control)).then(|| url.to_owned())
 }
 
 fn genre_for_game(game: &Game) -> String {
     if let Some(genre) = game
         .extra
         .get(catalog::STEAM_STORE_GENRE_KEY)
+        .or_else(|| game.extra.get(catalog::SOURCE_GENRE_KEY))
         .and_then(serde_json::Value::as_str)
         .filter(|genre| !genre.trim().is_empty())
     {

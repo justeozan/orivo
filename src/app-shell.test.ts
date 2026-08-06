@@ -321,6 +321,9 @@ describe("application shell against the desktop backend", () => {
     library: [] as Record<string, unknown>[],
     /** When set, `get_library` blocks on it, so a load can be made to land late. */
     gate: null as Promise<void> | null,
+    sources: [] as Record<string, unknown>[],
+    sourceSync: null as Record<string, unknown> | null,
+    providers: [] as Record<string, unknown>[],
   };
 
   const mount = (): void => {
@@ -346,6 +349,9 @@ describe("application shell against the desktop backend", () => {
     window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
     backend.library = [alpha];
     backend.gate = null;
+    backend.sources = [];
+    backend.sourceSync = null;
+    backend.providers = [];
     tauri.detailOptions = null;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockImplementation(async (command) => {
@@ -362,6 +368,14 @@ describe("application shell against the desktop backend", () => {
             runner: { state: "ready", available: true, version: "9.0", message: "" },
             profiles: [],
           };
+        case "get_source_accounts":
+          return backend.sources;
+        case "get_store_home":
+          return { providerStatuses: backend.providers };
+        case "sync_source_library":
+          return backend.sourceSync;
+        case "disconnect_source_account":
+          return 0;
         default:
           return undefined;
       }
@@ -386,6 +400,242 @@ describe("application shell against the desktop backend", () => {
     tauri.detailOptions?.play(alpha.id);
     await settle();
     expect(launchedGameIds()).toEqual([alpha.id]);
+  });
+
+  it("lists every connectable store and signs into the one that was clicked", async () => {
+    backend.sources = [
+      { provider: "gog", label: "GOG", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    const rows = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-source-row]"),
+    ).map((row) => row.dataset.sourceRow);
+    expect(rows).toEqual([
+      "epic",
+      "gog",
+      "ubisoft",
+      "xbox",
+      "microsoft-store",
+      "instant-gaming",
+    ]);
+
+    // A connected store offers a sync, a disconnected one offers a connect.
+    const action = (provider: string, name: string): HTMLButtonElement | null =>
+      root.querySelector(`[data-source-action='${name}'][data-source-provider='${provider}']`);
+    expect(action("gog", "sync")).not.toBeNull();
+    expect(action("gog", "connect")).toBeNull();
+    expect(action("epic", "connect")).not.toBeNull();
+
+    action("epic", "connect")!.click();
+    await settle();
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "connect_source_account"),
+    ).toEqual([["connect_source_account", { provider: "epic" }]]);
+  });
+
+  it("syncs a connected store and reports what could not be read", async () => {
+    backend.sources = [
+      { provider: "epic", label: "Epic Games", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    backend.sourceSync = {
+      provider: "epic",
+      label: "Epic Games",
+      totalGames: 5,
+      importedGames: 4,
+      updatedGames: 0,
+      skippedGames: 1,
+    };
+    mount();
+    await goto("#/settings/libraries");
+
+    root
+      .querySelector<HTMLButtonElement>(
+        "[data-source-action='sync'][data-source-provider='epic']",
+      )!
+      .click();
+    await settle();
+
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "sync_source_library"),
+    ).toEqual([["sync_source_library", { provider: "epic" }]]);
+    // A partial import is never rounded up to a clean one.
+    expect(root.querySelector("#source-accounts-body")?.textContent).toContain(
+      "1 game could not be read",
+    );
+  });
+
+  it("asks whether to keep imported games before disconnecting a store", async () => {
+    backend.sources = [
+      { provider: "gog", label: "GOG", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    root
+      .querySelector<HTMLButtonElement>(
+        "[data-source-action='disconnect'][data-source-provider='gog']",
+      )!
+      .click();
+    await settle();
+
+    // Signing out and forgetting a library are two decisions, so nothing is
+    // sent until the second one is made.
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "disconnect_source_account"),
+    ).toEqual([]);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        "[data-source-action='disconnect-keep'][data-source-provider='gog']",
+      )!
+      .click();
+    await settle();
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "disconnect_source_account"),
+    ).toEqual([["disconnect_source_account", { provider: "gog", forgetGames: false }]]);
+  });
+
+  it("never paints one game's artwork onto another", async () => {
+    // Cached artwork arrives as an opaque `cache:` token, which cannot be
+    // resolved to a URL synchronously. Falling back to the first fixture here
+    // is what put Elden Ring's cover on every synced game, and only the first
+    // handful of cards were ever hydrated back to the truth.
+    backend.library = [
+      { ...alpha, id: "xbox:1", title: "Sea of Thieves", source: "xbox", coverUrl: "cache:x1-usercover-7.jpg", heroUrl: "", landscapeUrl: "" },
+      { ...alpha, id: "xbox:2", title: "It Takes Two", source: "xbox", coverUrl: "", heroUrl: "", landscapeUrl: "" },
+    ];
+    mount();
+    await settle();
+
+    const covers = Array.from(
+      root.querySelectorAll<HTMLImageElement>("#game-cards .game-card img"),
+    ).map((image) => image.getAttribute("src") ?? "");
+    // Whatever a card shows, it is never the artwork of a different game.
+    expect(covers.some((source) => source.includes("elden"))).toBe(false);
+    expect(covers.some((source) => source.includes("cyberpunk"))).toBe(false);
+  });
+
+  it("hydrates every rendered card, not just the first screenful", async () => {
+    backend.library = Array.from({ length: 40 }, (_, index) => ({
+      ...alpha,
+      id: `xbox:${index}`,
+      title: `Game ${index}`,
+      source: "xbox",
+      coverUrl: `cache:game-${index}.jpg`,
+      heroUrl: "",
+      landscapeUrl: "",
+    }));
+    mount();
+    await settle();
+    await settle();
+
+    // A card past the old 16-item cap kept its placeholder forever, because
+    // nothing re-runs hydration for a card that is already on screen.
+    const cards = root.querySelectorAll("#game-cards .game-card");
+    expect(cards.length).toBeGreaterThan(16);
+    const covers = Array.from(
+      root.querySelectorAll<HTMLImageElement>("#game-cards .game-card img"),
+    ).map((image) => image.getAttribute("src") ?? "");
+    expect(covers.some((source) => source.includes("elden"))).toBe(false);
+  });
+
+  it("never lets a store's display name inject markup into the Sources menu", async () => {
+    // The account label is whatever the store returned — an Epic display name,
+    // a gamertag, a GOG username. It is untrusted text.
+    backend.sources = [
+      {
+        provider: "epic",
+        label: "Epic Games",
+        connected: true,
+        accountLabel: '<img src=x onerror="document.title=\'pwned\'">',
+        style: "token",
+        sharesSignInWith: [],
+        launchable: true,
+      },
+    ];
+    backend.library = [{ ...alpha, id: "epic:1", title: "Fall Guys", source: "epic" }];
+    mount();
+    await goto("#/settings/libraries");
+    await goto("#/library");
+
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    await settle();
+
+    const entry = root.querySelector<HTMLElement>(
+      "[data-library-action='source-connected'][data-source-provider='epic']",
+    );
+    expect(entry).not.toBeNull();
+    // The name renders as text, never as an element.
+    expect(entry!.querySelector("img")).toBeNull();
+    expect(entry!.textContent).toContain("onerror");
+    expect(document.title).not.toBe("pwned");
+  });
+
+  it("shows each store's price-data health on its own row instead of a second card", async () => {
+    backend.sources = [
+      { provider: "gog", label: "GOG", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    backend.providers = [
+      { provider: "gog", label: "GOG", health: "available", message: "Store prices are live.", refreshedAt: null },
+      { provider: "humble", label: "Humble", health: "not-configured", message: "No feed configured.", refreshedAt: null },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    // The connectable store carries its health inline, as a quiet dot beside
+    // the name rather than a pill that reads like an error about the store.
+    const gogRow = root.querySelector<HTMLElement>("[data-source-row='gog']");
+    const dot = gogRow?.querySelector(".source-account-row__dot");
+    expect(dot?.classList.contains("source-account-row__dot--available")).toBe(true);
+    expect(dot?.getAttribute("aria-label")).toBe("Store data: available");
+    // …and is not repeated in the store-data-only list below it.
+    const remaining = Array.from(
+      root.querySelectorAll<HTMLElement>("#provider-status-list .provider-status-row strong"),
+    ).map((entry) => entry.textContent);
+    expect(remaining).toEqual(["Humble"]);
+    // One card now, not two.
+    expect(root.querySelectorAll("#provider-status-list")).toHaveLength(1);
+    expect(root.querySelector("#source-accounts-panel #provider-status-list")).not.toBeNull();
+  });
+
+  it("presents each store in its own colours in Settings and in white in the library", async () => {
+    backend.library = [
+      { ...alpha, id: "microsoft-store:1", title: "Minecraft", source: "microsoft-store" },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    const settingsMark = root.querySelector<HTMLElement>(
+      "[data-source-row='microsoft-store'] .source-account-row__mark",
+    );
+    expect(settingsMark?.innerHTML).toContain("#f25022");
+
+    await goto("#/library");
+    // The hero badge inherits the near-white text colour, so it must stay
+    // monochrome rather than carrying the brand palette onto the artwork.
+    const heroMark = root.querySelector<HTMLElement>("#hero-source-icon");
+    expect(heroMark?.innerHTML).toContain("currentColor");
+    expect(heroMark?.innerHTML).not.toContain("#f25022");
+  });
+
+  it("lists a store in the library Sources menu once it has games", async () => {
+    backend.library = [
+      { ...alpha, id: "epic:Sugar", title: "Fall Guys", source: "epic" },
+    ];
+    mount();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    await settle();
+
+    const entry = root.querySelector<HTMLElement>(
+      "[data-library-action='source-connected'][data-source-provider='epic']",
+    );
+    expect(entry?.textContent).toContain("Epic Games");
+    // Its badge is the store's own, never the local fallback.
+    expect(root.querySelector("#hero-source-label")?.textContent).toBe("Epic Games");
   });
 
   it("applies a library refresh that lands after the user left the Library", async () => {

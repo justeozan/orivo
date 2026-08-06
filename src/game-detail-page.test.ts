@@ -39,6 +39,9 @@ function clientWithDetail(
       return detail;
     },
     async setWishlist() {},
+    async resetArtwork() {
+      return { title: "Test", replaced: ["cover", "landscape", "background"] as const };
+    },
     async selectMedia() {
       return [];
     },
@@ -207,12 +210,14 @@ describe("game detail page social rendering", () => {
     expect(container.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
   });
 
-  it("puts Wishlist and the more menu under the title, with no source logo", async () => {
+  it("puts Wishlist and the more menu under the title, behind the source mark", async () => {
     await mountWith(createFallbackGameDetail(GAME_ID));
 
-    // The approved design's meta row opens straight on the developer name —
-    // the old Steam/local source logo is gone.
-    expect(container.querySelector(".gd-hero__subline .gd-source")).toBeNull();
+    // The meta row opens on the store a game came from. Now that a library can
+    // be stitched together from six connected accounts, which one owns a game
+    // is the first thing the row has to answer — the small Steam/local glyph
+    // this design dropped was replaced by each store's own mark.
+    expect(container.querySelector(".gd-hero__subline .gd-source")).not.toBeNull();
 
     // Play, Wishlist and the "…" actions control share the row below the copy.
     const wishlist = container.querySelector<HTMLButtonElement>("[data-focus-key='wishlist']");
@@ -416,5 +421,42 @@ describe("wallpaper dialog category rows", () => {
     expect(
       container.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.disabled,
     ).toBe(false);
+  });
+});
+
+describe("resetting the covers", () => {
+  it("refills all three roles through one action", async () => {
+    const requested: string[] = [];
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork(gameId) {
+        requested.push(gameId);
+        return { title: "Test", replaced: ["cover", "landscape", "background"] };
+      },
+    });
+
+    // The action replaced the old single-image search, which downloaded one
+    // picture and used it as cover, landscape and background at once.
+    const entry = container.querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']");
+    expect(entry?.textContent).toContain("Reset the covers");
+    entry!.click();
+    await flush();
+    expect(requested).toEqual([GAME_ID]);
+  });
+
+  it("says which role it could not find art for instead of reporting success", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork() {
+        return { title: "Test", replaced: ["cover", "background"] };
+      },
+    });
+
+    container.querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']")!.click();
+    await flush();
+
+    // A game whose publisher never uploaded a wide capsule keeps the landscape
+    // image it had, and the page says so rather than claiming a clean result.
+    expect(container.textContent).toContain("no landscape cover was found");
   });
 });

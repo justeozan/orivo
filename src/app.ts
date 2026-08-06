@@ -10,9 +10,26 @@ import type {
   WallpaperCredentialsUpdate,
 } from "./contracts";
 import { createGameDetailPage } from "./game-detail-page";
-import { icon } from "./icons";
-import { isTauriRuntime, resolveMediaUrl } from "./media";
+import { brandIcon, icon, type IconName } from "./icons";
+import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { fallbackLibrary, formatPlayTime, type LibraryGame } from "./mock-library";
+import type {
+  ConnectedSource,
+  SourceAccountStatus,
+  SourceSyncResult,
+  StoreProvider,
+} from "./contracts";
+import {
+  CONNECTED_SOURCES,
+  connectedSourceDescriptor,
+  defaultSourceAccounts,
+  isConnectedSource,
+  normaliseSourceAccounts,
+  normaliseSourceSyncResult,
+  sourceBadge,
+  sourceStatusLine,
+  sourceSyncSummary,
+} from "./source-model";
 import { type AppPage, PageLifecycleHost } from "./page-lifecycle";
 import { HashRouter } from "./router";
 import {
@@ -225,6 +242,21 @@ interface SteamAccountState {
   apiKeySteamId: string;
 }
 
+/**
+ * Per-store UI state for the connected libraries. `busy` is what the store's
+ * own row awaits, so signing into Epic never greys out the GOG row next to it.
+ */
+interface SourceAccountsState {
+  loading: boolean;
+  statuses: SourceAccountStatus[];
+  busy: Set<ConnectedSource>;
+  lastSync: Map<ConnectedSource, SourceSyncResult>;
+  notice: string;
+  noticeTone: SteamNoticeTone;
+  noticeProvider: ConnectedSource | null;
+  pendingDisconnect: ConnectedSource | null;
+}
+
 interface State {
   games: LibraryGame[];
   libraryMediaTokens: Map<string, LibraryMediaTokens>;
@@ -233,6 +265,7 @@ interface State {
   libraryMenuOpen: boolean;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
+  sourceAccounts: SourceAccountsState;
   wineSettings: WineSettingsState;
   launchFeedback: LaunchFeedback | null;
   preferences: Preferences;
@@ -258,11 +291,18 @@ const MAX_STEAM_PREVIEW_MEDIA = 16;
 const MAX_STEAM_IMPORT_SELECTION = 2_000;
 const MAX_AUTOMATIC_STEAM_SELECTION = 50;
 const MAX_RENDERED_LIBRARY_CARDS = 48;
-const MAX_LIBRARY_MEDIA_HYDRATION = 16;
+// Hydration covers everything the library actually renders. Capping it below
+// the rendered window left later cards showing a placeholder indefinitely,
+// because nothing re-runs hydration for a card that is already on screen.
+const MAX_LIBRARY_MEDIA_HYDRATION = 64;
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
 const STEAM_ACCOUNT_LOGIN_PENDING_EVENT = "steam-account-login-pending";
+const SOURCE_ACCOUNT_CONNECTED_EVENT = "source-account-authenticated";
+const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
+const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
+const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
@@ -289,6 +329,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       noticeTone: "info",
       lastSync: null,
       apiKeySteamId: "",
+    },
+    sourceAccounts: {
+      loading: false,
+      statuses: defaultSourceAccounts(),
+      busy: new Set(),
+      lastSync: new Map(),
+      notice: "",
+      noticeTone: "info",
+      noticeProvider: null,
+      pendingDisconnect: null,
     },
     wineSettings: {
       loading: false,
@@ -353,6 +403,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     steamRefresh: get<HTMLButtonElement>("#steam-refresh"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
+    sourceAccountsPanel: get<HTMLElement>("#source-accounts-panel"),
+    sourceAccountsBody: get<HTMLElement>("#source-accounts-body"),
     playButton: get<HTMLButtonElement>("#play-button"),
     detailsButton: get<HTMLButtonElement>("#details-button"),
     launchFeedback: get<HTMLElement>("#launch-feedback"),
@@ -369,6 +421,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     wallpaperIgdbClientSecret: get<HTMLInputElement>("#wallpaper-igdb-client-secret"),
     wallpaperGoogleApiKey: get<HTMLInputElement>("#wallpaper-google-api-key"),
     wallpaperGoogleCseId: get<HTMLInputElement>("#wallpaper-google-cse-id"),
+    wallpaperSteamGridDbApiKey: get<HTMLInputElement>("#wallpaper-steamgriddb-api-key"),
     libraryPage: get<HTMLElement>("#app-page-library"),
     storePage: get<HTMLElement>("#app-page-store"),
     mePage: get<HTMLElement>("#app-page-me"),
@@ -786,14 +839,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.lastPlayed.textContent = game.lastPlayedAt ? `Last played ${game.lastPlayedAt}` : "";
     if (refs.lastPlayed.parentElement) refs.lastPlayed.parentElement.hidden = !game.lastPlayedAt;
     const isSteamInstallable = game.source === "steam" && !game.launchable;
-    const sourceName =
-      game.source === "steam"
-        ? "Steam"
-        : game.source === "wine"
-          ? "Windows"
-          : game.source === "local"
-            ? "Local"
-            : "";
+    // Every source the catalog can return has a badge, so a game synced from a
+    // connected store is never mislabelled as a local one.
+    const badge = sourceBadge(game.source);
+    const sourceName = badge?.label ?? "";
     const hasSource = sourceName !== "";
     // The Play button already states runnability (Play / Install / Unavailable),
     // so the meta row never repeats runtime, install or compatibility mentions
@@ -812,14 +861,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.source.hidden = !hasSource && !cleanMetadata;
     refs.sourceIcon.hidden = !hasSource;
     // A real, legible source logo: Steam's mark, the Windows mark for Wine
-    // titles, a folder for local games.
-    refs.sourceIcon.innerHTML = hasSource
-      ? game.source === "steam"
-        ? icon("steam")
-        : game.source === "wine"
-          ? icon("windows")
-          : icon("folder")
-      : "";
+    // titles, a folder for local games, each connected store's own mark.
+    refs.sourceIcon.innerHTML = badge ? icon(badge.icon) : "";
     refs.sourceLabel.hidden = !hasSource;
     refs.sourceLabel.textContent = sourceName;
     refs.metadata.textContent = cleanMetadata;
@@ -905,6 +948,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     state.steamAccount.status?.connected === true ||
     state.games.some((game) => game.source === "steam");
 
+  // Same rule for every other store: a synced game is proof the account was
+  // connected, even before Settings has loaded its status list.
+  const connectedSourcesInMenu = (): ConnectedSource[] =>
+    CONNECTED_SOURCES.filter(
+      (descriptor) =>
+        sourceStatus(descriptor.provider).connected ||
+        state.games.some((game) => game.source === descriptor.provider),
+    ).map((descriptor) => descriptor.provider);
+
   const renderLibrarySources = (): void => {
     const list = refs.librarySourceList;
     list.replaceChildren();
@@ -920,6 +972,38 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         `<span class="library-source-action__copy"><strong>Steam</strong><small>Connected · import installed games</small></span>` +
         icon("chevron-right", "library-source-action__chevron");
       list.append(steam);
+    }
+
+    for (const provider of connectedSourcesInMenu()) {
+      const descriptor = connectedSourceDescriptor(provider);
+      const status = sourceStatus(provider);
+      const entry = document.createElement("button");
+      entry.type = "button";
+      entry.className = "library-source-action";
+      entry.setAttribute("role", "menuitem");
+      entry.dataset.libraryAction = "source-connected";
+      entry.dataset.sourceProvider = provider;
+      const detail = status.connected
+        ? `${sourceStatusLine(status)} · sync now`
+        : "Imported games · reconnect to sync";
+      // The account label is the display name the store returned, so it is
+      // untrusted text and is set through textContent. Interpolating it into
+      // innerHTML would let a display name inject markup into this menu.
+      const entryIcon = document.createElement("span");
+      entryIcon.className = "library-source-action__icon library-source-action__icon--library";
+      entryIcon.setAttribute("aria-hidden", "true");
+      entryIcon.innerHTML = icon(descriptor.icon);
+      const entryCopy = document.createElement("span");
+      entryCopy.className = "library-source-action__copy";
+      const entryName = document.createElement("strong");
+      entryName.textContent = descriptor.label;
+      const entryDetail = document.createElement("small");
+      entryDetail.textContent = detail;
+      entryCopy.append(entryName, entryDetail);
+      const entryChevron = document.createElement("span");
+      entryChevron.innerHTML = icon("chevron-right", "library-source-action__chevron");
+      entry.append(entryIcon, entryCopy, entryChevron.firstElementChild ?? entryChevron);
+      list.append(entry);
     }
 
     // The local source is always present: it is this Mac itself. It is a
@@ -2236,6 +2320,395 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderSteamAccountPanel();
   };
 
+  // -------------------------------------------------------------------------
+  // Connected libraries (Epic, GOG, Ubisoft, Xbox, Microsoft Store, Instant Gaming)
+  // -------------------------------------------------------------------------
+
+  const sourceStatus = (provider: ConnectedSource): SourceAccountStatus =>
+    state.sourceAccounts.statuses.find((status) => status.provider === provider) ??
+    defaultSourceAccounts().find((status) => status.provider === provider)!;
+
+  const setSourceNotice = (
+    provider: ConnectedSource | null,
+    notice: string,
+    tone: SteamNoticeTone = "info",
+  ): void => {
+    state.sourceAccounts.notice = notice;
+    state.sourceAccounts.noticeTone = tone;
+    state.sourceAccounts.noticeProvider = provider;
+  };
+
+  const setSourceBusy = (provider: ConnectedSource, busy: boolean): void => {
+    if (busy) {
+      state.sourceAccounts.busy.add(provider);
+    } else {
+      state.sourceAccounts.busy.delete(provider);
+    }
+  };
+
+  const sourceActionButton = (
+    provider: ConnectedSource,
+    action: string,
+    label: string,
+    className: string,
+    iconName: IconName,
+  ): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.dataset.sourceAction = action;
+    button.dataset.sourceProvider = provider;
+    button.innerHTML = icon(iconName) + "<span>" + label + "</span>";
+    return button;
+  };
+
+  const renderSourceAccountsPanel = (): void => {
+    const body = refs.sourceAccountsBody;
+    const restoreFocus = body.contains(document.activeElement);
+    const focusedAction = restoreFocus
+      ? (document.activeElement as HTMLElement | null)?.dataset.sourceAction ?? ""
+      : "";
+    const focusedProvider = restoreFocus
+      ? (document.activeElement as HTMLElement | null)?.dataset.sourceProvider ?? ""
+      : "";
+    body.replaceChildren();
+    refs.sourceAccountsPanel.setAttribute(
+      "aria-busy",
+      String(state.sourceAccounts.loading || state.sourceAccounts.busy.size > 0),
+    );
+
+    if (!isTauriRuntime()) {
+      const hint = document.createElement("p");
+      hint.className = "settings-hint";
+      hint.textContent = "Connecting another game library is available in the Orivo desktop app.";
+      body.append(hint);
+      return;
+    }
+
+    if (state.sourceAccounts.notice && state.sourceAccounts.noticeProvider === null) {
+      body.append(sourceNoticeElement());
+    }
+
+    const list = document.createElement("div");
+    list.className = "source-account-list";
+    for (const descriptor of CONNECTED_SOURCES) {
+      const status = sourceStatus(descriptor.provider);
+      const busy = state.sourceAccounts.busy.has(descriptor.provider);
+      const row = document.createElement("div");
+      row.className = "settings-row source-account-row";
+      row.classList.toggle("is-connected", status.connected);
+      row.dataset.sourceRow = descriptor.provider;
+
+      const mark = document.createElement("span");
+      mark.className = "source-account-row__mark";
+      mark.setAttribute("aria-hidden", "true");
+      // Settings presents each store as itself, in its own colours and at a
+      // size where the logo is the logo. The library, the hero badge and the
+      // detail page keep the white marks.
+      mark.innerHTML = brandIcon(descriptor.icon);
+
+      const copy = document.createElement("div");
+      copy.className = "settings-row__copy source-account-row__copy";
+      const name = document.createElement("strong");
+      name.textContent = status.label;
+      const detail = document.createElement("small");
+      // A disconnected store needs to say what connecting it gives you. Once
+      // it is connected that pitch is spent, and the account is what matters —
+      // repeating both made every connected row three lines tall.
+      detail.textContent = status.connected
+        ? sourceStatusLine(status)
+        : status.description || sourceStatusLine(status);
+      copy.append(name, detail);
+      const sync = state.sourceAccounts.lastSync.get(descriptor.provider);
+      if (sync) {
+        const summary = document.createElement("small");
+        summary.className = "source-account-row__summary";
+        summary.textContent = sourceSyncSummary(sync);
+        copy.append(summary);
+      }
+
+      // This store's price-data health, on the same row as its connection, as
+      // a small dot beside the name. It used to be a red "Unavailable" pill on
+      // every row, which read as an error about the store itself rather than a
+      // note about its price feed.
+      const health = state.providerStatuses.find(
+        (provider) => providerStatusForSource(provider.provider) === descriptor.provider,
+      );
+      if (health) {
+        const dot = document.createElement("span");
+        dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
+        dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
+        dot.setAttribute("role", "img");
+        dot.setAttribute(
+          "aria-label",
+          `Store data: ${health.health.replace("-", " ")}`,
+        );
+        name.append(dot);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "source-account-row__actions";
+      if (busy) {
+        const spinner = document.createElement("span");
+        spinner.className = "steam-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        const waiting = document.createElement("span");
+        waiting.className = "source-account-row__waiting";
+        waiting.setAttribute("role", "status");
+        waiting.textContent = status.connected
+          ? "Syncing…"
+          : status.style === "session"
+            ? "Continue in the window…"
+            : "Waiting for sign-in…";
+        actions.append(spinner, waiting);
+        actions.append(
+          sourceActionButton(
+            descriptor.provider,
+            "cancel",
+            "Cancel",
+            "steam-secondary-button",
+            "close",
+          ),
+        );
+      } else if (state.sourceAccounts.pendingDisconnect === descriptor.provider) {
+        // Disconnecting is two decisions, not one: sign out, and optionally
+        // forget what was already imported. Never guess the second.
+        const confirm = document.createElement("p");
+        confirm.className = "source-account-row__confirm";
+        confirm.textContent = "Keep the games already imported?";
+        copy.append(confirm);
+        actions.append(
+          sourceActionButton(
+            descriptor.provider,
+            "disconnect-keep",
+            "Keep them",
+            "steam-secondary-button",
+            "check",
+          ),
+          sourceActionButton(
+            descriptor.provider,
+            "disconnect-forget",
+            "Remove them",
+            "steam-secondary-button",
+            "close",
+          ),
+          sourceActionButton(
+            descriptor.provider,
+            "disconnect-cancel",
+            "Cancel",
+            "steam-secondary-button",
+            "chevron-left",
+          ),
+        );
+      } else if (status.connected) {
+        actions.append(
+          sourceActionButton(
+            descriptor.provider,
+            "sync",
+            "Sync",
+            "steam-import-button",
+            "refresh",
+          ),
+          sourceActionButton(
+            descriptor.provider,
+            "disconnect",
+            "Disconnect",
+            "steam-secondary-button",
+            "close",
+          ),
+        );
+      } else {
+        // The brand logo already sits at the head of the row, so repeating it
+        // inside the button only added noise.
+        const connect = document.createElement("button");
+        connect.type = "button";
+        connect.className = "steam-import-button source-account-row__connect";
+        connect.dataset.sourceAction = "connect";
+        connect.dataset.sourceProvider = descriptor.provider;
+        connect.textContent = "Connect";
+        actions.append(connect);
+      }
+
+      row.append(mark, copy, actions);
+      if (
+        state.sourceAccounts.notice &&
+        state.sourceAccounts.noticeProvider === descriptor.provider
+      ) {
+        const wrapper = document.createElement("div");
+        wrapper.className = "source-account-entry";
+        wrapper.append(row, sourceNoticeElement());
+        list.append(wrapper);
+      } else {
+        list.append(row);
+      }
+
+      // Xbox and Microsoft Store are one Microsoft account. Saying so once,
+      // under the pair, beats letting someone connect twice and wonder why.
+      if (status.sharesSignInWith.length > 0 && descriptor.provider === "microsoft-store") {
+        const shared = document.createElement("p");
+        shared.className = "settings-hint source-account-shared";
+        shared.textContent =
+          "Xbox and Microsoft Store share one Microsoft sign-in: connecting or disconnecting either affects both.";
+        list.append(shared);
+      }
+    }
+    body.append(list);
+
+    if (restoreFocus && focusedAction && focusedProvider) {
+      requestAnimationFrame(() => {
+        const next = body.querySelector<HTMLElement>(
+          `[data-source-action="${focusedAction}"][data-source-provider="${focusedProvider}"]`,
+        );
+        (next ?? body.querySelector<HTMLElement>(`[data-source-provider="${focusedProvider}"] button`))?.focus();
+      });
+    }
+  };
+
+  const sourceNoticeElement = (): HTMLParagraphElement => {
+    const notice = document.createElement("p");
+    notice.className = "steam-notice steam-notice--" + state.sourceAccounts.noticeTone;
+    notice.setAttribute(
+      "role",
+      state.sourceAccounts.noticeTone === "error" ? "alert" : "status",
+    );
+    notice.textContent = state.sourceAccounts.notice;
+    return notice;
+  };
+
+  const refreshSourceAccounts = async (): Promise<void> => {
+    // Shares the settings generation counter with every other settings loader,
+    // so a status that resolves after the section changed cannot overwrite a
+    // fresher one.
+    const request = settingsRequest;
+    if (!isTauriRuntime()) {
+      state.sourceAccounts.statuses = defaultSourceAccounts();
+      state.sourceAccounts.loading = false;
+      renderSourceAccountsPanel();
+      return;
+    }
+    state.sourceAccounts.loading = true;
+    renderSourceAccountsPanel();
+    try {
+      const statuses = normaliseSourceAccounts(await invoke<unknown>("get_source_accounts"));
+      if (request !== settingsRequest) return;
+      state.sourceAccounts.statuses = statuses;
+      if (state.sourceAccounts.noticeTone !== "error") {
+        setSourceNotice(null, "");
+      }
+    } catch (error) {
+      if (request !== settingsRequest) return;
+      setSourceNotice(
+        null,
+        messageFromError(error, "Library source connections could not be loaded."),
+        "error",
+      );
+    }
+    state.sourceAccounts.loading = false;
+    renderSourceAccountsPanel();
+  };
+
+  const connectSourceAccount = async (provider: ConnectedSource): Promise<void> => {
+    if (!isTauriRuntime() || state.sourceAccounts.busy.has(provider)) {
+      return;
+    }
+    const label = connectedSourceDescriptor(provider).label;
+    setSourceBusy(provider, true);
+    setSourceNotice(provider, "");
+    renderSourceAccountsPanel();
+    try {
+      await invoke<unknown>("connect_source_account", { provider });
+      // The backend is the authority on what a sign-in produced, including for
+      // the sibling source that shares the same account.
+      await refreshSourceAccounts();
+      // A session-style store imports its library as part of connecting, so
+      // the Library has to be re-read either way.
+      await refreshLibrary();
+      setSourceNotice(provider, `${label} is connected.`, "success");
+      showToast(`${label} is connected.`);
+    } catch (error) {
+      setSourceNotice(provider, messageFromError(error, `${label} could not be connected.`), "error");
+    }
+    setSourceBusy(provider, false);
+    renderSourceAccountsPanel();
+  };
+
+  const syncSourceLibrary = async (provider: ConnectedSource): Promise<void> => {
+    if (!isTauriRuntime() || state.sourceAccounts.busy.has(provider)) {
+      return;
+    }
+    const label = connectedSourceDescriptor(provider).label;
+    setSourceBusy(provider, true);
+    setSourceNotice(provider, "");
+    renderSourceAccountsPanel();
+    try {
+      const result = normaliseSourceSyncResult(
+        await invoke<unknown>("sync_source_library", { provider }),
+      );
+      if (!result) {
+        throw new Error(`${label} returned an invalid library sync.`);
+      }
+      state.sourceAccounts.lastSync.set(provider, result);
+      await refreshLibrary();
+      setSourceNotice(provider, sourceSyncSummary(result), "success");
+      showToast(sourceSyncSummary(result));
+    } catch (error) {
+      setSourceNotice(provider, messageFromError(error, `${label} could not be synced.`), "error");
+    }
+    setSourceBusy(provider, false);
+    renderSourceAccountsPanel();
+  };
+
+  const cancelSourceLogin = async (provider: ConnectedSource): Promise<void> => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    try {
+      // Closing the window is what settles the pending connect: the awaiting
+      // call resolves on its own, so nothing is cleared here.
+      await invoke("cancel_source_login", { provider });
+    } catch {
+      // A window that is already gone is exactly the outcome asked for.
+    }
+  };
+
+  const disconnectSourceAccount = async (
+    provider: ConnectedSource,
+    forgetGames: boolean,
+  ): Promise<void> => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    const label = connectedSourceDescriptor(provider).label;
+    state.sourceAccounts.pendingDisconnect = null;
+    setSourceBusy(provider, true);
+    renderSourceAccountsPanel();
+    try {
+      const removed = await invoke<unknown>("disconnect_source_account", {
+        provider,
+        forgetGames,
+      });
+      state.sourceAccounts.lastSync.delete(provider);
+      const removedCount = typeof removed === "number" && Number.isFinite(removed) ? removed : 0;
+      setSourceNotice(
+        provider,
+        forgetGames
+          ? `${label} was disconnected and ${removedCount === 1 ? "1 game was" : `${removedCount} games were`} removed.`
+          : `${label} was disconnected. Games already imported stay in your library.`,
+        "info",
+      );
+      await refreshSourceAccounts();
+      await refreshLibrary();
+    } catch (error) {
+      setSourceNotice(
+        provider,
+        messageFromError(error, `${label} could not be disconnected.`),
+        "error",
+      );
+    }
+    setSourceBusy(provider, false);
+    renderSourceAccountsPanel();
+  };
+
   const hydrateSteamPreviewMedia = async (
     preview: SteamPreview,
     request: number,
@@ -2616,11 +3089,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     applyMotionPreference();
   };
 
+  /**
+   * The price-data providers that are *not* a connectable library. A store you
+   * can sign into shows its health inline on its own row instead, so nothing is
+   * listed twice.
+   */
   const renderProviderStatuses = (): void => {
     const list = root.querySelector<HTMLElement>("#provider-status-list");
+    const group = root.querySelector<HTMLElement>(".source-providers");
     if (!list) return;
+    const remaining = state.providerStatuses.filter(
+      (provider) => providerStatusForSource(provider.provider) === null,
+    );
+    if (group) group.hidden = remaining.length === 0;
     const fragment = document.createDocumentFragment();
-    for (const provider of state.providerStatuses) {
+    for (const provider of remaining) {
       const row = document.createElement("article");
       row.className = "provider-status-row";
       row.dataset.settingsSearchable = "";
@@ -2637,6 +3120,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       fragment.append(row);
     }
     list.replaceChildren(fragment);
+    // The connectable rows carry the rest of the health chips, so they have to
+    // repaint whenever provider status lands.
+    renderSourceAccountsPanel();
+  };
+
+  /**
+   * Map a store-data provider onto the library source it is the same shop as.
+   * `microsoft` covers both Microsoft surfaces, and the pairing is what lets
+   * one row speak for both meanings.
+   */
+  const providerStatusForSource = (provider: StoreProvider): ConnectedSource | null => {
+    switch (provider) {
+      case "epic":
+        return "epic";
+      case "gog":
+        return "gog";
+      case "ubisoft":
+        return "ubisoft";
+      case "instant-gaming":
+        return "instant-gaming";
+      case "microsoft":
+        return "microsoft-store";
+      default:
+        return null;
+    }
   };
 
   const renderDataUsage = (): void => {
@@ -2805,6 +3313,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.wallpaperIgdbClientSecret.value = state.wallpaperCredentials.igdbClientSecret;
     refs.wallpaperGoogleApiKey.value = state.wallpaperCredentials.googleApiKey;
     refs.wallpaperGoogleCseId.value = state.wallpaperCredentials.googleCseId;
+    refs.wallpaperSteamGridDbApiKey.value = state.wallpaperCredentials.steamgriddbApiKey;
     refs.wallpaperCredentialsSave.disabled = state.wallpaperCredentialsSaving;
     refs.wallpaperCredentialsSave.textContent = state.wallpaperCredentialsSaving
       ? "Saving…"
@@ -2836,6 +3345,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       igdbClientSecret: refs.wallpaperIgdbClientSecret.value.trim(),
       googleApiKey: refs.wallpaperGoogleApiKey.value.trim(),
       googleCseId: refs.wallpaperGoogleCseId.value.trim(),
+      steamgriddbApiKey: refs.wallpaperSteamGridDbApiKey.value.trim(),
     };
     if (!isTauriRuntime()) {
       state.wallpaperCredentials = { ...EMPTY_WALLPAPER_CREDENTIALS, ...update };
@@ -3028,6 +3538,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       closeLibraryMenu();
       navigate({ page: "settings", section: "libraries", attachGameId: null });
       setSteamPanelOpen(true);
+    } else if (action === "source-connected") {
+      // A connected store row goes to Settings and syncs it straight away,
+      // which is the only thing there is to do with an already-signed-in store.
+      const provider = trigger.dataset.sourceProvider ?? "";
+      closeLibraryMenu();
+      navigate({ page: "settings", section: "libraries", attachGameId: null });
+      if (isConnectedSource(provider) && sourceStatus(provider).connected) {
+        void syncSourceLibrary(provider);
+      }
     } else if (action === "add-source") {
       // "Add a new source" opens the existing library connection flow: the
       // Settings › Libraries page auto-expands the Steam account connect card.
@@ -3252,6 +3771,43 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  refs.sourceAccountsPanel.addEventListener("click", (event) => {
+    const trigger = (event.target as Element | null)?.closest<HTMLButtonElement>(
+      "[data-source-action]",
+    );
+    const action = trigger?.dataset.sourceAction;
+    if (!trigger || !action) {
+      return;
+    }
+    if (action === "refresh") {
+      void refreshSourceAccounts();
+      return;
+    }
+    const provider = trigger.dataset.sourceProvider ?? "";
+    if (!isConnectedSource(provider)) {
+      return;
+    }
+
+    if (action === "connect") {
+      void connectSourceAccount(provider);
+    } else if (action === "sync") {
+      void syncSourceLibrary(provider);
+    } else if (action === "cancel") {
+      void cancelSourceLogin(provider);
+    } else if (action === "disconnect") {
+      state.sourceAccounts.pendingDisconnect = provider;
+      setSourceNotice(provider, "");
+      renderSourceAccountsPanel();
+    } else if (action === "disconnect-keep") {
+      void disconnectSourceAccount(provider, false);
+    } else if (action === "disconnect-forget") {
+      void disconnectSourceAccount(provider, true);
+    } else if (action === "disconnect-cancel") {
+      state.sourceAccounts.pendingDisconnect = null;
+      renderSourceAccountsPanel();
+    }
+  });
+
   refs.steamAccountPanel.addEventListener("submit", (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || form.dataset.steamAccountForm !== "api-key") {
@@ -3299,6 +3855,50 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       state.steamAccount.notice = "Steam sign-in is not complete yet. Finish in the Steam window, then try again.";
       state.steamAccount.noticeTone = "info";
       renderSteamAccountPanel();
+    });
+    // The connected-store commands already resolve with their own outcome, so
+    // these listeners exist for the paths the awaiting caller cannot see: a
+    // sibling source that the same sign-in connected, and a window the user
+    // closed or that failed while the panel was on another settings section.
+    void listen<{ provider?: string; accountLabel?: string }>(
+      SOURCE_ACCOUNT_CONNECTED_EVENT,
+      (event) => {
+        const provider = event.payload?.provider ?? "";
+        if (!isConnectedSource(provider)) return;
+        void refreshSourceAccounts();
+      },
+    );
+    void listen<{ provider?: string }>(SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT, (event) => {
+      const provider = event.payload?.provider ?? "";
+      if (!isConnectedSource(provider) || !state.sourceAccounts.busy.has(provider)) return;
+      setSourceNotice(
+        provider,
+        `${connectedSourceDescriptor(provider).label} sign-in was cancelled.`,
+        "info",
+      );
+      renderSourceAccountsPanel();
+    });
+    void listen<{ provider?: string; message?: string }>(
+      SOURCE_ACCOUNT_LOGIN_FAILED_EVENT,
+      (event) => {
+        const provider = event.payload?.provider ?? "";
+        if (!isConnectedSource(provider)) return;
+        setSourceNotice(
+          provider,
+          messageFromError(
+            event.payload?.message,
+            `${connectedSourceDescriptor(provider).label} sign-in could not be saved.`,
+          ),
+          "error",
+        );
+        renderSourceAccountsPanel();
+      },
+    );
+    void listen<unknown>(SOURCE_LIBRARY_SYNCED_EVENT, (event) => {
+      const result = normaliseSourceSyncResult(event.payload);
+      if (!result) return;
+      state.sourceAccounts.lastSync.set(result.provider, result);
+      renderSourceAccountsPanel();
     });
     void listen<WineLaunchStatusEvent>(WINE_LAUNCH_STATUS_EVENT, (event) => {
       const payload = event.payload;
@@ -3473,6 +4073,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
       if (route.section === "libraries") {
         setSteamAccountPanelOpen(true);
+        void refreshSourceAccounts();
         void loadProviderStatuses(request);
       } else if (state.steamAccount.open) {
         setSteamAccountPanelOpen(false);
@@ -3954,7 +4555,10 @@ async function loadLibrary(): Promise<LibraryLoad | null> {
   }
 
   try {
-    const result = await invoke<unknown>("get_library");
+    // Learn the media directory alongside the library, so cached artwork is
+    // already resolvable when the records are normalised and the first paint
+    // shows the real covers rather than a placeholder.
+    const [result] = await Promise.all([invoke<unknown>("get_library"), primeMediaDirectory()]);
     const records = recordsFromResult(result);
     if (records.length === 0) {
       return {
@@ -3994,20 +4598,30 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
     return null;
   }
 
+  // Copy (description, genre, play state) may borrow from a matching fixture,
+  // and only from one that matches by title.
+  //
+  // Artwork never does. Falling back to `lastUsedFallback` here is what put
+  // Elden Ring's cover on every game whose art lives in the media cache: a
+  // `cache:` token is not resolvable synchronously, so the fallback won, and
+  // only the first handful of cards were ever hydrated back to the truth.
   const fallback = fallbackLibrary.find((game) => game.title === title) ?? lastUsedFallback;
+  const artworkFallback = fallbackLibrary.find((game) => game.title === title) ?? null;
   const rawSource = readString(record, "source");
   const source: LibraryGame["source"] =
     rawSource === "steam" || rawSource === "local"
       ? rawSource
-      : rawSource === "wine" || rawSource === "runner"
-        ? "wine"
-        : rawSource === "wine_staging" || rawSource === "wine-staging"
+      : isConnectedSource(rawSource)
+        ? rawSource
+        : rawSource === "wine" || rawSource === "runner"
           ? "wine"
-          : id.startsWith("runner:")
+          : rawSource === "wine_staging" || rawSource === "wine-staging"
             ? "wine"
-            : id.startsWith("showcase-")
-              ? "showcase"
-              : fallback.source ?? "local";
+            : id.startsWith("runner:")
+              ? "wine"
+              : id.startsWith("showcase-")
+                ? "showcase"
+                : fallback.source ?? "local";
   const heroToken = readString(record, "heroUrl", "hero_url");
   const coverToken = readString(record, "coverUrl", "cover_url");
   const landscapeToken = readString(record, "landscapeUrl", "landscape_url");
@@ -4028,9 +4642,13 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       description: readString(record, "description") || fallback.description,
       metadata: readString(record, "metadata") || fallback.metadata,
       genre: readString(record, "genre") || fallback.genre,
-      heroUrl: immediateMediaUrl(heroToken) || fallback.heroUrl,
-      coverUrl: immediateMediaUrl(coverToken) || fallback.coverUrl,
-      landscapeUrl: immediateMediaUrl(landscapeToken) || immediateMediaUrl(heroToken) || fallback.landscapeUrl,
+      heroUrl: immediateMediaUrl(heroToken) || artworkFallback?.heroUrl || "",
+      coverUrl: immediateMediaUrl(coverToken) || artworkFallback?.coverUrl || "",
+      landscapeUrl:
+        immediateMediaUrl(landscapeToken) ||
+        immediateMediaUrl(heroToken) ||
+        artworkFallback?.landscapeUrl ||
+        "",
       // An empty value is meaningful for a newly synced Steam game: it has
       // never been launched locally. Do not borrow a fixture's last-played
       // date merely because the backend intentionally returned an empty one.
@@ -4051,8 +4669,16 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
 }
 
 
+/**
+ * Resolve an artwork token without awaiting. Remote and bundled URLs are usable
+ * as-is; a `cache:` token resolves once the media directory has been learned,
+ * which `primeMediaDirectory` does before the first library load.
+ */
 function immediateMediaUrl(value: string): string {
-  return value.startsWith("https://") || value.startsWith("/media/") ? value : "";
+  if (value.startsWith("https://") || value.startsWith("/media/")) {
+    return value;
+  }
+  return resolveMediaUrlSync(value);
 }
 
 function nestedRecord(record: BackendRecord, ...keys: string[]): BackendRecord | null {
@@ -4664,14 +5290,24 @@ function shell(): string {
                 </footer>
               </section>
 
-              <section class="settings-card" data-settings-searchable aria-labelledby="provider-status-title">
+              <!-- Connecting a library and reading that store's prices were two
+                   cards saying different things about the same shops. They are
+                   one list now: each store shows its connection and, on the same
+                   row, whether its price data is reachable. -->
+              <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-labelledby="source-accounts-title">
                 <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("collections")}</span>
                   <div class="settings-card__copy">
-                    <strong id="provider-status-title">Provider status</strong>
-                    <small>Where store data can come from on this Mac.</small>
+                    <strong id="source-accounts-title">Game libraries &amp; providers</strong>
+                    <small>Connect a store to see the games you own, and check where store data can come from.</small>
                   </div>
+                  <button id="source-accounts-refresh" type="button" class="steam-header-button" data-source-action="refresh" aria-label="Refresh library source connections">${icon("refresh")}</button>
                 </header>
-                <div id="provider-status-list" class="provider-status-list"></div>
+                <div id="source-accounts-body" class="source-accounts-body"></div>
+                <div class="source-providers">
+                  <p class="source-providers__label">Store data only</p>
+                  <div id="provider-status-list" class="provider-status-list"></div>
+                </div>
               </section>
             </section>
 
@@ -4758,6 +5394,11 @@ function shell(): string {
                     <label for="wallpaper-google-cse-id">Google Search Engine ID</label>
                     <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Custom search engine ID" />
                     <small>Optional. The programmatic search engine used with the API key.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-steamgriddb-api-key">SteamGridDB API Key</label>
+                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="From steamgriddb.com/profile/preferences/api" />
+                    <small>Optional. With a key, “Reset the covers” pulls 4K artwork for all three formats; without one it uses Steam's official art.</small>
                   </div>
                   <div class="credentials-form__actions">
                     <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
