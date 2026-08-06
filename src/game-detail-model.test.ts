@@ -1,18 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AppRoute, GameMediaView, PageRestoreState } from "./contracts";
+import type {
+  AppRoute,
+  GameMediaView,
+  PageRestoreState,
+  WallpaperCandidateView,
+  WallpaperCategory,
+  WallpaperSearchView,
+} from "./contracts";
+import { WALLPAPER_CATEGORIES } from "./contracts";
 import type { PageActivation } from "./page-lifecycle";
 import {
   createGameDetailPage,
   type GameDetailPageClient,
   type GameDetailPageOptions,
+  type WallpaperRole,
 } from "./game-detail-page";
 import {
+  allWallpaperCandidates,
   availableMediaKinds,
   buildStatFacts,
   canApplyMedia,
   createFallbackGameDetail,
   createFallbackWallpaperSearch,
   createInitialGameDetailState,
+  createWallpaperCategoryState,
   defaultMediaKind,
   formatAchievementProgress,
   formatLastPlayed,
@@ -301,6 +312,50 @@ describe("state reducer", () => {
 });
 
 describe("wallpaper search state", () => {
+  const candidate = (id: string, category: WallpaperCategory): WallpaperCandidateView => ({
+    id,
+    title: id,
+    thumbnailUrl: `/${id}.png`,
+    category,
+  });
+
+  const backendResults = (
+    category: WallpaperCategory,
+    candidateIds: readonly string[],
+  ): WallpaperSearchView => ({
+    phase: "ready",
+    source: "igdb",
+    category,
+    query: "elden ring",
+    message: "",
+    candidates: candidateIds.map((id) => candidate(id, category)),
+  });
+
+  /** One full round trip for a single row: the request, then the answer. */
+  function runSearch(
+    state: GameDetailPageState,
+    category: WallpaperCategory,
+    candidateIds: readonly string[],
+    options: { more?: boolean } = {},
+  ): GameDetailPageState {
+    const started = reduceGameDetailState(state, {
+      type: "wallpaper-search-started",
+      category,
+      more: options.more === true,
+    });
+    return reduceGameDetailState(started, {
+      type: "wallpaper-search-results",
+      category,
+      results: backendResults(category, candidateIds),
+    });
+  }
+
+  const rowIds = (state: GameDetailPageState, category: WallpaperCategory): string[] =>
+    state.wallpaperSearch.categories[category].candidates.map((entry) => entry.id);
+
+  /** A game with no rail wallpapers, so the dialog opens with no active slide. */
+  const emptyRail = () => readyState({ media: [] });
+
   it("opens prefilled with the game title and closes again", () => {
     let state = readyState();
     expect(state.wallpaperSearch.open).toBe(false);
@@ -308,6 +363,7 @@ describe("wallpaper search state", () => {
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     expect(state.wallpaperSearch.open).toBe(true);
     expect(state.wallpaperSearch.query).toBe("Elden Ring");
+    expect(state.wallpaperSearch.focus).toBeNull();
 
     state = reduceGameDetailState(state, { type: "wallpaper-search-closed" });
     expect(state.wallpaperSearch.open).toBe(false);
@@ -321,91 +377,246 @@ describe("wallpaper search state", () => {
     expect(state.wallpaperSearch.query).toBe("souls");
   });
 
-  it("switches the source without clobbering the rest of the search", () => {
-    let state = readyState();
-    state = reduceGameDetailState(state, { type: "wallpaper-search-source-changed", source: "google-images" });
+  it("fills the searched row and leaves the other two untouched", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    const before = state.wallpaperSearch.categories;
+
+    state = reduceGameDetailState(state, { type: "wallpaper-search-started", category: "cover" });
+    expect(state.wallpaperSearch.categories.cover).toMatchObject({
+      busy: true,
+      phase: "idle",
+      // A fresh search restarts at zero.
+      offset: 0,
+    });
+    // The rows nobody asked for are the very same objects, not rebuilt copies.
+    expect(state.wallpaperSearch.categories.landscape).toBe(before.landscape);
+    expect(state.wallpaperSearch.categories.background).toBe(before.background);
+
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-results",
+      category: "cover",
+      results: backendResults("cover", ["c1"]),
+    });
+    expect(state.wallpaperSearch.categories.cover).toMatchObject({
+      busy: false,
+      phase: "ready",
+      offset: 1,
+      hasMore: true,
+    });
+    expect(rowIds(state, "cover")).toEqual(["c1"]);
+    // The backend echoes the query it actually ran.
+    expect(state.wallpaperSearch.query).toBe("elden ring");
+    // No portrait result bled into the wide rows.
+    expect(state.wallpaperSearch.categories.landscape).toEqual(createWallpaperCategoryState());
+    expect(state.wallpaperSearch.categories.background).toEqual(createWallpaperCategoryState());
+    // With no rail wallpaper to sit on, the dialog lands on the first result.
+    expect(state.wallpaperSearch.activeId).toBe("c1");
+  });
+
+  it("keeps the other rows' results when one row fails", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    state = runSearch(state, "cover", ["c1", "c2"]);
+    state = runSearch(state, "landscape", ["l1"]);
+    state = runSearch(state, "background", ["b1"]);
+
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-started",
+      category: "landscape",
+      more: true,
+    });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-failed",
+      category: "landscape",
+      message: "IGDB is unreachable.",
+    });
+
+    expect(state.wallpaperSearch.categories.landscape).toMatchObject({
+      busy: false,
+      phase: "error",
+      message: "IGDB is unreachable.",
+    });
+    // A failed "search more" keeps what that row had already shown.
+    expect(rowIds(state, "landscape")).toEqual(["l1"]);
+    // And the failure stays in its own row: the neighbours still render.
+    expect(state.wallpaperSearch.categories.cover).toMatchObject({ phase: "ready", busy: false });
+    expect(rowIds(state, "cover")).toEqual(["c1", "c2"]);
+    expect(state.wallpaperSearch.categories.background).toMatchObject({ phase: "ready" });
+    expect(rowIds(state, "background")).toEqual(["b1"]);
+  });
+
+  it("drops every row's results when the source changes, and only then", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    state = reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: "cover" });
+    for (const category of WALLPAPER_CATEGORIES) {
+      state = runSearch(state, category, [`${category}-1`]);
+    }
+
+    // Re-picking the source already in use must not throw the results away.
+    expect(
+      reduceGameDetailState(state, {
+        type: "wallpaper-search-source-changed",
+        source: state.wallpaperSearch.source,
+      }),
+    ).toBe(state);
+
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-source-changed",
+      source: "google-images",
+    });
     expect(state.wallpaperSearch.source).toBe("google-images");
+    // Another source means other artwork, so all three rows are stale.
+    for (const category of WALLPAPER_CATEGORIES) {
+      expect(state.wallpaperSearch.categories[category]).toEqual(createWallpaperCategoryState());
+    }
+    expect(allWallpaperCandidates(state.wallpaperSearch)).toEqual([]);
+    // The session itself survives: same dialog, same query, same narrowing.
+    expect(state.wallpaperSearch.open).toBe(true);
+    expect(state.wallpaperSearch.query).toBe("elden ring");
+    expect(state.wallpaperSearch.focus).toBe("cover");
   });
 
-  it("tracks a running search and adopts the backend result", () => {
+  it("narrows to a single row and back, ignoring a repeated focus", () => {
     let state = readyState();
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started" });
-    expect(state.wallpaperSearch.busy).toBe(true);
-    expect(state.wallpaperSearch.phase).toBe("idle");
-    // A fresh search restarts at zero.
-    expect(state.wallpaperSearch.offset).toBe(0);
+    expect(state.wallpaperSearch.focus).toBeNull();
 
     state = reduceGameDetailState(state, {
-      type: "wallpaper-search-results",
-      results: {
-        phase: "ready",
-        source: "igdb",
-        query: "elden ring",
-        message: "",
-        candidates: [{ id: "c1", title: "Key art", thumbnailUrl: "/a.png" }],
-      },
+      type: "wallpaper-search-focus-changed",
+      focus: "landscape",
     });
-    expect(state.wallpaperSearch.busy).toBe(false);
-    expect(state.wallpaperSearch.phase).toBe("ready");
-    expect(state.wallpaperSearch.candidates.map((candidate) => candidate.id)).toEqual(["c1"]);
-    expect(state.wallpaperSearch.activeId).toBe("c1");
-    expect(state.wallpaperSearch.offset).toBe(1);
-    expect(state.wallpaperSearch.hasMore).toBe(true);
+    expect(state.wallpaperSearch.focus).toBe("landscape");
+
+    // Clicking the chip already selected must not churn state (and re-render).
+    expect(
+      reduceGameDetailState(state, {
+        type: "wallpaper-search-focus-changed",
+        focus: "landscape",
+      }),
+    ).toBe(state);
+
+    state = reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: null });
+    expect(state.wallpaperSearch.focus).toBeNull();
+    expect(
+      reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: null }),
+    ).toBe(state);
   });
 
-  it("merges results when searching more and stops when the source runs dry", () => {
-    const candidate = (id: string) => ({ id, title: id, thumbnailUrl: "/a.png" });
-    let state = readyState();
+  it("appends when searching more and pages only the row that asked", () => {
+    let state = emptyRail();
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started" });
-    state = reduceGameDetailState(state, {
-      type: "wallpaper-search-results",
-      results: {
-        phase: "ready",
-        source: "igdb",
-        query: "elden ring",
-        message: "",
-        candidates: ["c1", "c2", "c3", "c4"].map(candidate),
-      },
-    });
-    expect(state.wallpaperSearch.offset).toBe(4);
+    state = runSearch(state, "cover", ["c1", "c2", "c3", "c4"]);
+    state = runSearch(state, "landscape", ["l1"]);
+    expect(state.wallpaperSearch.categories.cover.offset).toBe(4);
     expect(state.wallpaperSearch.activeId).toBe("c1");
 
-    // "Search more" keeps the page offset and the slide the user is on.
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started", more: true });
-    expect(state.wallpaperSearch.offset).toBe(4);
-    state = reduceGameDetailState(state, {
-      type: "wallpaper-search-results",
-      results: {
-        phase: "ready",
-        source: "igdb",
-        query: "elden ring",
-        message: "",
-        candidates: ["c5", "c6"].map(candidate),
-      },
+    // "Search more" keeps the page offset, the results and the active slide.
+    const more = reduceGameDetailState(state, {
+      type: "wallpaper-search-started",
+      category: "cover",
+      more: true,
     });
-    expect(state.wallpaperSearch.candidates.map((candidate) => candidate.id)).toEqual([
-      "c1", "c2", "c3", "c4", "c5", "c6",
-    ]);
-    expect(state.wallpaperSearch.offset).toBe(6);
+    expect(more.wallpaperSearch.categories.cover.offset).toBe(4);
+    expect(rowIds(more, "cover")).toEqual(["c1", "c2", "c3", "c4"]);
+
+    state = reduceGameDetailState(more, {
+      type: "wallpaper-search-results",
+      category: "cover",
+      results: backendResults("cover", ["c5", "c6"]),
+    });
+    expect(rowIds(state, "cover")).toEqual(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    expect(state.wallpaperSearch.categories.cover.offset).toBe(6);
+    expect(state.wallpaperSearch.categories.cover.hasMore).toBe(true);
     expect(state.wallpaperSearch.activeId).toBe("c1");
-    expect(state.wallpaperSearch.hasMore).toBe(true);
+    // Paging the Cover row never pages the Landscape row.
+    expect(state.wallpaperSearch.categories.landscape.offset).toBe(1);
+    expect(rowIds(state, "landscape")).toEqual(["l1"]);
 
     // The source has nothing else: the merged list stays, hasMore flips off.
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started", more: true });
-    state = reduceGameDetailState(state, {
-      type: "wallpaper-search-results",
-      results: {
-        phase: "ready",
-        source: "igdb",
-        query: "elden ring",
-        message: "",
-        candidates: [],
-      },
+    state = runSearch(state, "cover", [], { more: true });
+    expect(rowIds(state, "cover")).toHaveLength(6);
+    expect(state.wallpaperSearch.categories.cover.hasMore).toBe(false);
+  });
+
+  it("replaces a row's results on a fresh search instead of appending", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    state = runSearch(state, "cover", ["c1", "c2"]);
+
+    // A new query empties the row while it loads: no stale art under the spinner.
+    const started = reduceGameDetailState(state, {
+      type: "wallpaper-search-started",
+      category: "cover",
     });
-    expect(state.wallpaperSearch.candidates.length).toBe(6);
-    expect(state.wallpaperSearch.hasMore).toBe(false);
+    expect(started.wallpaperSearch.categories.cover.candidates).toEqual([]);
+    expect(started.wallpaperSearch.categories.cover.offset).toBe(0);
+
+    state = reduceGameDetailState(started, {
+      type: "wallpaper-search-results",
+      category: "cover",
+      results: backendResults("cover", ["d1"]),
+    });
+    expect(rowIds(state, "cover")).toEqual(["d1"]);
+    expect(state.wallpaperSearch.categories.cover.offset).toBe(1);
+  });
+
+  it("lists every row's candidates in cover, landscape, background order", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    expect(allWallpaperCandidates(state.wallpaperSearch)).toEqual([]);
+
+    // The three requests can answer in any order; the dialog still reads
+    // top row first.
+    state = runSearch(state, "background", ["b1"]);
+    state = runSearch(state, "landscape", ["l1", "l2"]);
+    state = runSearch(state, "cover", ["c1"]);
+    expect(allWallpaperCandidates(state.wallpaperSearch).map((entry) => entry.id)).toEqual([
+      "c1",
+      "l1",
+      "l2",
+      "b1",
+    ]);
+    expect(allWallpaperCandidates(state.wallpaperSearch).map((entry) => entry.category)).toEqual([
+      "cover",
+      "landscape",
+      "landscape",
+      "background",
+    ]);
+  });
+
+  it("keeps in-flight rows busy when the dialog closes, so a reopen cannot double-fire", () => {
+    let state = emptyRail();
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    state = runSearch(state, "cover", ["c1"]);
+    // Three requests in flight at once, as the dialog fires on open.
+    for (const category of WALLPAPER_CATEGORIES) {
+      state = reduceGameDetailState(state, {
+        type: "wallpaper-search-started",
+        category,
+        more: category === "cover",
+      });
+      expect(state.wallpaperSearch.categories[category].busy).toBe(true);
+    }
+
+    state = reduceGameDetailState(state, { type: "wallpaper-search-closed" });
+    expect(state.wallpaperSearch.open).toBe(false);
+    // The requests did not stop just because the dialog did. Clearing `busy`
+    // here would let the reopen fire a second request per row, whose results
+    // then merge as a "search more" page and duplicate every tile.
+    for (const category of WALLPAPER_CATEGORIES) {
+      expect(state.wallpaperSearch.categories[category].busy).toBe(true);
+    }
+    // Closing is not a reset: what the Cover row already found is still there.
+    expect(rowIds(state, "cover")).toEqual(["c1"]);
+
+    // Reopening finds the rows still busy, so nothing re-fires; the in-flight
+    // answer lands normally and replaces, rather than appending to, the row.
+    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
+    for (const category of WALLPAPER_CATEGORIES) {
+      expect(state.wallpaperSearch.categories[category].busy).toBe(true);
+    }
   });
 
   it("opens on the wallpaper being previewed, else the first wallpaper", () => {
@@ -425,19 +636,10 @@ describe("wallpaper search state", () => {
     let state = readyState({
       media: [media("w1", "wallpaper", true), media("w2", "wallpaper")],
     });
-    // A search left the last result active.
+    // A search left the user browsing one of its results.
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started" });
-    state = reduceGameDetailState(state, {
-      type: "wallpaper-search-results",
-      results: {
-        phase: "ready",
-        source: "steam-store",
-        query: "elden ring",
-        message: "",
-        candidates: [{ id: "c1", title: "Key art", thumbnailUrl: "/a.png" }],
-      },
-    });
+    state = runSearch(state, "cover", ["c1"]);
+    state = reduceGameDetailState(state, { type: "wallpaper-slide-changed", slideId: "c1" });
     state = reduceGameDetailState(state, { type: "wallpaper-search-closed" });
     expect(state.wallpaperSearch.activeId).toBe("c1");
     // The user then previewed a downloaded wallpaper; the dialog must open on it.
@@ -458,16 +660,46 @@ describe("wallpaper search state", () => {
       slideId: slides[1],
     });
     expect(state.wallpaperSearch.activeId).toBe(slides[1]);
+    for (const category of WALLPAPER_CATEGORIES) {
+      expect(state.wallpaperSearch.categories[category].busy).toBe(false);
+    }
   });
 
-  it("surfaces a failure and clears the busy flag", () => {
-    let state = readyState();
-    state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-failed", message: "nope" });
-    expect(state.wallpaperSearch.busy).toBe(false);
-    expect(state.wallpaperSearch.phase).toBe("error");
-    expect(state.wallpaperSearch.message).toBe("nope");
+  it("fills each browser-fallback row with art of that row's shape", () => {
+    // The bundled mock art is filed by shape, so a row can only look right if
+    // it draws from its own folder.
+    const folders: Record<WallpaperCategory, string> = {
+      cover: "/media/igdb/covers/",
+      landscape: "/media/igdb/landscapes/",
+      background: "/media/igdb/heroes/",
+    };
+    for (const category of WALLPAPER_CATEGORIES) {
+      const view = createFallbackWallpaperSearch("igdb", category, "elden ring");
+      expect(view).toMatchObject({
+        phase: "ready",
+        source: "igdb",
+        category,
+        query: "elden ring",
+      });
+      expect(view.candidates).toHaveLength(5);
+      expect(view.candidates.map((entry) => entry.category)).toEqual(Array(5).fill(category));
+      expect(
+        view.candidates.filter((entry) => entry.thumbnailUrl.startsWith(folders[category])),
+      ).toHaveLength(5);
+    }
+  });
+
+  it("pages the fallback rows and never reuses an id across rows", () => {
+    expect(
+      createFallbackWallpaperSearch("igdb", "cover", "q", 5).candidates.map((entry) => entry.id),
+    ).toEqual(["candidate-cover-6"]);
+    expect(createFallbackWallpaperSearch("igdb", "cover", "q", 6).candidates).toEqual([]);
+
+    // All three rows live in one dialog, so their ids must not collide.
+    const ids = WALLPAPER_CATEGORIES.flatMap((category) =>
+      createFallbackWallpaperSearch("igdb", category, "q").candidates.map((entry) => entry.id),
+    );
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 
@@ -666,42 +898,82 @@ describe("normalisation", () => {
 
   it("keeps only well-formed wallpaper search results", () => {
     expect(
-      normaliseWallpaperSearch({
-        phase: "ready",
-        source: "google-images",
-        query: " elden ring ",
-        message: "10 results",
-        candidates: [
-          { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png" },
-          { id: "c1", title: "Duplicate", thumbnailUrl: "https://x.test/b.png" },
-          { id: "c2", thumbnailUrl: "https://x.test/c.png" },
-          { id: "c3", title: "No thumb" },
-          "junk",
-        ],
-      }),
+      normaliseWallpaperSearch(
+        {
+          phase: "ready",
+          source: "google-images",
+          category: "landscape",
+          query: " elden ring ",
+          message: "10 results",
+          candidates: [
+            { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png" },
+            { id: "c1", title: "Duplicate", thumbnailUrl: "https://x.test/b.png" },
+            { id: "c2", thumbnailUrl: "https://x.test/c.png" },
+            { id: "c3", title: "No thumb" },
+            "junk",
+          ],
+        },
+        "landscape",
+      ),
     ).toEqual({
       phase: "ready",
       source: "google-images",
+      category: "landscape",
       query: " elden ring ",
       message: "10 results",
       candidates: [
-        { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png" },
-        { id: "c2", title: "Wallpaper", thumbnailUrl: "https://x.test/c.png" },
+        { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png", category: "landscape" },
+        { id: "c2", title: "Wallpaper", thumbnailUrl: "https://x.test/c.png", category: "landscape" },
       ],
     });
   });
 
+  it("files every candidate under the row that was actually requested", () => {
+    const view = normaliseWallpaperSearch(
+      {
+        phase: "ready",
+        source: "igdb",
+        query: "elden ring",
+        message: "",
+        candidates: [
+          { id: "c1", title: "Silent", thumbnailUrl: "/a.png" },
+          { id: "c2", title: "Garbage", thumbnailUrl: "/b.png", category: "screenshot" },
+          { id: "c3", title: "Explicit", thumbnailUrl: "/c.png", category: "background" },
+        ],
+      },
+      "cover",
+    );
+    // The payload never named a shape, so the row we asked for wins.
+    expect(view.category).toBe("cover");
+    // A silent candidate inherits the row; a nonsense one is coerced to it; a
+    // candidate that names a real shape keeps it.
+    expect(view.candidates.map((entry) => entry.category)).toEqual([
+      "cover",
+      "cover",
+      "background",
+    ]);
+  });
+
   it("falls back to a safe shape for a malformed search payload", () => {
-    expect(normaliseWallpaperSearch(null)).toEqual({
+    expect(normaliseWallpaperSearch(null, "landscape")).toEqual({
       phase: "error",
       source: "steam-store",
+      category: "landscape",
       query: "",
       message: "",
       candidates: [],
     });
     expect(
-      normaliseWallpaperSearch({ phase: "mystery", source: "nope", candidates: "x" }),
-    ).toMatchObject({ phase: "error", source: "steam-store", candidates: [] });
+      normaliseWallpaperSearch(
+        { phase: "mystery", source: "nope", category: "portrait", candidates: "x" },
+        "cover",
+      ),
+    ).toMatchObject({
+      phase: "error",
+      source: "steam-store",
+      category: "cover",
+      candidates: [],
+    });
   });
 });
 
@@ -752,7 +1024,8 @@ function stubClient(overrides: Partial<GameDetailPageClient> = {}): GameDetailPa
     importMedia: async () => [],
     exportMedia: async () => undefined,
     cancelMediaDownload: async () => undefined,
-    searchWallpapers: async () => createFallbackWallpaperSearch("igdb", ""),
+    searchWallpapers: async (_source, category) =>
+      createFallbackWallpaperSearch("igdb", category, ""),
     importWallpaper: async () => [],
     openOffer: async () => undefined,
     searchArtwork: async () => undefined,
@@ -798,6 +1071,12 @@ function mountPage(
   return { page, host, options };
 }
 
+/** Opens the wallpaper dialog the way the UI now does: through the "…" menu. */
+function openWallpaperDialog(host: HTMLElement): void {
+  host.querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")?.click();
+  host.querySelector<HTMLButtonElement>("[data-focus-key='menu-wallpaper']")?.click();
+}
+
 describe("game detail page lifecycle", () => {
   it("mounts, paints the loaded game and never throws into the shell", async () => {
     const { page, host } = mountPage(stubClient());
@@ -806,7 +1085,8 @@ describe("game detail page lifecycle", () => {
     expect(host.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
     expect(host.querySelector(".gd-primary-action")?.textContent).toContain("Play");
     expect(host.querySelectorAll(".gd-gallery__tile:not(.gd-gallery__tile--empty)").length).toBe(2);
-    expect(host.querySelector("[data-focus-key='wallpaper-search-toggle']")).not.toBeNull();
+    // Adding a wallpaper lives in the "…" menu now, not on the rail.
+    expect(host.querySelector("[data-focus-key='menu-wallpaper']")).not.toBeNull();
   });
 
   it("discards a late response once the activation is no longer current", async () => {
@@ -894,7 +1174,7 @@ describe("game detail page lifecycle", () => {
     const { page, host } = mountPage(stubClient({ selectMedia, setHomeImage }));
     await page.activate(activationFor(gameRoute).activation);
 
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-search-toggle']")?.click();
+    openWallpaperDialog(host);
     // Tick an existing wallpaper in the grid, then apply it.
     host.querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")?.click();
     const apply = host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']");
@@ -907,19 +1187,40 @@ describe("game detail page lifecycle", () => {
     await vi.waitFor(() => expect(host.querySelector(".gd-modal")).toBeNull());
   });
 
-  it("applies a single wallpaper to the chosen card role", async () => {
+  it("applies each pick to the slot its own row stands for, all three at once", async () => {
     const selectMedia = vi.fn(async () => [media("w1", "wallpaper"), media("w2", "wallpaper", true)]);
-    const setHomeImage = vi.fn(async () => undefined);
-    const { page, host } = mountPage(stubClient({ selectMedia, setHomeImage }));
+    const setHomeImage = vi.fn(
+      async (_gameId: string, _mediaId: string, _role: WallpaperRole) => undefined,
+    );
+    // Each import echoes back a media id derived from the candidate, so the
+    // assertion can tell which row's pick produced which call.
+    const importWallpaper = vi.fn(async (_gameId: string, candidateId: string) => [
+      { ...media(`saved-${candidateId}`, "wallpaper", true) },
+    ]);
+    const { page, host } = mountPage(
+      stubClient({ selectMedia, setHomeImage, importWallpaper }),
+    );
     await page.activate(activationFor(gameRoute).activation);
 
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-search-toggle']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")?.click();
-    // Target the landscape card instead of the default background.
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-role-landscape']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
+    openWallpaperDialog(host);
     await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w2", "landscape", expect.anything()),
+      expect(host.querySelector("[data-focus-key='wall-candidate-cover-1']")).not.toBeNull(),
+    );
+
+    // One tile per row — no "Apply as" step in between.
+    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-cover-1']")?.click();
+    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-landscape-1']")?.click();
+    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-background-1']")?.click();
+    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
+
+    await vi.waitFor(() => expect(setHomeImage).toHaveBeenCalledTimes(3));
+    const roles = setHomeImage.mock.calls.map((call) => [call[1], call[2]]);
+    expect(roles).toEqual(
+      expect.arrayContaining([
+        ["saved-candidate-cover-1", "cover"],
+        ["saved-candidate-landscape-1", "landscape"],
+        ["saved-candidate-background-1", "background"],
+      ]),
     );
   });
 
@@ -932,7 +1233,7 @@ describe("game detail page lifecycle", () => {
       }),
     );
     await page.activate(activationFor(gameRoute).activation);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-search-toggle']")?.click();
+    openWallpaperDialog(host);
     host.querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")?.click();
     host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
     await vi.waitFor(() =>
@@ -1008,19 +1309,22 @@ describe("game detail page lifecycle", () => {
     await page.activate(activationFor(gameRoute).activation);
     expect(host.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
     expect(host.querySelector(".gd-modal")).toBeNull();
-    // The rail still offers a way to add a wallpaper even with no media yet.
-    expect(host.querySelector(".gd-gallery--empty")).not.toBeNull();
+    // No media yet: the rail is gone entirely, but the "…" menu still offers a
+    // way to add a wallpaper.
+    expect(host.querySelector(".gd-gallery")).toBeNull();
     expect(host.querySelectorAll(".gd-gallery__tile")).toHaveLength(0);
-    expect(host.querySelector(".gd-gallery__add")).not.toBeNull();
+    expect(host.querySelector("[data-focus-key='menu-wallpaper']")).not.toBeNull();
   });
 
-  it("downloads a ticked search result and promotes it to the background", async () => {
-    const searchWallpapers = vi.fn(async () => ({
+  it("downloads a ticked search result and applies it to its own row's slot", async () => {
+    // Every row is fetched on its own, so each answers with its own art.
+    const searchWallpapers = vi.fn(async (_source, category: WallpaperCategory) => ({
       phase: "ready" as const,
       source: "steam-store" as const,
+      category,
       query: "elden ring",
       message: "",
-      candidates: [{ id: "c1", title: "Key art", thumbnailUrl: "/a.png" }],
+      candidates: [{ id: `c1-${category}`, title: "Key art", thumbnailUrl: "/a.png", category }],
     }));
     const importWallpaper = vi.fn(async () => [media("w9", "wallpaper", true)]);
     const selectMedia = vi.fn(async () => [media("w9", "wallpaper", true)]);
@@ -1031,22 +1335,22 @@ describe("game detail page lifecycle", () => {
     await page.activate(activationFor(gameRoute).activation);
 
     // The search toggle only exists on the wallpaper slot; opening it searches.
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-search-toggle']")?.click();
+    openWallpaperDialog(host);
     await vi.waitFor(() => expect(searchWallpapers).toHaveBeenCalled());
-    // The candidate lands as a grid tile; tick it and apply.
+    // The candidate lands as a tile in its own row; tick it and apply.
     await vi.waitFor(() =>
-      expect(host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1']")).not.toBeNull(),
+      expect(host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1-cover']")).not.toBeNull(),
     );
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1']")?.click();
+    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1-cover']")?.click();
     host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
 
     await vi.waitFor(() =>
-      expect(importWallpaper).toHaveBeenCalledWith("game_1", "c1", expect.anything()),
+      expect(importWallpaper).toHaveBeenCalledWith("game_1", "c1-cover", expect.anything()),
     );
-    // The downloaded wallpaper is promoted to the home background, and the
-    // dialog closes.
+    // It was ticked in the Cover row, so it fills the cover slot — not the
+    // background, which used to be the hardcoded default.
     await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w9", "background", expect.anything()),
+      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w9", "cover", expect.anything()),
     );
     await vi.waitFor(() => expect(host.querySelector(".gd-modal")).toBeNull());
   });
@@ -1054,9 +1358,10 @@ describe("game detail page lifecycle", () => {
   it("shows a not-configured notice instead of a broken search", async () => {
     const { page, host } = mountPage(
       stubClient({
-        searchWallpapers: async () => ({
-          phase: "not-configured",
-          source: "igdb",
+        searchWallpapers: async (_source, category) => ({
+          phase: "not-configured" as const,
+          source: "igdb" as const,
+          category,
           query: "elden ring",
           message: "IGDB needs a client id and secret.",
           candidates: [],
@@ -1064,7 +1369,7 @@ describe("game detail page lifecycle", () => {
       }),
     );
     await page.activate(activationFor(gameRoute).activation);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-search-toggle']")?.click();
+    openWallpaperDialog(host);
     host.querySelector<HTMLFormElement>(".gd-search__form")?.requestSubmit();
     await vi.waitFor(() =>
       expect(host.querySelector(".gd-search__notice")?.textContent).toContain("client id and secret"),

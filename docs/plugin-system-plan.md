@@ -32,9 +32,32 @@ défaut sur Apple Silicon (détecté via `hw.optional.arm64`) : archive épingl�
 allowlistée, téléchargée puis hachée par le host, DLL copiées dans le seul
 préfixe Orivo et override hôte fixe, sans GPTK ni CrossOver.
 
-Restent volontairement hors de cette première intégration : l’installateur de
-packages signés, l’invocation WIT de composants tiers avec grants, l’import de
-ROMs et les runners GPTK/CrossOver. Les targets Runner tiers continuent donc à
+L’installateur de packages est désormais implémenté. Un plugin arrive sous
+forme d’archive `.orivo-plugin` (tar gzippé) contenant `manifest.json`,
+`component.wasm`, ses assets déclarés et une signature Ed25519 optionnelle. Le
+host lit l’archive entièrement en mémoire, borne le nombre d’entrées et la
+taille, rejette toute traversée de chemin, revalide chaque empreinte d’artefact
+contre le manifeste, applique `validate_plugin_package`, fait passer le
+composant par le préflight Wasmtime, puis matérialise le tout dans un
+répertoire de staging renommé en place — de sorte qu’un échec ne laisse jamais
+un plugin à moitié écrit derrière lui. Deux canaux, deux politiques de
+signature : le registre embarqué exige la clé de release d’Orivo, tandis qu’un
+paquet choisi à la main par l’utilisateur s’installe en `Development` et
+s’affiche comme non signé partout. Un paquet ne peut pas transporter de binaire
+natif : `blocked_payload_path` refuse `.exe`, `.dylib`, `.so`, `.dll` et les
+scripts, et toute entrée non déclarée dans le manifeste invalide l’archive.
+
+Une extension `installer` complète le contrat v1. Le plugin ne fournit que des
+données — un catalogue borné de titres avec URL, empreinte et tailles — et le
+host exécute lui-même chaque étape privilégiée : téléchargement HTTPS restreint
+à l’allowlist du manifeste et revérifiée à chaque redirection, contrôle
+SHA-256, extraction silencieuse de l’installeur Windows via un préfixe Wine
+neuf par titre, puis enregistrement dans la bibliothèque en réutilisant la
+présentation de la fiche Store d’origine. La WebView n’envoie jamais qu’un slug
+opaque.
+
+Restent volontairement hors de cette intégration : l’invocation WIT de
+composants tiers avec grants, l’import de ROMs et les runners GPTK/CrossOver. Les targets Runner tiers continuent donc à
 échouer explicitement au lieu d’accepter une commande libre. Wine-Staging ne
 charge pas un faux composant Wasm : il applique le contrat WIT `prepare-launch`
 comme adapter natif, puis le host valide les IDs opaques et possède le processus.

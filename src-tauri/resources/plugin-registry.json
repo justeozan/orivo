@@ -1,0 +1,11 @@
+[
+  {
+    "id": "com.orivo.quiky",
+    "name": "Quiky",
+    "version": "0.1.0",
+    "summary": "Installs Store games and follows the download, then the extraction.",
+    "url": "https://github.com/justeozan/orivo-plugin-quiky/releases/download/v0.1.0/com.orivo.quiky-0.1.0.orivo-plugin",
+    "sha256": "d757b12ec39b065ca78eb1076ad9984b3ecef2b2696e2501e7befc413fca5629",
+    "sizeBytes": 1114
+  }
+]

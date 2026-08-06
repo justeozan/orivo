@@ -51,3 +51,11 @@ Petits soucis que je vois à regler rapidement :
 - ✅ le genre du jeu est parfois wrap, et la pill devient moche.
 - ✅ les long titres de jeu sont wrap et donc coupé en plein milieu, il faut pas les wrap
 - ✅ dans le modal en haut à gauche, dans le menu, il y a 2 boutons qui font doubblons: "importé les jeux installé (steam)" et "se connecter à une bibliothèque" , qui devrais donc les deux etres remplacé par "Sources" et apres Steam si on ajouter "steam", et "ajouter une nouvel source"
+
+
+
+Ensuite, d'autres features non catégorisé :
+- Creer le plugin quiky version Orivo
+- Faire en sorte que tout soit navigable avec la manette et les flèche du clavier (petit detail en clavier: 'a' permet de rentrer dans la page d'entrer du jeu, et 'entrer' de le lancer direct)
+- bundle app pour windows, linux et mac (prio). installable facilement, et un bouton qui check la version dans les parametre, et telechargé et update l'app automatiquement si une nouvelle version est détecté. avec CI et tag + release github automatique.
+- 

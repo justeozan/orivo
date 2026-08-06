@@ -806,6 +806,31 @@ fn catalog_games() -> &'static [CachedGame] {
     STORE_CATALOG.get_or_init(|| parse_catalog(STORE_CATALOG_JSON))
 }
 
+/// The presentation a Store card carries. A host feature that installs a
+/// Store game reuses it so the library card keeps the catalogue's artwork and
+/// copy instead of falling back to the Windows binary's own icon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorePresentation {
+    pub title: String,
+    pub short_description: String,
+    pub cover_url: String,
+    pub hero_url: String,
+    pub landscape_url: String,
+}
+
+pub fn presentation_for(game_id: &str) -> Option<StorePresentation> {
+    catalog_games()
+        .iter()
+        .find(|game| game.id == game_id)
+        .map(|game| StorePresentation {
+            title: game.title.clone(),
+            short_description: game.short_description.clone(),
+            cover_url: game.cover_url.clone(),
+            hero_url: game.hero_url.clone(),
+            landscape_url: game.landscape_url.clone(),
+        })
+}
+
 fn parse_catalog(encoded: &str) -> Vec<CachedGame> {
     serde_json::from_str::<Vec<serde_json::Value>>(encoded)
         .unwrap_or_default()

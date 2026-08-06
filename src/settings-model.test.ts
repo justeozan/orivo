@@ -19,12 +19,14 @@ describe("settings model", () => {
         storeRegion: "fr",
         motion: "reduced",
         showShowcaseGames: true,
+        debugSampleSocial: true,
       }),
     ).toEqual({
       startPage: "store",
       storeRegion: "fr",
       motion: "reduced",
       showShowcaseGames: true,
+      debugSampleSocial: true,
     });
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -37,6 +39,7 @@ describe("settings model", () => {
       storeRegion: "jp",
       motion: "reduced",
       showShowcaseGames: true,
+      debugSampleSocial: true,
     } as const;
     expect(applyPreferencesUpdate(current, { reset: true, storeRegion: "de" })).toEqual(
       DEFAULT_PREFERENCES,

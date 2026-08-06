@@ -711,6 +711,76 @@
 .store-card__wishlist .icon { width: 22px; height: 22px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5)); }
 .store-card__wishlist[aria-pressed="true"] { color: #ff8fa8; }
 
+/* --- Install (Quiky plugin) ----------------------------------------------- */
+
+/* This control only exists on the cards a plugin claims, so it borrows the
+   price chip's glass and the wishlist's reveal rather than inventing a third
+   look. It sits under the wishlist: neither has to move when both are there. */
+.store-card__install {
+  position: absolute;
+  z-index: 2;
+  top: 54px;
+  right: 12px;
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  padding: 0 10px;
+  gap: 6px;
+  border: 1px solid var(--glass-line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: rgba(10, 12, 15, 0.62);
+  box-shadow: var(--glass-sheen);
+  opacity: 0;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: opacity 180ms ease, background 180ms ease, border-color 180ms ease;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+
+/* An install already under way, or one that stopped short, is not a hover
+   detail: it stays on screen until the shopper deals with it. */
+.store-card:hover .store-card__install,
+.store-card--featured .store-card__install,
+.store-card__install:focus-visible,
+.store-card__install[data-phase="queued"],
+.store-card__install[data-phase="downloading"],
+.store-card__install[data-phase="extracting"],
+.store-card__install[data-phase="failed"] { opacity: 1; }
+
+.store-card__install:hover[aria-disabled="false"] {
+  border-color: var(--accent);
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.store-card__install[aria-disabled="true"] { color: var(--ink-3); cursor: default; }
+.store-card__install .icon { width: 14px; height: 14px; }
+.store-card__install-label { line-height: 1; }
+
+/* The only thing that moves while a game installs: three pixels on the foot of
+   the artwork, one accent, no chrome around it. */
+.store-card__meter {
+  position: absolute;
+  z-index: 2;
+  inset: auto 0 0;
+  display: block;
+  overflow: hidden;
+  height: 3px;
+  background: var(--glass-line);
+}
+
+.store-card__meter[hidden] { display: none; }
+
+.store-card__fill {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 220ms ease;
+}
+
 /* --- Empty shelf ---------------------------------------------------------- */
 
 .store-empty {
@@ -969,6 +1039,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .store-backdrop__layer,
+  .store-card__fill,
   .store-card__art { transition: none; }
   .store-rail__track { scroll-behavior: auto; }
   .store-why { animation: none; }

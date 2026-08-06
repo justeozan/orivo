@@ -52,7 +52,10 @@ export type IconName =
   | "switch"
   | "emulator"
   | "chart"
-  | "sun";
+  | "sun"
+  | "cover"
+  | "landscape"
+  | "background";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -144,6 +147,12 @@ const paths: Record<IconName, string> = {
   chart:
     '<rect x="4.8" y="12" width="2.9" height="6.6" rx=".5" /><rect x="10.2" y="5.9" width="4.1" height="12.7" rx=".6" /><rect x="16.3" y="13.3" width="2.9" height="5.3" rx=".5" /><path d="M3.2 18.6h17.6" />',
   sun: '<circle cx="12" cy="12" r="3.4" /><path d="M12 3.4v2.2M12 18.4v2.2M3.4 12h2.2M18.4 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M18 6l-1.6 1.6M7.6 16.4 6 18" />',
+  // The three wallpaper shapes, drawn as the frame each row actually renders:
+  // a portrait plate, a wide plate, and a wide plate with scenery in it.
+  cover: '<rect x="6.6" y="3" width="10.8" height="18" rx="2" />',
+  landscape: '<rect x="3" y="5.4" width="18" height="13.2" rx="2" />',
+  background:
+    '<rect x="3" y="5.4" width="18" height="13.2" rx="2" /><circle cx="8.3" cy="9.9" r="1.4" /><path d="m3.4 16.9 4.3-4 2.9 2.7 3.3-3.4 4.7 4.7" />',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {

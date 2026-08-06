@@ -1,231 +1,1146 @@
+/* Page « Moi » — dashboard Performance Cognitive, calé sur
+   assets/moc-images/orivo-cognitive-scan-page.png (1536×1024) : colonne gauche
+   (score global, résumé quotidien, énergie), radar pentagonal central, jauges à
+   droite (charge, saturation, addiction), rangée basse (évolution, usure,
+   recommandations) et barre d'objectif.
+
+   Le dashboard tient dans une seule vue : la page fait exactement la hauteur du
+   host et ne défile jamais. Toutes les tailles verticales (anneaux, courbes,
+   paddings) sont donc exprimées en `svh` bornés, et chaque bloc se compresse
+   proportionnellement au lieu de pousser la rangée suivante hors de l'écran. */
+
 .me-page {
-  /* Lavande premium alignée sur --violet (styles.css), avec une pointe sauge
-     pour les scores élevés — même échelle de rayons que la page Store. */
-  --me-accent: var(--violet, #7d54f4);
-  --me-accent-soft: #b9a8ff;
-  --me-sage: #8fca9c;
-  --me-amber: #e8bd7f;
-  --me-rose: #e2a9ac;
-  --me-text: var(--text, #f4f2f7);
-  --me-muted: var(--muted, #c8c5cf);
-  --me-dim: var(--ash, #9b97a3);
-  --me-surface: rgba(19, 18, 26, 0.72);
+  --me-accent: #8a5cff;
+  --me-blue: #4aa8ff;
+  --me-green: #43d98c;
+  --me-amber: #ffd25e;
+  --me-orange: #ff8a3d;
+  --me-rose: #ef6bcb;
+  --me-text: #f4f2f7;
+  --me-muted: #a7a3b3;
+  --me-dim: #767283;
+  --me-surface: rgba(16, 17, 26, var(--me-card-alpha));
   --me-line: rgba(255, 255, 255, 0.1);
-  --me-r-sm: 14px;
-  --me-r-md: 18px;
-  --me-r-lg: 24px;
-  --me-elev-card: 0 16px 40px rgba(0, 0, 0, 0.28);
+  --me-r-lg: 18px;
+  /* Transparence des blocs d'info : le seul curseur à bouger pour les alléger
+     ou les densifier. */
+  --me-card-alpha: 0.24;
+  /* Respiration verticale partagée par la grille, la rangée basse et l'objectif. */
+  --me-gap: clamp(8px, 1.1svh, 16px);
+  --me-pad: clamp(9px, 1.15svh, 15px);
   position: relative;
-  display: block;
+  display: grid;
+  /* Grille principale souple, rangée basse et objectif à leur taille propre. */
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  gap: var(--me-gap);
   width: 100%;
-  /* Le host du shell (`.app-page--scroll`) est l'unique conteneur de scroll et
-     possède le dégagement du topbar : la page n'ajoute ni hauteur ni overflow
-     ni padding haut (même règle que la page Store). */
-  min-height: 100%;
-  padding: 0 clamp(24px, 3vw, 48px) clamp(24px, 3.5svh, 48px);
+  /* Exactement la hauteur du host : rien ne dépasse, donc rien ne défile. */
+  height: 100%;
+  overflow: hidden;
+  padding: var(--topbar-height) clamp(16px, 2vw, 34px) clamp(10px, 1.4svh, 20px);
   color: var(--me-text);
-  background:
-    radial-gradient(1100px 520px at 12% -6%, rgba(125, 84, 244, 0.16), transparent 62%),
-    radial-gradient(900px 460px at 88% 4%, rgba(143, 202, 156, 0.07), transparent 60%),
-    linear-gradient(180deg, #0d0c12 0%, #0b0b0d 58%, #0a0a0c 100%);
+  /* Base quasi noire : toute la couleur vient des taches du calque `.me-aurora`.
+     Calée sur le fond isolé de la maquette (biais résiduel < 1/canal). */
+  background: #080a17;
 }
 
-.me-header {
-  max-width: 640px;
-  padding: clamp(8px, 1.4svh, 18px) 2px clamp(18px, 2.6svh, 30px);
+/* ------------------------------------------------------------------ aurore */
+
+/*
+ * Les halos flous du fond. Hors flux (donc invisibles pour la grille) et
+ * derrière tout le contenu. Chaque orbe est un disque coloré très flouté qui
+ * dérive en boucle : c'est du CSS pur, animé sur le compositeur (`transform`
+ * et `opacity` uniquement), sans dépendance ni boucle JavaScript de fond.
+ */
+.me-aurora {
+  /*
+   * Les réglages du fond, tous ici : c'est le seul endroit à toucher pour
+   * l'ajuster. Le script ne fournit que la position, la teinte et l'intensité
+   * relevées de chaque tache ; il ne peint aucune valeur d'apparence, sinon
+   * elle l'emporterait sur cette feuille et toute retouche resterait sans
+   * effet.
+   */
+  --me-orb-blur: 16px;    /* netteté des taches : bas = distinctes, haut = nappe */
+  --me-orb-alpha: 1;      /* intensité d'ensemble des taches */
+  --me-orb-scale: 1;      /* taille d'ensemble des taches */
+  --me-orb-fade: 46%;     /* étalement de chaque tache vers le transparent */
+  --me-orb-travel: 3;     /* amplitude du déplacement (0 = taches immobiles) */
+  --me-streak-alpha: 4;   /* intensité des deux traînées du bas */
+
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
-.me-header__eyebrow {
-  margin: 0 0 10px;
-  color: var(--me-accent-soft);
-  font-size: 12px;
-  font-weight: 650;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+/* Le contenu passe devant le calque d'aurore. */
+.me-grid,
+.me-bottom,
+.me-objective {
+  position: relative;
+  z-index: 1;
 }
 
-.me-header__title {
-  margin: 0 0 12px;
-  color: var(--me-text);
-  font-size: clamp(38px, 3.6vw, 54px);
-  font-weight: 480;
-  letter-spacing: -0.042em;
-  line-height: 1;
+/*
+ * Une tache : disque coloré flouté. Le script ne fournit que les variables
+ * `--bx/--by/--bs/--bc/--ba` (relevées sur le fond isolé de la maquette) ;
+ * toute l'apparence se compose ici, avec les curseurs de `.me-aurora`.
+ * Le flou reste faible : les taches sont petites et doivent se lire une à une
+ * comme sur la référence — c'est leur nombre qui fait la nébuleuse, pas leur
+ * étalement. Au-delà, tout fusionne en une nappe informe. La correspondance
+ * mesurée est insensible à ce réglage (MAE 6,40 à 38 px, 6,45 à 16 px), donc il
+ * se choisit à l'œil, sur la netteté voulue.
+ */
+.me-aurora__orb {
+  position: absolute;
+  display: block;
+  left: var(--bx);
+  top: var(--by);
+  width: calc(var(--bs) * 1vw * var(--me-orb-scale));
+  height: calc(var(--bs) * 1vw * var(--me-orb-scale));
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(var(--bc), calc(var(--ba) * var(--me-orb-alpha))),
+    rgba(var(--bc), 0) var(--me-orb-fade)
+  );
+  /* Portée réelle : le vecteur propre à la tache, mis à l'échelle du curseur. */
+  --tx: calc(var(--dx, 0) * 1vw * var(--me-orb-travel, 1));
+  --ty: calc(var(--dy, 0) * 1vw * var(--me-orb-travel, 1));
+
+  transform: translate(-50%, -50%);
+  filter: blur(var(--me-orb-blur));
+  will-change: transform, opacity;
+  animation: me-drift var(--bdur, 46s) var(--bdelay, 0s) ease-in-out infinite;
 }
 
-.me-header__lede {
+/* Les deux traînées obliques du bas : de fines lignes lumineuses, très floutées
+   dans leur épaisseur, qui donnent au bas de page son relief. */
+.me-aurora__streak {
+  position: absolute;
+  display: block;
+  left: var(--bx);
+  top: var(--by);
+  width: calc(var(--bs) * 1vw);
+  height: 2.5px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--bc), 0),
+    rgba(var(--bc), calc(var(--ba) * var(--me-streak-alpha))) 45%,
+    rgba(var(--bc), 0)
+  );
+  transform: translate(-50%, -50%) rotate(var(--bangle, 0deg));
+  filter: blur(3.5px);
+  will-change: opacity;
+  animation: me-shimmer 19s ease-in-out infinite alternate;
+}
+
+/* Dérive lente et fermée. Chaque tache suit sa propre boucle : la direction et
+   la portée arrivent en `--dx`/`--dy`, si bien qu'aucune paire ne se déplace de
+   concert. Le cycle revient à son point de départ à 100 %, d'où `infinite`
+   plutôt que `alternate` — le retour se fait en avançant, pas en rembobinant. */
+@keyframes me-drift {
+  0% {
+    transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1);
+    opacity: 0.86;
+  }
+  25% {
+    transform: translate(-50%, -50%)
+      translate3d(var(--tx), var(--ty), 0) scale(1.1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-50%, -50%)
+      translate3d(calc(var(--tx) * 0.35), calc(var(--ty) * -0.85), 0) scale(0.94);
+    opacity: 0.8;
+  }
+  75% {
+    transform: translate(-50%, -50%)
+      translate3d(calc(var(--tx) * -0.8), calc(var(--ty) * 0.45), 0) scale(1.05);
+    opacity: 0.95;
+  }
+  100% {
+    transform: translate(-50%, -50%) translate3d(0, 0, 0) scale(1);
+    opacity: 0.86;
+  }
+}
+
+/* Les traînées ne se déplacent pas : elles respirent. */
+@keyframes me-shimmer {
+  0% { opacity: 0.55; }
+  50% { opacity: 0.95; }
+  100% { opacity: 0.7; }
+}
+
+/* ------------------------------------------------------------------ header */
+
+.me-head {
+  display: grid;
+  gap: 2px;
+  justify-items: start;
+}
+
+.me-head__title {
+  margin: 0;
+  font-size: clamp(19px, 2.4svh, 27px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.me-head__sub {
   margin: 0;
   color: var(--me-muted);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: clamp(11px, 1.3svh, 13px);
 }
 
-.me-section-title {
-  margin: 0 0 14px;
+.me-head__select {
+  display: inline-flex;
+  align-items: center;
+  gap: 22px;
+  margin-top: clamp(4px, 0.8svh, 10px);
+  padding: clamp(6px, 0.85svh, 9px) 12px clamp(6px, 0.85svh, 9px) 14px;
+  border: 1px solid var(--me-line);
+  border-radius: 11px;
   color: var(--me-text);
-  font-size: 17px;
-  font-weight: 630;
-  letter-spacing: -0.016em;
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
 }
 
-.me-metrics {
-  margin-bottom: clamp(22px, 3svh, 36px);
+.me-head__select:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.075);
 }
 
-.me-metrics__grid {
+/* ------------------------------------------------------------------- grille */
+
+.me-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(240px, 320fr) minmax(360px, 610fr) minmax(280px, 395fr);
+  gap: clamp(12px, 1.3vw, 20px);
+  align-items: stretch;
+  min-height: 0;
 }
 
-.me-metric-card {
+.me-col {
   display: grid;
   align-content: start;
-  gap: 12px;
-  padding: 16px 17px 15px;
+  gap: var(--me-gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+.me-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 545fr) minmax(0, 380fr) minmax(0, 390fr);
+  gap: clamp(12px, 1.3vw, 20px);
+  align-items: stretch;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------- cartes */
+
+.me-card {
+  display: grid;
+  align-content: start;
+  gap: clamp(7px, 1svh, 13px);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--me-pad) clamp(12px, 1vw, 18px);
   border: 1px solid var(--me-line);
-  border-radius: var(--me-r-md);
-  background: linear-gradient(165deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)), var(--me-surface);
-  box-shadow: var(--me-elev-card), inset 0 1px rgba(255, 255, 255, 0.05);
-  transition: border-color 180ms ease, transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  border-radius: var(--me-r-lg);
+  background: linear-gradient(170deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0)), var(--me-surface);
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.26);
+  /* À cette transparence, la nébuleuse passerait à travers le texte : le flou
+     d'arrière-plan garde les taches lisibles comme couleur, pas comme forme. */
+  backdrop-filter: blur(14px) saturate(125%);
+  -webkit-backdrop-filter: blur(14px) saturate(125%);
 }
 
-.me-metric-card:hover {
-  border-color: rgba(196, 181, 255, 0.3);
-  transform: translateY(-2px);
-}
-
-.me-metric-card__head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.me-metric-card__label {
+.me-card__title {
   margin: 0;
-  color: var(--me-text);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: clamp(12.5px, 1.55svh, 15px);
+  font-weight: 650;
   letter-spacing: -0.008em;
 }
 
-.me-metric-card__score {
+.me-card__titlerow {
   display: flex;
-  align-items: baseline;
-  gap: 2px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.me-card__hint {
+  color: var(--me-dim);
+}
+
+.me-glyph {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+}
+
+.me-glyph svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* ------------------------------------------------------- score cognitif */
+
+.me-score__row {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.2vw, 18px);
+}
+
+.me-ring {
+  position: relative;
+  flex: none;
+  width: clamp(74px, 10.5svh, 112px);
+}
+
+.me-ring__svg {
+  display: block;
+  width: 100%;
+}
+
+.me-ring__track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 9;
+}
+
+.me-ring__value {
+  fill: none;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.me-ring__centre {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.me-score__value {
+  font-size: clamp(20px, 3svh, 29px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.me-score__scale {
+  color: var(--me-dim);
+  font-size: 11.5px;
+}
+
+.me-score__copy {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+
+.me-score__band {
+  font-size: clamp(14px, 1.9svh, 17px);
+  font-weight: 650;
+}
+
+.me-score__delta {
+  color: var(--me-green);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.me-spark {
+  width: 100%;
+  max-width: 130px;
+  height: clamp(20px, 3svh, 34px);
+  margin-top: 3px;
+}
+
+.me-spark__line {
+  fill: none;
+  stroke: #5b8cff;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ------------------------------------------------------- résumé quotidien */
+
+.me-daily__list {
+  display: grid;
+  gap: clamp(6px, 1.05svh, 13px);
   margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.me-daily__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.me-daily__glyph {
+  display: grid;
+  width: clamp(24px, 3.4svh, 30px);
+  height: clamp(24px, 3.4svh, 30px);
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.me-daily__glyph svg {
+  width: 15px;
+  height: 15px;
+}
+
+.me-daily__label {
+  color: var(--me-muted);
+  font-size: clamp(11.5px, 1.4svh, 13.5px);
+}
+
+.me-daily__value {
+  margin-left: auto;
+  font-size: clamp(12px, 1.45svh, 14px);
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
 
-.me-metric-card__value {
-  color: var(--me-accent-soft);
-  font-size: 22px;
-  font-weight: 680;
-  letter-spacing: -0.03em;
+/* --------------------------------------------------------- énergie mentale */
+
+.me-energy__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.me-metric-card__scale {
+.me-wave {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: clamp(36px, 5.6svh, 62px);
+}
+
+.me-wave__line {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.me-energy__copy {
+  display: grid;
+  flex: none;
+  gap: 1px;
+  justify-items: end;
+  text-align: right;
+}
+
+.me-energy__figure strong {
+  font-size: clamp(17px, 2.5svh, 24px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.me-energy__figure span {
+  color: var(--me-muted);
+  font-size: 12.5px;
+}
+
+.me-energy__band {
+  color: var(--me-muted);
+  font-size: 11.5px;
+}
+
+.me-energy__delta {
+  color: var(--me-green);
+  font-size: 11px;
+  font-weight: 550;
+}
+
+/* --------------------------------------------------------- schéma cognitif */
+
+.me-schema {
+  display: grid;
+  /* Le radar prend toute la hauteur restante entre l'intitulé et le bouton. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  justify-items: center;
+  gap: clamp(4px, 0.8svh, 10px);
+  min-width: 0;
+  min-height: 0;
+}
+
+.me-schema__head {
+  display: grid;
+  gap: 2px;
+  justify-self: start;
+}
+
+.me-schema__title {
+  margin: 0;
+  font-size: clamp(13px, 1.75svh, 17px);
+  font-weight: 650;
+}
+
+.me-schema__sub {
+  margin: 0;
+  color: var(--me-muted);
+  font-size: clamp(10.5px, 1.3svh, 12.5px);
+}
+
+/* Le pentagone garde ses proportions et se borne aux deux contraintes à la fois :
+   la largeur de la colonne et la hauteur de l'écran. Sa largeur pilote tout, si
+   bien que le SVG et les étiquettes en pourcentage restent toujours alignés. */
+.me-radar__stage {
+  position: relative;
+  align-self: center;
+  width: min(100%, 58svh);
+  aspect-ratio: 460 / 436;
+  margin-inline: auto;
+}
+
+.me-radar__svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.me-radar__grid {
+  fill: none;
+  stroke: rgba(150, 130, 255, 0.14);
+  stroke-width: 1;
+}
+
+.me-radar__spoke {
+  stroke: rgba(150, 130, 255, 0.2);
+  stroke-width: 1;
+}
+
+.me-radar__shape {
+  stroke: #8b7bff;
+  stroke-width: 2.2;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 14px rgba(124, 92, 255, 0.5));
+}
+
+.me-radar__dot-halo {
+  fill: rgba(255, 255, 255, 0.22);
+}
+
+.me-radar__dot {
+  fill: #fff;
+}
+
+.me-radar__core {
+  fill: rgba(22, 17, 48, 0.92);
+  stroke: rgba(150, 120, 255, 0.55);
+  stroke-width: 1.6;
+  filter: drop-shadow(0 0 18px rgba(124, 92, 255, 0.55));
+}
+
+.me-radar__brain {
+  position: absolute;
+  color: #b49bff;
+  transform: translate(-50%, -50%);
+}
+
+.me-radar__brain svg {
+  width: clamp(20px, 3.4svh, 30px);
+  height: clamp(20px, 3.4svh, 30px);
+}
+
+.me-radar__label {
+  position: absolute;
+  display: grid;
+  gap: 0;
+  justify-items: center;
+  max-width: clamp(112px, 12vw, 150px);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* Chaque étiquette est repoussée hors du pentagone selon son sommet. */
+.me-radar__label[data-axis="focus"] { transform: translate(-50%, -100%); }
+.me-radar__label[data-axis="reflexion"] { transform: translate(6%, -50%); }
+.me-radar__label[data-axis="memoire"] { transform: translate(4%, -12%); }
+.me-radar__label[data-axis="creativite"] { transform: translate(-104%, -12%); }
+.me-radar__label[data-axis="reflexes"] { transform: translate(-106%, -50%); }
+
+.me-radar__label-name {
+  font-size: clamp(11.5px, 1.5svh, 14px);
+  font-weight: 650;
+}
+
+.me-radar__label-score {
+  color: #9db4ff;
+  font-size: clamp(11.5px, 1.5svh, 14px);
+  font-weight: 700;
+}
+
+.me-radar__label-copy {
+  margin: 1px 0 0;
   color: var(--me-dim);
+  font-size: clamp(9.5px, 1.15svh, 11px);
+  line-height: 1.3;
+}
+
+.me-schema__detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: clamp(7px, 1svh, 11px) clamp(14px, 1.4vw, 20px);
+  border: 1px solid var(--me-line);
+  border-radius: 11px;
+  color: var(--me-text);
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.me-schema__detail:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.085);
+}
+
+/* --------------------------------------------------------- jauges en arc */
+
+.me-arc {
+  position: relative;
+  flex: none;
+  width: clamp(80px, 11svh, 120px);
+}
+
+.me-arc__svg {
+  display: block;
+  width: 100%;
+}
+
+.me-arc__track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.me-arc__value {
+  fill: none;
+  stroke-width: 9;
+  stroke-linecap: round;
+}
+
+.me-arc__figure {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.me-arc__percent {
+  font-size: clamp(17px, 2.6svh, 25px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.me-arc__unit {
+  color: var(--me-muted);
+  font-size: 11.5px;
+}
+
+.me-arc__bounds {
+  position: absolute;
+  right: 4px;
+  bottom: 0;
+  left: 4px;
+  display: flex;
+  justify-content: space-between;
+  color: var(--me-dim);
+  font-size: 9.5px;
+}
+
+.me-charge__row,
+.me-risk__row {
+  display: flex;
+  align-items: center;
+  gap: clamp(10px, 1.2vw, 16px);
+}
+
+.me-charge__copy,
+.me-risk__copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.me-charge__copy strong,
+.me-risk__copy strong {
+  font-size: clamp(12.5px, 1.6svh, 14.5px);
+  font-weight: 650;
+}
+
+.me-charge__copy span,
+.me-risk__copy span {
+  color: var(--me-muted);
+  font-size: clamp(11px, 1.35svh, 12.5px);
+}
+
+/* ------------------------------------------------ saturation dopaminergique */
+
+.me-saturation {
+  gap: clamp(6px, 0.85svh, 10px);
+}
+
+.me-saturation__figure {
+  display: grid;
+  justify-items: end;
+  gap: 0;
+  /* Remonte le chiffre à hauteur du titre de la carte, comme la maquette. */
+  margin-top: clamp(-30px, -3.2svh, -20px);
+}
+
+.me-saturation__figure strong {
+  font-size: clamp(16px, 2.3svh, 21px);
+  font-weight: 700;
+}
+
+.me-saturation__number {
+  font-variant-numeric: tabular-nums;
+}
+
+.me-saturation__unit {
+  margin-left: 1px;
+  color: var(--me-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.me-saturation__band {
+  color: var(--me-muted);
   font-size: 11px;
 }
 
-/* Le chiffre suit la bande de score : rose (faible) -> ambre -> lavande ->
-   sauge (élevé), le dégradé de couleur demandé par le scan. */
-.me-metric-card[data-band="faible"] .me-metric-card__value { color: var(--me-rose); }
-.me-metric-card[data-band="modere"] .me-metric-card__value { color: var(--me-amber); }
-.me-metric-card[data-band="soutenu"] .me-metric-card__value { color: var(--me-accent-soft); }
-.me-metric-card[data-band="eleve"] .me-metric-card__value { color: var(--me-sage); }
-
-.me-gauge {
+.me-saturation__bar {
   position: relative;
-  height: 6px;
-  overflow: hidden;
+  height: 7px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 1px rgba(0, 0, 0, 0.32);
+  background: linear-gradient(90deg, #23c37b 0%, #9fdc4e 34%, #ffd25e 58%, #ff8a3d 78%, #f4504a 100%);
 }
 
-.me-gauge__fill {
+.me-saturation__marker {
   position: absolute;
-  inset: 0 auto 0 0;
-  display: block;
-  min-width: 3px;
-  border-radius: inherit;
-  /* Remplissage en dégradé violet -> lavande -> sauge ; la largeur (score %)
-     détermine jusqu'où le dégradé se dévoile. */
-  background: linear-gradient(90deg, #5d3fc0 0%, var(--me-accent) 34%, var(--me-accent-soft) 68%, var(--me-sage) 100%);
-  background-size: calc(100% / max(var(--me-fill, 1), 0.01)) 100%;
-  box-shadow: 0 0 12px rgba(125, 84, 244, 0.35);
-  transition: width 480ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  top: 50%;
+  width: 13px;
+  height: 13px;
+  border: 2.5px solid #fff;
+  border-radius: 50%;
+  background: #ffb43f;
+  box-shadow: 0 0 10px rgba(255, 180, 63, 0.65);
+  transform: translate(-50%, -50%);
 }
 
-.me-metric-card__description {
+.me-saturation__bounds {
+  display: flex;
+  justify-content: space-between;
+  color: var(--me-dim);
+  font-size: 10px;
+}
+
+.me-saturation__notice {
+  display: flex;
+  gap: 10px;
+  padding: clamp(8px, 1.05svh, 12px) 12px;
+  border: 1px solid rgba(255, 180, 63, 0.22);
+  border-radius: 12px;
+  background: rgba(255, 170, 60, 0.07);
+}
+
+.me-saturation__warn {
+  margin-top: 1px;
+  color: var(--me-amber);
+}
+
+.me-saturation__notice-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.me-saturation__notice-copy strong {
+  font-size: clamp(11px, 1.4svh, 12.5px);
+  font-weight: 650;
+}
+
+.me-saturation__notice-copy p {
   margin: 0;
   color: var(--me-muted);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: clamp(10px, 1.28svh, 11.5px);
+  line-height: 1.4;
 }
 
-.me-profile {
-  padding: clamp(18px, 2.2vw, 28px);
-  border: 1px solid rgba(196, 181, 255, 0.16);
-  border-radius: var(--me-r-lg);
-  background:
-    radial-gradient(560px 240px at 8% 0%, rgba(125, 84, 244, 0.14), transparent 70%),
-    linear-gradient(165deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
-    var(--me-surface);
-  box-shadow: var(--me-elev-card), inset 0 1px rgba(255, 255, 255, 0.06);
+/* --------------------------------------------------------- risque addiction */
+
+.me-risk__signals {
+  position: relative;
+  display: grid;
+  gap: clamp(5px, 0.85svh, 9px);
+  padding-top: clamp(8px, 1.1svh, 13px);
+  border-top: 1px solid var(--me-line);
 }
 
-.me-profile__stats {
+.me-risk__signals-title {
+  margin: 0;
+  font-size: clamp(11.5px, 1.45svh, 13px);
+  font-weight: 650;
+}
+
+.me-risk__list {
+  display: grid;
+  gap: clamp(5px, 0.8svh, 8px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.me-risk__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--me-muted);
+  font-size: clamp(11px, 1.35svh, 12.5px);
+}
+
+.me-risk__dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.me-risk__more {
+  position: absolute;
+  top: 50%;
+  right: -4px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid var(--me-line);
+  border-radius: 50%;
+  color: var(--me-muted);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+.me-risk__more:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--me-text);
+}
+
+.me-risk__more svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ------------------------------------------------------ évolution cognitive */
+
+.me-evolution__period {
+  color: var(--me-dim);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.me-evolution__svg {
+  width: 100%;
+  height: clamp(58px, 11svh, 140px);
+}
+
+.me-evolution__grid {
+  stroke: rgba(255, 255, 255, 0.06);
+  stroke-width: 1;
+}
+
+.me-evolution__axis {
+  fill: var(--me-dim);
+  font-size: 10px;
+}
+
+.me-evolution__line {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
+}
+
+.me-evolution__legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin: 0 0 16px;
+  gap: 5px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.me-profile__stat {
+.me-evolution__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--me-muted);
+  font-size: clamp(10.5px, 1.3svh, 12px);
+}
+
+.me-evolution__legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+/* ----------------------------------------------------------- usure cognitive */
+
+.me-wear__row {
+  display: flex;
+  align-items: center;
+  gap: clamp(12px, 1.4vw, 18px);
+}
+
+.me-wear__row .me-ring {
+  width: clamp(68px, 9.5svh, 104px);
+}
+
+.me-wear__value {
+  font-size: clamp(16px, 2.3svh, 21px);
+  font-weight: 700;
+}
+
+.me-wear__band {
+  color: var(--me-muted);
+  font-size: 10px;
+  text-align: center;
+}
+
+.me-wear__causes {
   display: grid;
-  min-width: 128px;
-  gap: 4px;
-  padding: 10px 13px;
-  border: 1px solid var(--me-line);
-  border-radius: var(--me-r-sm);
-  background: rgba(10, 10, 15, 0.45);
+  gap: clamp(5px, 0.85svh, 9px);
+  min-width: 0;
 }
 
-.me-profile__stat-label {
+.me-wear__causes-title {
+  margin: 0;
+  font-size: clamp(11.5px, 1.45svh, 13px);
+  font-weight: 650;
+}
+
+.me-wear__list {
+  display: grid;
+  gap: clamp(5px, 0.8svh, 8px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.me-wear__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--me-muted);
+  font-size: clamp(11px, 1.35svh, 12.5px);
+}
+
+.me-wear__dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+}
+
+/* ---------------------------------------------------------- recommandations */
+
+.me-reco__list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.me-reco__item + .me-reco__item {
+  border-top: 1px solid var(--me-line);
+}
+
+.me-reco__button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 11px;
+  padding: clamp(7px, 1.05svh, 12px) 2px;
+  border: 0;
+  color: var(--me-text);
+  background: none;
+  font-size: clamp(11.5px, 1.4svh, 13px);
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+
+.me-reco__button:hover .me-reco__label {
+  color: #fff;
+}
+
+.me-reco__glyph {
+  display: grid;
+  width: clamp(26px, 3.6svh, 32px);
+  height: clamp(26px, 3.6svh, 32px);
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.me-reco__glyph svg {
+  width: 16px;
+  height: 16px;
+}
+
+.me-reco__label {
+  min-width: 0;
+  flex: 1;
+}
+
+.me-reco__chevron {
+  color: var(--me-dim);
+}
+
+.me-reco__chevron svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------------------------------------------------------------- objectif */
+
+.me-objective {
+  display: grid;
+  justify-items: center;
+}
+
+.me-objective__pill {
+  display: flex;
+  width: min(860px, 100%);
+  align-items: center;
+  gap: 12px;
+  padding: clamp(7px, 1svh, 12px) clamp(14px, 1.4vw, 20px);
+  border: 1px solid rgba(140, 110, 255, 0.32);
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(124, 92, 255, 0.16), rgba(63, 123, 255, 0.1));
+  box-shadow: 0 10px 30px rgba(60, 40, 140, 0.28);
+}
+
+.me-objective__glyph {
+  color: #b49bff;
+}
+
+.me-objective__copy {
+  margin: 0;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+  font-size: clamp(11.5px, 1.45svh, 13.5px);
+  font-weight: 550;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.me-objective__progress {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+}
+
+.me-objective__hint {
   color: var(--me-dim);
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
 }
 
-.me-profile__stat-value {
-  margin: 0;
-  color: var(--me-text);
-  font-size: 17px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+.me-objective__track {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  width: clamp(80px, 11vw, 160px);
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.me-objective__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #8a5cff, #4aa8ff);
+}
+
+.me-objective__percent {
+  font-size: 12.5px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-.me-profile__summary {
-  max-width: 68ch;
-  margin: 0;
-  color: var(--me-muted);
-  font-size: 14px;
-  line-height: 1.62;
-}
+/* --------------------------------------------------------------- responsive */
 
-@media (max-width: 640px) {
-  .me-metrics__grid {
-    grid-template-columns: 1fr;
+/* Sous ces seuils le dashboard ne tient plus d'un bloc : il redevient une page
+   qui défile plutôt que de se comprimer jusqu'à l'illisible. */
+@media (max-width: 1180px), (max-height: 620px) {
+  .me-page {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+    grid-template-rows: none;
   }
 
-  .me-profile__stat {
-    flex: 1;
+  .me-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .me-col--centre {
+    order: 3;
+    grid-column: 1 / -1;
+  }
+
+  .me-radar__stage {
+    width: min(100%, 460px);
+  }
+
+  .me-bottom {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 760px) {
+  .me-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .me-radar__label-copy,
+  .me-objective__hint {
+    display: none;
+  }
+}
+
+/* La dérive du fond est décorative : elle s'arrête net si l'utilisateur a
+   demandé moins d'animations (la montée des compteurs se coupe côté script). */
+@media (prefers-reduced-motion: reduce) {
+  .me-aurora__orb {
+    animation: none;
   }
 }

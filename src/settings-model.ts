@@ -20,6 +20,8 @@ export interface Preferences {
   motion: MotionPreference;
   /** Debug-only: seed the library with the bundled demo (showcase) games. */
   showShowcaseGames: boolean;
+  /** Debug-only: fill detail pages with sample achievements, friends and activity. */
+  debugSampleSocial: boolean;
 }
 
 export interface PreferencesUpdate {
@@ -27,6 +29,7 @@ export interface PreferencesUpdate {
   storeRegion?: StoreRegion;
   motion?: MotionPreference;
   showShowcaseGames?: boolean;
+  debugSampleSocial?: boolean;
   reset?: boolean;
 }
 
@@ -41,6 +44,7 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   storeRegion: "automatic",
   motion: "system",
   showShowcaseGames: false,
+  debugSampleSocial: false,
 });
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -92,6 +96,7 @@ export function normalisePreferences(value: unknown): Preferences {
     ),
     motion: readEnum(record, ["motion"], MOTION_PREFERENCES, DEFAULT_PREFERENCES.motion),
     showShowcaseGames: record.showShowcaseGames === true || record.show_showcase_games === true,
+    debugSampleSocial: record.debugSampleSocial === true || record.debug_sample_social === true,
   };
 }
 

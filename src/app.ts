@@ -34,6 +34,19 @@ import {
   normaliseWallpaperCredentials,
 } from "./settings-model";
 import { createMePage } from "./me-page";
+import {
+  createDefaultPluginManagerClient,
+  createPluginManagerController,
+  formatInstallLabel,
+  formatPluginSize,
+  formatPluginStatus,
+  isPluginInstallBusy,
+  pluginErrorMessage,
+  pluginPercent,
+  type AvailablePluginView,
+  type InstalledPluginView,
+} from "./plugin-manager";
+import { createDefaultQuikyClient, normaliseTitle, type QuikyClient } from "./quiky-install";
 import { createStorePage } from "./store-page";
 import "./game-detail-page.css";
 import "./me-page.css";
@@ -139,12 +152,6 @@ type PluginId = "wine" | "wallpaper-searcher";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
-interface PluginCatalogEntry {
-  id: string;
-  name: string;
-  summary: string;
-}
-
 interface LaunchFeedback {
   gameId: string;
   phase: LaunchFeedbackPhase;
@@ -224,17 +231,6 @@ export interface MountAppOptions {
 }
 
 const lastUsedFallback = fallbackLibrary[0];
-// The "Available" catalogue is illustrative for now: no emulator ships with
-// Orivo yet, so every Install button is a placeholder until a plugin runtime
-// can fetch and verify a package.
-const AVAILABLE_PLUGINS: readonly PluginCatalogEntry[] = [
-  { id: "astris", name: "Astris Emulator", summary: "Sega Dreamcast titles from disc images." },
-  { id: "ps2", name: "PlayStation 2 Emulator", summary: "Run PS2 discs and ISO images." },
-  { id: "dolphin", name: "Dolphin Emulator", summary: "GameCube and Wii games." },
-  { id: "citra", name: "Citra Emulator", summary: "Nintendo 3DS titles." },
-  { id: "retroarch", name: "RetroArch", summary: "Multi-system emulation front-end." },
-  { id: "mame", name: "MAME", summary: "Classic arcade cabinets." },
-];
 const MAX_RENDERED_STEAM_GAMES = 120;
 const MAX_STEAM_PREVIEW_MEDIA = 16;
 const MAX_STEAM_IMPORT_SELECTION = 2_000;
@@ -317,8 +313,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     platform: get<HTMLElement>("#hero-platform"),
     platformLabel: get<HTMLElement>("#hero-platform-label"),
     cards: get<HTMLElement>("#game-cards"),
-    mostPlayed: get<HTMLElement>(".most-played"),
-    mostPlayedCards: get<HTMLElement>("#most-played-cards"),
     search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
@@ -338,6 +332,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
+    pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
@@ -604,16 +599,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     media.append(portrait, landscape);
 
-    const shade = document.createElement("span");
-    shade.className = "card-shade";
-
-    const name = document.createElement("span");
-    name.className = "card-title";
-
+    // The art stands alone: no name overlay and no darkening gradient. The
+    // title lives in the aria-label, and the playtime keeps its own corner.
     const time = document.createElement("span");
     time.className = "card-time";
 
-    card.append(media, shade, name, time);
+    card.append(media, time);
     card.addEventListener("focus", () => {
       const id = card.dataset.gameId;
       if (id && currentRoute.page === "library") selectGame(id, false);
@@ -647,7 +638,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   ): void => {
     const portrait = card.querySelector<HTMLImageElement>(".card-art--portrait");
     const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape");
-    const title = card.querySelector<HTMLElement>(".card-title");
     const time = card.querySelector<HTMLElement>(".card-time");
     const portraitSource = game.coverUrl || game.heroUrl;
     const landscapeSource = game.landscapeUrl || game.heroUrl || portraitSource;
@@ -660,51 +650,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     assignCardImage(portrait, portraitSource, fallback, index < 7);
     assignCardImage(landscape, landscapeSource, fallback, index < 7);
-    if (title) {
-      title.textContent = game.title;
-    }
     if (time) {
       time.textContent = formatPlayTime(game.playTimeSeconds);
       time.hidden = game.playTimeSeconds <= 0;
-    }
-  };
-
-  const MAX_MOST_PLAYED_CARDS = 8;
-
-  const mostPlayedGames = (): LibraryGame[] =>
-    state.games
-      .filter((game) => game.playTimeSeconds > 0)
-      .sort((a, b) => b.playTimeSeconds - a.playTimeSeconds)
-      .slice(0, MAX_MOST_PLAYED_CARDS);
-
-  const renderMostPlayed = (): void => {
-    // The row steps aside during a search so the results stay the only list.
-    const games = state.query.trim() ? [] : mostPlayedGames();
-    refs.mostPlayed.hidden = games.length === 0;
-    if (games.length === 0) {
-      refs.mostPlayedCards.replaceChildren();
-      return;
-    }
-
-    const cards = Array.from(refs.mostPlayedCards.querySelectorAll<HTMLButtonElement>(".game-card"));
-    const matchesCurrentOrder =
-      cards.length === games.length &&
-      cards.every((card, index) => card.dataset.gameId === games[index].id);
-
-    if (!matchesCurrentOrder) {
-      const cardsById = new Map(cards.map((card) => [card.dataset.gameId, card]));
-      const fragment = document.createDocumentFragment();
-      for (const [index, game] of games.entries()) {
-        const card = cardsById.get(game.id) ?? createGameCard();
-        syncGameCard(card, game, index, game.id === state.selectedId);
-        fragment.append(card);
-      }
-      refs.mostPlayedCards.replaceChildren(fragment);
-      return;
-    }
-
-    for (const [index, game] of games.entries()) {
-      syncGameCard(cards[index], game, index, game.id === state.selectedId);
     }
   };
 
@@ -870,9 +818,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     updateHeroImage(game, immediateHero);
     renderCards();
-    renderMostPlayed();
     renderLaunchFeedback();
-    hydrateLibraryMedia([game, ...mostPlayedGames(), ...railGames(visibleGames())]);
+    hydrateLibraryMedia([game, ...railGames(visibleGames())]);
   };
 
   const selectGame = (id: string, scroll = true): void => {
@@ -1118,39 +1065,224 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
-  const renderPluginCatalogRow = (entry: PluginCatalogEntry): HTMLElement => {
+  // The plugin registry lives in the host. Settings never learns whether it
+  // answered: an empty catalogue and a host binary with no registry render the
+  // same panel, which is the panel that shipped before this feature existed.
+  const pluginManager = createPluginManagerController(createDefaultPluginManagerClient());
+  pluginManager.onChange(() => renderPluginList());
+
+  const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
     row.className = "settings-row plugin-catalog-row";
+    row.dataset.pluginRow = entry.id;
+    const progress = pluginManager.progressFor(entry.id);
+    const busy = isPluginInstallBusy(progress);
+    const installed = entry.installed || progress?.phase === "installed";
+
     const copy = document.createElement("div");
     copy.className = "settings-row__copy";
     const name = document.createElement("strong");
     name.textContent = entry.name;
     const summary = document.createElement("small");
-    summary.textContent = entry.summary;
+    summary.textContent = [
+      entry.summary,
+      entry.version ? `v${entry.version}` : "",
+      formatPluginSize(entry.sizeBytes),
+    ]
+      .filter(Boolean)
+      .join(" · ");
     copy.append(name, summary);
+    if (progress) {
+      // The row's own status line, not a toast: an install that takes a minute
+      // has to stay legible next to the thing it is installing.
+      const status = document.createElement("small");
+      status.className = "plugin-catalog-row__status";
+      if (progress.phase === "failed") status.classList.add("plugin-catalog-row__status--error");
+      status.textContent = progress.message || formatInstallLabel(progress, entry);
+      copy.append(status);
+    }
+
     const install = document.createElement("button");
     install.type = "button";
     install.className = "settings-button";
     install.dataset.pluginInstall = entry.id;
-    install.setAttribute("aria-label", `Install ${entry.name}`);
-    install.innerHTML = `${icon("download")}<span>Install</span>`;
+    install.disabled = busy || installed;
+    const label = formatInstallLabel(progress, { ...entry, installed });
+    install.setAttribute("aria-label", `${label} ${entry.name}`);
+    install.innerHTML = `${icon(installed ? "check" : "download")}<span></span>`;
+    // The label is host copy and plugin names are third-party: neither goes
+    // through innerHTML.
+    install.lastElementChild!.textContent = label;
     row.append(copy, install);
+
+    if (busy) {
+      const track = document.createElement("div");
+      track.className = "plugin-progress";
+      const bar = document.createElement("div");
+      bar.className = "plugin-progress__bar";
+      bar.style.width = `${pluginPercent(progress)}%`;
+      track.append(bar);
+      row.append(track);
+    }
     return row;
+  };
+
+  const renderInstalledPluginRow = (plugin: InstalledPluginView): HTMLElement => {
+    const row = document.createElement("div");
+    row.className = "settings-row plugin-row";
+    row.dataset.pluginManaged = plugin.id;
+    const mark = document.createElement("span");
+    mark.className = "settings-card__mark plugin-row__mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = icon("puzzle");
+
+    const copy = document.createElement("div");
+    copy.className = "settings-row__copy";
+    const name = document.createElement("strong");
+    name.textContent = plugin.name;
+    const details = document.createElement("small");
+    details.textContent =
+      [
+        plugin.version ? `v${plugin.version}` : "",
+        plugin.extensions.join(", "),
+        plugin.message,
+      ]
+        .filter(Boolean)
+        .join(" · ") || "Plugin tiers";
+    copy.append(name, details);
+
+    const state = document.createElement("span");
+    state.className = "plugin-row__state";
+    // A plugin the host refused to load must not read in the same green as one
+    // that works; the copy says so, the colour says it faster.
+    if (plugin.state === "incompatible") state.classList.add("plugin-row__state--warn");
+    if (plugin.state === "invalid") state.classList.add("plugin-row__state--error");
+    state.textContent = formatPluginStatus(plugin);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "settings-button settings-button--quiet plugin-uninstall-button";
+    remove.dataset.pluginUninstall = plugin.id;
+    remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
+    remove.textContent = "Uninstall";
+
+    row.append(mark, copy, state, remove);
+    return row;
+  };
+
+  let discoveredInstaller: Awaited<ReturnType<QuikyClient["getStatus"]>> | null = null;
+  const installerClient = createDefaultQuikyClient();
+  void installerClient
+    .getStatus(new AbortController().signal)
+    .then((status) => {
+      discoveredInstaller = status;
+      renderPluginList();
+    })
+    .catch(() => {});
+  // The host writes the finished game straight into the catalog, so the shell
+  // reloads the library on its own rather than making the user find a refresh.
+  installerClient.subscribe((progress) => {
+    if (progress.phase === "installed") void refreshLibrary();
+  });
+
+  /**
+   * The Quiky row predates the registry and is discovered through its own
+   * command. Once the registry reports the same plugin, the registry wins: it
+   * is the row that can be uninstalled, and two rows for one plugin is worse
+   * than either of them alone.
+   */
+  const discoveredInstallerRow = (installed: InstalledPluginView[]): HTMLElement | null => {
+    const status = discoveredInstaller;
+    if (!status?.available) return null;
+    const name = normaliseTitle(status.pluginName);
+    if (name && installed.some((plugin) => normaliseTitle(plugin.name) === name)) return null;
+    const row = document.createElement("div");
+    row.className = "settings-row plugin-row";
+    row.dataset.pluginManaged = "installer";
+    row.dataset.pluginDiscovered = "installer";
+    const installable = status.titles.length;
+    row.innerHTML = `
+      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("download")}</span>
+      <div class="settings-row__copy">
+        <strong></strong>
+        <small>Installe les jeux du Store — ${installable} titre${installable > 1 ? "s" : ""} disponible${installable > 1 ? "s" : ""}</small>
+      </div>
+      <span class="plugin-row__state">Installed</span>`;
+    // The plugin names itself; that name never reaches innerHTML.
+    row.querySelector("strong")!.textContent = status.pluginName;
+    return row;
+  };
+
+  // Third-party plugins are discovered on disk, so the Installed group is the
+  // two native runners plus whatever the registry found. Nothing extra renders
+  // when the registry is empty: the panel then looks exactly as it did before.
+  const renderDiscoveredPlugins = (): void => {
+    for (const stale of refs.pluginsInstalledList.querySelectorAll("[data-plugin-managed]")) {
+      stale.remove();
+    }
+    const installed = pluginManager.catalog().installed;
+    const rows = installed.map(renderInstalledPluginRow);
+    const discovered = discoveredInstallerRow(installed);
+    if (discovered) rows.push(discovered);
+    refs.pluginsInstalledList.append(...rows);
   };
 
   const renderPluginList = (): void => {
     const showList = state.pluginView === "list";
+    renderDiscoveredPlugins();
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
+    const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
-    const matches = AVAILABLE_PLUGINS.filter(
+    const matches = available.filter(
       (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
     );
     refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogRow));
     refs.pluginsCatalogEmpty.hidden = matches.length > 0;
+    // An empty registry and a search that matched nothing are different
+    // problems, and telling the user to refine a search they never typed is
+    // the kind of dead end this panel used to have.
+    refs.pluginsCatalogEmpty.textContent =
+      available.length === 0
+        ? "Aucun plugin à installer pour le moment."
+        : "No plugins match that search.";
+  };
+
+  const pluginName = (pluginId: string): string => {
+    const catalog = pluginManager.catalog();
+    const known =
+      catalog.installed.find((plugin) => plugin.id === pluginId) ??
+      catalog.available.find((plugin) => plugin.id === pluginId);
+    return known?.name ?? pluginId;
+  };
+
+  // Removal and file installs have no row to print into, so their outcome goes
+  // to the toast. A registry install does have a row, and reports there.
+  const uninstallPlugin = async (pluginId: string): Promise<void> => {
+    const name = pluginName(pluginId);
+    try {
+      await pluginManager.uninstall(pluginId);
+      showToast(`${name} has been uninstalled.`);
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
+  };
+
+  const installPluginFromFile = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast("Installing a plugin from a file needs the Orivo desktop app.");
+      return;
+    }
+    try {
+      const installed = await pluginManager.installFromFile();
+      // A cancelled picker is not a failure and says nothing.
+      if (installed) showToast(`${pluginName(installed)} has been installed.`);
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
   };
 
   const openPluginDetail = (id: PluginId): void => {
@@ -2449,6 +2581,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     const showcase = root.querySelector<HTMLInputElement>("#preference-show-showcase");
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
+    const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
+    if (sampleSocial) sampleSocial.checked = state.preferences.debugSampleSocial;
     applyMotionPreference();
   };
 
@@ -3087,7 +3221,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // blurred scrim or that content reads straight through it.
     refs.topbar.classList.toggle(
       "topbar--over-content",
-      route.page !== "library" && route.page !== "store",
+      route.page !== "library" &&
+        route.page !== "store" &&
+        route.page !== "game" &&
+        route.page !== "me",
     );
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
@@ -3170,6 +3307,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         setSteamAccountPanelOpen(false);
       }
       if (route.section === "plugins") void refreshWineRunnerSettings();
+      // The catalogue is re-read on every visit: a plugin installed from the
+      // file picker in a previous session has to show up without a restart.
+      if (route.section === "plugins") void pluginManager.load(activation.signal);
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
@@ -3227,6 +3367,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       onLibraryChanged: () => {
         void refreshLibrary();
       },
+      // Debug overlay: when the Settings toggle is on, the detail page fills in
+      // sample achievements, friends and activity for games that ship none.
+      sampleSocialEnabled: () => state.preferences.debugSampleSocial,
     });
 
   const mePage = options.mePage ?? createMePage();
@@ -3302,12 +3445,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const installId = target?.closest<HTMLButtonElement>("[data-plugin-install]")?.dataset
       .pluginInstall;
     if (installId) {
-      const entry = AVAILABLE_PLUGINS.find((candidate) => candidate.id === installId);
-      showToast(
-        isTauriRuntime()
-          ? `${entry?.name ?? "That plugin"} is not installable yet.`
-          : `${entry?.name ?? "That plugin"} install is available in the Orivo desktop app.`,
-      );
+      // The controller notifies on every phase, and `onChange` repaints the
+      // row: nothing here waits for the install to finish.
+      void pluginManager.installFromRegistry(installId);
+      return;
+    }
+    const uninstallId = target?.closest<HTMLButtonElement>("[data-plugin-uninstall]")?.dataset
+      .pluginUninstall;
+    if (uninstallId) {
+      void uninstallPlugin(uninstallId);
+      return;
+    }
+    if (target?.closest("[data-plugin-install-file]")) {
+      void installPluginFromFile();
       return;
     }
 
@@ -3359,6 +3509,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void savePreferences({ showShowcaseGames: target.checked }).then(() => {
         void refreshLibrary();
       });
+    }
+    if (target instanceof HTMLInputElement && target.id === "preference-debug-social") {
+      // Purely a detail-page overlay: no library reload needed.
+      void savePreferences({ debugSampleSocial: target.checked });
     }
   });
 
@@ -4166,12 +4320,6 @@ function shell(): string {
       </section>
 
       <section class="recently-played" aria-label="Library games">
-        <section class="most-played" aria-labelledby="most-played-title" hidden>
-          <div class="rail-header rail-header--most-played">
-            <h2 id="most-played-title">Most Played</h2>
-          </div>
-          <div id="most-played-cards" class="game-cards most-played-cards" role="list" aria-label="Most played games"></div>
-        </section>
         <div class="rail-header">
           <h2 id="recently-played-title">Recently Played</h2>
           <div class="rail-filters" aria-label="Library view controls">
@@ -4196,9 +4344,9 @@ function shell(): string {
       </div>
 
       <div id="app-page-store" class="app-page app-page--store"></div>
-      <div id="app-page-me" class="app-page app-page--scroll"></div>
+      <div id="app-page-me" class="app-page app-page--scroll app-page--overlay"></div>
 
-      <div id="app-page-game" class="app-page app-page--scroll"></div>
+      <div id="app-page-game" class="app-page app-page--scroll app-page--overlay"></div>
 
       <div id="app-page-settings" class="app-page app-page--scroll app-page--settings">
         <div class="settings-layout">
@@ -4312,7 +4460,7 @@ function shell(): string {
 
                 <div class="plugins-group">
                   <p class="plugins-group__label">Installed</p>
-                  <div class="plugins-group__list">
+                  <div id="plugins-installed-list" class="plugins-group__list">
                     <div class="settings-row plugin-row">
                       <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("monitor")}</span>
                       <div class="settings-row__copy">
@@ -4335,7 +4483,10 @@ function shell(): string {
                 </div>
 
                 <div class="plugins-group plugins-group--catalog">
-                  <p class="plugins-group__label">Available</p>
+                  <div class="plugins-group__header">
+                    <p class="plugins-group__label">Available</p>
+                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                  </div>
                   <label class="plugins-search">
                     ${icon("search")}
                     <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="Search available plugins…" aria-label="Search available plugins" />
@@ -4363,13 +4514,13 @@ function shell(): string {
                 <div class="credentials-form">
                   <div class="credentials-form__field">
                     <label for="wallpaper-igdb-client-id">IGDB Client ID</label>
-                    <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="From the IGDB API site" />
-                    <small>Optional. Enables the IGDB artwork source.</small>
+                    <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Twitch application client ID" />
+                    <small>Optional, but IGDB needs both this and the secret below. Register an application at dev.twitch.tv/console/apps to get the pair.</small>
                   </div>
                   <div class="credentials-form__field">
                     <label for="wallpaper-igdb-client-secret">IGDB Client Secret</label>
-                    <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="From the IGDB API site" />
-                    <small>Optional. Used with the client ID to request an access token.</small>
+                    <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Twitch application client secret" />
+                    <small>The other half of the pair. A secret on its own cannot request a token.</small>
                   </div>
                   <div class="credentials-form__field">
                     <label for="wallpaper-google-api-key">Google API Key</label>
@@ -4433,6 +4584,21 @@ function shell(): string {
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-show-showcase" />
                     <span><strong>Show demo games</strong><small>Adds Elden Ring, Cyberpunk 2077 and other fixtures to your library.</small></span>
+                  </label>
+                </div>
+              </section>
+              <section class="settings-card" data-settings-searchable aria-labelledby="sample-social-preference-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("users")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="sample-social-preference-title">Sample social data (debug)</strong>
+                    <small>Fill every game's detail page with placeholder achievements, friends and activity so those sections can be reviewed without a live feed. Off by default.</small>
+                  </div>
+                </header>
+                <div class="settings-choices">
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-debug-social" />
+                    <span><strong>Show sample achievements &amp; friends</strong><small>Adds demo trophies, a friends rail and an activity feed to game pages that have none.</small></span>
                   </label>
                 </div>
               </section>

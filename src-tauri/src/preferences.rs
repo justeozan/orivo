@@ -65,6 +65,11 @@ pub struct PreferencesDto {
     /// Off by default so a real library shows only the user's own games.
     #[serde(default)]
     pub show_showcase_games: bool,
+    /// Debug-only: fill a game's detail page with sample achievements, friends
+    /// and activity so the social sections can be exercised without a backend
+    /// feed. Off by default.
+    #[serde(default)]
+    pub debug_sample_social: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -74,6 +79,7 @@ pub struct PreferencesUpdate {
     pub store_region: Option<StoreRegion>,
     pub motion: Option<MotionPreference>,
     pub show_showcase_games: Option<bool>,
+    pub debug_sample_social: Option<bool>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -137,6 +143,9 @@ impl PreferencesService {
             }
             if let Some(show_showcase_games) = update.show_showcase_games {
                 preferences.show_showcase_games = show_showcase_games;
+            }
+            if let Some(debug_sample_social) = update.debug_sample_social {
+                preferences.debug_sample_social = debug_sample_social;
             }
         }
         self.save_atomically(&preferences)?;
@@ -328,6 +337,7 @@ mod tests {
                 store_region: Some(StoreRegion::Fr),
                 motion: Some(MotionPreference::Reduced),
                 show_showcase_games: Some(true),
+                debug_sample_social: Some(true),
                 reset: false,
             })
             .unwrap();

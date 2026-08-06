@@ -4,8 +4,10 @@ mod game_media;
 mod launcher;
 mod plugin_manifest;
 mod plugin_registry;
+mod plugin_installer;
 mod plugin_runtime;
 mod preferences;
+mod quiky_installer;
 mod steam;
 mod steam_account;
 mod store;
@@ -549,6 +551,25 @@ pub fn run() {
             ));
             app.manage(Arc::clone(&wallpaper_credentials));
             app.manage(wallpaper_search::WallpaperSearchService::new(wallpaper_credentials));
+            // Acquisition is optional. The service is always constructed, but
+            // it reports itself unavailable until a plugin declaring the
+            // installer extension is present, so Orivo never depends on one.
+            let games_root = app
+                .path()
+                .home_dir()
+                .map(|home| home.join("Games"))
+                .unwrap_or_else(|_| app_data.join("Games"));
+            app.manage(Arc::new(plugin_installer::PluginInstallerService::new(
+                plugin_installer::plugin_root_for(&app_data),
+                env!("CARGO_PKG_VERSION"),
+            )));
+            app.manage(Arc::new(quiky_installer::QuikyService::new(
+                app_data.join(PLUGINS_DIRECTORY),
+                app_data.join(WINE_PREFIXES_DIRECTORY),
+                app.path().app_cache_dir().unwrap_or_else(|_| app_data.clone()),
+                games_root,
+                env!("CARGO_PKG_VERSION"),
+            )));
             Ok(())
         })
         // Media files stay behind a host-owned scheme instead of a broad
@@ -614,7 +635,16 @@ pub fn run() {
             preferences::get_preferences,
             preferences::update_preferences,
             preferences::get_data_usage,
-            preferences::clear_derived_cache
+            preferences::clear_derived_cache,
+            quiky_installer::get_quiky_status,
+            quiky_installer::get_quiky_progress,
+            quiky_installer::start_quiky_install,
+            quiky_installer::cancel_quiky_install,
+            quiky_installer::get_quiky_diagnostics,
+            plugin_installer::get_plugin_catalog,
+            plugin_installer::install_plugin_from_registry,
+            plugin_installer::install_plugin_from_file,
+            plugin_installer::uninstall_plugin
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orivo");
@@ -2942,6 +2972,62 @@ fn get_library(app: AppHandle, state: State<'_, AppState>) -> Result<LibraryStat
     Ok(library_state(&app, &catalog))
 }
 
+/// Adds a freshly installed executable to the library through the same
+/// transaction an explicit import uses, so an installed game is launchable
+/// without the user importing it a second time by hand.
+pub(crate) fn register_installed_game(
+    app: &AppHandle,
+    executable: PathBuf,
+    store_game_id: Option<&str>,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut game = Game::from_executable(executable).map_err(|error| error.to_string())?;
+    let _ = cache_game_media(app, &mut game);
+    // A game installed from the Store keeps the Store's title, copy and
+    // artwork. Deriving them from the Windows binary instead would give the
+    // card the installer's icon and the executable's file name.
+    if let Some(presentation) = store_game_id.and_then(store::presentation_for) {
+        game.title = presentation.title;
+        if !presentation.short_description.trim().is_empty() {
+            game.description = Some(presentation.short_description);
+        }
+        for (key, url) in [
+            (STORE_COVER_URL_KEY, presentation.cover_url),
+            (STORE_HERO_URL_KEY, presentation.hero_url),
+            (STORE_LANDSCAPE_URL_KEY, presentation.landscape_url),
+        ] {
+            if !url.trim().is_empty() {
+                game.extra.insert(key.into(), serde_json::Value::String(url));
+            }
+        }
+    }
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next_catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    // A duplicate install must refresh the existing card rather than fail the
+    // whole installation after the files have already landed.
+    if next_catalog.add(game).is_err() {
+        return Ok(());
+    }
+    auto_apply_wine_to_direct_games(&mut next_catalog, &state.wine_prefix_root);
+    next_catalog
+        .save_atomically(&state.catalog_path)
+        .map_err(|error| error.to_string())?;
+    let mut catalog = state
+        .catalog
+        .write()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    *catalog = next_catalog;
+    refresh_detail_projection(&catalog);
+    Ok(())
+}
+
 #[tauri::command]
 fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportResponse, String> {
     let Some(executable) = rfd::FileDialog::new()
@@ -4758,13 +4844,30 @@ fn owned_library_games(app: &AppHandle, state: &AppState) -> Result<Vec<store::O
         .collect())
 }
 
+/// Artwork carried over from a Store card. These are frontend asset routes,
+/// not filesystem paths, so they are stored beside the record rather than in
+/// the media cache and are handed to the WebView unchanged.
+const STORE_COVER_URL_KEY: &str = "storeCoverUrl";
+const STORE_HERO_URL_KEY: &str = "storeHeroUrl";
+const STORE_LANDSCAPE_URL_KEY: &str = "storeLandscapeUrl";
+
+/// Only a rooted, relative asset route is accepted: a record must never turn
+/// into a request for an arbitrary origin.
+fn store_artwork_url(game: &Game, key: &str) -> Option<String> {
+    let value = game.extra.get(key)?.as_str()?.trim();
+    (value.starts_with('/') && !value.starts_with("//")).then(|| value.to_string())
+}
+
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {
     // Wallpapers the user deliberately chose on the detail page. Each role is
     // independent: the background never overrides a card cover and vice versa.
     let home_image = media_source_url(game.home_image_path.as_deref(), cache_dir);
     let landscape_image = media_source_url(game.landscape_image_path.as_deref(), cache_dir);
-    let local_hero = media_source_url(game.artwork_path.as_deref(), cache_dir);
-    let local_cover = media_source_url(game.cover_path.as_deref(), cache_dir);
+    let local_hero = media_source_url(game.artwork_path.as_deref(), cache_dir)
+        .or_else(|| store_artwork_url(game, STORE_HERO_URL_KEY));
+    let local_cover = media_source_url(game.cover_path.as_deref(), cache_dir)
+        .or_else(|| store_artwork_url(game, STORE_COVER_URL_KEY));
+    let store_landscape = store_artwork_url(game, STORE_LANDSCAPE_URL_KEY);
     // Steam exposes distinct artwork roles for its library. Its landscape
     // capsule is the publisher's official branded wallpaper, while the wide
     // library hero belongs to the selected horizontal card. Do not reuse a
@@ -4807,6 +4910,7 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             .or_else(|| local_hero.clone())
             .or_else(|| steam_wallpaper.clone()),
         landscape_url: landscape_image
+            .or_else(|| store_landscape)
             .or_else(|| steam_landscape)
             .or_else(|| local_hero.clone())
             .or_else(|| steam_wallpaper.clone())
