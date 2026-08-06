@@ -41,7 +41,7 @@ impl PluginRegistry {
     /// Discovery is deliberately best-effort. One malformed third-party
     /// package becomes an unavailable row, not an error that prevents another
     /// valid runner or the rest of Orivo from loading.
-    fn discover_internal(&self) -> Vec<DiscoveredPlugin> {
+    fn discover_internal(&self) -> Vec<(PathBuf, DiscoveredPlugin)> {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return Vec::new();
         };
@@ -51,19 +51,81 @@ impl PluginRegistry {
                 entry
                     .file_type()
                     .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+                    // The installer stages a package in a dotted sibling before
+                    // renaming it into place. It is host scratch space, never a
+                    // plugin, so discovery must not report it as a broken one.
+                    && !entry.file_name().to_string_lossy().starts_with('.')
             })
             .collect::<Vec<_>>();
         entries.sort_by_key(|entry| entry.file_name());
         entries
             .into_iter()
             .take(MAX_DISCOVERED_PLUGINS)
-            .map(|entry| self.inspect_plugin_directory(entry.path(), entry.file_name()))
+            .map(|entry| {
+                let directory = entry.path();
+                let plugin = self.inspect_plugin_directory(directory.clone(), entry.file_name());
+                (directory, plugin)
+            })
+            .collect()
+    }
+
+    /// The installer surface is resolved inside the backend because the host
+    /// performs the acquisition itself. The plugin directory and its declared
+    /// network allowlist stay here: they are host inputs, never IPC payload.
+    pub fn installer_plugin(&self, runtime: &PluginRuntime) -> Option<InstallerPlugin> {
+        self.discover_internal()
+            .into_iter()
+            .find(|(_, plugin)| {
+                plugin
+                    .record
+                    .extension_names
+                    .iter()
+                    .any(|extension| extension == "installer")
+            })
+            .map(|(directory, mut plugin)| {
+                if plugin.record.state == PluginState::Ready {
+                    match plugin.preflight(runtime) {
+                        Ok(()) => {}
+                        Err(message) => {
+                            plugin.record.state = PluginState::Invalid;
+                            plugin.record.message = message.into();
+                        }
+                    }
+                }
+                InstallerPlugin {
+                    network_domains: declared_network_domains(&directory),
+                    directory,
+                    id: plugin.record.id,
+                    name: plugin.record.name,
+                    version: plugin.record.version,
+                    state: plugin.record.state,
+                    message: plugin.record.message,
+                }
+            })
+    }
+
+    /// Every installed plugin, whatever it extends. The Settings surface needs
+    /// the full list to offer removal, including packages that turned out to
+    /// be invalid or built for a newer host.
+    pub fn installed_plugins(&self, runtime: &PluginRuntime) -> Vec<PluginRecord> {
+        self.discover_internal()
+            .into_iter()
+            .map(|(_, mut plugin)| {
+                if plugin.record.state == PluginState::Ready
+                    && let Err(message) = plugin.preflight(runtime)
+                {
+                    plugin.record.state = PluginState::Invalid;
+                    plugin.record.message = message.into();
+                }
+                plugin.record
+            })
             .collect()
     }
 
     pub fn runner_plugins(&self, runtime: &PluginRuntime) -> Vec<RunnerPluginView> {
         self.discover_internal()
             .into_iter()
+            .map(|(_, plugin)| plugin)
             .filter_map(|plugin| {
                 plugin
                     .record
@@ -304,6 +366,33 @@ pub struct RunnerPluginView {
     pub message: String,
 }
 
+/// An installer plugin as the backend sees it. This type never crosses the
+/// IPC boundary: `directory` and `network_domains` are the two host-owned
+/// inputs the acquisition service needs and the WebView must never learn.
+#[derive(Debug, Clone)]
+pub struct InstallerPlugin {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub state: PluginState,
+    pub message: String,
+    pub directory: PathBuf,
+    pub network_domains: Vec<String>,
+}
+
+/// Re-read the allowlist from the manifest that discovery already accepted.
+/// Reading it again is cheaper than threading the validated manifest through
+/// every discovery outcome, and it cannot widen anything: `validate` has
+/// already normalised and bounded the list.
+fn declared_network_domains(directory: &Path) -> Vec<String> {
+    read_bounded_file(&directory.join(MANIFEST_FILE), MAX_MANIFEST_BYTES)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PluginManifest>(&bytes).ok())
+        .and_then(|manifest| manifest.validate().ok())
+        .map(|validated| validated.manifest().network_domains.clone())
+        .unwrap_or_default()
+}
+
 fn component_descriptor(
     directory: &Path,
     manifest: &ValidatedPluginManifest,
@@ -370,6 +459,7 @@ fn extension_name(extension: &PluginExtension) -> &'static str {
         PluginExtension::Search => "search",
         PluginExtension::Automation => "automation",
         PluginExtension::UiContribution => "ui_contribution",
+        PluginExtension::Installer => "installer",
     }
 }
 

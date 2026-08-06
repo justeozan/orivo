@@ -28,6 +28,9 @@ pub enum PluginExtension {
     Search,
     Automation,
     UiContribution,
+    /// Provides a host-executed acquisition catalogue: the plugin supplies the
+    /// data, Orivo owns the download, the verification and the extraction.
+    Installer,
 }
 
 /// A manifest declares what it may ask the user for. A declaration is not a
@@ -206,6 +209,14 @@ impl PluginManifest {
             && !self.capabilities.contains(&PluginCapability::RunnerPrepare)
         {
             errors.push("runner plugins must declare runner_prepare".into());
+        }
+        // The host, not the plugin, performs the fetch. Requiring the
+        // declaration keeps the download allowlist visible in the manifest the
+        // user consents to instead of hiding it inside catalogue data.
+        if self.extensions.contains(&PluginExtension::Installer)
+            && !self.capabilities.contains(&PluginCapability::NetworkFetch)
+        {
+            errors.push("installer plugins must declare network_fetch".into());
         }
         if self.artifacts.len() > MAX_ARTIFACT_COUNT || self.artifacts.is_empty() {
             errors.push("plugin must contain a bounded non-empty artifact list".into());

@@ -9,6 +9,17 @@ import type {
 import { icon, type IconName } from "./icons";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
+  createDefaultQuikyClient,
+  createQuikyController,
+  formatQuikyLabel,
+  isQuikyBusy,
+  matchTitle,
+  quikyPercent,
+  type QuikyClient,
+  type QuikyController,
+  type QuikyTitle,
+} from "./quiky-install";
+import {
   createInitialStoreState,
   EDITORIAL_STORE_HOME,
   fitStats,
@@ -52,6 +63,11 @@ export interface StorePageOptions {
    */
   navigate(route: AppRoute): void;
   client?: StorePageClient;
+  /**
+   * The installer is a plugin the Store may or may not find. Injecting the
+   * client keeps that decision out of the page and testable.
+   */
+  quiky?: QuikyClient;
 }
 
 function isTauriRuntime(): boolean {
@@ -178,6 +194,21 @@ interface FocusSnapshot {
   selectionEnd: number | null;
 }
 
+/**
+ * The three nodes an install owns on a card. They are held rather than queried
+ * because a download ticks several times a second and a shelf that rebuilds a
+ * card per tick would drop the pointer, the focus and the artwork's fade.
+ */
+interface InstallNodes {
+  title: QuikyTitle;
+  button: HTMLButtonElement;
+  label: HTMLElement;
+  glyph: HTMLElement;
+  glyphName: IconName;
+  meter: HTMLElement;
+  fill: HTMLElement;
+}
+
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className: string,
@@ -251,6 +282,7 @@ function offerLine(game: GameSummary): string {
  */
 export function createStorePage(options: StorePageOptions): AppPage {
   const client = options.client ?? createDefaultStorePageClient();
+  const quikyClient = options.quiky ?? createDefaultQuikyClient();
   let state = createInitialStoreState();
   let container: HTMLElement | null = null;
   let pageRoot: HTMLElement | null = null;
@@ -266,6 +298,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let backdropFront = 0;
   let backdropUrl = "";
   let renderedGameIds = "";
+  // One controller per activation: it owns the event subscription and dies with
+  // the page's teardown path, so a re-entry starts from a fresh status.
+  let quiky: QuikyController | null = null;
+  let quikyOff: (() => void) | null = null;
+  const installNodes = new Map<string, InstallNodes>();
 
   // Long-lived nodes. The page paints once and then updates in place: a full
   // rebuild would drop the rail's scroll position and restart the backdrop
@@ -426,6 +463,38 @@ export function createStorePage(options: StorePageOptions): AppPage {
       dispatch({ type: "wishlist-changed", gameId: game.id, wishlisted: !wishlisted });
       showTransientStatus(requestErrorMessage(error) || "Le changement d'envie a été annulé.");
     }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Install (Quiky plugin)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The gate for the whole feature. No plugin, no match, no affordance — and a
+   * card that gets no affordance is exactly the card the Store painted before
+   * the installer existed.
+   */
+  const quikyTitleFor = (game: GameSummary): QuikyTitle | null => {
+    const status = quiky?.status();
+    if (!status?.available) return null;
+    return matchTitle(status.titles, game.title);
+  };
+
+  const quikyTitleBySlug = (slug: string): QuikyTitle | null =>
+    quiky?.status().titles.find((title) => title.slug === slug) ?? null;
+
+  const handleInstall = async (slug: string, gameId: string): Promise<void> => {
+    const controller = quiky;
+    if (!controller) return;
+    // One control, two jobs: while the host is working it is the way out.
+    if (isQuikyBusy(controller.progressFor(slug))) {
+      await controller.cancel(slug);
+      return;
+    }
+    if (quikyTitleBySlug(slug)?.installed) return;
+    await controller.install(slug, gameId);
+    const progress = controller.progressFor(slug);
+    if (progress?.phase === "failed" && progress.message) showTransientStatus(progress.message);
   };
 
   // ---------------------------------------------------------------------------
@@ -683,6 +752,108 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }, gameId ? 60 : 220);
   };
 
+  /**
+   * The install control and its bar. The button joins the card's floating
+   * controls, under the wishlist so neither has to move when both are there;
+   * the bar is three pixels on the foot of the artwork and nothing else.
+   */
+  const buildInstall = (
+    game: GameSummary,
+    title: QuikyTitle,
+  ): { button: HTMLButtonElement; meter: HTMLElement } => {
+    const button = element("button", "store-card__install");
+    button.type = "button";
+    button.dataset.focusKey = `install-${game.id}`;
+    button.dataset.phase = "idle";
+    button.setAttribute("aria-label", `Installer ${title.title}`);
+    const glyph = iconElement("download", "store-card__install-glyph");
+    const label = element("span", "store-card__install-label", "Installer");
+    button.append(glyph, label);
+    button.addEventListener("click", (event) => {
+      // The card is one big link to the game page; installing is not going.
+      event.stopPropagation();
+      void handleInstall(title.slug, game.id);
+    });
+
+    // Spans, not divs: the artwork lives inside the card's open button, and a
+    // button may only carry phrasing content.
+    const meter = element("span", "store-card__meter");
+    meter.setAttribute("role", "progressbar");
+    meter.setAttribute("aria-valuemin", "0");
+    meter.setAttribute("aria-valuemax", "100");
+    meter.setAttribute("aria-valuenow", "0");
+    meter.setAttribute("aria-label", `${title.title} — Installer`);
+    meter.hidden = true;
+    const fill = element("span", "store-card__fill");
+    fill.style.width = "0%";
+    meter.append(fill);
+
+    installNodes.set(game.id, {
+      title,
+      button,
+      label,
+      glyph,
+      glyphName: "download",
+      meter,
+      fill,
+    });
+    return { button, meter };
+  };
+
+  const installGlyph = (busy: boolean, installed: boolean, failed: boolean): IconName => {
+    if (busy) return "close";
+    if (installed) return "check";
+    return failed ? "refresh" : "download";
+  };
+
+  /**
+   * The whole per-tick repaint: two text nodes, one width and a handful of
+   * attributes, on nodes that already exist. Nothing here builds an element.
+   */
+  const renderInstallState = (): void => {
+    const controller = quiky;
+    if (!controller || installNodes.size === 0) return;
+    for (const [, entry] of installNodes) {
+      const slug = entry.title.slug;
+      const title = quikyTitleBySlug(slug) ?? entry.title;
+      entry.title = title;
+      const progress = controller.progressFor(slug);
+      const busy = isQuikyBusy(progress);
+      const percent = quikyPercent(progress);
+      const phaseLabel = formatQuikyLabel(progress, title);
+      const installed = title.installed || progress?.phase === "installed";
+      const failed = progress?.phase === "failed";
+
+      const label = busy ? "Annuler" : phaseLabel;
+      if (entry.label.textContent !== label) entry.label.textContent = label;
+
+      const glyphName = installGlyph(busy, installed, failed);
+      if (glyphName !== entry.glyphName) {
+        entry.glyph.innerHTML = icon(glyphName);
+        entry.glyphName = glyphName;
+      }
+
+      // `aria-disabled` rather than `disabled`: the page restores focus by key
+      // after every render, and a disabled button cannot be focused.
+      entry.button.setAttribute("aria-disabled", String(installed && !busy));
+      entry.button.dataset.phase = progress?.phase ?? (installed ? "installed" : "idle");
+      entry.button.title = progress?.message ?? "";
+      entry.button.setAttribute(
+        "aria-label",
+        busy
+          ? `Annuler l'installation de ${title.title} — ${phaseLabel}`
+          : installed
+            ? `${title.title} est déjà installé`
+            : `Installer ${title.title}`,
+      );
+
+      entry.meter.hidden = !busy;
+      entry.meter.setAttribute("aria-valuenow", String(percent));
+      entry.meter.setAttribute("aria-label", `${title.title} — ${phaseLabel}`);
+      entry.fill.style.width = `${percent}%`;
+    }
+  };
+
   const buildCard = (game: GameSummary, index: number): HTMLElement => {
     const card = element("article", "store-card");
     card.dataset.gameId = game.id;
@@ -773,6 +944,14 @@ export function createStorePage(options: StorePageOptions): AppPage {
     });
 
     card.append(open, wishlist);
+
+    const quikyTitle = quikyTitleFor(game);
+    if (quikyTitle) {
+      const install = buildInstall(game, quikyTitle);
+      media.append(install.meter);
+      card.append(install.button);
+    }
+
     card.addEventListener("pointerenter", () => previewGame(game.id));
     card.addEventListener("pointerleave", () => previewGame(null));
     return card;
@@ -790,11 +969,24 @@ export function createStorePage(options: StorePageOptions): AppPage {
     });
   };
 
+  /**
+   * The card set, not the state inside a card. A download stepping from 41% to
+   * 42% must never land here. The Quiky slug is part of it because a plugin
+   * that finishes loading after the first paint adds a control to cards that
+   * already exist — and because a status of "unavailable" leaves every entry
+   * empty, which is the same string the Store had before the installer existed.
+   */
+  const cardSignature = (games: GameSummary[]): string =>
+    games
+      .map((game) => `${game.id}:${game.wishlisted ? 1 : 0}:${quikyTitleFor(game)?.slug ?? ""}`)
+      .join("|");
+
   const renderCards = (games: GameSummary[]): void => {
     if (!nodes.railTrack || !nodes.emptyState) return;
-    const signature = games.map((game) => `${game.id}:${game.wishlisted ? 1 : 0}`).join("|");
+    const signature = cardSignature(games);
     if (signature !== renderedGameIds) {
       renderedGameIds = signature;
+      installNodes.clear();
       const fragment = document.createDocumentFragment();
       games.forEach((game, index) => fragment.append(buildCard(game, index)));
       nodes.railTrack.replaceChildren(fragment);
@@ -813,8 +1005,29 @@ export function createStorePage(options: StorePageOptions): AppPage {
         ),
       );
     }
+    renderInstallState();
     syncFeatured();
     syncArrows();
+  };
+
+  /**
+   * Every change the installer reports. A phase tick repaints the two nodes it
+   * owns; only a change to the card set itself — a plugin that just became
+   * available, a title that just started matching — rebuilds the shelf.
+   */
+  const onQuikyChange = (): void => {
+    if (!nodes.railTrack) return;
+    const games = visibleGames();
+    if (cardSignature(games) === renderedGameIds) renderInstallState();
+    else renderCards(games);
+  };
+
+  const teardownQuiky = (): void => {
+    quikyOff?.();
+    quikyOff = null;
+    quiky?.dispose();
+    quiky = null;
+    installNodes.clear();
   };
 
   const renderFilters = (): void => {
@@ -1060,6 +1273,13 @@ export function createStorePage(options: StorePageOptions): AppPage {
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState(context.restoreState);
       });
+      // An activation that replaces another one takes the installer with it:
+      // the old controller's event subscription belongs to the old signal.
+      teardownQuiky();
+      const controller = createQuikyController(quikyClient);
+      quiky = controller;
+      quikyOff = controller.onChange(onQuikyChange);
+      void controller.load(context.signal);
       void loadOwned(context);
       void loadHome(context).then(() => {
         if (
@@ -1080,6 +1300,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       transientStatus = "";
       morePlatformsOpen = false;
       whyOpen = false;
+      teardownQuiky();
       const focusKey = captureFocus()?.focusKey ?? null;
       const restoreState: PageRestoreState = {
         scrollTop: readScrollTop(),

@@ -113,16 +113,35 @@ export type WallpaperSource =
 
 export type WallpaperSearchPhase = "ready" | "not-configured" | "error";
 
+/**
+ * The shape of artwork a row asks for. A search is scoped to exactly one:
+ * the picker fills each row from its own request, so a wide screenshot can
+ * never land in the portrait cover row.
+ *
+ * - `cover`     portrait box art, ~2:3
+ * - `landscape` wide key art, ~16:9
+ * - `background` atmospheric backgrounds and screenshots
+ */
+export type WallpaperCategory = "cover" | "landscape" | "background";
+
+export const WALLPAPER_CATEGORIES: readonly WallpaperCategory[] = [
+  "cover",
+  "landscape",
+  "background",
+];
+
 /** One result in a wallpaper search, addressable only by its opaque id. */
 export interface WallpaperCandidateView {
   id: string;
   title: string;
   thumbnailUrl: string;
+  category: WallpaperCategory;
 }
 
 export interface WallpaperSearchView {
   phase: WallpaperSearchPhase;
   source: WallpaperSource;
+  category: WallpaperCategory;
   query: string;
   message: string;
   candidates: WallpaperCandidateView[];

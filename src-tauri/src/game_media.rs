@@ -42,7 +42,9 @@ pub const MEDIA_DIRECTORY: &str = "game-media";
 /// registers it against `MEDIA_DIRECTORY`; the WebView never sees a real path.
 pub const GAME_MEDIA_URI_SCHEME: &str = "game-media";
 
-pub const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+/// Big enough for a genuine 4K wallpaper: a 3840×2160 PNG runs 30–60 MB, so the
+/// old 20 MB cap rejected exactly the high-resolution art the picker is for.
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_VIDEO_BYTES: u64 = 250 * 1024 * 1024;
 pub const MEDIA_QUOTA_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_REDIRECTS: usize = 3;

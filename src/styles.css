@@ -1009,18 +1009,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .rail-header { height: 36px; justify-content: space-between; padding-right: 78px; }
 .rail-header h2 { margin: 0; color: #f1eef3; font-size: 15px; font-weight: 600; transform: translateY(-6px); }
 
-/* "Most Played": a compact rail stacked above Recently Played. The section
-   lives inside the bottom-anchored rail block, so it simply grows the block
-   upward and every breakpoint offset keeps working. Cards reuse the exact
-   rail card component at a smaller scale (same 2:3 portrait ratio). */
-.most-played { --rail-card-height: 156px; margin-bottom: 4px; }
-.most-played .rail-header { height: 30px; }
-.most-played .game-card { flex: 0 0 104px; width: 104px; }
-.most-played .game-card.is-selected,
-.most-played .game-card.is-selected:hover { flex-basis: clamp(226px, 17vw, 277px); }
-.most-played[hidden] { display: none; }
-/* On short viewports the hero and the main rail keep priority. */
-@media (max-height: 820px) { .most-played { display: none; } }
 .rail-filters { gap: 10px; }
 .compact-filter, .compact-icon { height: 34px; border: 1px solid rgba(255,255,255,.12); color: #d6d2d8; background: rgba(12,13,17,.35); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(16px) saturate(125%); backdrop-filter: blur(16px) saturate(125%); }
 .compact-filter { display: inline-flex; align-items: center; gap: 8px; padding: 0 13px; border-radius: 17px; font-size: 12px; }
@@ -1145,27 +1133,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .game-card.is-selected .card-art--portrait { opacity: 0; transform: scale(1.012); }
 .game-card.is-selected .card-art--landscape { opacity: 1; transform: scale(1); }
 .game-card:hover .card-art { transform: scale(1.035); }
-.card-shade { position: absolute; z-index: 1; right: 0; bottom: 0; left: 0; height: 132px; border-radius: 0 0 calc(var(--card-radius) - 1px) calc(var(--card-radius) - 1px); pointer-events: none; background: linear-gradient(0deg, rgba(5,6,9,.99) 0%, rgba(7,8,12,.91) 35%, rgba(8,9,13,.64) 62%, rgba(11,11,13,0) 100%); }
-.card-title, .card-time { position: absolute; z-index: 2; right: 14px; left: 14px; }
-.card-title {
-  bottom: 36px;
-  display: block;
-  overflow: hidden;
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -.012em;
-  line-height: 1.2;
-  opacity: .8;
-  text-overflow: ellipsis;
-  text-shadow: 0 2px 14px rgba(0,0,0,.92);
-  transform: translateY(7px);
-  white-space: nowrap;
-  will-change: opacity, transform;
-  transition: opacity 240ms ease, transform 340ms cubic-bezier(.22, .74, .2, 1);
-}
+
+.card-time { position: absolute; z-index: 2; right: 14px; left: 14px; }
+
 .card-time { bottom: 14px; color: #d4cfd7; font-size: 12px; opacity: .82; text-shadow: 0 2px 12px rgba(0,0,0,.92); transform: translateY(4px); transition: opacity 220ms ease 30ms, transform 300ms cubic-bezier(.22, .74, .2, 1) 30ms; }
-.game-card.is-selected .card-title { opacity: 1; transform: translateY(0); }
 .game-card.is-selected .card-time { opacity: 1; transform: translateY(0); }
 @keyframes cover-glint-orbit { to { --cover-glint-angle: 360deg; } }
 @keyframes hero-title-arrive { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -1281,6 +1252,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   overscroll-behavior: contain;
   scrollbar-color: rgba(210,200,255,.32) transparent;
   scrollbar-width: thin;
+}
+
+/* Pages whose own art or gradient runs edge to edge (game detail, Me) drop the
+   shell's topbar clearance so that art bleeds up behind the transparent bar,
+   exactly like the Library and Store. Each such page adds its own top inset for
+   any content that must clear the floating topbar. */
+.app-page--overlay {
+  padding-top: 0;
 }
 
 /* Settings and not-found paint the same base as the Store and detail pages, so
@@ -1520,6 +1499,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   text-transform: uppercase;
 }
 .plugins-group__list { display: grid; }
+/* The label and the file-install action share the group's first line, so the
+   action never pushes the catalogue down by a whole row. */
+.plugins-group__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+.plugins-group__header .plugins-group__label { margin: 0; }
+.plugins-group__action { height: 30px; padding: 0 11px; font-size: 12px; }
+.plugins-group__action .icon { width: 14px; height: 14px; }
 .plugin-row { gap: 13px; padding: 13px 18px; }
 .plugin-row__mark {
   width: 34px;
@@ -1533,6 +1524,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-weight: 560;
   white-space: nowrap;
 }
+/* A plugin the host refused to load must not read in the same green as one
+   that runs. */
+.plugin-row__state--warn { color: #ecd08a; }
+.plugin-row__state--error { color: #f0a3a3; }
+.plugin-uninstall-button { height: 30px; padding: 0 11px; font-size: 12px; }
 .plugin-open-button {
   display: grid;
   width: 30px;
@@ -1574,7 +1570,28 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-size: 13px;
 }
 .plugins-search__input::placeholder { color: #8f8a99; }
+.plugin-catalog-row { position: relative; }
 .plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.06); }
+.plugin-catalog-row__status { color: #c3b5ff !important; }
+.plugin-catalog-row__status--error { color: #f0a3a3 !important; }
+/* The bar rides the bottom edge of its own row: an install has to be locatable
+   at a glance in a list where every other row looks the same. */
+.plugin-progress {
+  position: absolute;
+  right: 18px;
+  bottom: 0;
+  left: 18px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255,255,255,.09);
+}
+.plugin-progress__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #b9aff6, #f0edff);
+  transition: width 200ms ease;
+}
 
 .plugin-back-button { height: 30px; padding: 0 11px; }
 .plugin-back-button .icon { width: 14px; height: 14px; }

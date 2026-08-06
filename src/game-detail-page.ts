@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {
   AppRoute,
   GameDetailView,
   GameMediaKind,
   GameMediaView,
   GameSummary,
+  WallpaperCategory,
   WallpaperSearchView,
   WallpaperSource,
 } from "./contracts";
@@ -34,6 +36,7 @@ import {
   shouldOfferAboutToggle,
   shouldRenderSection,
   toGameDetailRestoreState,
+  withSampleSocialData,
   type GameDetailPageAction,
   type GameDetailViewModel,
 } from "./game-detail-model";
@@ -45,8 +48,14 @@ export interface GameDetailPageClient {
   importMedia(gameId: string, kind: GameMediaKind, signal: AbortSignal): Promise<GameMediaView[]>;
   exportMedia(gameId: string, mediaId: string, signal: AbortSignal): Promise<void>;
   cancelMediaDownload(gameId: string, signal: AbortSignal): Promise<void>;
+  /**
+   * One request per row: the category the caller asks for is the only shape
+   * that comes back, which is what keeps a 16:9 screenshot out of the portrait
+   * Cover row.
+   */
   searchWallpapers(
     source: WallpaperSource,
+    category: WallpaperCategory,
     query: string,
     offset: number,
     signal: AbortSignal,
@@ -77,13 +86,6 @@ export interface ArtworkResetResult {
   replaced: WallpaperRole[];
 }
 
-/** The role picker's segments, in display order. */
-const WALLPAPER_ROLES: ReadonlyArray<{ id: WallpaperRole; label: string }> = [
-  { id: "background", label: "Background" },
-  { id: "cover", label: "Portrait cover" },
-  { id: "landscape", label: "Landscape cover" },
-];
-
 /** Role names as they read in a sentence, for the reset's partial result. */
 const ROLE_LABELS: ReadonlyArray<{ role: WallpaperRole; label: string }> = [
   { role: "cover", label: "portrait cover" },
@@ -91,12 +93,20 @@ const ROLE_LABELS: ReadonlyArray<{ role: WallpaperRole; label: string }> = [
   { role: "background", label: "background" },
 ];
 
-/** Apply-button labels per role, shown for a single pick. */
-const WALLPAPER_ROLE_ACTION: Record<WallpaperRole, string> = {
-  background: "Set as background",
-  cover: "Set as cover",
-  landscape: "Set as landscape",
+/**
+ * The row a tile was ticked in decides the slot it fills. The two vocabularies
+ * line up one-to-one, which is what let the "Apply as" picker go: asking again
+ * which slot the user meant, right after they picked from a row named after it,
+ * was a question with only one sensible answer.
+ */
+const WALLPAPER_ROLE_FOR_CATEGORY: Record<WallpaperCategory, WallpaperRole> = {
+  cover: "cover",
+  landscape: "landscape",
+  background: "background",
 };
+
+/** How long each background holds before the hero cross-fades to the next. */
+const HERO_SLIDE_MS = 7000;
 
 /** Confirmation toasts per role. */
 const WALLPAPER_ROLE_APPLIED: Record<WallpaperRole, string> = {
@@ -104,6 +114,19 @@ const WALLPAPER_ROLE_APPLIED: Record<WallpaperRole, string> = {
   cover: "Portrait cover updated.",
   landscape: "Landscape cover updated.",
 };
+
+/** The label and glyph each wallpaper row and its filter chip carry. */
+const WALLPAPER_CATEGORY_META: Record<
+  WallpaperCategory,
+  { label: string; icon: Parameters<typeof icon>[0] }
+> = {
+  cover: { label: "Cover", icon: "cover" },
+  landscape: { label: "Landscape cover", icon: "landscape" },
+  background: { label: "Background", icon: "background" },
+};
+
+/** Tiles a row shows before "Voir tout" expands it to everything it holds. */
+const WALLPAPER_ROW_TILES = 5;
 
 export interface GameDetailPageOptions {
   /** Routing stays owned by the application shell. */
@@ -118,6 +141,12 @@ export interface GameDetailPageOptions {
    * reflect the change.
    */
   onLibraryChanged?(): void;
+  /**
+   * Debug-only: when this returns true, a loaded game is overlaid with sample
+   * achievements, friends and activity for any section it ships empty. Wired to
+   * the Settings "Sample social data" toggle.
+   */
+  sampleSocialEnabled?(): boolean;
   client?: GameDetailPageClient;
 }
 
@@ -166,9 +195,13 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("cancel_game_media_download", { gameId }, signal);
     },
-    async searchWallpapers(source, query, offset, signal) {
-      if (!isTauriRuntime()) return createFallbackWallpaperSearch(source, query, offset);
-      return invokeWhileActive<WallpaperSearchView>("search_wallpapers", { source, query, offset }, signal);
+    async searchWallpapers(source, category, query, offset, signal) {
+      if (!isTauriRuntime()) return createFallbackWallpaperSearch(source, category, query, offset);
+      return invokeWhileActive<WallpaperSearchView>(
+        "search_wallpapers",
+        { source, category, query, offset },
+        signal,
+      );
     },
     async importWallpaper(gameId, candidateId, signal) {
       if (!isTauriRuntime()) return [createFallbackImportedWallpaper()];
@@ -272,9 +305,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   /** Slide ids ticked in the wallpaper grid; downloaded/applied together. */
   const wallpaperSelection = new Set<string>();
   /** Which card role a single ticked wallpaper is applied to. */
-  let wallpaperRole: WallpaperRole = "background";
   /** The hero media rail's current page (three tiles per page). */
-  let galleryPage = 0;
+  /** Index into the hero's auto-cycling backgrounds, and its timer. */
+  let heroSlide = 0;
+  let heroTimer: number | null = null;
 
   const isActive = (context = activation): context is PageActivation =>
     Boolean(context && context.isCurrent() && !context.signal.aborted);
@@ -310,7 +344,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     try {
       const payload = await client.getDetail(gameId, context.signal);
       if (!isFresh(context, gameId)) return;
-      dispatch({ type: "detail-loaded", requestId, detail: normaliseGameDetail(payload) });
+      let detail = normaliseGameDetail(payload);
+      // Debug overlay only: fills empty social sections when the Settings toggle
+      // is on, leaving anything the backend actually shipped untouched.
+      if (detail && options.sampleSocialEnabled?.()) detail = withSampleSocialData(detail);
+      dispatch({ type: "detail-loaded", requestId, detail });
     } catch (error) {
       if (!isFresh(context, gameId)) return;
       const message = requestErrorMessage(error, "This game could not be loaded right now.");
@@ -404,18 +442,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
   const openWallpaperSearch = (): void => {
     wallpaperSelection.clear();
-    wallpaperRole = "background";
     dispatch({ type: "wallpaper-search-opened" });
-    // Populate the grid straight away — the reference shows a full board on open,
-    // not an empty search form.
-    if (state.wallpaperSearch.candidates.length === 0) void handleWallpaperSearch();
+    // Every row is filled straight away, and each from its own scoped request:
+    // the three searches are fired together rather than chained, so a slow
+    // Cover fetch never holds up the Background row.
+    for (const category of WALLPAPER_CATEGORIES) {
+      const row = state.wallpaperSearch.categories[category];
+      if (!row.busy && row.candidates.length === 0) void handleWallpaperSearch(category);
+    }
     pageRoot?.querySelector<HTMLElement>("[data-focus-key='wallpaper-modal-close']")?.focus();
   };
 
   const closeWallpaperSearch = (): void => {
     wallpaperSelection.clear();
     dispatch({ type: "wallpaper-search-closed" });
-    pageRoot?.querySelector<HTMLElement>("[data-focus-key='wallpaper-search-toggle']")?.focus();
+    // The dialog is opened from the "…" menu now, so focus returns there.
+    pageRoot?.querySelector<HTMLElement>("[data-focus-key='more-actions']")?.focus();
   };
 
   /**
@@ -452,64 +494,110 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
   };
 
-  const handleWallpaperSearch = async (more = false): Promise<void> => {
+  /**
+   * Fills one row. The category travels all the way to the backend, so the
+   * response is already scoped to that shape; nothing is filtered client-side.
+   */
+  const handleWallpaperSearch = async (
+    category: WallpaperCategory,
+    more = false,
+  ): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
-    if (!isActive(context) || !gameId || state.wallpaperSearch.busy) return;
+    if (!isActive(context) || !gameId || state.wallpaperSearch.categories[category].busy) return;
     const source = state.wallpaperSearch.source;
     const query = state.wallpaperSearch.query.trim();
     if (!query) return;
-    dispatch({ type: "wallpaper-search-started", more });
-    const offset = state.wallpaperSearch.offset;
+    dispatch({ type: "wallpaper-search-started", category, more });
+    const offset = state.wallpaperSearch.categories[category].offset;
     try {
-      const results = await client.searchWallpapers(source, query, offset, context.signal);
+      const results = await client.searchWallpapers(source, category, query, offset, context.signal);
       if (!isFresh(context, gameId)) return;
-      dispatch({ type: "wallpaper-search-results", results: normaliseWallpaperSearch(results) });
+      dispatch({
+        type: "wallpaper-search-results",
+        category,
+        results: normaliseWallpaperSearch(results, category),
+      });
     } catch (error) {
       if (!isFresh(context, gameId)) return;
       dispatch({
         type: "wallpaper-search-failed",
+        category,
         message: requestErrorMessage(error, "That search did not finish. Try again."),
       });
     }
   };
 
   /**
-   * Applies the wallpaper grid's ticked tiles: every chosen search result is
-   * downloaded (so several can be saved in one go), and the first pick becomes
-   * the game's home (Library) background.
+   * Submitting the form refills every visible row: all three normally, or just
+   * the narrowed one while a chip (or "Voir tout") holds the focus.
+   */
+  /**
+   * Refills every row, focus or not. A new source or a new query invalidates
+   * all three, and `focus` only decides what is *shown* — a narrowed row is a
+   * view, not a fetch scope. Refilling just the focused one would leave the
+   * other two holding results for the previous query, or, after a source
+   * change wiped them, holding nothing at all with no request in flight.
+   */
+  const runWallpaperSearches = (): void => {
+    for (const category of WALLPAPER_CATEGORIES) {
+      void handleWallpaperSearch(category);
+    }
+  };
+
+  /** Chips and "Voir tout" share one state: narrowing to a row, or clearing it. */
+  const setWallpaperFocus = (focus: WallpaperCategory | null): void => {
+    dispatch({ type: "wallpaper-search-focus-changed", focus });
+    if (!focus) return;
+    // A row can be narrowed to before it ever ran (its own request failed to
+    // start, or the query only changed afterwards).
+    const row = state.wallpaperSearch.categories[focus];
+    if (!row.busy && row.phase === "idle" && row.candidates.length === 0) {
+      void handleWallpaperSearch(focus);
+    }
+  };
+
+  /**
+   * Applies the ticked tiles. Each one fills the card slot its row stands for,
+   * so ticking one tile per row sets cover, landscape and background in a
+   * single pass — which is why the dialog has no "Apply as" picker.
    */
   const handleApplySelection = async (): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId || state.mediaBusy) return;
-    const chosen = wallpaperSlides().filter((slide) => wallpaperSelection.has(slide.id));
+    const chosen = allWallpaperSlides().filter((slide) => wallpaperSelection.has(slide.id));
     if (chosen.length === 0) return;
     dispatch({ type: "media-busy-changed", busy: true });
     try {
-      // Download every chosen search result so several are saved in one go.
-      const savedIds: string[] = [];
+      // Download every chosen search result so several are saved in one go,
+      // keeping each saved id paired with the slot its row asked for.
+      const saved: Array<{ mediaId: string; role: WallpaperRole }> = [];
       for (const slide of chosen) {
+        const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
         if (slide.candidate) {
           const media = await client.importWallpaper(gameId, slide.id, context.signal);
           if (!isFresh(context, gameId)) return;
           const normalised = normaliseGameMedia(media);
           if (normalised.length > 0) dispatch({ type: "media-imported", media: normalised });
-          const saved = normalised.find((item) => item.selected) ?? normalised[normalised.length - 1];
-          if (saved) savedIds.push(saved.id);
+          const stored = normalised.find((item) => item.selected) ?? normalised[normalised.length - 1];
+          if (stored) saved.push({ mediaId: stored.id, role });
         } else {
-          savedIds.push(slide.id);
+          saved.push({ mediaId: slide.id, role });
         }
       }
-      // A single pick also becomes the home (Library) background; a multi-pick
-      // just adds them all to the game.
-      const homeMediaId = chosen.length === 1 ? savedIds[0] ?? null : null;
-      if (homeMediaId) {
-        const media = await client.selectMedia(gameId, homeMediaId, context.signal);
+      // The background pick (or a lone pick of any shape) is what the hero and
+      // the Library card paint, so that one is also the committed selection.
+      const home = saved.find((entry) => entry.role === "background") ?? saved[0];
+      if (home) {
+        const media = await client.selectMedia(gameId, home.mediaId, context.signal);
         if (!isFresh(context, gameId)) return;
         const committed = normaliseGameMedia(media);
         if (committed.length > 0) dispatch({ type: "media-committed", media: committed });
-        await client.setHomeImage(gameId, homeMediaId, wallpaperRole, context.signal);
+        for (const entry of saved) {
+          await client.setHomeImage(gameId, entry.mediaId, entry.role, context.signal);
+          if (!isFresh(context, gameId)) return;
+        }
       } else {
         dispatch({ type: "media-busy-changed", busy: false });
       }
@@ -519,8 +607,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       dispatch({ type: "wallpaper-search-closed" });
       showTransientStatus(
         chosen.length > 1
-          ? `${chosen.length} wallpapers added to this game.`
-          : WALLPAPER_ROLE_APPLIED[wallpaperRole],
+          ? `${chosen.length} wallpapers applied to this game.`
+          : WALLPAPER_ROLE_APPLIED[WALLPAPER_ROLE_FOR_CATEGORY[chosen[0].category]],
       );
     } catch (error) {
       if (!isFresh(context, gameId)) return;
@@ -637,24 +725,45 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     return button;
   };
 
-  /**
-   * Wraps the primary action so a launchable game gets the reference's split
-   * "Play ▾" control: the label commits, the chevron opens run options. The
-   * chevron is a visual affordance for now and never blocks the primary action.
-   */
-  const renderPrimaryActionGroup = (detail: GameDetailViewModel): HTMLElement => {
-    const action = renderPrimaryAction(detail);
-    const descriptor = resolvePrimaryAction(detail, state.gameId);
-    if (descriptor.kind !== "play") return action;
-    const group = element("div", "gd-play-split");
-    action.classList.add("gd-play-split__main");
-    const more = element("button", "gd-button gd-button--primary gd-play-split__more");
-    more.type = "button";
-    more.dataset.focusKey = "play-options";
-    more.setAttribute("aria-label", `Run options for ${detail.title}`);
-    more.append(iconElement("chevron-down"));
-    group.append(action, more);
-    return group;
+  /** The primary action is a single pill — the old split "Play ▾" chevron is gone. */
+  const renderPrimaryActionGroup = (detail: GameDetailViewModel): HTMLElement =>
+    renderPrimaryAction(detail);
+
+  /** Optimistic wishlist toggle; a failed save flips the button back. */
+  const handleWishlist = async (): Promise<void> => {
+    const context = activation;
+    const gameId = state.gameId;
+    const detail = state.detail;
+    if (!isActive(context) || !gameId || !detail) return;
+    const next = !detail.wishlisted;
+    dispatch({ type: "wishlist-changed", wishlisted: next });
+    try {
+      await client.setWishlist(gameId, next, context.signal);
+    } catch (error) {
+      if (!isFresh(context, gameId) || isUserCancellation(error)) return;
+      dispatch({ type: "wishlist-changed", wishlisted: !next });
+      showTransientStatus(requestErrorMessage(error, "The wishlist could not be updated."));
+    }
+  };
+
+  const renderWishlistButton = (detail: GameDetailViewModel): HTMLElement => {
+    const button = element("button", "gd-button gd-wishlist");
+    button.type = "button";
+    button.dataset.focusKey = "wishlist";
+    button.classList.toggle("gd-wishlist--active", detail.wishlisted);
+    button.setAttribute("aria-pressed", String(detail.wishlisted));
+    button.setAttribute(
+      "aria-label",
+      detail.wishlisted
+        ? `Remove ${detail.title} from your wishlist`
+        : `Add ${detail.title} to your wishlist`,
+    );
+    button.append(
+      iconElement("bookmark"),
+      element("span", "gd-button__label", detail.wishlisted ? "Wishlisted" : "Wishlist"),
+    );
+    button.addEventListener("click", () => void handleWishlist());
+    return button;
   };
 
   const closeMoreMenu = (button: HTMLElement, menu: HTMLElement): void => {
@@ -729,6 +838,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     };
 
     menu.append(
+      item("menu-wallpaper", "background", "Add wallpaper", openWallpaperSearch),
+      // "Search cover & images" is deliberately gone: it downloaded one picture
+      // and used it as cover, landscape and background at once, which is how
+      // games ended up wearing each other's art. "Reset the covers" refills the
+      // three roles from their own sources instead.
       item("menu-artwork", "refresh", "Reset the covers", () => void handleResetArtwork()),
       item("menu-remove", "close", "Remove from library", () => void handleRemoveGame(), true),
     );
@@ -777,100 +891,68 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const image = element("img", "gd-hero__image");
     image.decoding = "async";
     image.setAttribute("aria-hidden", "true");
-    attachImage(frame, image, heroImageUrl(state), "gd-hero__media--missing");
+    // A background the user is previewing or has applied wins outright; with
+    // none chosen, the hero cycles the game's backgrounds on its own.
+    attachImage(frame, image, heroSlideshowUrl() ?? heroImageUrl(state), "gd-hero__media--missing");
     frame.append(image);
     return frame;
   };
 
-  /** Media eligible for the hero rail: showcase art and trailers, in order. */
-  const galleryMedia = (): GameMediaView[] =>
-    state.media.filter((item) => item.kind === "video" || item.kind === "wallpaper");
+  /**
+   * The auto-cycling hero background. It only runs when the user has not
+   * singled one out — previewing or applying a wallpaper is an explicit choice,
+   * and rotating away from it a second later would undo their intent.
+   */
+  const heroSlideshowUrl = (): string | null => {
+    if (state.previewMediaId || state.appliedMediaId) return null;
+    const backgrounds = galleryMedia();
+    if (backgrounds.length < 2) return null;
+    const item = backgrounds[heroSlide % backgrounds.length];
+    return item?.previewUrl ?? item?.posterUrl ?? null;
+  };
 
-  /** The "Add wallpaper" tile that opens the wallpaper dialog. */
-  const renderGalleryAddTile = (detail: GameDetailViewModel): HTMLElement => {
-    const add = element("button", "gd-gallery__add");
-    add.type = "button";
-    add.dataset.focusKey = "wallpaper-search-toggle";
-    add.setAttribute("aria-haspopup", "dialog");
-    add.setAttribute("aria-label", `Add a wallpaper for ${detail.title}`);
-    add.append(iconElement("search"), element("span", "gd-gallery__add-label", "Add wallpaper"));
-    add.addEventListener("click", openWallpaperSearch);
-    return add;
+  const startHeroSlideshow = (): void => {
+    stopHeroSlideshow();
+    heroTimer = window.setInterval(() => {
+      // Re-render only while the slideshow is actually what paints the hero,
+      // so a chosen wallpaper never gets repainted underneath the user.
+      if (heroSlideshowUrl() === null) return;
+      heroSlide += 1;
+      render();
+    }, HERO_SLIDE_MS);
+  };
+
+  const stopHeroSlideshow = (): void => {
+    if (heroTimer !== null) {
+      window.clearInterval(heroTimer);
+      heroTimer = null;
+    }
   };
 
   /**
-   * The reference's vertical rail overlapping the hero's top-right: a
-   * "‹ Wallpaper ›" header with dot pagination, three media tiles per page (the
-   * selected one framed), then a dashed "Add wallpaper" tile. Tiles preview /
-   * choose the home background; the dialog owns full selection and search.
+   * The hero rail shows backgrounds only. It is the picker for the art painted
+   * behind the hero, so covers and trailers — which can never fill that slot —
+   * would only be noise to scroll past.
    */
-  const renderGalleryRail = (detail: GameDetailViewModel): HTMLElement => {
+  const galleryMedia = (): GameMediaView[] =>
+    state.media.filter((item) => item.kind === "wallpaper");
+
+  /**
+   * The vertical rail overlapping the hero's top-right: every saved background,
+   * scrolled rather than paged. Adding a wallpaper now lives in the "…" menu, so
+   * a game with no backgrounds yet has no rail at all.
+   */
+  const renderGalleryRail = (): HTMLElement | null => {
     const items = galleryMedia();
+    if (items.length === 0) return null;
+
     const rail = element("aside", "gd-gallery");
     rail.setAttribute("aria-label", "Wallpapers");
-
-    // No media yet: just the add-wallpaper affordance (a freshly imported local
-    // or Wine title can still gain the wallpaper the Library paints behind it).
-    if (items.length === 0) {
-      rail.classList.add("gd-gallery--empty");
-      rail.append(renderGalleryAddTile(detail));
-      return rail;
-    }
-
-    const PAGE = 3;
-    const pageCount = Math.max(1, Math.ceil(items.length / PAGE));
-    galleryPage = Math.min(Math.max(0, galleryPage), pageCount - 1);
-
-    const head = element("div", "gd-gallery__head");
-    const prev = element("button", "gd-gallery__nav");
-    prev.type = "button";
-    prev.dataset.focusKey = "gallery-prev";
-    prev.setAttribute("aria-label", "Previous wallpapers");
-    prev.disabled = galleryPage <= 0;
-    prev.append(iconElement("chevron-left"));
-    prev.addEventListener("click", () => {
-      galleryPage -= 1;
-      render();
-    });
-    const next = element("button", "gd-gallery__nav");
-    next.type = "button";
-    next.dataset.focusKey = "gallery-next";
-    next.setAttribute("aria-label", "More wallpapers");
-    next.disabled = galleryPage >= pageCount - 1;
-    next.append(iconElement("chevron-right"));
-    next.addEventListener("click", () => {
-      galleryPage += 1;
-      render();
-    });
-    head.append(prev, element("span", "gd-gallery__title", "Wallpaper"), next);
-    rail.append(head);
-
-    if (pageCount > 1) {
-      const dots = element("div", "gd-gallery__dots");
-      dots.setAttribute("aria-hidden", "true");
-      for (let page = 0; page < pageCount; page += 1) {
-        const dot = element("span", "gd-gallery__dot");
-        dot.classList.toggle("gd-gallery__dot--active", page === galleryPage);
-        dots.append(dot);
-      }
-      rail.append(dots);
-    }
-
-    // Three fixed slots so the rail keeps a steady shape, like the reference;
-    // short pages pad with empty plates.
-    const pageItems = items.slice(galleryPage * PAGE, galleryPage * PAGE + PAGE);
-    for (let slot = 0; slot < PAGE; slot += 1) {
-      const item = pageItems[slot];
-      if (item) {
-        rail.append(renderGalleryTile(item));
-      } else {
-        const empty = element("div", "gd-gallery__tile gd-gallery__tile--empty");
-        empty.setAttribute("aria-hidden", "true");
-        rail.append(empty);
-      }
-    }
-
-    rail.append(renderGalleryAddTile(detail));
+    const track = element("div", "gd-gallery__track");
+    track.setAttribute("role", "group");
+    track.setAttribute("aria-label", "Backgrounds");
+    for (const item of items) track.append(renderGalleryTile(item));
+    rail.append(track);
     return rail;
   };
 
@@ -907,22 +989,197 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     title: string;
     url: string;
     candidate: boolean;
+    /** The row it was ticked in, which is also the card slot it fills. */
+    category: WallpaperCategory;
   }
 
-  const wallpaperSlides = (): WallpaperSlide[] => [
-    ...state.wallpaperSearch.candidates.map((candidate) => ({
-      id: candidate.id,
-      title: candidate.title,
-      url: candidate.thumbnailUrl,
-      candidate: true,
-    })),
-    ...mediaForKind(state.media, "wallpaper").map((item) => ({
-      id: item.id,
-      title: item.title,
-      url: item.posterUrl ?? item.previewUrl,
-      candidate: false,
-    })),
-  ];
+  /** The candidates one row shows, in the order they were fetched. */
+  const categorySlides = (category: WallpaperCategory): WallpaperSlide[] => {
+    const slides: WallpaperSlide[] = state.wallpaperSearch.categories[category].candidates.map(
+      (candidate) => ({
+        id: candidate.id,
+        title: candidate.title,
+        url: candidate.thumbnailUrl,
+        candidate: true,
+        category,
+      }),
+    );
+    // Wallpapers already saved on this game are backgrounds — that is what the
+    // kind means — so they join the Background row and no other.
+    if (category === "background") {
+      for (const item of mediaForKind(state.media, "wallpaper")) {
+        slides.push({
+          id: item.id,
+          title: item.title,
+          url: item.posterUrl ?? item.previewUrl,
+          candidate: false,
+          category: "background",
+        });
+      }
+    }
+    return slides;
+  };
+
+  /** Every tile the dialog can show, used to resolve a ticked id back to it. */
+  const allWallpaperSlides = (): WallpaperSlide[] =>
+    WALLPAPER_CATEGORIES.flatMap((category) => categorySlides(category));
+
+  /** One tick-selectable wallpaper tile; its shape comes from its row. */
+  const renderWallpaperTile = (slide: WallpaperSlide): HTMLElement => {
+    const tile = element("button", "gd-wallgrid__tile");
+    tile.type = "button";
+    tile.dataset.focusKey = `wall-${slide.id}`;
+    const picked = wallpaperSelection.has(slide.id);
+    tile.classList.toggle("gd-wallgrid__tile--selected", picked);
+    tile.classList.toggle("gd-wallgrid__tile--current", slide.id === state.appliedMediaId);
+    tile.setAttribute("aria-pressed", String(picked));
+    tile.setAttribute("aria-label", slide.title);
+    const image = element("img", "gd-wallgrid__image");
+    image.loading = "lazy";
+    image.decoding = "async";
+    attachImage(tile, image, slide.url, "gd-wallgrid__tile--missing");
+    const check = element("span", "gd-wallgrid__check");
+    check.setAttribute("aria-hidden", "true");
+    check.append(iconElement("check"));
+    tile.append(image, check);
+    tile.addEventListener("click", () => {
+      if (wallpaperSelection.has(slide.id)) wallpaperSelection.delete(slide.id);
+      else wallpaperSelection.add(slide.id);
+      render();
+    });
+    return tile;
+  };
+
+  /**
+   * A row's own busy / empty / error / not-configured line. It lives inside the
+   * row so one failing category never blanks the two beside it.
+   */
+  const renderWallpaperRowStatus = (
+    category: WallpaperCategory,
+    tiles: number,
+  ): HTMLElement | null => {
+    const row = state.wallpaperSearch.categories[category];
+    if (row.busy) {
+      const busy = element("p", "gd-wallrow__status gd-search__status", "Searching…");
+      busy.setAttribute("role", "status");
+      return busy;
+    }
+    if (row.phase === "not-configured") {
+      return element(
+        "p",
+        "gd-wallrow__status gd-search__notice",
+        row.message || "This source is not configured yet. Add the required keys and try again.",
+      );
+    }
+    if (row.phase === "error") {
+      const error = element(
+        "p",
+        "gd-wallrow__status gd-search__notice gd-search__notice--error",
+        row.message || "That search did not finish. Try again.",
+      );
+      error.setAttribute("role", "alert");
+      return error;
+    }
+    if (row.phase === "ready" && tiles === 0) {
+      return element(
+        "p",
+        "gd-wallrow__status gd-search__notice",
+        `Nothing matched for ${WALLPAPER_CATEGORY_META[category].label.toLowerCase()}. Try another query.`,
+      );
+    }
+    return null;
+  };
+
+  /** The three pill filters. The lit one narrows the dialog to its row. */
+  const renderWallpaperChips = (focus: WallpaperCategory | null): HTMLElement => {
+    const chips = element("div", "gd-chips");
+    chips.setAttribute("role", "group");
+    chips.setAttribute("aria-label", "Filter wallpapers by shape");
+    for (const category of WALLPAPER_CATEGORIES) {
+      const meta = WALLPAPER_CATEGORY_META[category];
+      const active = focus === category;
+      const chip = element("button", "gd-chip");
+      chip.type = "button";
+      chip.dataset.focusKey = `wallpaper-chip-${category}`;
+      chip.dataset.category = category;
+      chip.classList.toggle("gd-chip--active", active);
+      chip.setAttribute("aria-pressed", String(active));
+      const check = element("span", "gd-chip__check");
+      check.setAttribute("aria-hidden", "true");
+      check.append(iconElement("check"));
+      chip.append(
+        iconElement(meta.icon, "gd-chip__icon"),
+        element("span", "gd-chip__label", meta.label),
+        check,
+      );
+      // Clicking the lit chip clears the filter and brings all three rows back.
+      chip.addEventListener("click", () => setWallpaperFocus(active ? null : category));
+      chips.append(chip);
+    }
+    return chips;
+  };
+
+  /**
+   * One category section: a titled header with a "Voir tout" link, then its own
+   * tiles at that category's aspect ratio (portrait for Cover, 16:9 otherwise).
+   * Narrowed to a single row, the grid keeps its columns and simply wraps.
+   */
+  const renderWallpaperRow = (
+    category: WallpaperCategory,
+    focus: WallpaperCategory | null,
+  ): HTMLElement => {
+    const meta = WALLPAPER_CATEGORY_META[category];
+    const row = state.wallpaperSearch.categories[category];
+    const expanded = focus === category;
+    const slides = categorySlides(category);
+    const shown = expanded ? slides : slides.slice(0, WALLPAPER_ROW_TILES);
+
+    const section = element("section", "gd-wallrow");
+    section.dataset.category = category;
+    section.classList.toggle("gd-wallrow--expanded", expanded);
+
+    const header = element("div", "gd-wallrow__header");
+    const title = element("h3", "gd-wallrow__title", meta.label);
+    title.id = `gd-wallrow-${category}`;
+    const seeAll = element("button", "gd-wallrow__seeall");
+    seeAll.type = "button";
+    seeAll.dataset.focusKey = `wallpaper-seeall-${category}`;
+    seeAll.append(
+      element("span", "gd-wallrow__seeall-label", expanded ? "Voir moins" : "Voir tout"),
+      iconElement(expanded ? "arrow-left" : "arrow-right"),
+    );
+    seeAll.addEventListener("click", () => setWallpaperFocus(expanded ? null : category));
+    header.append(iconElement(meta.icon, "gd-wallrow__icon"), title, seeAll);
+    section.append(header);
+
+    const grid = element("div", "gd-wallgrid");
+    grid.dataset.category = category;
+    grid.setAttribute("role", "group");
+    grid.setAttribute("aria-labelledby", title.id);
+    for (const slide of shown) grid.append(renderWallpaperTile(slide));
+    // Empty slots keep the row at its full width while it loads or comes back
+    // empty, so the dialog never jumps as the three requests land.
+    for (let slot = shown.length; slot < WALLPAPER_ROW_TILES; slot += 1) {
+      const ghost = element("div", "gd-wallgrid__ghost");
+      ghost.setAttribute("aria-hidden", "true");
+      grid.append(ghost);
+    }
+    section.append(grid);
+
+    const status = renderWallpaperRowStatus(category, shown.length);
+    if (status) section.append(status);
+
+    // Paging only makes sense once a row owns the dialog: an unexpanded row
+    // shows five tiles however many it holds.
+    if (expanded && row.phase === "ready" && row.hasMore && !row.busy) {
+      const more = element("button", "gd-button gd-button--ghost gd-search__more", "Search more");
+      more.type = "button";
+      more.dataset.focusKey = "wallpaper-search-more";
+      more.addEventListener("click", () => void handleWallpaperSearch(category, true));
+      section.append(more);
+    }
+    return section;
+  };
 
   const renderWallpaperModal = (): HTMLElement | null => {
     const search = state.wallpaperSearch;
@@ -935,12 +1192,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const backdrop = element("div", "gd-modal__backdrop");
     backdrop.addEventListener("click", closeWallpaperSearch);
 
-    const dialog = element("div", "gd-modal__dialog gd-modal__dialog--grid");
+    const dialog = element("div", "gd-modal__dialog gd-modal__dialog--wallpapers");
     const header = element("header", "gd-modal__header");
     const heading = element("div", "gd-modal__heading");
+    const brand = element("span", "gd-modal__brand");
+    brand.setAttribute("aria-hidden", "true");
+    brand.innerHTML = icon("orivo");
     const title = element("h2", "gd-modal__title", "Wallpapers");
     title.id = "gd-wallpaper-title";
-    heading.append(title);
+    heading.append(brand, title);
     const close = element("button", "gd-modal__close");
     close.type = "button";
     close.dataset.focusKey = "wallpaper-modal-close";
@@ -949,15 +1209,6 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     close.addEventListener("click", closeWallpaperSearch);
     header.append(heading, close);
     dialog.append(header);
-
-    dialog.append(element("h3", "gd-modal__subtitle", "Choose your vibe"));
-    dialog.append(
-      element(
-        "p",
-        "gd-modal__hint",
-        "Pick one to set your home background, or tick several to save them all at once.",
-      ),
-    );
 
     const form = element("form", "gd-search__form");
     form.setAttribute("role", "search");
@@ -981,9 +1232,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       source.append(entry);
     }
     source.value = search.source;
-    source.addEventListener("change", () =>
-      dispatch({ type: "wallpaper-search-source-changed", source: source.value as WallpaperSource }),
-    );
+    source.addEventListener("change", () => {
+      dispatch({ type: "wallpaper-search-source-changed", source: source.value as WallpaperSource });
+      // Every row held art from the old source, so all of them refill.
+      runWallpaperSearches();
+    });
 
     const input = element("input", "gd-search__input") as HTMLInputElement;
     input.type = "text";
@@ -995,72 +1248,32 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       dispatch({ type: "wallpaper-search-query-changed", query: input.value }, false),
     );
 
+    const anyRowBusy = WALLPAPER_CATEGORIES.some(
+      (category) => search.categories[category].busy,
+    );
     const submit = element("button", "gd-button gd-button--primary gd-search__submit", "Search");
     submit.type = "submit";
     submit.dataset.focusKey = "wallpaper-search-button";
-    submit.disabled = search.busy || !search.query.trim();
+    submit.disabled = anyRowBusy || !search.query.trim();
     submit.prepend(iconElement("search"));
 
     form.append(source, input, submit);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      void handleWallpaperSearch();
+      runWallpaperSearches();
     });
     dialog.append(form);
 
-    // A tick-selectable grid: several picks download together, and the first
-    // one becomes the home background.
-    const slides = wallpaperSlides();
-    const grid = element("div", "gd-wallgrid");
-    grid.setAttribute("role", "group");
-    grid.setAttribute("aria-label", "Wallpapers");
-    for (const slide of slides) {
-      const tile = element("button", "gd-wallgrid__tile");
-      tile.type = "button";
-      tile.dataset.focusKey = `wall-${slide.id}`;
-      const picked = wallpaperSelection.has(slide.id);
-      tile.classList.toggle("gd-wallgrid__tile--selected", picked);
-      tile.classList.toggle("gd-wallgrid__tile--current", slide.id === state.appliedMediaId);
-      tile.setAttribute("aria-pressed", String(picked));
-      tile.setAttribute("aria-label", slide.title);
-      const image = element("img", "gd-wallgrid__image");
-      image.loading = "lazy";
-      image.decoding = "async";
-      attachImage(tile, image, slide.url, "gd-wallgrid__tile--missing");
-      const check = element("span", "gd-wallgrid__check");
-      check.setAttribute("aria-hidden", "true");
-      check.append(iconElement("check"));
-      tile.append(image, check);
-      tile.addEventListener("click", () => {
-        if (wallpaperSelection.has(slide.id)) wallpaperSelection.delete(slide.id);
-        else wallpaperSelection.add(slide.id);
-        render();
-      });
-      grid.append(tile);
-    }
-    dialog.append(grid);
+    dialog.append(renderWallpaperChips(search.focus));
 
-    if (search.busy) {
-      const busy = element("p", "gd-search__status", "Searching…");
-      busy.setAttribute("role", "status");
-      dialog.append(busy);
-    } else if (search.phase === "not-configured") {
-      dialog.append(
-        element(
-          "p",
-          "gd-search__notice",
-          search.message || "This source is not configured yet. Add the required keys and try again.",
-        ),
-      );
-    } else if (search.phase === "error") {
-      const error = element("p", "gd-search__notice gd-search__notice--error", search.message);
-      error.setAttribute("role", "alert");
-      dialog.append(error);
-    } else if (search.phase === "ready" && slides.length === 0) {
-      dialog.append(
-        element("p", "gd-search__notice", "No wallpapers matched that search. Try another query."),
-      );
+    // One row per shape, each fed by its own scoped request. A chip (or "Voir
+    // tout") narrows the dialog to a single row, which then wraps.
+    const rows = element("div", "gd-wallrows");
+    for (const category of WALLPAPER_CATEGORIES) {
+      if (search.focus && search.focus !== category) continue;
+      rows.append(renderWallpaperRow(category, search.focus));
     }
+    dialog.append(rows);
 
     if (state.mediaBusy) {
       const busy = element("p", "gd-search__status", "Saving wallpapers…");
@@ -1076,41 +1289,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
     const picks = wallpaperSelection.size;
 
-    // A single pick can target a specific card role; multi-pick just downloads.
-    if (picks === 1) {
-      const roles = element("div", "gd-roles");
-      roles.setAttribute("role", "group");
-      roles.setAttribute("aria-label", "Apply the wallpaper as");
-      roles.append(element("span", "gd-roles__label", "Apply as"));
-      for (const role of WALLPAPER_ROLES) {
-        const button = element("button", "gd-roles__button");
-        button.type = "button";
-        button.dataset.focusKey = `wallpaper-role-${role.id}`;
-        const active = wallpaperRole === role.id;
-        button.classList.toggle("gd-roles__button--active", active);
-        button.setAttribute("aria-pressed", String(active));
-        button.textContent = role.label;
-        button.addEventListener("click", () => {
-          wallpaperRole = role.id;
-          render();
-        });
-        roles.append(button);
-      }
-      dialog.append(roles);
-    }
-
+    // No "Apply as" picker: the row a tile was ticked in already says which
+    // slot it fills, so one pick per row applies all three in a single go.
     const actions = element("div", "gd-modal__actions");
-    if (search.phase === "ready" && search.hasMore && !search.busy) {
-      const more = element("button", "gd-button gd-button--ghost gd-search__more", "Search more");
-      more.type = "button";
-      more.dataset.focusKey = "wallpaper-search-more";
-      more.addEventListener("click", () => void handleWallpaperSearch(true));
-      actions.append(more);
-    }
     const apply = element(
       "button",
       "gd-button gd-button--primary gd-modal__use",
-      picks > 1 ? `Add ${picks} wallpapers` : picks === 1 ? WALLPAPER_ROLE_ACTION[wallpaperRole] : "Apply wallpaper",
+      picks > 1 ? `Apply ${picks} wallpapers` : picks === 1 ? "Apply wallpaper" : "Apply wallpaper",
     );
     apply.type = "button";
     apply.dataset.focusKey = "wallpaper-apply";
@@ -1170,11 +1355,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     // The back control and media rail float over the art, matching the
     // reference; the copy column is inset to the shared left margin.
     hero.append(renderBackButton());
-    hero.append(renderGalleryRail(detail));
+    const rail = renderGalleryRail();
+    if (rail) hero.append(rail);
     const copy = element("div", "gd-hero__copy");
     const title = element("h1", "gd-hero__title", detail.title);
     title.id = "gd-hero-title";
     copy.append(title);
+    // The approved design's meta row starts straight at the developer name —
+    // no source logo in front of it.
     const subline = element("div", "gd-hero__subline");
     subline.append(renderSourceBadge(detail));
     const metaFacts = buildMetaFacts(detail);
@@ -1184,7 +1372,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       copy.append(element("p", "gd-hero__summary", detail.shortDescription));
     }
     const actions = element("div", "gd-hero__actions");
-    actions.append(renderPrimaryActionGroup(detail), renderMoreButton(detail));
+    actions.append(renderPrimaryActionGroup(detail), renderWishlistButton(detail), renderMoreButton(detail));
     copy.append(actions);
     const stats = buildStatFacts(detail);
     if (stats.length > 0) copy.append(renderFactList("gd-stats", stats, false));
@@ -1401,13 +1589,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     fragment.append(renderHero(detail));
     const panels = element("div", "gd-panels");
     if (shouldRenderSection(detail, "about")) panels.append(renderAbout(detail));
-    // Game info / Features / Achievements share one raised card, as in the
-    // reference; About stays flat beside it.
-    const infocard = element("div", "gd-infocard");
-    if (shouldRenderSection(detail, "info")) infocard.append(renderGameInfo(detail));
-    if (shouldRenderSection(detail, "features")) infocard.append(renderFeatures(detail));
-    if (shouldRenderSection(detail, "achievements")) infocard.append(renderAchievements(detail));
-    if (infocard.childElementCount > 0) panels.append(infocard);
+    // The design's raised zone is two glass cards: Game info + Features share
+    // one (split by a hairline), Achievements stands in its own.
+    const facts = element("div", "gd-infocard gd-infocard--facts");
+    if (shouldRenderSection(detail, "info")) facts.append(renderGameInfo(detail));
+    if (shouldRenderSection(detail, "features")) facts.append(renderFeatures(detail));
+    if (facts.childElementCount > 0) panels.append(facts);
+    const trophies = element("div", "gd-infocard gd-infocard--achievements");
+    if (shouldRenderSection(detail, "achievements")) trophies.append(renderAchievements(detail));
+    if (trophies.childElementCount > 0) panels.append(trophies);
     if (panels.childElementCount > 0) fragment.append(panels);
     const social = element("div", "gd-social");
     if (shouldRenderSection(detail, "friends")) social.append(renderFriends(detail));
@@ -1519,7 +1709,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     activate(context) {
       activation = context;
       if (context.route.page !== "game") return;
-      galleryPage = 0;
+      heroSlide = 0;
+      startHeroSlideshow();
       const gameId = context.route.gameId;
       dispatch({
         type: "activate",
@@ -1538,6 +1729,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     deactivate() {
       if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
+      stopHeroSlideshow();
       moreMenuCleanup?.();
       moreMenuCleanup = null;
       const restoreState = toGameDetailRestoreState(state, readScrollTop(), currentFocusKey());

@@ -285,22 +285,6 @@ describe("application shell", () => {
     expect(detail.routes.at(-1)?.page).toBe("game");
   });
 
-  it("shows a Most Played rail sorted by play time, capped at eight cards", () => {
-    const rail = root.querySelector<HTMLElement>(".most-played")!;
-    expect(rail.hidden).toBe(false);
-
-    const ids = Array.from(rail.querySelectorAll<HTMLElement>(".game-card")).map(
-      (card) => card.dataset.gameId,
-    );
-    expect(ids.length).toBeLessThanOrEqual(8);
-    // The fallback library's biggest play times, in descending order.
-    expect(ids.slice(0, 3)).toEqual([
-      "showcase-the-witcher-3",
-      "showcase-elden-ring",
-      "showcase-god-of-war",
-    ]);
-  });
-
   it("lists connected sources and one add-source entry in the library menu", () => {
     root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
     const menu = root.querySelector<HTMLElement>("#library-source-menu")!;

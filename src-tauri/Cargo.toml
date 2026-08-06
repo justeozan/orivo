@@ -15,6 +15,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 futures-util = "0.3"
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 flate2 = "1"
 keyring = "4.1.5"
 libc = "0.2"
@@ -34,6 +35,9 @@ wasmtime = { version = "=44.0.0", default-features = false, features = ["compone
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 wit-parser = "=0.246.2"

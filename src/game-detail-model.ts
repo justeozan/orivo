@@ -8,10 +8,12 @@ import type {
   PageRestoreState,
   StoreOffer,
   WallpaperCandidateView,
+  WallpaperCategory,
   WallpaperSearchPhase,
   WallpaperSearchView,
   WallpaperSource,
 } from "./contracts";
+import { WALLPAPER_CATEGORIES } from "./contracts";
 import type { IconName } from "./icons";
 
 /* -------------------------------------------------------------------------- */
@@ -59,23 +61,75 @@ export interface GameDetailSocialExtras {
 }
 
 /**
- * Wallpaper search. `phase` is `"idle"` until the first search runs, then it
- * mirrors the backend's `ready | not-configured | error` phases.
+ * One category row's own results. `phase` is `"idle"` until that row's first
+ * search runs, then it mirrors the backend's `ready | not-configured | error`
+ * phases. Each row searches, pages and fails independently, so an empty Cover
+ * row never blanks the Background row beside it.
+ */
+export interface WallpaperCategoryState {
+  phase: "idle" | WallpaperSearchPhase;
+  message: string;
+  candidates: WallpaperCandidateView[];
+  busy: boolean;
+  /** Offset the last search started from; also the next "search more" offset. */
+  offset: number;
+  /** Whether another "search more" could still yield new candidates. */
+  hasMore: boolean;
+}
+
+/**
+ * Wallpaper search, split by the shape of artwork each row wants. The dialog
+ * shows one row per category and fills each from its own scoped request, which
+ * is what keeps a 16:9 screenshot out of the portrait Cover row.
  */
 export interface WallpaperSearchState {
   open: boolean;
   source: WallpaperSource;
   query: string;
-  phase: "idle" | WallpaperSearchPhase;
-  message: string;
-  candidates: WallpaperCandidateView[];
-  busy: boolean;
+  /**
+   * The row the user has narrowed to via the chips, or `null` for all three.
+   * "Voir tout" sets this, so expanding a row and filtering to it are the
+   * same state — one concept, not two.
+   */
+  focus: WallpaperCategory | null;
+  categories: Record<WallpaperCategory, WallpaperCategoryState>;
   /** The slide currently shown in the dialog: a candidate id or a media id. */
   activeId: string | null;
-  /** Offset the last search started from; also the next "search more" offset. */
-  offset: number;
-  /** Whether another "search more" could still yield new candidates. */
-  hasMore: boolean;
+}
+
+export function createWallpaperCategoryState(): WallpaperCategoryState {
+  return {
+    phase: "idle",
+    message: "",
+    candidates: [],
+    busy: false,
+    offset: 0,
+    hasMore: false,
+  };
+}
+
+function createWallpaperCategories(): Record<WallpaperCategory, WallpaperCategoryState> {
+  return {
+    cover: createWallpaperCategoryState(),
+    landscape: createWallpaperCategoryState(),
+    background: createWallpaperCategoryState(),
+  };
+}
+
+/** Replaces one row, leaving the other two identical by reference. */
+function updateWallpaperCategory(
+  search: WallpaperSearchState,
+  category: WallpaperCategory,
+  row: WallpaperCategoryState,
+): WallpaperSearchState {
+  return { ...search, categories: { ...search.categories, [category]: row } };
+}
+
+/** Every candidate the dialog currently holds, in row order. */
+export function allWallpaperCandidates(
+  search: WallpaperSearchState,
+): WallpaperCandidateView[] {
+  return WALLPAPER_CATEGORIES.flatMap((category) => search.categories[category].candidates);
 }
 
 export type GameDetailViewModel = GameDetailView & GameDetailSocialExtras;
@@ -122,9 +176,10 @@ export type GameDetailPageAction =
   | { type: "wallpaper-search-closed" }
   | { type: "wallpaper-search-source-changed"; source: WallpaperSource }
   | { type: "wallpaper-search-query-changed"; query: string }
-  | { type: "wallpaper-search-started"; more?: boolean }
-  | { type: "wallpaper-search-results"; results: WallpaperSearchView }
-  | { type: "wallpaper-search-failed"; message: string }
+  | { type: "wallpaper-search-focus-changed"; focus: WallpaperCategory | null }
+  | { type: "wallpaper-search-started"; category: WallpaperCategory; more?: boolean }
+  | { type: "wallpaper-search-results"; category: WallpaperCategory; results: WallpaperSearchView }
+  | { type: "wallpaper-search-failed"; category: WallpaperCategory; message: string }
   | { type: "wallpaper-slide-changed"; slideId: string | null }
   | { type: "wishlist-changed"; wishlisted: boolean }
   | { type: "about-toggled" }
@@ -269,7 +324,17 @@ export function normaliseGameMedia(value: unknown): GameMediaView[] {
   return media;
 }
 
-function normaliseWallpaperCandidates(value: unknown): WallpaperCandidateView[] {
+function normaliseWallpaperCategory(
+  value: unknown,
+  fallback: WallpaperCategory,
+): WallpaperCategory {
+  return oneOf(value, WALLPAPER_CATEGORIES, fallback);
+}
+
+function normaliseWallpaperCandidates(
+  value: unknown,
+  category: WallpaperCategory,
+): WallpaperCandidateView[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
   const candidates: WallpaperCandidateView[] = [];
@@ -279,15 +344,33 @@ function normaliseWallpaperCandidates(value: unknown): WallpaperCandidateView[] 
     const thumbnailUrl = text(entry.thumbnailUrl);
     if (!id || !thumbnailUrl || seen.has(id)) continue;
     seen.add(id);
-    candidates.push({ id, title: text(entry.title, "Wallpaper"), thumbnailUrl });
+    candidates.push({
+      id,
+      title: text(entry.title, "Wallpaper"),
+      thumbnailUrl,
+      // A candidate inherits the row it was fetched for unless it says
+      // otherwise, so a backend that omits the field still lands correctly.
+      category: normaliseWallpaperCategory(entry.category, category),
+    });
   }
   return candidates;
 }
 
-export function normaliseWallpaperSearch(value: unknown): WallpaperSearchView {
+export function normaliseWallpaperSearch(
+  value: unknown,
+  category: WallpaperCategory = "background",
+): WallpaperSearchView {
   if (!isRecord(value)) {
-    return { phase: "error", source: "steam-store", query: "", message: "", candidates: [] };
+    return {
+      phase: "error",
+      source: "steam-store",
+      category,
+      query: "",
+      message: "",
+      candidates: [],
+    };
   }
+  const resolved = normaliseWallpaperCategory(value.category, category);
   return {
     phase: oneOf(value.phase, ["ready", "not-configured", "error"] as const, "error"),
     source: oneOf(
@@ -295,9 +378,10 @@ export function normaliseWallpaperSearch(value: unknown): WallpaperSearchView {
       ["steam-store", "wikimedia", "openverse", "igdb", "google-images"] as const,
       "steam-store",
     ),
+    category: resolved,
     query: text(value.query),
     message: text(value.message),
-    candidates: normaliseWallpaperCandidates(value.candidates),
+    candidates: normaliseWallpaperCandidates(value.candidates, resolved),
   };
 }
 
@@ -939,13 +1023,9 @@ export function createInitialGameDetailState(): GameDetailPageState {
       open: false,
       source: "steam-store",
       query: "",
-      phase: "idle",
-      message: "",
-      candidates: [],
-      busy: false,
+      focus: null,
+      categories: createWallpaperCategories(),
       activeId: null,
-      offset: 0,
-      hasMore: false,
     },
     aboutExpanded: false,
     statusMessage: "",
@@ -1110,7 +1190,6 @@ export function reduceGameDetailState(
           // A fresh session starts on the game title, but never clobbers what
           // the user already typed.
           query: state.wallpaperSearch.query || state.detail?.title || "",
-          message: "",
           // Open on the wallpaper being previewed (the most recent intent),
           // else the last slide the user was on, else the first wallpaper.
           activeId:
@@ -1121,65 +1200,83 @@ export function reduceGameDetailState(
         },
       };
     }
+    // `busy` deliberately survives a close: the request is genuinely still in
+    // flight, and its result still lands in the row. Clearing it here would let
+    // a reopen fire a second request for the same row, which then merges as a
+    // "search more" page and duplicates every tile — two tiles sharing one id,
+    // so ticking either lights up both.
     case "wallpaper-search-closed":
-      return {
-        ...state,
-        wallpaperSearch: { ...state.wallpaperSearch, open: false, busy: false },
-      };
+      return { ...state, wallpaperSearch: { ...state.wallpaperSearch, open: false } };
     case "wallpaper-search-source-changed":
+      // A different source has different artwork, so every row's results are
+      // stale the moment the source changes.
       return state.wallpaperSearch.source === action.source
         ? state
-        : { ...state, wallpaperSearch: { ...state.wallpaperSearch, source: action.source } };
+        : {
+            ...state,
+            wallpaperSearch: {
+              ...state.wallpaperSearch,
+              source: action.source,
+              categories: createWallpaperCategories(),
+            },
+          };
     case "wallpaper-search-query-changed":
       return { ...state, wallpaperSearch: { ...state.wallpaperSearch, query: action.query } };
+    case "wallpaper-search-focus-changed":
+      return state.wallpaperSearch.focus === action.focus
+        ? state
+        : { ...state, wallpaperSearch: { ...state.wallpaperSearch, focus: action.focus } };
     case "wallpaper-search-started": {
+      const row = state.wallpaperSearch.categories[action.category];
       // A fresh search restarts at zero; "search more" keeps the page offset.
-      const offset = action.more ? state.wallpaperSearch.offset : 0;
       return {
         ...state,
-        wallpaperSearch: {
-          ...state.wallpaperSearch,
+        wallpaperSearch: updateWallpaperCategory(state.wallpaperSearch, action.category, {
+          ...row,
           busy: true,
           phase: "idle",
           message: "",
-          offset,
-        },
+          offset: action.more ? row.offset : 0,
+          candidates: action.more ? row.candidates : [],
+        }),
       };
     }
     case "wallpaper-search-results": {
+      const row = state.wallpaperSearch.categories[action.category];
       // A "search more" search starts at a non-zero offset; a fresh search at
       // zero, so the two merge differently.
-      const more = state.wallpaperSearch.offset > 0;
+      const more = row.offset > 0;
       const incoming = action.results.candidates;
-      const candidates = more ? [...state.wallpaperSearch.candidates, ...incoming] : incoming;
+      const candidates = more ? [...row.candidates, ...incoming] : incoming;
       return {
         ...state,
         wallpaperSearch: {
-          ...state.wallpaperSearch,
-          busy: false,
-          phase: action.results.phase,
-          source: action.results.source,
+          ...updateWallpaperCategory(state.wallpaperSearch, action.category, {
+            ...row,
+            busy: false,
+            phase: action.results.phase,
+            message: action.results.message,
+            candidates,
+            hasMore: incoming.length > 0,
+            offset: row.offset + incoming.length,
+          }),
           query: action.results.query,
-          message: action.results.message,
-          candidates,
-          hasMore: incoming.length > 0,
-          offset: state.wallpaperSearch.offset + incoming.length,
-          activeId: more
-            ? state.wallpaperSearch.activeId
-            : candidates[0]?.id ?? state.wallpaperSearch.activeId,
+          activeId: state.wallpaperSearch.activeId ?? candidates[0]?.id ?? null,
         },
       };
     }
-    case "wallpaper-search-failed":
+    case "wallpaper-search-failed": {
+      const row = state.wallpaperSearch.categories[action.category];
       return {
         ...state,
-        wallpaperSearch: {
-          ...state.wallpaperSearch,
+        wallpaperSearch: updateWallpaperCategory(state.wallpaperSearch, action.category, {
+          ...row,
           busy: false,
           phase: "error",
           message: action.message,
-        },
+        }),
       };
+    }
     case "wallpaper-slide-changed":
       return {
         ...state,
@@ -1328,31 +1425,59 @@ function fallbackRelated(
  * Used only outside the Tauri runtime so `pnpm dev` renders something real.
  * It never reaches production because `isTauriRuntime()` gates it.
  */
+/**
+ * The browser fallback, one deterministic page per category. The bundled mock
+ * art is already filed by shape — `covers/` is portrait, `landscapes/` and
+ * `heroes/` are wide — so the three rows render at their real proportions
+ * without a backend.
+ */
 export function createFallbackWallpaperSearch(
   source: WallpaperSource,
+  category: WallpaperCategory,
   query: string,
   offset = 0,
 ): WallpaperSearchView {
-  const stems = [
-    ["candidate-fallback-1", "Key art", "/media/igdb/heroes/elden-ring-wallpaper.png"],
-    ["candidate-fallback-2", "Landscape", "/media/igdb/landscapes/elden-ring.jpg"],
-    ["candidate-fallback-3", "Wide art", "/media/igdb/landscapes/cyberpunk-2077.webp"],
-    ["candidate-fallback-4", "Horizon", "/media/igdb/landscapes/horizon-forbidden-west.jpg"],
-    ["candidate-fallback-5", "Night city", "/media/igdb/landscapes/cyberpunk-2077.webp"],
-    ["candidate-fallback-6", "Redwood", "/media/igdb/landscapes/horizon-forbidden-west.jpg"],
-  ];
+  const stems: Record<WallpaperCategory, ReadonlyArray<readonly [string, string]>> = {
+    cover: [
+      ["Elden Ring", "/media/igdb/covers/elden-ring.jpg"],
+      ["Baldur's Gate 3", "/media/igdb/covers/baldurs-gate-3.jpg"],
+      ["Red Dead Redemption 2", "/media/igdb/covers/red-dead-redemption-2.jpg"],
+      ["The Witcher 3", "/media/igdb/covers/the-witcher-3-wild-hunt.jpg"],
+      ["God of War", "/media/igdb/covers/god-of-war.jpg"],
+      ["Hades II", "/media/igdb/covers/hades-2.jpg"],
+    ],
+    landscape: [
+      ["Elden Ring", "/media/igdb/landscapes/elden-ring.jpg"],
+      ["Cyberpunk 2077", "/media/igdb/landscapes/cyberpunk-2077.webp"],
+      ["Horizon Forbidden West", "/media/igdb/landscapes/horizon-forbidden-west.jpg"],
+      ["God of War", "/media/igdb/landscapes/god-of-war.jpg"],
+      ["Baldur's Gate 3", "/media/igdb/landscapes/baldurs-gate-3.jpg"],
+      ["Unrailed!", "/media/igdb/landscapes/unrailed.jpg"],
+    ],
+    background: [
+      ["Elden Ring", "/media/igdb/heroes/elden-ring-wallpaper.png"],
+      ["Cyberpunk 2077", "/media/igdb/heroes/cyberpunk-2077.webp"],
+      ["Horizon Forbidden West", "/media/igdb/heroes/horizon-forbidden-west.jpg"],
+      ["Red Dead Redemption 2", "/media/igdb/heroes/red-dead-redemption-2.jpg"],
+      ["The Witcher 3", "/media/igdb/heroes/the-witcher-3-wild-hunt.jpg"],
+      ["Hades II", "/media/igdb/heroes/hades-2.jpg"],
+    ],
+  };
   return {
     phase: "ready",
     source,
+    category,
     query,
     message: "",
-    // A small deterministic page so "search more" can be exercised in the
-    // browser: 4 results, then 2, then none.
-    candidates: stems.slice(offset, offset + 4).map(([id, title, thumbnailUrl]) => ({
-      id,
-      title,
-      thumbnailUrl,
-    })),
+    // 5 results, then 1, then none — enough to exercise "Voir tout".
+    candidates: stems[category]
+      .slice(offset, offset + 5)
+      .map(([title, thumbnailUrl], index) => ({
+        id: `candidate-${category}-${offset + index + 1}`,
+        title,
+        thumbnailUrl,
+        category,
+      })),
   };
 }
 
@@ -1478,4 +1603,20 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     ],
     primaryAction: "play",
   };
+}
+
+/**
+ * Debug overlay: grafts the fallback's achievements, friends, activity and
+ * related games onto a real detail that ships none, so the social sections can
+ * be reviewed without a backend feed. Anything the game already carries is left
+ * untouched. Gated behind a Settings toggle; never runs in a normal session.
+ */
+export function withSampleSocialData(detail: GameDetailViewModel): GameDetailViewModel {
+  const sample = createFallbackGameDetail(detail.id);
+  const next: GameDetailViewModel = { ...detail };
+  if (!hasAchievementsContent(detail)) next.achievements = sample.achievements;
+  if (!hasFriendsContent(detail)) next.friends = sample.friends;
+  if (!hasActivityContent(detail)) next.activity = sample.activity;
+  if (!hasRelatedContent(detail)) next.relatedGames = sample.relatedGames;
+  return next;
 }

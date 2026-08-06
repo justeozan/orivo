@@ -167,20 +167,15 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("[data-plugin-open='wine']")).toBeVisible();
     await expect(page.locator("[data-plugin-open='wallpaper-searcher']")).toBeVisible();
 
-    const catalogue = page.locator(".plugin-catalog-row");
-    await expect(catalogue).toHaveCount(6);
-    await expect(page.locator("[data-plugin-install='astris']")).toHaveAttribute(
-      "aria-label",
-      "Install Astris Emulator",
+    // The catalogue is the host's now. This suite runs in a plain browser with
+    // no Tauri, so the registry answers nothing and the group says so instead
+    // of listing plugins that could never be installed from here.
+    await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
+    await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
+    await expect(page.locator("#plugins-catalog-empty")).toHaveText(
+      "Aucun plugin à installer pour le moment.",
     );
-    await expect(page.locator("[data-plugin-install='ps2']")).toHaveAttribute(
-      "aria-label",
-      "Install PlayStation 2 Emulator",
-    );
-    await expect(page.locator("[data-plugin-install='dolphin']")).toHaveAttribute(
-      "aria-label",
-      "Install Dolphin Emulator",
-    );
+    await expect(page.locator("[data-plugin-install-file]")).toBeVisible();
   });
 
   test("the chevron opens a plugin's settings and back returns to the browser", async ({ page }) => {
@@ -213,28 +208,31 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
   });
 
-  test("the catalogue search filters the available plugins", async ({ page }) => {
+  test("the catalogue search survives an empty registry", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
+    // Searching an empty catalogue is a no-op, not a crash, and it must not
+    // start blaming the query for a registry that answered nothing.
     await page.locator("#plugins-catalog-search").fill("dolphin");
-    await expect(page.locator(".plugin-catalog-row")).toHaveCount(1);
-    await expect(page.locator(".plugin-catalog-row")).toContainText("Dolphin Emulator");
-    await expect(page.locator("#plugins-catalog-empty")).toBeHidden();
-
-    await page.locator("#plugins-catalog-search").fill("xbox");
-    await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
     await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
+    await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
+    await expect(page.locator("#plugins-catalog-empty")).toHaveText(
+      "Aucun plugin à installer pour le moment.",
+    );
 
     await page.locator("#plugins-catalog-search").fill("");
-    await expect(page.locator(".plugin-catalog-row")).toHaveCount(6);
+    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    await expect(page.locator("#plugins-catalog-search")).toHaveValue("");
   });
 
-  test("an install button is a placeholder that stays on the browser", async ({ page }) => {
+  test("installing from a file needs the desktop app and stays on the browser", async ({
+    page,
+  }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
-    await page.locator("[data-plugin-install='astris']").click();
+    await page.locator("[data-plugin-install-file]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#toast")).toHaveText(/install/i);
+    await expect(page.locator("#toast")).toHaveText(/desktop app/i);
   });
 });
 
