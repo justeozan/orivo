@@ -37,15 +37,61 @@ pub const LEGACY_STEAM_STORE_METADATA_MARKER: &str = "orivo_steam_store_metadata
 pub const STEAM_STORE_GENRE_KEY: &str = "orivo_steam_genre";
 pub const STEAM_STORE_PLATFORMS_KEY: &str = "orivo_steam_platforms";
 
+/// Keys reserved for artwork a connected store account published for one of
+/// its own games. Only URLs whose host passed the connector's allowlist are
+/// ever written here, so the WebView still cannot be pointed at an arbitrary
+/// origin by a provider response.
+pub const SOURCE_COVER_URL_KEY: &str = "orivo_source_cover_url";
+pub const SOURCE_HERO_URL_KEY: &str = "orivo_source_hero_url";
+pub const SOURCE_LANDSCAPE_URL_KEY: &str = "orivo_source_landscape_url";
+pub const SOURCE_GENRE_KEY: &str = "orivo_source_genre";
+
 /// The provider that owns the external identity of a library entry.  Catalog
 /// records created before sources existed deserialize as `Local`, preserving
 /// the v1 file format without a migration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum GameSource {
     #[default]
     Local,
     Steam,
+    Epic,
+    Gog,
+    Ubisoft,
+    Xbox,
+    MicrosoftStore,
+    InstantGaming,
+}
+
+impl GameSource {
+    /// The opaque provider token that a connected-account record carries in its
+    /// launch target and view model. `Local` and `Steam` are deliberately not
+    /// part of this namespace: they have their own dedicated import paths and
+    /// their own launch strategies.
+    pub fn provider_token(self) -> Option<&'static str> {
+        match self {
+            Self::Local | Self::Steam => None,
+            Self::Epic => Some("epic"),
+            Self::Gog => Some("gog"),
+            Self::Ubisoft => Some("ubisoft"),
+            Self::Xbox => Some("xbox"),
+            Self::MicrosoftStore => Some("microsoft-store"),
+            Self::InstantGaming => Some("instant-gaming"),
+        }
+    }
+
+    pub fn from_provider_token(token: &str) -> Option<Self> {
+        [
+            Self::Epic,
+            Self::Gog,
+            Self::Ubisoft,
+            Self::Xbox,
+            Self::MicrosoftStore,
+            Self::InstantGaming,
+        ]
+        .into_iter()
+        .find(|source| source.provider_token() == Some(token))
+    }
 }
 
 /// A launch target is deliberately structured rather than represented as a
@@ -66,6 +112,17 @@ pub enum LaunchTarget {
         runner_id: String,
         game_ref: String,
         profile_id: String,
+    },
+    /// A game owned through a connected store account and started by that
+    /// store's own client. Both fields are opaque tokens: the host turns them
+    /// into one fixed, percent-encoded provider URI, never into a command.
+    Provider {
+        /// Must equal the record's `GameSource::provider_token()`.
+        provider: String,
+        /// The provider-owned launch reference (an Epic
+        /// `namespace:catalogItem:appName`, a GOG product id, a Ubisoft
+        /// launch id, a Microsoft package family name, …).
+        app_ref: String,
     },
 }
 
@@ -662,6 +719,86 @@ impl Catalog {
         Ok(true)
     }
 
+    /// Insert a connected-store record or refresh the provider-owned fields of
+    /// the one that already carries the same `(source, source_id)` identity.
+    ///
+    /// This is the Epic/GOG/Ubisoft/Xbox/Microsoft Store/Instant Gaming
+    /// equivalent of `upsert_steam`: re-syncing an account must never duplicate
+    /// a rail card, and it must never discard state the user owns — a chosen
+    /// wallpaper, a chosen landscape image, or play time Orivo recorded itself
+    /// while the provider still reports zero.
+    ///
+    /// Returns `true` for a newly imported game and `false` for a refresh.
+    pub fn upsert_source(&mut self, mut game: Game) -> Result<bool, CatalogError> {
+        game.validate()?;
+        let source = game.source;
+        if source.provider_token().is_none() {
+            return Err(CatalogError::Invalid(
+                "upsert_source requires a connected-store source record".into(),
+            ));
+        }
+        let source_id = game.source_id.clone().ok_or_else(|| {
+            CatalogError::Invalid("connected-source game requires a stable source id".into())
+        })?;
+
+        if let Some(index) = self.games.iter().position(|existing| {
+            existing.source == source && existing.source_id.as_deref() == Some(source_id.as_str())
+        }) {
+            let existing = &self.games[index];
+            // The provider identity is the stable key, so keep the Orivo card
+            // id even if a later connector build derives a different one.
+            game.id = existing.id.clone();
+            if game.description.is_none() {
+                game.description = existing.description.clone();
+            }
+            for (key, value) in &existing.extra {
+                game.extra
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            if game.last_played_at.is_none() {
+                game.last_played_at = existing.last_played_at.clone();
+            }
+            if game.play_time_seconds == 0 {
+                game.play_time_seconds = existing.play_time_seconds;
+            }
+            // Deliberate home-background / landscape choices survive a re-sync,
+            // exactly as they do for Steam.
+            if game.home_image_path.is_none() {
+                game.home_image_path = existing.home_image_path.clone();
+            }
+            if game.landscape_image_path.is_none() {
+                game.landscape_image_path = existing.landscape_image_path.clone();
+            }
+            if game.artwork_path.is_none() {
+                game.artwork_path = existing.artwork_path.clone();
+            }
+            if game.cover_path.is_none() {
+                game.cover_path = existing.cover_path.clone();
+            }
+            self.games[index] = game;
+            return Ok(false);
+        }
+
+        if self.games.iter().any(|existing| existing.id == game.id) {
+            return Err(CatalogError::Invalid(format!(
+                "game id {} already belongs to another source",
+                game.id
+            )));
+        }
+        self.games.push(game);
+        Ok(true)
+    }
+
+    /// Drop every game imported from one connected store. Disconnecting an
+    /// account is a separate, explicit choice from forgetting its library, so
+    /// only the command that asks for it calls this.
+    pub fn remove_source_games(&mut self, source: GameSource) -> usize {
+        let before = self.games.len();
+        self.games.retain(|game| game.source != source);
+        before - self.games.len()
+    }
+
     /// Insert a runner record or refresh an existing record with the same
     /// `(runner_id, profile_id, game_ref)` identity. This is deliberately not
     /// keyed by a title or a path: titles can change and paths stay private in
@@ -1190,7 +1327,9 @@ fn runner_target_key(game: &Game) -> Option<(&str, &str, &str)> {
             profile_id,
             game_ref,
         } => Some((runner_id, profile_id, game_ref)),
-        LaunchTarget::Direct | LaunchTarget::Steam { .. } => None,
+        LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => {
+            None
+        }
     }
 }
 
@@ -1542,6 +1681,25 @@ impl Game {
             }
             (GameSource::Steam, Some(source_id), LaunchTarget::Steam { app_id })
                 if *app_id > 0 && source_id == &app_id.to_string() => {}
+            (source, Some(source_id), LaunchTarget::Provider { provider, app_ref })
+                if source.provider_token() == Some(provider.as_str()) =>
+            {
+                validate_provider_target(source_id, app_ref)?;
+                // A connected-account record describes ownership, not a local
+                // installation. Keeping every executable-style field empty is
+                // what stops a provider response from ever being read back as
+                // a path or an argument list.
+                if self.executable_path.is_some()
+                    || self.installation_path.is_some()
+                    || self.working_directory.is_some()
+                    || !self.arguments.is_empty()
+                {
+                    return Err(CatalogError::Invalid(format!(
+                        "connected-source game {} cannot contain executable launch fields",
+                        self.id
+                    )));
+                }
+            }
             _ => {
                 return Err(CatalogError::Invalid(format!(
                     "game {} has an invalid source or launch target",
@@ -1556,6 +1714,23 @@ impl Game {
 const MAX_RUNNER_ID_LENGTH: usize = 128;
 const MAX_PROFILE_ID_LENGTH: usize = 128;
 const MAX_GAME_REF_LENGTH: usize = 512;
+const MAX_SOURCE_ID_LENGTH: usize = 256;
+const MAX_PROVIDER_APP_REF_LENGTH: usize = 512;
+
+/// Connected-store identities reuse the runner grammar on purpose. A provider
+/// answer is untrusted input, and this is the boundary that keeps a hostile or
+/// merely malformed response from ever reaching a URI, a filesystem path or a
+/// process argument.
+fn validate_provider_target(source_id: &str, app_ref: &str) -> Result<(), CatalogError> {
+    validate_opaque_runner_token("source id", source_id, MAX_SOURCE_ID_LENGTH)?;
+    validate_opaque_runner_token("provider launch reference", app_ref, MAX_PROVIDER_APP_REF_LENGTH)
+}
+
+/// The same grammar, exposed so a connector can drop an unusable provider
+/// record while it is still a wire value instead of failing a whole sync.
+pub fn is_valid_provider_reference(value: &str) -> bool {
+    validate_opaque_runner_token("provider reference", value, MAX_PROVIDER_APP_REF_LENGTH).is_ok()
+}
 
 fn validate_runner_target(
     runner_id: &str,
@@ -2824,6 +2999,146 @@ mod tests {
             play_time_seconds: 0,
             extra: BTreeMap::new(),
         }
+    }
+
+    fn provider_game(source: GameSource, source_id: &str, title: &str) -> Game {
+        let provider = source.provider_token().expect("a connected source");
+        Game {
+            id: format!("{provider}:{source_id}"),
+            title: title.into(),
+            executable_path: None,
+            source,
+            source_id: Some(source_id.into()),
+            launch_target: LaunchTarget::Provider {
+                provider: provider.into(),
+                app_ref: source_id.into(),
+            },
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: None,
+            metadata: None,
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
+            logo_path: None,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_connected_store_record_needs_a_matching_provider_and_no_launch_paths() {
+        assert!(provider_game(GameSource::Epic, "Sugar", "Fall Guys").validate().is_ok());
+
+        // The provider token has to agree with the source, or a GOG record
+        // could describe itself as an Epic launch.
+        let mut mismatched = provider_game(GameSource::Gog, "1207658924", "The Witcher");
+        mismatched.launch_target = LaunchTarget::Provider {
+            provider: "epic".into(),
+            app_ref: "1207658924".into(),
+        };
+        assert!(mismatched.validate().is_err());
+
+        // A path or an argument list can never ride along on a store record.
+        let mut with_path = provider_game(GameSource::Epic, "Sugar", "Fall Guys");
+        with_path.executable_path = Some(PathBuf::from("/tmp/anything"));
+        assert!(with_path.validate().is_err());
+
+        let mut with_arguments = provider_game(GameSource::Epic, "Sugar", "Fall Guys");
+        with_arguments.arguments = vec!["--exec".into()];
+        assert!(with_arguments.validate().is_err());
+
+        // And a reference outside the opaque grammar never becomes a URI.
+        let mut traversal = provider_game(GameSource::Ubisoft, "5416", "Anno 1800");
+        traversal.launch_target = LaunchTarget::Provider {
+            provider: "ubisoft".into(),
+            app_ref: "../../etc/passwd".into(),
+        };
+        assert!(traversal.validate().is_err());
+    }
+
+    #[test]
+    fn resyncing_a_store_refreshes_a_card_instead_of_duplicating_it() {
+        let mut catalog = Catalog::default();
+        let mut first = provider_game(GameSource::Epic, "Sugar", "Fall Guys");
+        first.play_time_seconds = 7_200;
+        first.home_image_path = Some(PathBuf::from("/cache/chosen-wallpaper.jpg"));
+        first.description = Some("A chaotic obstacle course.".into());
+        assert!(catalog.upsert_source(first).unwrap());
+
+        // A later sync that arrives without play time, without the chosen
+        // wallpaper and without a description must not undo any of them.
+        let refreshed = provider_game(GameSource::Epic, "Sugar", "Fall Guys: Season 5");
+        assert!(!catalog.upsert_source(refreshed).unwrap());
+
+        assert_eq!(catalog.games.len(), 1);
+        let game = &catalog.games[0];
+        assert_eq!(game.title, "Fall Guys: Season 5");
+        assert_eq!(game.play_time_seconds, 7_200);
+        assert_eq!(
+            game.home_image_path.as_deref(),
+            Some(Path::new("/cache/chosen-wallpaper.jpg"))
+        );
+        assert_eq!(game.description.as_deref(), Some("A chaotic obstacle course."));
+        assert!(catalog.validate().is_ok());
+    }
+
+    #[test]
+    fn the_same_game_owned_on_two_stores_stays_two_records() {
+        let mut catalog = Catalog::default();
+        assert!(
+            catalog
+                .upsert_source(provider_game(GameSource::Xbox, "1017535743", "Minecraft"))
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .upsert_source(provider_game(
+                    GameSource::MicrosoftStore,
+                    "1017535743",
+                    "Minecraft"
+                ))
+                .unwrap()
+        );
+
+        assert_eq!(catalog.games.len(), 2);
+        assert!(catalog.validate().is_ok());
+    }
+
+    #[test]
+    fn upsert_source_refuses_a_record_from_a_source_it_does_not_own() {
+        let mut catalog = Catalog::default();
+        assert!(matches!(
+            catalog.upsert_source(steam_game("Spacewar")),
+            Err(CatalogError::Invalid(_))
+        ));
+        assert!(catalog.games.is_empty());
+    }
+
+    #[test]
+    fn forgetting_one_store_leaves_every_other_library_intact() {
+        let mut catalog = Catalog::default();
+        catalog.add(steam_game("Spacewar")).unwrap();
+        catalog
+            .upsert_source(provider_game(GameSource::Gog, "1207658924", "The Witcher"))
+            .unwrap();
+        catalog
+            .upsert_source(provider_game(GameSource::Gog, "1495134320", "Cyberpunk"))
+            .unwrap();
+        catalog
+            .upsert_source(provider_game(GameSource::Epic, "Sugar", "Fall Guys"))
+            .unwrap();
+
+        assert_eq!(catalog.remove_source_games(GameSource::Gog), 2);
+        assert_eq!(catalog.games.len(), 2);
+        assert!(catalog.games.iter().all(|game| game.source != GameSource::Gog));
+        assert!(catalog.validate().is_ok());
     }
 
     fn direct_windows_game() -> Game {

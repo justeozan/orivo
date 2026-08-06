@@ -5,10 +5,16 @@
 //! credential in the operating-system keychain; the frontend can learn the
 //! connection state and library counts, never a token, cookie, or API key.
 
+use crate::sources;
 use futures_util::{StreamExt, stream};
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{Mutex, OnceLock},
+    time::Duration,
+};
 
 // Version the service name whenever the keychain access contract changes.
 // The original entry was created by unsigned development binaries whose
@@ -17,6 +23,17 @@ use std::{collections::BTreeMap, fmt, time::Duration};
 const KEYRING_SERVICE: &str = "io.orivo.desktop.steam.v2";
 const LEGACY_KEYRING_SERVICE: &str = "io.orivo.desktop.steam";
 const KEYRING_ACCOUNT: &str = "primary-library";
+/// Steam's entry in the shared, secret-free connection directory. Rendering
+/// Settings reads this instead of the keychain, so opening the page no longer
+/// makes macOS ask for the keychain password.
+const CONNECTION_KEY: &str = "steam";
+/// The keychain is opened at most once per run: a status check followed by a
+/// sync would otherwise prompt twice.
+static CREDENTIAL_CACHE: OnceLock<Mutex<Option<StoredSteamCredential>>> = OnceLock::new();
+
+fn credential_cache() -> &'static Mutex<Option<StoredSteamCredential>> {
+    CREDENTIAL_CACHE.get_or_init(|| Mutex::new(None))
+}
 const OWNED_GAMES_ENDPOINT: &str = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/";
 const STORE_APP_DETAILS_ENDPOINT: &str = "https://store.steampowered.com/api/appdetails";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -194,20 +211,50 @@ struct WebLoginPayload {
     access_token: String,
 }
 
+/// Report the connection **without opening the keychain**.
+///
+/// The steam id and method are recorded in the secret-free directory when the
+/// account is connected, so the Settings page can render from that. Only a real
+/// sync, which needs the token itself, reaches the keychain.
 pub fn account_status() -> Result<SteamAccountStatus, SteamAccountError> {
-    let Some(credential) = load_credential()? else {
+    if let Some(credential) = cached_credential() {
+        return Ok(connected_status(&credential));
+    }
+    if let Some(record) = sources::remembered_named_connection(CONNECTION_KEY) {
+        let (steam_id, method) = record.split_once('\u{1}').unwrap_or((record.as_str(), "web"));
         return Ok(SteamAccountStatus {
-            connected: false,
-            steam_id: String::new(),
-            method: String::new(),
+            connected: true,
+            steam_id: steam_id.to_string(),
+            method: method.to_string(),
         });
-    };
-
+    }
     Ok(SteamAccountStatus {
+        connected: false,
+        steam_id: String::new(),
+        method: String::new(),
+    })
+}
+
+fn connected_status(credential: &StoredSteamCredential) -> SteamAccountStatus {
+    SteamAccountStatus {
         connected: true,
         steam_id: credential.steam_id().to_string(),
         method: credential.method().to_string(),
-    })
+    }
+}
+
+fn cached_credential() -> Option<StoredSteamCredential> {
+    credential_cache().lock().ok()?.clone()
+}
+
+fn remember_connection(credential: &StoredSteamCredential) {
+    if let Ok(mut cache) = credential_cache().lock() {
+        *cache = Some(credential.clone());
+    }
+    sources::remember_named_connection(
+        CONNECTION_KEY,
+        &format!("{}\u{1}{}", credential.steam_id(), credential.method()),
+    );
 }
 
 /// Parse the JSON returned by Tauri's `eval_with_callback`. Depending on the
@@ -252,6 +299,12 @@ pub async fn connect_api_key(
 }
 
 pub fn disconnect() -> Result<(), SteamAccountError> {
+    // Forget first, so a keychain that will not open cannot leave Steam stuck
+    // reading as connected with no way back.
+    if let Ok(mut cache) = credential_cache().lock() {
+        *cache = None;
+    }
+    sources::forget_named_connection(CONNECTION_KEY);
     let entry = credential_entry(KEYRING_SERVICE)?;
     match entry.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
@@ -494,9 +547,30 @@ fn normalize_store_text(value: &str) -> Option<String> {
 }
 
 fn load_credential() -> Result<Option<StoredSteamCredential>, SteamAccountError> {
+    if let Some(credential) = cached_credential() {
+        return Ok(Some(credential));
+    }
     match load_credential_from(KEYRING_SERVICE) {
-        Ok(Some(credential)) => Ok(Some(credential)),
-        Ok(None) => legacy_credential_or_disconnected(load_credential_from(LEGACY_KEYRING_SERVICE)),
+        Ok(Some(credential)) => {
+            remember_connection(&credential);
+            Ok(Some(credential))
+        }
+        Ok(None) => {
+            let recovered =
+                legacy_credential_or_disconnected(load_credential_from(LEGACY_KEYRING_SERVICE))?;
+            match recovered {
+                Some(credential) => {
+                    remember_connection(&credential);
+                    Ok(Some(credential))
+                }
+                None => {
+                    // The directory claimed a connection the keychain does not
+                    // have. Stop offering a sync that could never complete.
+                    sources::forget_named_connection(CONNECTION_KEY);
+                    Ok(None)
+                }
+            }
+        }
         Err(error) => Err(error),
     }
 }
@@ -544,7 +618,9 @@ fn save_credential(credential: StoredSteamCredential) -> Result<(), SteamAccount
     let encoded = serde_json::to_string(&credential).map_err(|_| SteamAccountError::Keychain)?;
     credential_entry(KEYRING_SERVICE)?
         .set_password(&encoded)
-        .map_err(|error| keychain_error("write", error))
+        .map_err(|error| keychain_error("write", error))?;
+    remember_connection(&credential);
+    Ok(())
 }
 
 fn api_key_credential(

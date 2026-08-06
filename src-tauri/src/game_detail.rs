@@ -6,7 +6,8 @@
 //! the WebView.
 
 use crate::catalog::{
-    Catalog, Game, GameSource as CatalogGameSource, LaunchTarget, STEAM_STORE_GENRE_KEY,
+    Catalog, Game, GameSource as CatalogGameSource, LaunchTarget, SOURCE_COVER_URL_KEY,
+    SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_LANDSCAPE_URL_KEY, STEAM_STORE_GENRE_KEY,
     STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -129,6 +130,29 @@ pub enum GameSourceView {
     Local,
     Showcase,
     Store,
+    Epic,
+    Gog,
+    Ubisoft,
+    Xbox,
+    MicrosoftStore,
+    InstantGaming,
+}
+
+impl GameSourceView {
+    /// The one place the catalog's connected-store sources become view sources.
+    /// The Library projection and this detail projection both go through it, so
+    /// the two can never disagree about which badge a game wears.
+    pub fn from_catalog_source(source: CatalogGameSource) -> Option<Self> {
+        match source {
+            CatalogGameSource::Epic => Some(Self::Epic),
+            CatalogGameSource::Gog => Some(Self::Gog),
+            CatalogGameSource::Ubisoft => Some(Self::Ubisoft),
+            CatalogGameSource::Xbox => Some(Self::Xbox),
+            CatalogGameSource::MicrosoftStore => Some(Self::MicrosoftStore),
+            CatalogGameSource::InstantGaming => Some(Self::InstantGaming),
+            CatalogGameSource::Local | CatalogGameSource::Steam => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -679,7 +703,7 @@ fn project_catalog_game(
         }
         _ if game.id.starts_with("showcase-") => GameSourceView::Showcase,
         _ if game.source == CatalogGameSource::Steam => GameSourceView::Steam,
-        _ => GameSourceView::Local,
+        _ => GameSourceView::from_catalog_source(game.source).unwrap_or(GameSourceView::Local),
     };
     let launchable = match &game.launch_target {
         LaunchTarget::Steam { .. } => game.installation_path.is_some(),
@@ -696,6 +720,9 @@ fn project_catalog_game(
                 && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
         }
         LaunchTarget::Runner { .. } => false,
+        // Only a store whose client is on this machine gets a live Play
+        // button; the rest stay records of what the account owns.
+        LaunchTarget::Provider { provider, .. } => crate::launcher::provider_launchable(provider),
     };
     let primary_action = if launchable {
         PrimaryAction::Play
@@ -717,6 +744,7 @@ fn project_catalog_game(
     let genres = game
         .extra
         .get(STEAM_STORE_GENRE_KEY)
+        .or_else(|| game.extra.get(SOURCE_GENRE_KEY))
         .and_then(serde_json::Value::as_str)
         .filter(|genre| !genre.trim().is_empty())
         .map(|genre| vec![genre.to_owned()])
@@ -747,6 +775,7 @@ fn project_catalog_game(
         .and_then(|media| media.source_url.clone())
         .unwrap_or_else(|| hero_url.clone());
     let landscape_url = steam_asset_url(game, "library_hero.jpg")
+        .or_else(|| source_asset_url(game, SOURCE_LANDSCAPE_URL_KEY))
         .or_else(|| media_source_url(game.artwork_path.as_deref(), cache_dir))
         .unwrap_or_else(|| hero_url.clone());
 
@@ -797,6 +826,7 @@ fn project_catalog_game(
 fn catalog_media(game: &Game, cache_dir: Option<&Path>) -> Vec<GameMediaAsset> {
     let mut media = Vec::new();
     let wallpaper = steam_asset_url(game, "capsule_616x353.jpg")
+        .or_else(|| source_asset_url(game, SOURCE_HERO_URL_KEY))
         .or_else(|| media_source_url(game.artwork_path.as_deref(), cache_dir));
     if let Some(url) = wallpaper {
         media.push(media_asset(
@@ -807,6 +837,7 @@ fn catalog_media(game: &Game, cache_dir: Option<&Path>) -> Vec<GameMediaAsset> {
         ));
     }
     let cover = steam_asset_url(game, "library_600x900.jpg")
+        .or_else(|| source_asset_url(game, SOURCE_COVER_URL_KEY))
         .or_else(|| media_source_url(game.cover_path.as_deref(), cache_dir));
     if let Some(url) = cover {
         media.push(media_asset(&game.id, GameMediaKind::Cover, "Cover", url));
@@ -852,6 +883,15 @@ fn steam_asset_url(game: &Game, asset: &str) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// Artwork a connected store published for one of its own games. The value was
+/// already held to that provider's host allowlist when the sync wrote it, so
+/// this only has to refuse a record that predates the check or was edited on
+/// disk: nothing but an absolute HTTPS URL is ever handed to the WebView.
+fn source_asset_url(game: &Game, key: &str) -> Option<String> {
+    let url = game.extra.get(key)?.as_str()?;
+    (url.starts_with("https://") && !url.chars().any(char::is_control)).then(|| url.to_owned())
 }
 
 /// The one rule that turns a stored artwork path into something a WebView may
