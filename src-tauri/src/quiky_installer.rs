@@ -638,6 +638,14 @@ fn free_disk_bytes(path: &Path) -> u64 {
             None => return 0,
         }
     }
+    free_space_of_existing(&probe)
+}
+
+/// The volume query, per family. Both answer in bytes available to this user,
+/// which is the number the pre-flight check needs: a quota can leave a volume
+/// with plenty of raw free space and still refuse the write.
+#[cfg(unix)]
+fn free_space_of_existing(probe: &Path) -> u64 {
     let Ok(encoded) = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()) else {
         return 0;
     };
@@ -650,6 +658,27 @@ fn free_disk_bytes(path: &Path) -> u64 {
         }
         (stats.f_bavail as u64).saturating_mul(stats.f_bsize as u64)
     }
+}
+
+#[cfg(windows)]
+fn free_space_of_existing(probe: &Path) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    // A directory path is enough: the call reports on the volume holding it.
+    let wide: Vec<u16> = probe.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available: u64 = 0;
+    // SAFETY: the path is NUL-terminated above and only read; the one output
+    // pointer is a live local, and the two totals are opted out of with null.
+    let queried = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if queried == 0 { 0 } else { available }
 }
 
 // ---------------------------------------------------------------------------

@@ -3029,6 +3029,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "wasmtime",
+ "windows-sys 0.61.2",
  "wit-parser",
 ]
 

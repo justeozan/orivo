@@ -36,5 +36,8 @@ wasmtime = { version = "=44.0.0", default-features = false, features = ["compone
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 wit-parser = "=0.246.2"
