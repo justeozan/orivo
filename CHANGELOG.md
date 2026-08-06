@@ -4,6 +4,8 @@
 
 ### Added
 
+- Full controller and keyboard navigation on every page. The arrow keys or the d-pad move between whatever is on screen; `a` (A on a pad) opens a game's page and Enter (X on a pad) launches it straight away. B or Escape goes back, Y jumps to the search field, and the shoulder buttons walk the top-level pages. Holding a direction repeats.
+- The "Me" page can now be reached and read without a mouse: its metric cards and profile stats take focus, and the page remembers where you were when you come back to it.
 - New "Me" page (`#/me`) with a cognitive scan: engagement, regularity, genre diversity, intensity, and balance metrics computed from the library, plus a generated player profile summary.
 - "Most Played" row at the top of the library, sorted by play time (games without play time excluded).
 - Instant Gaming price display on store cards: price badge, strikethrough original price, and discount pill; games without pricing show nothing.
@@ -20,6 +22,11 @@
 
 - Locally added games no longer fall back to Elden Ring artwork; media is searched by title with a neutral placeholder fallback.
 - Hozy Playtest now has a cover.
+- Store cards no longer print an empty price frame when no shop has quoted a price, which read as "free".
+- The cheapest offer is now picked consistently: a stale quote could beat a freshly verified one, and the winner could change depending on the order the shops answered in.
+- Store filters apply again outside the desktop app, where browsing previously returned the whole catalogue whatever was selected.
+- Games tagged "Stories" land in the "Récits forts" category again.
+- The search field on the Store says "Search the store…" instead of the library's wording.
 
 ### Changed (Wine)
 

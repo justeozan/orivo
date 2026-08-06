@@ -572,8 +572,18 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     introFrame = requestAnimationFrame(step);
   };
 
+  /**
+   * Chaque carte est une cible de navigation. Sans cela la page « Moi » ne
+   * contient aucun élément focusable — le dashboard n'a ni bouton ni lien — et
+   * devient un cul-de-sac au clavier comme à la manette. La clé de focus est
+   * dérivée de la classe de la carte, qui est déjà unique par carte, ce qui
+   * donne au restaurateur d'état un sélecteur stable d'une visite à l'autre.
+   */
   const card = (className: string, title?: string): HTMLElement => {
     const article = element("article", `me-card ${className}`.trim());
+    article.tabIndex = 0;
+    article.dataset.focusKey = className || "card";
+    article.setAttribute("role", "group");
     if (title) article.append(element("h2", "me-card__title", title));
     return article;
   };
@@ -967,9 +977,26 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     if (scrollTop > 0) writeScrollTop(scrollTop);
   };
 
+  /**
+   * Clé de focus courante : uniquement si le focus est réellement dans la page
+   * (sinon on renverrait la clé d'un élément d'une autre page).
+   */
+  const readFocusKey = (): string | null => {
+    if (!pageRoot) return null;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !pageRoot.contains(active)) return null;
+    return active.dataset.focusKey ?? null;
+  };
+
   const restorePageState = (restoreState: PageRestoreState | null): void => {
     if (!pageRoot || !restoreState) return;
     writeScrollTop(Math.max(0, restoreState.scrollTop));
+    const { focusKey } = restoreState;
+    if (!focusKey) return;
+    const target = pageRoot.querySelector<HTMLElement>(
+      `[data-focus-key="${CSS.escape(focusKey)}"]`,
+    );
+    target?.focus({ preventScroll: true });
   };
 
   return {
@@ -996,7 +1023,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       stopIntro();
       const restoreState: PageRestoreState = {
         scrollTop: readScrollTop(),
-        focusKey: null,
+        focusKey: readFocusKey(),
       };
       activation = null;
       return restoreState;

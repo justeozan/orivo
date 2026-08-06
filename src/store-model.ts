@@ -336,7 +336,7 @@ function normalizedSearchText(value: string): string {
 const CATEGORY_KEYWORDS: Readonly<Record<string, string[]>> = {
   "good-for-brain": ["puzzle", "reflexion", "strategie", "strategy", "logique", "cartes", "enquete"],
   "short-sessions": ["courte", "short", "arcade", "roguelike"],
-  "strong-stories": ["recits", "story", "histoire", "narration", "aventure"],
+  "strong-stories": ["recits", "story", "stories", "histoire", "narration", "aventure"],
   relaxing: ["relaxant", "relax", "cozy", "detente", "contemplat", "simulation"],
 };
 
@@ -376,20 +376,33 @@ export function ownershipKey(title: string): string {
   return normalizedSearchText(title).replace(/[^a-z0-9]+/g, "");
 }
 
+export interface StoreFilters {
+  category: StoreCategory;
+  platforms: StorePlatform[];
+  query: string;
+}
+
+/** Whether a game survives the category, platform and text filters. */
+export function matchesStoreFilters(game: GameSummary, filters: StoreFilters): boolean {
+  if (!matchesCategory(game, filters.category)) return false;
+  if (!matchesPlatforms(game, filters.platforms)) return false;
+  const query = normalizedSearchText(filters.query);
+  if (!query) return true;
+  return normalizedSearchText(
+    [game.title, game.shortDescription, ...game.genres, ...game.tags].join(" "),
+  ).includes(query);
+}
+
 /** Every game the current filters allow, minus everything already owned. */
 export function selectStoreGames(state: StorePageState): GameSummary[] {
   const owned = new Set(state.ownedGameIds);
-  const query = normalizedSearchText(state.query);
-  const source = state.browseGames ?? state.home.games;
-  return source.filter((game) => {
-    if (owned.has(game.id) || owned.has(ownershipKey(game.title)) || game.owned) return false;
-    if (!matchesCategory(game, state.category)) return false;
-    if (!matchesPlatforms(game, state.platforms)) return false;
-    if (!query) return true;
-    return normalizedSearchText(
-      [game.title, game.shortDescription, ...game.genres, ...game.tags].join(" "),
-    ).includes(query);
-  });
+  const isOwned = (game: GameSummary): boolean =>
+    owned.has(game.id) || owned.has(ownershipKey(game.title)) || game.owned;
+  // A browse page arrives already filtered, so its answer is kept whole rather
+  // than run through the local heuristic again. Ownership still filters,
+  // because the library can change after the page was fetched.
+  if (state.browseGames) return state.browseGames.filter((game) => !isOwned(game));
+  return state.home.games.filter((game) => !isOwned(game) && matchesStoreFilters(game, state));
 }
 
 export function storeCategoryLabel(category: StoreCategory): string {
@@ -424,11 +437,19 @@ export function displayCurrency(): string {
   }
 }
 
+/**
+ * A quote Orivo can actually print. Free needs no currency to be true, which is
+ * the one case `formatPrice` also answers without one.
+ */
+function isPriced(offer: StoreOffer): boolean {
+  return offer.priceMinor !== null && (offer.priceMinor === 0 || Boolean(offer.currency));
+}
+
 function priceRank(offer: StoreOffer, currency: string): number {
-  if (offer.priceMinor === null || !offer.currency) return Number.POSITIVE_INFINITY;
+  const price = offer.priceMinor ?? 0;
   // Only same-currency prices are comparable; a foreign quote is ranked behind
   // every local one rather than converted at a rate Orivo cannot verify.
-  return offer.currency === currency ? offer.priceMinor : offer.priceMinor + 1_000_000;
+  return offer.currency === currency || price === 0 ? price : price + 1_000_000;
 }
 
 /**
@@ -441,10 +462,15 @@ export function selectBestOffer(game: GameSummary, currency = displayCurrency())
       const availability =
         Number(right.availability === "available") - Number(left.availability === "available");
       if (availability !== 0) return availability;
-      const priced = Number(left.priceMinor === null) - Number(right.priceMinor === null);
-      if (priced !== 0) return priced;
-      const rank = priceRank(left, currency) - priceRank(right, currency);
-      if (rank !== 0) return rank;
+      // Ranking only ever compares two printable quotes, so the comparator
+      // stays a total order instead of returning NaN on a pair of blanks.
+      const leftPriced = isPriced(left);
+      const rightPriced = isPriced(right);
+      if (leftPriced !== rightPriced) return leftPriced ? -1 : 1;
+      if (leftPriced) {
+        const rank = priceRank(left, currency) - priceRank(right, currency);
+        if (rank !== 0) return rank;
+      }
       return Number(isOfferStale(left)) - Number(isOfferStale(right));
     })[0] ?? null
   );

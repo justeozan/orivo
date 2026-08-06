@@ -1501,6 +1501,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const button = element("button", "gd-related__card");
     button.type = "button";
     button.dataset.focusKey = `related-${game.id}`;
+    button.dataset.navOpen = game.id;
     button.setAttribute("aria-label", `Open ${game.title}`);
     const frame = element("span", "gd-related__media");
     const image = element("img", "gd-related__cover");

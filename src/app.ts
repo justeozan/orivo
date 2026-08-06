@@ -33,6 +33,18 @@ import {
   normaliseProviderStatuses,
   normaliseWallpaperCredentials,
 } from "./settings-model";
+import {
+  INITIAL_UPDATE_STATE,
+  type UpdateState,
+  applyCheckResult,
+  applyError,
+  applyProgress,
+  describeUpdateState,
+  markReady,
+  startCheck,
+  startDownload,
+  updateProgressPercent,
+} from "./updater-model";
 import { createMePage } from "./me-page";
 import {
   createDefaultPluginManagerClient,
@@ -48,11 +60,20 @@ import {
 } from "./plugin-manager";
 import { createDefaultQuikyClient, normaliseTitle, type QuikyClient } from "./quiky-install";
 import { createStorePage } from "./store-page";
+import { createSpatialNav } from "./spatial-nav";
+import { createGamepadBridge } from "./gamepad";
 import "./game-detail-page.css";
 import "./me-page.css";
 import "./store-page.css";
 
 type BackendRecord = Record<string, unknown>;
+
+// The updater plugin is only ever loaded from inside the click handler, so the
+// browser preview and the test runner never execute it. `typeof import(...)` is
+// a type position: it is erased at build time and pulls nothing into the
+// bundle, which is what lets these handles stay exactly typed anyway.
+type UpdaterModule = typeof import("@tauri-apps/plugin-updater");
+type UpdateHandle = NonNullable<Awaited<ReturnType<UpdaterModule["check"]>>>;
 
 type SteamPreviewStatus = "available" | "unavailable" | "error";
 type SteamPanelPhase = "idle" | "scanning" | SteamPreviewStatus | "importing";
@@ -222,6 +243,7 @@ interface State {
   pluginCatalogSearch: string;
   wallpaperCredentials: WallpaperCredentials;
   wallpaperCredentialsSaving: boolean;
+  update: UpdateState;
 }
 
 export interface MountAppOptions {
@@ -285,7 +307,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     pluginCatalogSearch: "",
     wallpaperCredentials: { ...EMPTY_WALLPAPER_CREDENTIALS },
     wallpaperCredentialsSaving: false,
+    update: { ...INITIAL_UPDATE_STATE },
   };
+
+  // The `Update` handle returned by the last successful check. It owns the
+  // download, so it has to survive between the two button presses.
+  let pendingUpdate: UpdateHandle | null = null;
 
   root.innerHTML = shell();
 
@@ -644,6 +671,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const fallback = steamAssetUrl(game, "header.jpg");
 
     card.dataset.gameId = game.id;
+    // Spatial navigation verbs: A opens the game's page, Enter starts it.
+    card.dataset.navOpen = game.id;
+    card.dataset.navLaunch = game.id;
     card.classList.toggle("is-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
     card.setAttribute("aria-label", `Open details for ${game.title}`);
@@ -2622,6 +2652,49 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
   };
 
+  const renderUpdatePanel = (): void => {
+    const button = root.querySelector<HTMLButtonElement>("#check-updates-button");
+    const status = root.querySelector<HTMLElement>("#update-status");
+    const progress = root.querySelector<HTMLElement>("#update-progress");
+    const fill = progress?.querySelector<HTMLElement>(".update-progress__fill") ?? null;
+    if (!button || !status || !progress) return;
+
+    // Outside the desktop app there is no installer to run, so the action is
+    // disabled and says why instead of failing on the first click.
+    const description = isTauriRuntime()
+      ? describeUpdateState(state.update)
+      : {
+          label: "Updates are installed by the Orivo desktop app.",
+          detail: "Open Orivo on your Mac to check for and install a new version.",
+          buttonLabel: "Check for updates",
+          buttonDisabled: true,
+        };
+
+    button.textContent = description.buttonLabel;
+    button.disabled = description.buttonDisabled;
+
+    const label = document.createElement("span");
+    label.className = "update-status__label";
+    label.textContent = description.label;
+    const detail = document.createElement("span");
+    detail.className = "update-status__detail";
+    detail.textContent = description.detail;
+    status.replaceChildren(label, detail);
+
+    const downloading = isTauriRuntime() && state.update.status === "downloading";
+    progress.hidden = !downloading;
+    const percent = downloading ? updateProgressPercent(state.update) : null;
+    // A server that sends no content length gives no percentage; the bar runs
+    // indeterminate rather than sitting at a false 0%.
+    progress.classList.toggle("update-progress--indeterminate", downloading && percent === null);
+    if (percent === null) {
+      progress.removeAttribute("aria-valuenow");
+    } else {
+      progress.setAttribute("aria-valuenow", String(percent));
+    }
+    if (fill) fill.style.width = `${percent ?? 100}%`;
+  };
+
   const renderSettingsSearch = (): void => {
     const term = state.settingsSearch.trim().toLocaleLowerCase();
     const activePanel = refs.settingsPanels.find((panel) => !panel.hidden);
@@ -2652,6 +2725,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderPreferenceControls();
     renderProviderStatuses();
     renderDataUsage();
+    renderUpdatePanel();
     renderSettingsSearch();
   };
 
@@ -2818,6 +2892,98 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     } finally {
       if (clear) clear.disabled = false;
     }
+  };
+
+  // The handle is a reference to a resource held by the Rust side, and only
+  // `close()` releases it. Dropping the reference instead would leak one entry
+  // per check for the lifetime of the process.
+  const releasePendingUpdate = (): void => {
+    const previous = pendingUpdate;
+    pendingUpdate = null;
+    void previous?.close().catch(() => {});
+  };
+
+  const checkForUpdates = async (): Promise<void> => {
+    state.update = startCheck(state.update);
+    releasePendingUpdate();
+    renderUpdatePanel();
+    try {
+      // Imported here, not at the top of the module: the plugin talks to the
+      // Tauri IPC on load, which does not exist in the browser preview or in
+      // jsdom. Keeping it lazy is what makes the whole page survive without it.
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      pendingUpdate = update;
+      state.update = applyCheckResult(state.update, update);
+    } catch (error) {
+      state.update = applyError(state.update, error);
+    }
+    renderUpdatePanel();
+  };
+
+  const downloadAndInstallUpdate = async (): Promise<void> => {
+    const update = pendingUpdate;
+    if (!update) {
+      // The handle is gone (a failed check cleared it), so re-check rather than
+      // leave the button pointing at nothing.
+      await checkForUpdates();
+      return;
+    }
+    state.update = startDownload(state.update);
+    renderUpdatePanel();
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          state.update = applyProgress(state.update, 0, event.data.contentLength ?? null);
+        } else if (event.event === "Progress") {
+          state.update = applyProgress(state.update, event.data.chunkLength);
+        } else {
+          state.update = markReady(state.update);
+        }
+        renderUpdatePanel();
+      });
+      // `Finished` is emitted before the installer returns, so readiness is
+      // confirmed here as well: the button must never offer a restart for an
+      // install that has not actually completed.
+      state.update = markReady(state.update);
+      renderUpdatePanel();
+      showToast("Update installed. Restart Orivo to finish.");
+    } catch (error) {
+      state.update = applyError(state.update, error);
+      renderUpdatePanel();
+      showToast(messageFromError(error, "The update could not be installed."));
+    }
+  };
+
+  const restartForUpdate = async (): Promise<void> => {
+    try {
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (error) {
+      // Only the restart failed: the update is installed and still waiting, so
+      // the row keeps offering it. Falling into the error state would send the
+      // retry back to a fresh check, which would download the same build again.
+      showToast(
+        messageFromError(error, "Orivo could not restart. Quit and reopen it to finish updating."),
+      );
+    }
+  };
+
+  // One button drives the whole flow, so what it does is read off the state it
+  // is currently rendering.
+  const runUpdateAction = async (): Promise<void> => {
+    if (!isTauriRuntime()) return;
+    const status = state.update.status;
+    if (status === "checking" || status === "downloading") return;
+    if (status === "ready") {
+      await restartForUpdate();
+      return;
+    }
+    if (status === "available") {
+      await downloadAndInstallUpdate();
+      return;
+    }
+    await checkForUpdates();
   };
 
   root.querySelector<HTMLButtonElement>("#previous-game")?.addEventListener("click", () => moveSelection(-1));
@@ -3163,6 +3329,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (!isTauriRuntime()) {
       if (appVersion) appVersion.textContent = "Development build";
       if (tauriVersion) tauriVersion.textContent = "Browser preview";
+      renderUpdatePanel();
       return;
     }
     try {
@@ -3170,6 +3337,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (request !== settingsRequest) return;
       if (appVersion) appVersion.textContent = app;
       if (tauriVersion) tauriVersion.textContent = tauri;
+      // The updater copy names the running version, so it is refreshed with the
+      // rest of the About metadata rather than read separately.
+      state.update = { ...state.update, currentVersion: app };
+      renderUpdatePanel();
     } catch {
       // Version metadata is informational. A missing value must never keep the
       // About section from rendering its attributions.
@@ -3195,7 +3366,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // blanked out, because a 352px hole mid-bar reads as a broken layout. Only
     // what the field searches changes.
     if (route.page === "store") {
-      refs.search.placeholder = "Search games…";
+      refs.search.placeholder = "Search the store…";
       refs.search.setAttribute("aria-label", "Search the store");
       if (document.activeElement !== refs.search) refs.search.value = route.query;
       return;
@@ -3480,6 +3651,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void refreshDerivedData();
     } else if (action === "clear-derived") {
       void clearDerivedData();
+    } else if (action === "check-updates") {
+      void runUpdateAction();
     }
 
     if (target?.closest("#wallpaper-credentials-save")) {
@@ -3671,19 +3844,34 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
+    // With nothing focused there is no geometry to navigate from, so the rail
+    // keeps its own 1-D shortcuts. Once a card holds focus, spatial navigation
+    // takes over and can also walk off the rail to the rest of the page.
+    const onRail = target?.classList.contains("game-card") === true;
+    const adrift = target === null || target === document.body;
+
     switch (event.key) {
       case "ArrowLeft":
       case "ArrowUp":
+        if (!adrift) break;
         event.preventDefault();
         moveSelection(-1);
         break;
       case "ArrowRight":
       case "ArrowDown":
+        if (!adrift) break;
         event.preventDefault();
         moveSelection(1);
         break;
       case "Enter":
-        // Enter opens the detail page. Launching stays on the Play button.
+        // Enter launches the selected game outright; A opens its page first.
+        if (!adrift && !onRail) break;
+        event.preventDefault();
+        void launchGame(selectedGame().id);
+        break;
+      case "a":
+      case "A":
+        if (!adrift) break;
         event.preventDefault();
         openGameDetail(selectedGame().id);
         break;
@@ -3704,10 +3892,48 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  // Arrow keys, then the same verbs on a controller. The engine reads the live
+  // DOM, so pages only have to stay focusable — they never register anything.
+  const spatialNav = createSpatialNav({
+    openGame: (gameId) => {
+      openGameDetail(gameId);
+    },
+    launchGame: (gameId) => {
+      void launchGame(gameId);
+    },
+    back: () => {
+      router.back({ page: "library" });
+    },
+  });
+
+  createGamepadBridge({
+    move: (direction) => spatialNav.move(direction),
+    activate: () => void spatialNav.activate(),
+    back: () => spatialNav.back(),
+    launch: () => {
+      if (!spatialNav.launchFocused()) spatialNav.activate();
+    },
+    focusSearch: () => {
+      if (refs.search.disabled) return;
+      refs.search.focus();
+      refs.search.select();
+    },
+    cycleNav: (delta) => {
+      const links = refs.navLinks;
+      const index = links.findIndex((link) => link.classList.contains("is-active"));
+      links[(index + delta + links.length) % links.length]?.click();
+    },
+    scroll: (delta) => spatialNav.scrollBy(delta),
+    onActivity: () => spatialNav.setInputMode("gamepad"),
+  });
+
   renderSteamPanel();
   renderWineSettingsPanel();
   renderPreferenceControls();
-  router.start(dispatchRoute);
+  router.start((route) => {
+    dispatchRoute(route);
+    spatialNav.enterPage();
+  });
   void refreshLibrary();
   void (async () => {
     await loadPreferences();
@@ -4338,6 +4564,7 @@ function shell(): string {
         <span class="hud-controls">
           <span>${icon("navigate")}<em>Navigate</em></span>
           <span><b class="gamepad-a">A</b><em>Open</em></span>
+          <span><b class="gamepad-x">X</b><em>Play</em></span>
           <span><b class="gamepad-b">B</b><em>Back</em></span>
         </span>
       </footer>
@@ -4636,6 +4863,16 @@ function shell(): string {
                     <small>The desktop shell Orivo runs inside.</small>
                   </div>
                   <span id="about-tauri-version" class="settings-metric">—</span>
+                </div>
+                <div class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>Updates</strong>
+                    <small id="update-status" class="update-status"></small>
+                    <div id="update-progress" class="update-progress" role="progressbar" aria-label="Update download progress" aria-valuemin="0" aria-valuemax="100" hidden>
+                      <span class="update-progress__fill"></span>
+                    </div>
+                  </div>
+                  <button id="check-updates-button" type="button" class="settings-button" data-settings-action="check-updates">Check for updates</button>
                 </div>
               </div>
               <div class="settings-card" data-settings-searchable>

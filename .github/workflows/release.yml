@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the leading v (e.g. 0.4.0). Defaults to the version already in package.json.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            label: macOS (Apple Silicon)
+            cache-key: macos-aarch64
+            args: '--target aarch64-apple-darwin'
+          - platform: macos-latest
+            label: macOS (Intel)
+            cache-key: macos-x86_64
+            args: '--target x86_64-apple-darwin'
+          - platform: ubuntu-22.04
+            label: Linux (x86_64)
+            cache-key: linux-x86_64
+            args: ''
+          - platform: windows-latest
+            label: Windows (x86_64)
+            cache-key: windows-x86_64
+            args: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # A tag whose number disagrees with the bundled app version silently kills
+      # the updater: `latest.json` advertises the version read from
+      # tauri.conf.json, so an install already on that version never sees an
+      # update. Fail here rather than after a 30-minute build.
+      - name: Check the app version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${REF_TAG#v}"
+          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$conf" != "$expected" ] || [ "$pkg" != "$expected" ]; then
+            echo "::error::Tag $REF_TAG does not match the app version (src-tauri/tauri.conf.json: $conf, package.json: $pkg). latest.json would advertise $conf, so no installed copy would ever be offered this release. Use the Tag release workflow, which bumps every file at once."
+            exit 1
+          fi
+          echo "App version $expected matches tag $REF_TAG."
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: ${{ matrix.cache-key }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev
+
+      # Publishes the installers, the detached `.sig` signatures and, thanks to
+      # `includeUpdaterJson`, the `latest.json` manifest the in-app updater
+      # polls at https://github.com/justeozan/orivo/releases/latest/download/latest.json.
+      # The release must NOT be a draft: `/releases/latest/download/` only
+      # resolves against published releases.
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.version && format('v{0}', inputs.version) || 'v__VERSION__') }}
+          releaseName: 'Orivo __VERSION__'
+          releaseBody: |
+            See the assets below to download and install.
+
+            Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
+
+            Orivo is not code-signed yet. On macOS, right-click the app and choose **Open** the first time (Gatekeeper blocks a double-click). On Windows, click **More info** then **Run anyway** on the SmartScreen prompt.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+  verify-updater-manifest:
+    name: Verify updater manifest
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assert latest.json is published and complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_TAG" ]; then
+            tag="$REF_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          echo "Checking release $tag"
+
+          assets=''
+          found=''
+          for attempt in 1 2 3 4 5; do
+            assets="$(gh release view "$tag" --json assets --jq '.assets[].name' || true)"
+            if printf '%s\n' "$assets" | grep -qx 'latest.json'; then
+              found=yes
+              break
+            fi
+            echo "latest.json not visible yet (attempt $attempt/5), waiting..."
+            sleep 10
+          done
+
+          if [ -z "$found" ]; then
+            echo "::error::latest.json is missing from release $tag. The in-app updater endpoint will 404."
+            echo "Assets found:"
+            printf '%s\n' "${assets:-<none>}"
+            exit 1
+          fi
+
+          # /releases/latest/download/ resolves against the newest published,
+          # non-prerelease release only.
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = "true" ]; then
+            echo "::error::Release $tag is a draft; /releases/latest/download/latest.json will 404 for the updater."
+            exit 1
+          fi
+          if [ "$(gh release view "$tag" --json isPrerelease --jq '.isPrerelease')" = "true" ]; then
+            echo "::error::Release $tag is flagged as a pre-release; /releases/latest/download/ skips pre-releases, so the updater will keep serving the previous version."
+            exit 1
+          fi
+
+          manifest="$RUNNER_TEMP/latest.json"
+          gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
+          echo "latest.json:"
+          jq '.platforms |= map_values({url})' "$manifest"
+
+          manifest_version="$(jq -r '.version' "$manifest")"
+          if [ "$manifest_version" != "${tag#v}" ]; then
+            echo "::error::latest.json advertises version '$manifest_version' but the release is tagged '$tag'. Installed apps compare their own version against the manifest, so this update would never be offered."
+            exit 1
+          fi
+
+          # Every matrix job merges its own platform into the shared manifest. A
+          # missing key means that build failed, produced no signature (missing
+          # TAURI_SIGNING_PRIVATE_KEY), or was overwritten by a job that read the
+          # manifest before it was uploaded.
+          missing=''
+          for key in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
+            if [ "$(jq -r --arg k "$key" '.platforms | has($k)' "$manifest")" != "true" ]; then
+              missing="$missing $key"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::latest.json is missing platform entries:$missing. Users on those platforms will never be offered an update. Re-run the whole Release workflow for $tag."
+            exit 1
+          fi
+
+          echo "latest.json is published on $tag and covers every platform."

@@ -1098,6 +1098,14 @@
 
 /* --------------------------------------------------------------- responsive */
 
+/* Navigation clavier / manette : anneau de focus commun aux cibles de la page.
+   Chaque carte du dashboard est focusable, donc l'anneau se pose sur la carte
+   elle-même plutôt que sur une liste de cibles à tenir à jour. */
+.me-card:focus-visible {
+  outline: 2px solid #c3b5ff;
+  outline-offset: 3px;
+}
+
 /* Sous ces seuils le dashboard ne tient plus d'un bloc : il redevient une page
    qui défile plutôt que de se comprimer jusqu'à l'illisible. */
 @media (max-width: 1180px), (max-height: 620px) {

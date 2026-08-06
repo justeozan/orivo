@@ -96,21 +96,50 @@ describe("createInitialStoreState", () => {
     expect(state.home.games.length).toBeGreaterThan(0);
   });
 
-  it("never fabricates a price or an availability claim for editorial offers", () => {
+  it("never fabricates a price for editorial offers", () => {
+    const pricedProviders = new Set<StoreProvider>();
     for (const editorial of EDITORIAL_GAMES) {
       for (const editorialOffer of editorial.offers) {
-        expect(editorialOffer.priceMinor).toBeNull();
-        expect(editorialOffer.currency).toBeNull();
-        expect(editorialOffer.availability).toBe("unknown");
-        expect(editorialOffer.stale).toBe(true);
+        const where = `${editorial.id} / ${editorialOffer.provider}`;
+        if (editorialOffer.priceMinor === null) {
+          // No quote means no quote: nothing is dated, nothing is presented as
+          // current.
+          expect(editorialOffer.currency, where).toBeNull();
+          expect(editorialOffer.verifiedAt, where).toBeNull();
+          expect(editorialOffer.stale, where).toBe(true);
+          continue;
+        }
+        // A price only exists because a shop returned it, so it carries the
+        // currency it was quoted in and the day it was read.
+        expect(editorialOffer.priceMinor, where).toBeGreaterThanOrEqual(0);
+        expect(Number.isInteger(editorialOffer.priceMinor), where).toBe(true);
+        expect(editorialOffer.currency, where).toMatch(/^[A-Z]{3}$/);
+        expect(editorialOffer.verifiedAt, where).toBeTruthy();
+        expect(Number.isNaN(Date.parse(editorialOffer.verifiedAt ?? "")), where).toBe(false);
+        pricedProviders.add(editorialOffer.provider);
+      }
+    }
+
+    // A shop is only called available when the catalog actually carries a
+    // verified price from it; the console storefronts, whose prices are unknown,
+    // stay degraded, and a shop with no feed at all is never claimed to work.
+    for (const entry of EDITORIAL_PROVIDER_STATUSES) {
+      if (entry.health === "available") {
+        expect(pricedProviders.has(entry.provider), entry.provider).toBe(true);
+      } else {
+        expect(pricedProviders.has(entry.provider), entry.provider).toBe(false);
       }
     }
 
     const instantGaming = EDITORIAL_PROVIDER_STATUSES.find(
       (entry) => entry.provider === "instant-gaming",
     );
-    expect(instantGaming?.health).toBe("unavailable");
-    expect(EDITORIAL_PROVIDER_STATUSES.some((entry) => entry.health === "available")).toBe(false);
+    expect(instantGaming?.health).toBe("not-configured");
+    expect(
+      EDITORIAL_GAMES.some((entry) =>
+        entry.offers.some((editorialOffer) => editorialOffer.provider === "instant-gaming"),
+      ),
+    ).toBe(false);
   });
 
   it("keeps recommendation reasons factual", () => {
@@ -129,14 +158,14 @@ describe("reduceStorePageState", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready", browseGames: [game()] }), {
       type: "activate",
       category: "relaxing",
-      platforms: [],
+      platforms: ["pc"],
       query: "unrailed",
       online: true,
     });
 
     expect(next.phase).toBe("ready");
     expect(next.category).toBe("relaxing");
-    expect(next.platforms).toEqual(["steam"]);
+    expect(next.platforms).toEqual(["pc"]);
     expect(next.query).toBe("unrailed");
     expect(next.browseGames).toBeNull();
     expect(next.errorMessage).toBe("");
@@ -152,7 +181,7 @@ describe("reduceStorePageState", () => {
     });
 
     expect(next.phase).toBe("offline");
-    expect(next.errorMessage).toMatch(/offline/i);
+    expect(next.errorMessage).toMatch(/hors ligne/i);
     expect(next.home.games.length).toBeGreaterThan(0);
   });
 
@@ -301,12 +330,13 @@ describe("reduceStorePageState", () => {
     expect(byCategory.browseGames).toBeNull();
     expect(byCategory.nextCursor).toBeNull();
 
-    const byProvider = reduceStorePageState(browsing, {
+    const byPlatform = reduceStorePageState(browsing, {
       type: "platforms-changed",
-      platforms: [],
+      platforms: ["pc", "playstation"],
     });
-    expect(byProvider.platforms).toEqual(["steam", "apple"]);
-    expect(byProvider.browseGames).toBeNull();
+    expect(byPlatform.platforms).toEqual(["pc", "playstation"]);
+    expect(byPlatform.browseGames).toBeNull();
+    expect(byPlatform.nextCursor).toBeNull();
 
     const byQuery = reduceStorePageState(browsing, { type: "query-changed", query: "hades" });
     expect(byQuery.query).toBe("hades");
@@ -334,7 +364,7 @@ describe("reduceStorePageState", () => {
       online: false,
     });
     expect(offline.phase).toBe("offline");
-    expect(offline.errorMessage).toMatch(/offline/i);
+    expect(offline.errorMessage).toMatch(/hors ligne/i);
 
     const recovered = reduceStorePageState(offline, { type: "connectivity-changed", online: true });
     expect(recovered.phase).toBe("degraded");
@@ -383,10 +413,28 @@ describe("selectStoreGames", () => {
     expect(selectStoreGames(stateWith({ home, category: "all-games" }))).toHaveLength(3);
   });
 
-  it("combines the category filter with the provider filter", () => {
-    const state = stateWith({ home, category: "short-sessions", platforms: [] });
+  it("combines the category filter with the platform filter", () => {
+    const shortConsole = game({
+      id: "short-console",
+      title: "Astro Duel 2",
+      tags: ["Short Sessions"],
+      supportedPlatforms: [],
+      offers: [
+        offer({ gameId: "short-console", provider: "playstation", providerLabel: "PlayStation Store" }),
+      ],
+    });
+    const shelf = homeView({ games: [shortSteam, shortConsole, storySteam] });
 
-    expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["short-steam"]);
+    expect(
+      selectStoreGames(
+        stateWith({ home: shelf, category: "short-sessions", platforms: ["playstation"] }),
+      ).map((entry) => entry.id),
+    ).toEqual(["short-console"]);
+    expect(
+      selectStoreGames(stateWith({ home: shelf, category: "short-sessions", platforms: ["pc"] })).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual(["short-steam"]);
   });
 
   it("matches the story and relaxing categories on tags and genres", () => {
@@ -414,23 +462,24 @@ describe("selectStoreGames", () => {
   });
 
   it("returns an empty list rather than inventing results", () => {
-    expect(selectStoreGames(stateWith({ home, platforms: [] }))).toEqual([]);
+    expect(selectStoreGames(stateWith({ home, platforms: ["switch"] }))).toEqual([]);
   });
 });
 
 describe("storeCategoryLabel", () => {
-  it("labels every known category in English", () => {
+  it("labels every known category in French", () => {
     expect(STORE_CATEGORIES.map((option) => storeCategoryLabel(option.id))).toEqual([
-      "For You",
-      "Short Sessions",
-      "Strong Stories",
-      "Relaxing",
-      "All Games",
+      "Pour toi",
+      "Bon pour le cerveau",
+      "Courte durée",
+      "Récits forts",
+      "Relaxant",
+      "Tous les jeux",
     ]);
   });
 
-  it("falls back to All Games for an unknown category", () => {
-    expect(storeCategoryLabel("mystery" as never)).toBe("All Games");
+  it("falls back to every game for an unknown category", () => {
+    expect(storeCategoryLabel("mystery" as never)).toBe("Tous les jeux");
   });
 });
 
@@ -502,5 +551,83 @@ describe("selectBestOffer", () => {
     selectBestOffer(subject);
 
     expect(subject.offers.map((entry) => entry.id)).toEqual(["first", "second"]);
+  });
+});
+
+describe("selectBestOffer ordering", () => {
+  // selectBestOffer reads the wall clock for staleness, so the stamp has to be
+  // recent against it rather than against the fixture's frozen NOW.
+  const fresh = new Date(Date.now() - HOUR).toISOString();
+
+  it("never lets an unprintable quote displace a real price", () => {
+    // A row carrying an amount but no currency renders as an empty string, so
+    // it must not win over a shop that quoted something Orivo can print.
+    const priced = offer({
+      id: "priced",
+      priceMinor: 10_000,
+      currency: "EUR",
+      availability: "available",
+      verifiedAt: null,
+      stale: true,
+    });
+    const currencyless = offer({
+      id: "currencyless",
+      priceMinor: 5,
+      currency: null,
+      availability: "available",
+      verifiedAt: fresh,
+      stale: false,
+    });
+
+    expect(selectBestOffer(game({ offers: [priced, currencyless] }), "EUR")?.id).toBe("priced");
+    expect(selectBestOffer(game({ offers: [currencyless, priced] }), "EUR")?.id).toBe("priced");
+  });
+
+  it("orders the same whichever way the offers arrive", () => {
+    const expensive = offer({
+      id: "expensive",
+      priceMinor: 90_000,
+      currency: "EUR",
+      availability: "available",
+      verifiedAt: fresh,
+      stale: false,
+    });
+    const cheap = offer({
+      id: "cheap",
+      priceMinor: 10_000,
+      currency: "EUR",
+      availability: "available",
+      verifiedAt: null,
+      stale: true,
+    });
+    const currencyless = offer({
+      id: "currencyless",
+      priceMinor: 5,
+      currency: null,
+      availability: "available",
+      verifiedAt: null,
+      stale: true,
+    });
+
+    for (const offers of [
+      [expensive, cheap, currencyless],
+      [currencyless, cheap, expensive],
+      [cheap, currencyless, expensive],
+    ]) {
+      expect(selectBestOffer(game({ offers }), "EUR")?.id).toBe("cheap");
+    }
+  });
+
+  it("falls back to freshness when no shop quoted anything", () => {
+    const stale = offer({ id: "stale", availability: "available", verifiedAt: null, stale: true });
+    const verified = offer({
+      id: "verified",
+      availability: "available",
+      verifiedAt: fresh,
+      stale: false,
+    });
+
+    expect(selectBestOffer(game({ offers: [stale, verified] }), "EUR")?.id).toBe("verified");
+    expect(selectBestOffer(game({ offers: [verified, stale] }), "EUR")?.id).toBe("verified");
   });
 });
