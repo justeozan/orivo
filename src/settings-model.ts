@@ -108,6 +108,7 @@ export const EMPTY_WALLPAPER_CREDENTIALS: WallpaperCredentials = {
   igdbClientSecret: "",
   googleApiKey: "",
   googleCseId: "",
+  steamgriddbApiKey: "",
 };
 
 export function normaliseWallpaperCredentials(value: unknown): WallpaperCredentials {
@@ -117,6 +118,7 @@ export function normaliseWallpaperCredentials(value: unknown): WallpaperCredenti
     igdbClientSecret: readString(record.igdbClientSecret ?? record.igdb_client_secret),
     googleApiKey: readString(record.googleApiKey ?? record.google_api_key),
     googleCseId: readString(record.googleCseId ?? record.google_cse_id),
+    steamgriddbApiKey: readString(record.steamgriddbApiKey ?? record.steamgriddb_api_key),
   };
 }
 

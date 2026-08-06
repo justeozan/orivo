@@ -9,6 +9,7 @@ import type {
   WallpaperSource,
 } from "./contracts";
 import { icon } from "./icons";
+import { sourceBadge } from "./source-model";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
   buildMetaFacts,
@@ -54,6 +55,8 @@ export interface GameDetailPageClient {
   openOffer(offerId: string, signal: AbortSignal): Promise<void>;
   /** Fetch cover/hero art for a game the same way an import does. */
   searchArtwork(gameId: string, signal: AbortSignal): Promise<void>;
+  /** Refill the portrait cover, landscape cover and background from a reliable source. */
+  resetArtwork(gameId: string, signal: AbortSignal): Promise<ArtworkResetResult>;
   /** Remove a game from the library (does not touch the game's own files). */
   removeGame(gameId: string, signal: AbortSignal): Promise<void>;
   /** Promote a chosen media to a game card role: background, cover or landscape. */
@@ -68,11 +71,24 @@ export interface GameDetailPageClient {
 /** Which library card slot a chosen wallpaper fills. */
 export type WallpaperRole = "background" | "cover" | "landscape";
 
+/** What a cover reset actually replaced. A role with no art found is absent. */
+export interface ArtworkResetResult {
+  title: string;
+  replaced: WallpaperRole[];
+}
+
 /** The role picker's segments, in display order. */
 const WALLPAPER_ROLES: ReadonlyArray<{ id: WallpaperRole; label: string }> = [
   { id: "background", label: "Background" },
   { id: "cover", label: "Portrait cover" },
   { id: "landscape", label: "Landscape cover" },
+];
+
+/** Role names as they read in a sentence, for the reset's partial result. */
+const ROLE_LABELS: ReadonlyArray<{ role: WallpaperRole; label: string }> = [
+  { role: "cover", label: "portrait cover" },
+  { role: "landscape", label: "landscape cover" },
+  { role: "background", label: "background" },
 ];
 
 /** Apply-button labels per role, shown for a single pick. */
@@ -170,6 +186,10 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       // The explicit action re-runs the search even if art already exists.
       await invokeWhileActive("fetch_game_artwork", { gameId, force: true }, signal);
+    },
+    async resetArtwork(gameId, signal) {
+      if (!isTauriRuntime()) return { title: "", replaced: [] };
+      return invokeWhileActive<ArtworkResetResult>("reset_game_artwork", { gameId }, signal);
     },
     async removeGame(gameId, signal) {
       if (!isTauriRuntime()) return;
@@ -328,23 +348,38 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
   };
 
-  /** Refetch cover/hero art (the same search a fresh import runs), then repaint. */
-  const handleSearchArtwork = async (): Promise<void> => {
+  /**
+   * Refill all three artwork roles — portrait cover, landscape cover and
+   * background — from a reliable high-resolution source, then repaint.
+   *
+   * This replaces the old single-image search, which downloaded one picture and
+   * used it for every role. That is why a game synced from Xbox or the
+   * Microsoft Store ended up with a small square thumbnail everywhere.
+   */
+  const handleResetArtwork = async (): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId) return;
-    showTransientStatus("Searching for cover & images…");
+    showTransientStatus("Fetching fresh covers…");
     try {
-      await client.searchArtwork(gameId, context.signal);
+      const result = await client.resetArtwork(gameId, context.signal);
       if (!isFresh(context, gameId)) return;
       options.onLibraryChanged?.();
       await loadDetail(context, gameId);
-      // The refreshed cover and screenshots are the confirmation; a message
-      // saying so only repeats what is already on screen.
-      if (isFresh(context, gameId)) clearTransientStatus();
+      if (!isFresh(context, gameId)) return;
+      // A partial result is stated rather than hidden: a game whose publisher
+      // never uploaded a wide capsule keeps the landscape image it had.
+      const missing = ROLE_LABELS.filter(({ role }) => !result.replaced.includes(role));
+      if (missing.length === 0) {
+        clearTransientStatus();
+      } else {
+        showTransientStatus(
+          `Updated, but no ${missing.map(({ label }) => label).join(" or ")} was found.`,
+        );
+      }
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
-      showTransientStatus(requestErrorMessage(error, "No cover or images were found for this game."));
+      showTransientStatus(requestErrorMessage(error, "No covers were found for this game."));
     }
   };
 
@@ -694,7 +729,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     };
 
     menu.append(
-      item("menu-artwork", "search", "Search cover & images", () => void handleSearchArtwork()),
+      item("menu-artwork", "refresh", "Reset the covers", () => void handleResetArtwork()),
       item("menu-remove", "close", "Remove from library", () => void handleRemoveGame(), true),
     );
 
@@ -1113,19 +1148,19 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * The larger source logo under the title: Steam's mark for Steam games, a
-   * local-machine glyph for everything living on this device. A logo, not a
-   * text badge — the label only exists for assistive tech and the tooltip.
+   * The larger source logo under the title: each store's own mark for a game
+   * that came from a connected account, a local-machine glyph for everything
+   * living on this device. A logo, not a text badge — the label only exists for
+   * assistive tech and the tooltip.
    */
   const renderSourceBadge = (detail: GameDetailViewModel): HTMLElement => {
-    const isSteam = detail.source === "steam";
-    const label = isSteam ? "Steam" : "Local";
+    const source = sourceBadge(detail.source) ?? { label: "Local", icon: "local" as const };
     const badge = element("span", "gd-source");
     badge.dataset.source = detail.source;
     badge.setAttribute("role", "img");
-    badge.setAttribute("aria-label", `Source: ${label}`);
-    badge.title = label;
-    badge.innerHTML = icon(isSteam ? "steam" : "local");
+    badge.setAttribute("aria-label", `Source: ${source.label}`);
+    badge.title = source.label;
+    badge.innerHTML = icon(source.icon);
     return badge;
   };
 
