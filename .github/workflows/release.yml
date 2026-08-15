@@ -109,12 +109,10 @@ jobs:
             libxdo-dev \
             libssl-dev
 
-      # Publishes the installers, the detached `.sig` signatures and, thanks to
-      # `includeUpdaterJson`, the `latest.json` manifest the in-app updater
-      # polls at https://github.com/justeozan/orivo/releases/latest/download/latest.json.
-      # The release must NOT be a draft: `/releases/latest/download/` only
-      # resolves against published releases.
-      - name: Build and publish
+      # Every matrix worker uploads to the same *draft* release. Keeping it
+      # private until the final job verifies every installer and updater entry
+      # prevents users from ever seeing a half-finished multi-platform release.
+      - name: Build and stage release assets
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -124,19 +122,25 @@ jobs:
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.version && format('v{0}', inputs.version) || 'v__VERSION__') }}
           releaseName: 'Orivo __VERSION__'
           releaseBody: |
-            See the assets below to download and install.
+            ## Downloads
+
+            - **macOS:** download the `.dmg` matching your Mac (Apple Silicon or Intel).
+            - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
+            - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
+
+            The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
 
             Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
 
             Orivo is not code-signed yet. On macOS, right-click the app and choose **Open** the first time (Gatekeeper blocks a double-click). On Windows, click **More info** then **Run anyway** on the SmartScreen prompt.
-          releaseDraft: false
-          prerelease: false
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') || contains(inputs.version, '-') }}
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
   verify-updater-manifest:
-    name: Verify updater manifest
+    name: Verify staged release
     needs: release
     runs-on: ubuntu-latest
     permissions:
@@ -145,7 +149,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Assert latest.json is published and complete
+      - name: Assert every installer and updater entry is complete
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
@@ -180,16 +184,32 @@ jobs:
             exit 1
           fi
 
-          # /releases/latest/download/ resolves against the newest published,
-          # non-prerelease release only.
-          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" = "true" ]; then
-            echo "::error::Release $tag is a draft; /releases/latest/download/latest.json will 404 for the updater."
+          # The release must remain private until this job finishes. Publishing
+          # it earlier would expose a partial asset list when one matrix build
+          # fails or overwrites an updater entry.
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != "true" ]; then
+            echo "::error::Release $tag was published before its assets were verified."
             exit 1
           fi
-          if [ "$(gh release view "$tag" --json isPrerelease --jq '.isPrerelease')" = "true" ]; then
-            echo "::error::Release $tag is flagged as a pre-release; /releases/latest/download/ skips pre-releases, so the updater will keep serving the previous version."
-            exit 1
-          fi
+
+          require_count() {
+            label="$1"
+            pattern="$2"
+            minimum="$3"
+            actual="$(printf '%s\n' "$assets" | grep -Eic "$pattern" || true)"
+            if [ "$actual" -lt "$minimum" ]; then
+              echo "::error::$label is missing (expected at least $minimum asset(s), found $actual)."
+              exit 1
+            fi
+          }
+
+          require_count "macOS DMG installers" '\.dmg$' 2
+          require_count "macOS updater archives" '\.app\.tar\.gz$' 2
+          require_count "Windows NSIS installer" '-setup\.exe$' 1
+          require_count "Windows MSI installer" '\.msi$' 1
+          require_count "Linux AppImage" '\.AppImage$' 1
+          require_count "Linux Debian package" '\.deb$' 1
+          require_count "Linux RPM package" '\.rpm$' 1
 
           manifest="$RUNNER_TEMP/latest.json"
           gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
@@ -217,4 +237,67 @@ jobs:
             exit 1
           fi
 
-          echo "latest.json is published on $tag and covers every platform."
+          while IFS=$'\t' read -r platform url signature; do
+            if [ -z "$url" ] || [ -z "$signature" ]; then
+              echo "::error::Updater entry for $platform has no URL or signature."
+              exit 1
+            fi
+            asset="${url##*/}"
+            if ! printf '%s\n' "$assets" | grep -Fqx -- "$asset"; then
+              echo "::error::Updater entry for $platform points at missing asset $asset."
+              exit 1
+            fi
+          done < <(jq -r '.platforms | to_entries[] | "\(.key)\t\(.value.url)\t\(.value.signature)"' "$manifest")
+
+          echo "The staged release contains every installer and signed updater entry."
+
+  publish-release:
+    name: Publish verified release
+    needs: verify-updater-manifest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Publish only after verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_TAG" ]; then
+            tag="$REF_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != "true" ]; then
+            echo "::error::Release $tag is no longer a draft; refusing to change a public release."
+            exit 1
+          fi
+
+          if [ "$(gh release view "$tag" --json isPrerelease --jq '.isPrerelease')" = "true" ]; then
+            gh release edit "$tag" --draft=false
+            echo "Published pre-release $tag. It is intentionally excluded from the stable updater feed."
+            exit 0
+          fi
+
+          gh release edit "$tag" --draft=false --latest
+
+          feed='https://github.com/justeozan/orivo/releases/latest/download/latest.json'
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --location --silent --show-error "$feed" | jq -e --arg version "${tag#v}" '.version == $version' >/dev/null; then
+              echo "Published $tag and verified the public updater feed."
+              exit 0
+            fi
+            echo "The public updater feed is not visible yet (attempt $attempt/5), waiting..."
+            sleep 10
+          done
+
+          echo "::error::Release $tag is public but its updater feed could not be verified."
+          exit 1
