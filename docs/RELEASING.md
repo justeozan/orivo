@@ -10,7 +10,7 @@ Everything is automated by three workflows:
 | --- | --- | --- | --- |
 | CI | `.github/workflows/ci.yml` | push to `main`, every PR | `pnpm typecheck`, `pnpm test`, and `cargo check` on Linux / macOS / Windows |
 | Tag release | `.github/workflows/tag.yml` | manual (`workflow_dispatch`) | bumps the version everywhere, commits to `main`, pushes `v<version>`, starts the release |
-| Release | `.github/workflows/release.yml` | push of a `v*` tag, or manual | builds and publishes the bundles, signatures and `latest.json` |
+| Release | `.github/workflows/release.yml` | push of a `v*` tag, or manual | stages, verifies, then publishes the bundles, signatures and `latest.json` |
 
 ---
 
@@ -87,8 +87,9 @@ both secrets.
    - starts **Release** at that tag.
 4. Watch **Actions → Release**. Four builds run in parallel (macOS arm64, macOS
    x86_64, Linux, Windows); a cold cache takes roughly 20-30 minutes.
-5. The release is published (not a draft) at
-   `https://github.com/justeozan/orivo/releases/tag/v0.4.0`.
+5. The release starts as a draft while the four builds upload their assets. It
+   becomes public only after the workflow confirms every installer, every
+   updater target and the public `latest.json` feed.
 
 > The tag workflow starts the release workflow explicitly instead of relying on
 > the tag push. GitHub deliberately does not start workflow runs for events
@@ -117,11 +118,17 @@ retarget the run at `v<version>`.
 
 | Platform | Installers | Updater artifact |
 | --- | --- | --- |
-| macOS (Apple Silicon + Intel, built separately) | `.dmg`, `.app` | `.app.tar.gz` + `.sig` |
+| macOS (Apple Silicon + Intel, built separately) | `.dmg` | `.app.tar.gz` + `.sig` |
 | Windows | NSIS `.exe`, `.msi` | NSIS `.exe` + `.sig` |
 | Linux | `.AppImage`, `.deb`, `.rpm` | `.AppImage.tar.gz` + `.sig` |
 
 Plus one `latest.json` shared by all four builds.
+
+The macOS `.app` is a directory, so GitHub cannot attach it as a standalone
+file. The `.dmg` is the user-facing macOS installer; the `.app.tar.gz` is the
+signed updater archive, not a manual download. Orivo does not currently ship
+an Android `.apk`: this repository has no Android Tauri project or Android
+signing configuration.
 
 ---
 
@@ -135,17 +142,19 @@ https://github.com/justeozan/orivo/releases/latest/download/latest.json
 ```
 
 That URL is a GitHub redirect to the asset named `latest.json` on the newest
-**published** release. Three things have to hold for it to resolve, and the
-release workflow enforces all three:
+**published stable** release. The workflow first keeps a release as a draft,
+then verifies it, and only then publishes it. Four things have to hold:
 
 1. `includeUpdaterJson: true` on `tauri-apps/tauri-action`, so `latest.json` is
    generated and uploaded as a release asset. Each matrix job merges its own
    platform into the existing file, so the final manifest lists
    `darwin-aarch64`, `darwin-x86_64`, `linux-x86_64` and `windows-x86_64`.
-2. `releaseDraft: false`. `/releases/latest/download/` **404s for draft
-   releases** — a draft release is invisible to that endpoint, and the updater
-   would silently never find an update.
-3. `prerelease: false`. `latest` also skips pre-releases.
+2. `releaseDraft: true` while the matrix builds. A draft is intentionally
+   invisible to `/releases/latest/download/`; `publish-release` removes that
+   flag only after all verification passes.
+3. Stable releases are marked as latest. Pre-releases such as `0.4.0-rc.1`
+   are published but deliberately excluded from the stable updater feed.
+4. Every updater URL points to an uploaded release asset and has a signature.
 
 `updaterJsonPreferNsis: true` makes the Windows entry point at the NSIS
 installer rather than the MSI, which matches the `currentUser` / `passive`
@@ -156,17 +165,21 @@ writes a detached `.sig` next to it; the app verifies that signature against the
 embedded `pubkey` before installing anything. A build without
 `TAURI_SIGNING_PRIVATE_KEY` produces no `.sig` and no `latest.json`.
 
-The `verify-updater-manifest` job at the end of the release workflow downloads
-the published `latest.json` and fails the run if any of these is true, so a
-broken updater cannot ship unnoticed:
+The `verify-updater-manifest` job checks the staged release before it becomes
+public. It fails the run if any of these is true:
 
 - `latest.json` is not attached to the release;
-- the release is a draft or a pre-release;
+- the release was made public before verification;
 - the manifest's `version` does not match the tag (an install already on that
   version would never be offered the update);
 - any of `darwin-aarch64`, `darwin-x86_64`, `linux-x86_64`, `windows-x86_64` is
   missing from `platforms` — one build failed, produced no signature, or a
   concurrent matrix job overwrote the shared manifest.
+- a user-facing `.dmg`, `.exe`, `.msi`, `.AppImage`, `.deb` or `.rpm` asset is
+  absent, or an updater entry points to a missing asset.
+
+Only `publish-release` can then make the release public. For a stable release,
+it also fetches the public endpoint and checks its version before completing.
 
 The release job also refuses to start a build whose tag disagrees with the
 version in `package.json` and `src-tauri/tauri.conf.json`, which is the same
@@ -266,9 +279,10 @@ workflow, which bumps them together.
 
 **Installed apps never see the update.**
 Open `https://github.com/justeozan/orivo/releases/latest/download/latest.json`
-in a browser. A 404 means the newest release is a draft or a pre-release, or
-`latest.json` was never attached. A stale version in the JSON means an older run
-overwrote it — re-run the release workflow for the newest tag.
+in a browser. A 404 means there is no published stable release with a
+`latest.json` asset. A 404 while the new workflow is still building is expected:
+the release remains a draft until all platforms have been verified. A stale
+version in the JSON means an older run is still the latest stable release.
 
 **`pnpm install --frozen-lockfile` fails.**
 `pnpm-lock.yaml` is out of sync with `package.json`. Run `pnpm install` locally
