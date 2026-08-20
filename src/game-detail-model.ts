@@ -11,7 +11,6 @@ import type {
   WallpaperCategory,
   WallpaperSearchPhase,
   WallpaperSearchView,
-  WallpaperSource,
 } from "./contracts";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type { IconName } from "./icons";
@@ -21,12 +20,7 @@ import type { IconName } from "./icons";
 /* -------------------------------------------------------------------------- */
 
 export type GameDetailPhase =
-  | "idle"
-  | "loading"
-  | "ready"
-  | "not-found"
-  | "offline"
-  | "error";
+  "idle" | "loading" | "ready" | "not-found" | "offline" | "error";
 
 export type GameDetailPrimaryAction = GameDetailView["primaryAction"];
 
@@ -62,9 +56,9 @@ export interface GameDetailSocialExtras {
 
 /**
  * One category row's own results. `phase` is `"idle"` until that row's first
- * search runs, then it mirrors the backend's `ready | not-configured | error`
- * phases. Each row searches, pages and fails independently, so an empty Cover
- * row never blanks the Background row beside it.
+ * search runs, then it mirrors the backend's `ready | error` phases. Each row
+ * searches, pages and fails independently, so an empty Cover row never blanks
+ * the Background row beside it.
  */
 export interface WallpaperCategoryState {
   phase: "idle" | WallpaperSearchPhase;
@@ -84,12 +78,11 @@ export interface WallpaperCategoryState {
  */
 export interface WallpaperSearchState {
   open: boolean;
-  source: WallpaperSource;
   query: string;
   /**
-   * The row the user has narrowed to via the chips, or `null` for all three.
-   * "Voir tout" sets this, so expanding a row and filtering to it are the
-   * same state — one concept, not two.
+   * The row the user has narrowed to via the chips, or `null` for every row.
+   * There is no source alongside it: each row is filled from every provider at
+   * once, so there is nothing left to choose between.
    */
   focus: WallpaperCategory | null;
   categories: Record<WallpaperCategory, WallpaperCategoryState>;
@@ -108,11 +101,15 @@ export function createWallpaperCategoryState(): WallpaperCategoryState {
   };
 }
 
-function createWallpaperCategories(): Record<WallpaperCategory, WallpaperCategoryState> {
+function createWallpaperCategories(): Record<
+  WallpaperCategory,
+  WallpaperCategoryState
+> {
   return {
     cover: createWallpaperCategoryState(),
     landscape: createWallpaperCategoryState(),
     background: createWallpaperCategoryState(),
+    logo: createWallpaperCategoryState(),
   };
 }
 
@@ -129,7 +126,9 @@ function updateWallpaperCategory(
 export function allWallpaperCandidates(
   search: WallpaperSearchState,
 ): WallpaperCandidateView[] {
-  return WALLPAPER_CATEGORIES.flatMap((category) => search.categories[category].candidates);
+  return WALLPAPER_CATEGORIES.flatMap(
+    (category) => search.categories[category].candidates,
+  );
 }
 
 export type GameDetailViewModel = GameDetailView & GameDetailSocialExtras;
@@ -164,8 +163,17 @@ export type GameDetailPageAction =
       restore: PageRestoreState | null;
     }
   | { type: "request-started"; requestId: number }
-  | { type: "detail-loaded"; requestId: number; detail: GameDetailViewModel | null }
-  | { type: "request-failed"; requestId: number; message: string; offline: boolean }
+  | {
+      type: "detail-loaded";
+      requestId: number;
+      detail: GameDetailViewModel | null;
+    }
+  | {
+      type: "request-failed";
+      requestId: number;
+      message: string;
+      offline: boolean;
+    }
   | { type: "media-kind-changed"; kind: GameMediaKind }
   | { type: "media-previewed"; mediaId: string }
   | { type: "media-busy-changed"; busy: boolean }
@@ -174,12 +182,23 @@ export type GameDetailPageAction =
   | { type: "media-failed"; message: string }
   | { type: "wallpaper-search-opened" }
   | { type: "wallpaper-search-closed" }
-  | { type: "wallpaper-search-source-changed"; source: WallpaperSource }
   | { type: "wallpaper-search-query-changed"; query: string }
   | { type: "wallpaper-search-focus-changed"; focus: WallpaperCategory | null }
-  | { type: "wallpaper-search-started"; category: WallpaperCategory; more?: boolean }
-  | { type: "wallpaper-search-results"; category: WallpaperCategory; results: WallpaperSearchView }
-  | { type: "wallpaper-search-failed"; category: WallpaperCategory; message: string }
+  | {
+      type: "wallpaper-search-started";
+      category: WallpaperCategory;
+      more?: boolean;
+    }
+  | {
+      type: "wallpaper-search-results";
+      category: WallpaperCategory;
+      results: WallpaperSearchView;
+    }
+  | {
+      type: "wallpaper-search-failed";
+      category: WallpaperCategory;
+      message: string;
+    }
   | { type: "wallpaper-slide-changed"; slideId: string | null }
   | { type: "wishlist-changed"; wishlisted: boolean }
   | { type: "about-toggled" }
@@ -202,8 +221,13 @@ export interface GameDetailFact {
 export interface PrimaryActionDescriptor {
   kind: GameDetailPrimaryAction;
   label: string;
+  /**
+   * 0-100 while a download runs. The button fills to this, which is why the
+   * status row no longer repeats the number as a chip.
+   */
+  progress?: number | null;
   icon: IconName;
-  intent: "play" | "navigate" | "open-offer" | "none";
+  intent: "play" | "navigate" | "open-offer" | "install-epic" | "none";
   route: AppRoute | null;
   offerId: string | null;
   disabled: boolean;
@@ -231,16 +255,30 @@ export const GAME_MEDIA_KINDS: readonly GameDetailMediaKindOption[] = [
   { id: "cover", label: "Cover" },
 ];
 
-const MEDIA_KIND_IDS: readonly GameMediaKind[] = GAME_MEDIA_KINDS.map((option) => option.id);
+const MEDIA_KIND_IDS: readonly GameMediaKind[] = GAME_MEDIA_KINDS.map(
+  (option) => option.id,
+);
 const MEDIA_ORIGINS: readonly GameMediaView["origin"][] = [
   "bundled",
   "provider",
   "imported",
   "downloaded",
 ];
+const INSTALL_STATES: readonly GameDetailView["installState"][] = [
+  "installed",
+  "installing",
+  "not-installed",
+  "unknown",
+];
+const MAC_COMPATIBILITIES: readonly GameDetailView["macCompatibility"][] = [
+  "native",
+  "not-native",
+  "unknown",
+];
 const PRIMARY_ACTIONS: readonly GameDetailPrimaryAction[] = [
   "play",
   "install-steam",
+  "install-epic",
   "configure-wine",
   "view-offer",
   "unavailable",
@@ -271,7 +309,10 @@ function optionalText(value: unknown): string | null {
 
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+  return value.filter(
+    (entry): entry is string =>
+      typeof entry === "string" && entry.trim() !== "",
+  );
 }
 
 /**
@@ -286,11 +327,18 @@ function visibleLabels(values: string[]): string[] {
 }
 
 function wholeNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
 }
 
-function oneOf<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
-  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+function oneOf<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  return typeof value === "string" &&
+    (allowed as readonly string[]).includes(value)
     ? (value as T)
     : fallback;
 }
@@ -304,7 +352,10 @@ export function normaliseGameMedia(value: unknown): GameMediaView[] {
     const id = text(entry.id);
     const previewUrl = text(entry.previewUrl);
     if (!id || !previewUrl || seen.has(id)) continue;
-    if (typeof entry.kind !== "string" || !(MEDIA_KIND_IDS as readonly string[]).includes(entry.kind)) {
+    if (
+      typeof entry.kind !== "string" ||
+      !(MEDIA_KIND_IDS as readonly string[]).includes(entry.kind)
+    ) {
       continue;
     }
     seen.add(id);
@@ -363,7 +414,6 @@ export function normaliseWallpaperSearch(
   if (!isRecord(value)) {
     return {
       phase: "error",
-      source: "steam-store",
       category,
       query: "",
       message: "",
@@ -372,12 +422,7 @@ export function normaliseWallpaperSearch(
   }
   const resolved = normaliseWallpaperCategory(value.category, category);
   return {
-    phase: oneOf(value.phase, ["ready", "not-configured", "error"] as const, "error"),
-    source: oneOf(
-      value.source,
-      ["steam-store", "wikimedia", "openverse", "igdb", "google-images"] as const,
-      "steam-store",
-    ),
+    phase: oneOf(value.phase, ["ready", "error"] as const, "error"),
     category: resolved,
     query: text(value.query),
     message: text(value.message),
@@ -442,17 +487,30 @@ function normaliseOffers(value: unknown): StoreOffer[] {
       gameId: text(entry.gameId),
       provider: oneOf(
         entry.provider,
-        ["steam", "ubisoft", "microsoft", "apple", "google-play", "instant-gaming"] as const,
+        [
+          "steam",
+          "ubisoft",
+          "microsoft",
+          "apple",
+          "google-play",
+          "instant-gaming",
+        ] as const,
         "steam",
       ),
       providerLabel: text(entry.providerLabel, "Store"),
-      priceMinor: typeof entry.priceMinor === "number" && Number.isFinite(entry.priceMinor)
-        ? entry.priceMinor
-        : null,
+      priceMinor:
+        typeof entry.priceMinor === "number" &&
+        Number.isFinite(entry.priceMinor)
+          ? entry.priceMinor
+          : null,
       currency: optionalText(entry.currency),
       region: text(entry.region),
       verifiedAt: optionalText(entry.verifiedAt),
-      availability: oneOf(entry.availability, ["available", "unavailable", "unknown"] as const, "unknown"),
+      availability: oneOf(
+        entry.availability,
+        ["available", "unavailable", "unknown"] as const,
+        "unknown",
+      ),
       stale: entry.stale === true,
     });
   }
@@ -510,7 +568,9 @@ function normaliseActivity(value: unknown): GameDetailActivityEntry[] {
  * become empty rather than throwing, which is what "partial sections" means
  * for this page.
  */
-export function normaliseGameDetail(value: unknown): GameDetailViewModel | null {
+export function normaliseGameDetail(
+  value: unknown,
+): GameDetailViewModel | null {
   if (!isRecord(value)) return null;
   const summary = normaliseSummary(value);
   if (!summary) return null;
@@ -528,13 +588,28 @@ export function normaliseGameDetail(value: unknown): GameDetailViewModel | null 
           .map(normaliseSummary)
           .filter((game): game is GameSummary => game !== null)
       : [],
+    installState: oneOf(value.installState, INSTALL_STATES, "unknown"),
+    installPercent:
+      typeof value.installPercent === "number" &&
+      Number.isFinite(value.installPercent)
+        ? Math.min(100, Math.max(0, Math.round(value.installPercent)))
+        : null,
+    macCompatibility: oneOf(
+      value.macCompatibility,
+      MAC_COMPATIBILITIES,
+      "unknown",
+    ),
     primaryAction: oneOf(value.primaryAction, PRIMARY_ACTIONS, "unavailable"),
   };
   const friends = normaliseFriends(value.friends);
   if (friends.length > 0) detail.friends = friends;
   const activity = normaliseActivity(value.activity);
   if (activity.length > 0) detail.activity = activity;
-  if (typeof value.rating === "number" && Number.isFinite(value.rating) && value.rating > 0) {
+  if (
+    typeof value.rating === "number" &&
+    Number.isFinite(value.rating) &&
+    value.rating > 0
+  ) {
     detail.rating = value.rating;
   }
   if (
@@ -551,7 +626,9 @@ export function normaliseGameDetail(value: unknown): GameDetailViewModel | null 
 /* Media grouping and selection                                                */
 /* -------------------------------------------------------------------------- */
 
-export function groupMediaByKind(media: GameMediaView[]): Record<GameMediaKind, GameMediaView[]> {
+export function groupMediaByKind(
+  media: GameMediaView[],
+): Record<GameMediaKind, GameMediaView[]> {
   const groups: Record<GameMediaKind, GameMediaView[]> = {
     wallpaper: [],
     video: [],
@@ -562,7 +639,10 @@ export function groupMediaByKind(media: GameMediaView[]): Record<GameMediaKind, 
   return groups;
 }
 
-export function mediaForKind(media: GameMediaView[], kind: GameMediaKind): GameMediaView[] {
+export function mediaForKind(
+  media: GameMediaView[],
+  kind: GameMediaKind,
+): GameMediaView[] {
   return media.filter((item) => item.kind === kind);
 }
 
@@ -576,17 +656,25 @@ export function defaultMediaKind(media: GameMediaView[]): GameMediaKind {
   return availableMediaKinds(media)[0] ?? "wallpaper";
 }
 
-export function selectedMediaId(media: GameMediaView[], kind: GameMediaKind): string | null {
+export function selectedMediaId(
+  media: GameMediaView[],
+  kind: GameMediaKind,
+): string | null {
   const group = mediaForKind(media, kind);
   return group.find((item) => item.selected)?.id ?? group[0]?.id ?? null;
 }
 
-export function findMedia(media: GameMediaView[], mediaId: string | null): GameMediaView | null {
+export function findMedia(
+  media: GameMediaView[],
+  mediaId: string | null,
+): GameMediaView | null {
   if (!mediaId) return null;
   return media.find((item) => item.id === mediaId) ?? null;
 }
 
-export function previewedMedia(state: GameDetailPageState): GameMediaView | null {
+export function previewedMedia(
+  state: GameDetailPageState,
+): GameMediaView | null {
   return findMedia(state.media, state.previewMediaId);
 }
 
@@ -604,11 +692,20 @@ export function canExportMedia(state: GameDetailPageState): boolean {
 export function heroImageUrl(state: GameDetailPageState): string {
   const preview = previewedMedia(state);
   if (preview) {
-    if (preview.kind === "video") return preview.posterUrl ?? state.detail?.heroUrl ?? "";
-    if (preview.kind === "wallpaper" || preview.kind === "cover") return preview.previewUrl;
+    if (preview.kind === "video")
+      return preview.posterUrl ?? state.detail?.heroUrl ?? "";
+    if (preview.kind === "wallpaper" || preview.kind === "cover")
+      return preview.previewUrl;
   }
-  const wallpaper = mediaForKind(state.media, "wallpaper").find((item) => item.selected);
-  return wallpaper?.previewUrl ?? state.detail?.heroUrl ?? state.detail?.landscapeUrl ?? "";
+  const wallpaper = mediaForKind(state.media, "wallpaper").find(
+    (item) => item.selected,
+  );
+  return (
+    wallpaper?.previewUrl ??
+    state.detail?.heroUrl ??
+    state.detail?.landscapeUrl ??
+    ""
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -630,7 +727,9 @@ export function selectActionOffer(
   if (!detail || detail.offers.length === 0) return null;
   const ranked = [...detail.offers].sort((left, right) => {
     if (preferred) {
-      const preference = Number(right.provider === preferred) - Number(left.provider === preferred);
+      const preference =
+        Number(right.provider === preferred) -
+        Number(left.provider === preferred);
       if (preference !== 0) return preference;
     }
     const usable = Number(isOfferUsable(right)) - Number(isOfferUsable(left));
@@ -647,6 +746,7 @@ export function selectActionOffer(
 export function resolvePrimaryAction(
   detail: GameDetailView | null,
   gameId: GameId | null,
+  liveInstallPercent: number | null = null,
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
     kind: "unavailable",
@@ -685,6 +785,40 @@ export function resolvePrimaryAction(
           : "No Steam offer is available for this game.",
       };
     }
+    case "install-epic": {
+      // A download already running is not a second install to offer. The button
+      // becomes the progress bar instead — which is why the status row no
+      // longer carries a "Downloading 42%" chip.
+      if (detail.installState === "installing") {
+        const percent = liveInstallPercent ?? detail.installPercent;
+        return {
+          ...base,
+          kind: "install-epic",
+          label:
+            typeof percent === "number"
+              ? `Downloading ${percent}%`
+              : "Downloading",
+          progress: percent ?? 0,
+          icon: "download",
+          intent: "none",
+          disabled: true,
+          hint: `${detail.title} is downloading in the Epic Games Launcher`,
+        };
+      }
+      return {
+        ...base,
+        kind: "install-epic",
+        label: "Install",
+        progress: null,
+        icon: "download",
+        // Epic owns the download: Orivo asks its launcher to start one and
+        // then reports the progress it can measure, rather than pretending to
+        // run the transfer itself.
+        intent: "install-epic",
+        disabled: false,
+        hint: `Ask the Epic Games Launcher to download ${detail.title}`,
+      };
+    }
     case "configure-wine":
       return {
         ...base,
@@ -706,7 +840,9 @@ export function resolvePrimaryAction(
         intent: offer ? "open-offer" : "none",
         offerId: offer?.id ?? null,
         disabled: !offer,
-        hint: offer ? `Opens the ${offer.providerLabel} offer.` : "No offer is available yet.",
+        hint: offer
+          ? `Opens the ${offer.providerLabel} offer.`
+          : "No offer is available yet.",
       };
     }
     case "unavailable":
@@ -726,22 +862,27 @@ export function hasAboutContent(detail: GameDetailViewModel | null): boolean {
   return Boolean(detail && detail.about.trim().length > 0);
 }
 
-export function hasGameInfoContent(detail: GameDetailViewModel | null): boolean {
-  if (!detail) return false;
-  return Boolean(
-    detail.developer ||
-      detail.publisher ||
-      detail.releaseDate ||
-      detail.genres.length > 0 ||
-      detail.supportedPlatforms.length > 0,
-  );
+/**
+ * A loaded game always has something to say here: at the very least where it
+ * came from. The panel used to disappear for any title whose provider published
+ * no developer, publisher, date, genre or platform — which is most of a
+ * Microsoft Store or local library, and left a hole in the page.
+ */
+export function hasGameInfoContent(
+  detail: GameDetailViewModel | null,
+): boolean {
+  return detail !== null;
 }
 
-export function hasFeaturesContent(detail: GameDetailViewModel | null): boolean {
+export function hasFeaturesContent(
+  detail: GameDetailViewModel | null,
+): boolean {
   return Boolean(detail && detail.features.length > 0);
 }
 
-export function hasAchievementsContent(detail: GameDetailViewModel | null): boolean {
+export function hasAchievementsContent(
+  detail: GameDetailViewModel | null,
+): boolean {
   return Boolean(detail?.achievements && detail.achievements.total > 0);
 }
 
@@ -749,7 +890,9 @@ export function hasFriendsContent(detail: GameDetailViewModel | null): boolean {
   return Array.isArray(detail?.friends) && detail.friends.length > 0;
 }
 
-export function hasActivityContent(detail: GameDetailViewModel | null): boolean {
+export function hasActivityContent(
+  detail: GameDetailViewModel | null,
+): boolean {
   return Array.isArray(detail?.activity) && detail.activity.length > 0;
 }
 
@@ -774,15 +917,24 @@ export function shouldRenderSection(
   detail: GameDetailViewModel | null,
   section: GameDetailSection,
 ): boolean {
-  return SECTION_PREDICATES.find(([id]) => id === section)?.[1](detail) ?? false;
+  return (
+    SECTION_PREDICATES.find(([id]) => id === section)?.[1](detail) ?? false
+  );
 }
 
-export function visibleSections(detail: GameDetailViewModel | null): GameDetailSection[] {
-  return SECTION_PREDICATES.filter(([, predicate]) => predicate(detail)).map(([id]) => id);
+export function visibleSections(
+  detail: GameDetailViewModel | null,
+): GameDetailSection[] {
+  return SECTION_PREDICATES.filter(([, predicate]) => predicate(detail)).map(
+    ([id]) => id,
+  );
 }
 
 export function shouldOfferAboutToggle(about: string): boolean {
-  return about.trim().length > ABOUT_CLAMP_THRESHOLD || about.trim().split(/\n/).length > 3;
+  return (
+    about.trim().length > ABOUT_CLAMP_THRESHOLD ||
+    about.trim().split(/\n/).length > 3
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -791,11 +943,15 @@ export function shouldOfferAboutToggle(about: string): boolean {
 
 export function formatPlayTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "Not played yet";
-  if (seconds < 3_600) return `Played ${Math.max(1, Math.round(seconds / 60))} min`;
+  if (seconds < 3_600)
+    return `Played ${Math.max(1, Math.round(seconds / 60))} min`;
   return `Played ${Math.round(seconds / 3_600)}h`;
 }
 
-export function formatLastPlayed(value: string | null, now = Date.now()): string {
+export function formatLastPlayed(
+  value: string | null,
+  now = Date.now(),
+): string {
   if (!value) return "Never played";
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "Last played recently";
@@ -830,7 +986,8 @@ export function formatReleaseDate(value: string | null): string {
 export function releaseYear(value: string | null): string | null {
   if (!value) return null;
   const timestamp = Date.parse(value);
-  if (Number.isFinite(timestamp)) return String(new Date(timestamp).getUTCFullYear());
+  if (Number.isFinite(timestamp))
+    return String(new Date(timestamp).getUTCFullYear());
   const match = /\b(\d{4})\b/.exec(value);
   return match ? match[1] : null;
 }
@@ -839,11 +996,69 @@ export function formatAchievementProgress(
   achievements: GameDetailView["achievements"],
 ): { label: string; percent: number } | null {
   if (!achievements || achievements.total <= 0) return null;
-  const percent = Math.round((achievements.unlocked / achievements.total) * 100);
+  const percent = Math.round(
+    (achievements.unlocked / achievements.total) * 100,
+  );
   return {
     label: `${achievements.unlocked}/${achievements.total} unlocked`,
     percent: Math.min(100, Math.max(0, percent)),
   };
+}
+
+/**
+ * The hero's status chips: whether the game is on this machine, and whether it
+ * runs natively on this Mac. Both are stated outright rather than implied by
+ * the Play button, because "owned but not downloaded" and "runs under
+ * translation" are the two things a player most needs to know before clicking.
+ *
+ * A chip is omitted only when the answer is genuinely unknown. Saying nothing
+ * is honest; guessing is not.
+ */
+export interface GameStatusChip {
+  id: "install" | "mac";
+  label: string;
+  icon: IconName;
+  tone: "ready" | "warn";
+}
+
+export function statusChips(
+  detail: GameDetailView | null,
+): GameStatusChip[] {
+  if (!detail) return [];
+  const chips: GameStatusChip[] = [];
+
+  // Only "installed" earns a chip. "Not installed" and "downloading" are
+  // already what the primary action says — the first as its Install label, the
+  // second as the bar filling behind it — and a second place to read the same
+  // thing is noise, not emphasis.
+  if (detail.installState === "installed") {
+    chips.push({ id: "install", label: "Installed", icon: "check", tone: "ready" });
+  }
+
+  switch (detail.macCompatibility) {
+    case "native":
+      chips.push({
+        id: "mac",
+        label: "Mac native",
+        icon: "check",
+        tone: "ready",
+      });
+      break;
+    case "not-native":
+      // Named for what it means to the player on this machine, not for what
+      // Epic's entitlement list happens to be missing.
+      chips.push({
+        id: "mac",
+        label: "Windows only",
+        icon: "windows",
+        tone: "warn",
+      });
+      break;
+    case "unknown":
+      break;
+  }
+
+  return chips;
 }
 
 export function platformLabels(detail: GameDetailView | null): string[] {
@@ -868,10 +1083,13 @@ export function shortGenre(genre: string): string {
  * The dot-separated metadata row directly under the title, matching the design
  * reference: studio · year · genre · ★ rating · 👍 review score.
  */
-export function buildMetaFacts(detail: GameDetailViewModel | null): GameDetailFact[] {
+export function buildMetaFacts(
+  detail: GameDetailViewModel | null,
+): GameDetailFact[] {
   if (!detail) return [];
   const facts: GameDetailFact[] = [];
-  if (detail.developer) facts.push({ id: "developer", icon: null, text: detail.developer });
+  if (detail.developer)
+    facts.push({ id: "developer", icon: null, text: detail.developer });
   const year = releaseYear(detail.releaseDate);
   if (year) facts.push({ id: "year", icon: "clock", text: year });
   if (detail.genres.length > 0) {
@@ -899,13 +1117,23 @@ export function buildMetaFacts(detail: GameDetailViewModel | null): GameDetailFa
 /** Maps a feature label to the outline glyph shown beside it in the reference. */
 export function featureIcon(feature: string): IconName {
   const label = feature.toLowerCase();
-  if (label.includes("co-op") || label.includes("coop") || label.includes("multiplayer")) {
+  if (
+    label.includes("co-op") ||
+    label.includes("coop") ||
+    label.includes("multiplayer")
+  ) {
     return "users";
   }
-  if (label.includes("controller") || label.includes("gamepad")) return "gamepad";
+  if (label.includes("controller") || label.includes("gamepad"))
+    return "gamepad";
   if (label.includes("cloud")) return "cloud";
   if (label.includes("achievement")) return "trophy";
-  if (label.includes("single") || label.includes("player") || label.includes("pvp")) return "user";
+  if (
+    label.includes("single") ||
+    label.includes("player") ||
+    label.includes("pvp")
+  )
+    return "user";
   return "navigate";
 }
 
@@ -921,10 +1149,18 @@ export function buildStatFacts(
   if (!detail) return [];
   const facts: GameDetailFact[] = [];
   if (detail.playTimeSeconds > 0) {
-    facts.push({ id: "playtime", icon: "clock", text: formatPlayTime(detail.playTimeSeconds) });
+    facts.push({
+      id: "playtime",
+      icon: "clock",
+      text: formatPlayTime(detail.playTimeSeconds),
+    });
   }
   if (detail.lastPlayedAt) {
-    facts.push({ id: "last-played", icon: "clock", text: formatLastPlayed(detail.lastPlayedAt, now) });
+    facts.push({
+      id: "last-played",
+      icon: "clock",
+      text: formatLastPlayed(detail.lastPlayedAt, now),
+    });
   }
   const progress = formatAchievementProgress(detail.achievements);
   if (progress) {
@@ -937,7 +1173,10 @@ export function buildStatFacts(
   return facts;
 }
 
-export function formatRelativeTime(value: string | null, now = Date.now()): string {
+export function formatRelativeTime(
+  value: string | null,
+  now = Date.now(),
+): string {
   if (!value) return "";
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "";
@@ -967,9 +1206,12 @@ export function toGameDetailRestoreState(
   focusKey: string | null,
 ): PageRestoreState {
   const filters = [`${RESTORE_KIND_PREFIX}${state.activeMediaKind}`];
-  if (state.previewMediaId) filters.push(`${RESTORE_MEDIA_PREFIX}${state.previewMediaId}`);
+  if (state.previewMediaId)
+    filters.push(`${RESTORE_MEDIA_PREFIX}${state.previewMediaId}`);
   const restore: PageRestoreState = {
-    scrollTop: Number.isFinite(scrollTop) ? Math.max(0, Math.round(scrollTop)) : 0,
+    scrollTop: Number.isFinite(scrollTop)
+      ? Math.max(0, Math.round(scrollTop))
+      : 0,
     focusKey,
     filters,
   };
@@ -989,17 +1231,25 @@ export function readGameDetailRestoreState(
   };
   if (!restore) return empty;
   const filters = Array.isArray(restore.filters) ? restore.filters : [];
-  const kindEntry = filters.find((entry) => entry.startsWith(RESTORE_KIND_PREFIX));
-  const mediaEntry = filters.find((entry) => entry.startsWith(RESTORE_MEDIA_PREFIX));
+  const kindEntry = filters.find((entry) =>
+    entry.startsWith(RESTORE_KIND_PREFIX),
+  );
+  const mediaEntry = filters.find((entry) =>
+    entry.startsWith(RESTORE_MEDIA_PREFIX),
+  );
   const kind = kindEntry?.slice(RESTORE_KIND_PREFIX.length) ?? "";
   return {
-    scrollTop: Number.isFinite(restore.scrollTop) ? Math.max(0, restore.scrollTop) : 0,
+    scrollTop: Number.isFinite(restore.scrollTop)
+      ? Math.max(0, restore.scrollTop)
+      : 0,
     focusKey: restore.focusKey ?? null,
     selectedGameId: restore.selectedGameId ?? null,
     activeMediaKind: (MEDIA_KIND_IDS as readonly string[]).includes(kind)
       ? (kind as GameMediaKind)
       : null,
-    previewMediaId: mediaEntry ? mediaEntry.slice(RESTORE_MEDIA_PREFIX.length) || null : null,
+    previewMediaId: mediaEntry
+      ? mediaEntry.slice(RESTORE_MEDIA_PREFIX.length) || null
+      : null,
   };
 }
 
@@ -1021,7 +1271,6 @@ export function createInitialGameDetailState(): GameDetailPageState {
     mediaError: "",
     wallpaperSearch: {
       open: false,
-      source: "steam-store",
       query: "",
       focus: null,
       categories: createWallpaperCategories(),
@@ -1056,16 +1305,21 @@ function applyRestore(
   restore: PageRestoreState | null,
 ): GameDetailPageState {
   const selection = readGameDetailRestoreState(restore);
-  if (!selection.selectedGameId || selection.selectedGameId !== state.gameId) return state;
+  if (!selection.selectedGameId || selection.selectedGameId !== state.gameId)
+    return state;
   const kind =
-    selection.activeMediaKind && mediaForKind(state.media, selection.activeMediaKind).length > 0
+    selection.activeMediaKind &&
+    mediaForKind(state.media, selection.activeMediaKind).length > 0
       ? selection.activeMediaKind
       : state.activeMediaKind;
   const previewed = findMedia(state.media, selection.previewMediaId);
   return {
     ...state,
     activeMediaKind: kind,
-    previewMediaId: previewed && previewed.kind === kind ? previewed.id : selectedMediaId(state.media, kind),
+    previewMediaId:
+      previewed && previewed.kind === kind
+        ? previewed.id
+        : selectedMediaId(state.media, kind),
     appliedMediaId: selectedMediaId(state.media, kind),
   };
 }
@@ -1086,7 +1340,9 @@ export function reduceGameDetailState(
         mediaBusy: false,
         mediaError: "",
         statusMessage: "",
-        errorMessage: action.online ? "" : "You are offline. Showing the last saved details.",
+        errorMessage: action.online
+          ? ""
+          : "You are offline. Showing the last saved details.",
         pendingRestore: action.restore,
       };
     }
@@ -1158,7 +1414,11 @@ export function reduceGameDetailState(
       };
     }
     case "media-busy-changed":
-      return { ...state, mediaBusy: action.busy, mediaError: action.busy ? "" : state.mediaError };
+      return {
+        ...state,
+        mediaBusy: action.busy,
+        mediaError: action.busy ? "" : state.mediaError,
+      };
     case "media-committed":
       return {
         ...withMedia(state, action.media, state.activeMediaKind),
@@ -1166,10 +1426,15 @@ export function reduceGameDetailState(
         mediaError: "",
       };
     case "media-imported": {
-      const kind = mediaForKind(action.media, state.activeMediaKind).length > 0
-        ? state.activeMediaKind
-        : defaultMediaKind(action.media);
-      return { ...withMedia(state, action.media, kind), mediaBusy: false, mediaError: "" };
+      const kind =
+        mediaForKind(action.media, state.activeMediaKind).length > 0
+          ? state.activeMediaKind
+          : defaultMediaKind(action.media);
+      return {
+        ...withMedia(state, action.media, kind),
+        mediaBusy: false,
+        mediaError: "",
+      };
     }
     case "media-failed":
       // The previous selection stands; only the inline error changes.
@@ -1206,39 +1471,39 @@ export function reduceGameDetailState(
     // "search more" page and duplicates every tile — two tiles sharing one id,
     // so ticking either lights up both.
     case "wallpaper-search-closed":
-      return { ...state, wallpaperSearch: { ...state.wallpaperSearch, open: false } };
-    case "wallpaper-search-source-changed":
-      // A different source has different artwork, so every row's results are
-      // stale the moment the source changes.
-      return state.wallpaperSearch.source === action.source
-        ? state
-        : {
-            ...state,
-            wallpaperSearch: {
-              ...state.wallpaperSearch,
-              source: action.source,
-              categories: createWallpaperCategories(),
-            },
-          };
+      return {
+        ...state,
+        wallpaperSearch: { ...state.wallpaperSearch, open: false },
+      };
     case "wallpaper-search-query-changed":
-      return { ...state, wallpaperSearch: { ...state.wallpaperSearch, query: action.query } };
+      return {
+        ...state,
+        wallpaperSearch: { ...state.wallpaperSearch, query: action.query },
+      };
     case "wallpaper-search-focus-changed":
       return state.wallpaperSearch.focus === action.focus
         ? state
-        : { ...state, wallpaperSearch: { ...state.wallpaperSearch, focus: action.focus } };
+        : {
+            ...state,
+            wallpaperSearch: { ...state.wallpaperSearch, focus: action.focus },
+          };
     case "wallpaper-search-started": {
       const row = state.wallpaperSearch.categories[action.category];
       // A fresh search restarts at zero; "search more" keeps the page offset.
       return {
         ...state,
-        wallpaperSearch: updateWallpaperCategory(state.wallpaperSearch, action.category, {
-          ...row,
-          busy: true,
-          phase: "idle",
-          message: "",
-          offset: action.more ? row.offset : 0,
-          candidates: action.more ? row.candidates : [],
-        }),
+        wallpaperSearch: updateWallpaperCategory(
+          state.wallpaperSearch,
+          action.category,
+          {
+            ...row,
+            busy: true,
+            phase: "idle",
+            message: "",
+            offset: action.more ? row.offset : 0,
+            candidates: action.more ? row.candidates : [],
+          },
+        ),
       };
     }
     case "wallpaper-search-results": {
@@ -1269,12 +1534,16 @@ export function reduceGameDetailState(
       const row = state.wallpaperSearch.categories[action.category];
       return {
         ...state,
-        wallpaperSearch: updateWallpaperCategory(state.wallpaperSearch, action.category, {
-          ...row,
-          busy: false,
-          phase: "error",
-          message: action.message,
-        }),
+        wallpaperSearch: updateWallpaperCategory(
+          state.wallpaperSearch,
+          action.category,
+          {
+            ...row,
+            busy: false,
+            phase: "error",
+            message: action.message,
+          },
+        ),
       };
     }
     case "wallpaper-slide-changed":
@@ -1284,7 +1553,10 @@ export function reduceGameDetailState(
       };
     case "wishlist-changed":
       return state.detail
-        ? { ...state, detail: { ...state.detail, wishlisted: action.wishlisted } }
+        ? {
+            ...state,
+            detail: { ...state.detail, wishlisted: action.wishlisted },
+          }
         : state;
     case "about-toggled":
       return { ...state, aboutExpanded: !state.aboutExpanded };
@@ -1294,7 +1566,12 @@ export function reduceGameDetailState(
       return action.online
         ? {
             ...state,
-            phase: state.phase === "offline" ? (state.detail ? "ready" : "loading") : state.phase,
+            phase:
+              state.phase === "offline"
+                ? state.detail
+                  ? "ready"
+                  : "loading"
+                : state.phase,
             errorMessage: state.phase === "offline" ? "" : state.errorMessage,
           }
         : {
@@ -1377,18 +1654,24 @@ const FALLBACK_MEDIA: GameMediaView[] = [
   },
 ];
 
-const FALLBACK_AVATARS = ["/media/steam-avatar.png", "/media/avatar-reference.png"];
+const FALLBACK_AVATARS = [
+  "/media/steam-avatar.png",
+  "/media/avatar-reference.png",
+];
 
 /** The four named friends the reference shows, then anonymous extras up to +24. */
-const FALLBACK_FRIENDS: GameDetailFriend[] = Array.from({ length: 28 }, (_, index) => {
-  const named = ["Valkyrie", "PixelNinja", "StormRider", "Ashen"];
-  return {
-    id: `friend_${index + 1}`,
-    name: named[index] ?? `Tarnished ${index + 1}`,
-    avatarUrl: FALLBACK_AVATARS[index % FALLBACK_AVATARS.length],
-    status: index % 2 === 0 ? "In game" : "Online",
-  };
-});
+const FALLBACK_FRIENDS: GameDetailFriend[] = Array.from(
+  { length: 28 },
+  (_, index) => {
+    const named = ["Valkyrie", "PixelNinja", "StormRider", "Ashen"];
+    return {
+      id: `friend_${index + 1}`,
+      name: named[index] ?? `Tarnished ${index + 1}`,
+      avatarUrl: FALLBACK_AVATARS[index % FALLBACK_AVATARS.length],
+      status: index % 2 === 0 ? "In game" : "Online",
+    };
+  },
+);
 
 function fallbackRelated(
   id: string,
@@ -1432,12 +1715,14 @@ function fallbackRelated(
  * without a backend.
  */
 export function createFallbackWallpaperSearch(
-  source: WallpaperSource,
   category: WallpaperCategory,
   query: string,
   offset = 0,
 ): WallpaperSearchView {
-  const stems: Record<WallpaperCategory, ReadonlyArray<readonly [string, string]>> = {
+  const stems: Record<
+    WallpaperCategory,
+    ReadonlyArray<readonly [string, string]>
+  > = {
     cover: [
       ["Elden Ring", "/media/igdb/covers/elden-ring.jpg"],
       ["Baldur's Gate 3", "/media/igdb/covers/baldurs-gate-3.jpg"],
@@ -1449,7 +1734,10 @@ export function createFallbackWallpaperSearch(
     landscape: [
       ["Elden Ring", "/media/igdb/landscapes/elden-ring.jpg"],
       ["Cyberpunk 2077", "/media/igdb/landscapes/cyberpunk-2077.webp"],
-      ["Horizon Forbidden West", "/media/igdb/landscapes/horizon-forbidden-west.jpg"],
+      [
+        "Horizon Forbidden West",
+        "/media/igdb/landscapes/horizon-forbidden-west.jpg",
+      ],
       ["God of War", "/media/igdb/landscapes/god-of-war.jpg"],
       ["Baldur's Gate 3", "/media/igdb/landscapes/baldurs-gate-3.jpg"],
       ["Unrailed!", "/media/igdb/landscapes/unrailed.jpg"],
@@ -1457,15 +1745,22 @@ export function createFallbackWallpaperSearch(
     background: [
       ["Elden Ring", "/media/igdb/heroes/elden-ring-wallpaper.png"],
       ["Cyberpunk 2077", "/media/igdb/heroes/cyberpunk-2077.webp"],
-      ["Horizon Forbidden West", "/media/igdb/heroes/horizon-forbidden-west.jpg"],
+      [
+        "Horizon Forbidden West",
+        "/media/igdb/heroes/horizon-forbidden-west.jpg",
+      ],
       ["Red Dead Redemption 2", "/media/igdb/heroes/red-dead-redemption-2.jpg"],
       ["The Witcher 3", "/media/igdb/heroes/the-witcher-3-wild-hunt.jpg"],
       ["Hades II", "/media/igdb/heroes/hades-2.jpg"],
     ],
+    // No wordmarks ship with the app: a logo is a transparent PNG per game and
+    // there is nothing generic to stand in for one. The row renders empty in
+    // the browser, which is what a game with no published logo looks like in
+    // the real app too.
+    logo: [],
   };
   return {
     phase: "ready",
-    source,
     category,
     query,
     message: "",
@@ -1499,7 +1794,8 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     id: gameId,
     title: "Elden Ring",
     source: "local",
-    shortDescription: "A vast world full of mystery and peril. What will you discover?",
+    shortDescription:
+      "A vast world full of mystery and peril. What will you discover?",
     coverUrl: "/media/igdb/covers/elden-ring.jpg",
     heroUrl: "/media/igdb/heroes/elden-ring-wallpaper.png",
     landscapeUrl: "/media/igdb/landscapes/elden-ring.jpg",
@@ -1532,19 +1828,11 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
       unlocked: 67,
       total: 82,
       items: [
-        { id: "ach_1", title: "Elden Lord", iconUrl: "/media/igdb/covers/elden-ring.jpg" },
-        { id: "ach_2", title: "Shardbearer", iconUrl: "/media/igdb/covers/god-of-war.jpg" },
-        { id: "ach_3", title: "Great Rune", iconUrl: "/media/igdb/covers/hades-2.jpg" },
-        {
-          id: "ach_4",
-          title: "Legendary Armaments",
-          iconUrl: "/media/igdb/covers/horizon-forbidden-west.jpg",
-        },
-        {
-          id: "ach_5",
-          title: "Roundtable Hold",
-          iconUrl: "/media/igdb/covers/the-witcher-3-wild-hunt.jpg",
-        },
+        { id: "ach_1", title: "Elden Lord" },
+        { id: "ach_2", title: "Shardbearer" },
+        { id: "ach_3", title: "Great Rune" },
+        { id: "ach_4", title: "Legendary Armaments" },
+        { id: "ach_5", title: "Roundtable Hold" },
       ],
     },
     media: FALLBACK_MEDIA.map((item) => ({ ...item })),
@@ -1598,9 +1886,14 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
         summary: "Defeated Starscourge Radahn",
         detail: "",
         avatarUrl: FALLBACK_AVATARS[0],
-        occurredAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1_000).toISOString(),
+        occurredAt: new Date(
+          Date.now() - 3 * 24 * 60 * 60 * 1_000,
+        ).toISOString(),
       },
     ],
+    installState: "unknown",
+    installPercent: null,
+    macCompatibility: "unknown",
     primaryAction: "play",
   };
 }
@@ -1611,7 +1904,9 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
  * be reviewed without a backend feed. Anything the game already carries is left
  * untouched. Gated behind a Settings toggle; never runs in a normal session.
  */
-export function withSampleSocialData(detail: GameDetailViewModel): GameDetailViewModel {
+export function withSampleSocialData(
+  detail: GameDetailViewModel,
+): GameDetailViewModel {
   const sample = createFallbackGameDetail(detail.id);
   const next: GameDetailViewModel = { ...detail };
   if (!hasAchievementsContent(detail)) next.achievements = sample.achievements;

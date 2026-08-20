@@ -173,6 +173,9 @@ mod tests {
         // The shop front is wall-to-wall product links. Reading a page that is
         // not an order history would import the whole catalogue as purchases,
         // so the guard runs on the URL the response actually settled on.
-        assert!(SYNC_START_SCRIPT.contains("if (!isOrderPath(new URL(page.url, ORIGIN).pathname)) { continue; }"));
+        assert!(
+            SYNC_START_SCRIPT
+                .contains("if (!isOrderPath(new URL(page.url, ORIGIN).pathname)) { continue; }")
+        );
     }
 }

@@ -151,7 +151,10 @@ describe("About panel updater wiring", () => {
     window.location.hash = "";
   });
 
-  it("does not touch the updater plugin until the button is pressed", () => {
+  it("never downloads or restarts on its own", () => {
+    // Orivo looks for a release by itself, once the shell has gone quiet — that
+    // is the whole point of an app that updates itself. Looking is all it does:
+    // nothing is fetched and nothing restarts until the button is pressed.
     expect(updater.check).not.toHaveBeenCalled();
     expect(processPlugin.relaunch).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);
@@ -323,5 +326,42 @@ describe("About panel updater outside the desktop app", () => {
     await settle();
     expect(updater.check).not.toHaveBeenCalled();
     window.location.hash = "";
+  });
+});
+
+describe("About panel updater after the shell is torn down", () => {
+  /**
+   * The automatic check waits several seconds before it runs. A shell that is
+   * replaced in the meantime must not still fire it: the panel it would write
+   * into is detached, and in a test run every mounted shell would otherwise
+   * keep a live timer pointed at whatever ran next. That is exactly how this
+   * suite started failing on CI and passing locally — the wiring tests above
+   * left timers behind, and only a slow enough machine let them land.
+   */
+  it("drops the deferred check when its shell has been replaced", async () => {
+    vi.useFakeTimers();
+    try {
+      window.location.hash = "";
+      window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+      tauri.invoke.mockReset();
+      tauri.invoke.mockResolvedValue(undefined);
+      updater.check.mockReset();
+
+      document.body.replaceChildren();
+      const root = document.createElement("div");
+      document.body.append(root);
+      mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
+
+      // The shell goes away before the deferred check comes due.
+      document.body.replaceChildren();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(updater.check).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+      window.location.hash = "";
+    }
   });
 });

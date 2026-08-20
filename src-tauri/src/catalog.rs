@@ -45,6 +45,43 @@ pub const SOURCE_COVER_URL_KEY: &str = "orivo_source_cover_url";
 pub const SOURCE_HERO_URL_KEY: &str = "orivo_source_hero_url";
 pub const SOURCE_LANDSCAPE_URL_KEY: &str = "orivo_source_landscape_url";
 pub const SOURCE_GENRE_KEY: &str = "orivo_source_genre";
+/// A provider's transparent wordmark, kept apart from the artwork roles: it is
+/// drawn over the scene, never used as one.
+pub const SOURCE_LOGO_URL_KEY: &str = "orivo_source_logo_url";
+/// Whether the store publishes a build of this game that runs natively on
+/// macOS. Written only by a connector that can actually tell — Epic lists its
+/// entitlements per platform — so an absent key means "unknown", not "no".
+pub const SOURCE_NATIVE_MAC_KEY: &str = "orivo_source_native_mac";
+/// Whether the store's own client reports this game as installed on this
+/// machine. A boolean, deliberately not a path: a connected-source record may
+/// never carry a filesystem location, so "is it installed" is recorded without
+/// ever writing where. The detail page asks the launcher directly when it needs
+/// the location.
+pub const SOURCE_INSTALLED_KEY: &str = "orivo_source_installed";
+/// The percentage of a download the store's own client is still running, and
+/// the flag that says one is running at all. Both are re-read from the client
+/// on every refresh, so a finished install drops them.
+pub const SOURCE_INSTALLING_KEY: &str = "orivo_source_installing";
+pub const SOURCE_INSTALL_PERCENT_KEY: &str = "orivo_source_install_percent";
+
+/// The `extra` keys a connected store owns outright.
+///
+/// Everything else in `extra` — Steam store metadata, a wallpaper chosen in the
+/// Store — belongs to Orivo and survives a re-sync. These do not: the provider's
+/// latest answer is the whole truth about them, so a value it has stopped
+/// publishing has to disappear. Merging them forwards is how a genre the Epic
+/// connector wrongly filled with a studio name outlived the fix.
+pub const SOURCE_OWNED_EXTRA_KEYS: [&str; 9] = [
+    SOURCE_COVER_URL_KEY,
+    SOURCE_HERO_URL_KEY,
+    SOURCE_LANDSCAPE_URL_KEY,
+    SOURCE_GENRE_KEY,
+    SOURCE_LOGO_URL_KEY,
+    SOURCE_NATIVE_MAC_KEY,
+    SOURCE_INSTALLED_KEY,
+    SOURCE_INSTALLING_KEY,
+    SOURCE_INSTALL_PERCENT_KEY,
+];
 
 /// The provider that owns the external identity of a library entry.  Catalog
 /// records created before sources existed deserialize as `Local`, preserving
@@ -464,6 +501,11 @@ pub struct Game {
     pub landscape_image_path: Option<PathBuf>,
     #[serde(default)]
     pub logo_path: Option<PathBuf>,
+    /// Hidden from the library without being forgotten. The record keeps its
+    /// artwork, its play time and its launch configuration; it simply stops
+    /// being projected. Removing a game is the destructive door, this is not.
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub hero_video_path: Option<PathBuf>,
     #[serde(default)]
@@ -705,6 +747,12 @@ impl Catalog {
             if game.landscape_image_path.is_none() {
                 game.landscape_image_path = existing.landscape_image_path.clone();
             }
+            // A wordmark the user reset by hand survives a resync, exactly as
+            // their chosen cover and landscape do.
+            if game.logo_path.is_none() {
+                game.logo_path = existing.logo_path.clone();
+            }
+            game.hidden = existing.hidden;
             self.games[index] = game;
             return Ok(false);
         }
@@ -752,6 +800,9 @@ impl Catalog {
                 game.description = existing.description.clone();
             }
             for (key, value) in &existing.extra {
+                if SOURCE_OWNED_EXTRA_KEYS.contains(&key.as_str()) {
+                    continue;
+                }
                 game.extra
                     .entry(key.clone())
                     .or_insert_with(|| value.clone());
@@ -770,6 +821,12 @@ impl Catalog {
             if game.landscape_image_path.is_none() {
                 game.landscape_image_path = existing.landscape_image_path.clone();
             }
+            // A wordmark the user reset by hand survives a resync, exactly as
+            // their chosen cover and landscape do.
+            if game.logo_path.is_none() {
+                game.logo_path = existing.logo_path.clone();
+            }
+            game.hidden = existing.hidden;
             if game.artwork_path.is_none() {
                 game.artwork_path = existing.artwork_path.clone();
             }
@@ -1327,9 +1384,7 @@ fn runner_target_key(game: &Game) -> Option<(&str, &str, &str)> {
             profile_id,
             game_ref,
         } => Some((runner_id, profile_id, game_ref)),
-        LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => {
-            None
-        }
+        LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => None,
     }
 }
 
@@ -1361,6 +1416,7 @@ fn preserve_runner_game_state(incoming: &mut Game, existing: &Game) {
     if incoming.logo_path.is_none() {
         incoming.logo_path = existing.logo_path.clone();
     }
+    incoming.hidden = existing.hidden;
     if incoming.hero_video_path.is_none() {
         incoming.hero_video_path = existing.hero_video_path.clone();
     }
@@ -1624,6 +1680,7 @@ impl Game {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -1723,7 +1780,11 @@ const MAX_PROVIDER_APP_REF_LENGTH: usize = 512;
 /// process argument.
 fn validate_provider_target(source_id: &str, app_ref: &str) -> Result<(), CatalogError> {
     validate_opaque_runner_token("source id", source_id, MAX_SOURCE_ID_LENGTH)?;
-    validate_opaque_runner_token("provider launch reference", app_ref, MAX_PROVIDER_APP_REF_LENGTH)
+    validate_opaque_runner_token(
+        "provider launch reference",
+        app_ref,
+        MAX_PROVIDER_APP_REF_LENGTH,
+    )
 }
 
 /// The same grammar, exposed so a connector can drop an unusable provider
@@ -1852,6 +1913,39 @@ mod tests {
     use crate::game_detail::{
         GameMediaAsset, GameMediaKind, GameMediaOrigin, GameStateDocument, GameStateStore,
     };
+
+    #[test]
+    fn a_source_resync_retracts_a_value_the_provider_no_longer_publishes() {
+        // The regression this exists for: the Epic connector once filled the
+        // genre with the studio name. Fixing the connector changed nothing for
+        // the games already imported, because the stale key was merged forward
+        // on every re-sync and could never be cleared.
+        let mut catalog = Catalog::default();
+        let mut first = provider_game(GameSource::Epic, "Sugar", "Hogwarts Legacy");
+        first.extra.insert(
+            SOURCE_GENRE_KEY.to_string(),
+            serde_json::json!("Warner Bros."),
+        );
+        first.extra.insert(
+            "orivo_store_landscape_url".to_string(),
+            serde_json::json!("https://example.invalid/x.jpg"),
+        );
+        catalog.upsert_source(first).unwrap();
+
+        // The fixed connector sends no genre at all.
+        let second = provider_game(GameSource::Epic, "Sugar", "Hogwarts Legacy");
+        catalog.upsert_source(second).unwrap();
+
+        let stored = &catalog.games[0];
+        assert!(
+            !stored.extra.contains_key(SOURCE_GENRE_KEY),
+            "a provider-owned key the sync omitted must not survive"
+        );
+        assert!(
+            stored.extra.contains_key("orivo_store_landscape_url"),
+            "a key Orivo owns must survive a re-sync"
+        );
+    }
 
     #[test]
     fn creates_a_manual_import_from_an_executable() {
@@ -2583,6 +2677,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -2654,6 +2749,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -2684,6 +2780,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -2994,6 +3091,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -3025,6 +3123,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -3034,7 +3133,11 @@ mod tests {
 
     #[test]
     fn a_connected_store_record_needs_a_matching_provider_and_no_launch_paths() {
-        assert!(provider_game(GameSource::Epic, "Sugar", "Fall Guys").validate().is_ok());
+        assert!(
+            provider_game(GameSource::Epic, "Sugar", "Fall Guys")
+                .validate()
+                .is_ok()
+        );
 
         // The provider token has to agree with the source, or a GOG record
         // could describe itself as an Epic launch.
@@ -3085,7 +3188,10 @@ mod tests {
             game.home_image_path.as_deref(),
             Some(Path::new("/cache/chosen-wallpaper.jpg"))
         );
-        assert_eq!(game.description.as_deref(), Some("A chaotic obstacle course."));
+        assert_eq!(
+            game.description.as_deref(),
+            Some("A chaotic obstacle course.")
+        );
         assert!(catalog.validate().is_ok());
     }
 
@@ -3137,7 +3243,12 @@ mod tests {
 
         assert_eq!(catalog.remove_source_games(GameSource::Gog), 2);
         assert_eq!(catalog.games.len(), 2);
-        assert!(catalog.games.iter().all(|game| game.source != GameSource::Gog));
+        assert!(
+            catalog
+                .games
+                .iter()
+                .all(|game| game.source != GameSource::Gog)
+        );
         assert!(catalog.validate().is_ok());
     }
 
@@ -3161,6 +3272,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: Some("2026-08-01T00:00:00Z".into()),
             play_time_seconds: 42,
@@ -3192,6 +3304,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -3261,6 +3374,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,

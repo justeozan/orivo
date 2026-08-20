@@ -221,7 +221,9 @@ pub fn account_status() -> Result<SteamAccountStatus, SteamAccountError> {
         return Ok(connected_status(&credential));
     }
     if let Some(record) = sources::remembered_named_connection(CONNECTION_KEY) {
-        let (steam_id, method) = record.split_once('\u{1}').unwrap_or((record.as_str(), "web"));
+        let (steam_id, method) = record
+            .split_once('\u{1}')
+            .unwrap_or((record.as_str(), "web"));
         return Ok(SteamAccountStatus {
             connected: true,
             steam_id: steam_id.to_string(),

@@ -293,6 +293,8 @@ fn library_game(product_id: i64, product: &Product) -> SourceLibraryGame {
         title,
         description: None,
         genre: None,
+        developer: None,
+        logo_url: None,
         // GOG publishes no portrait capsule, so the wide logo stands in for the
         // cover as well; the library falls back cleanly when it is missing.
         cover_url: landscape.clone(),
@@ -300,6 +302,8 @@ fn library_game(product_id: i64, product: &Product) -> SourceLibraryGame {
         landscape_url: landscape,
         play_time_seconds: 0,
         last_played_at: None,
+        native_mac: None,
+        install: None,
     }
 }
 
@@ -337,7 +341,10 @@ mod tests {
         let insecure =
             reqwest::Url::parse("http://embed.gog.com/on_login_success?code=abc123").unwrap();
 
-        assert_eq!(authorization_code_from_url(&success).as_deref(), Some("abc123"));
+        assert_eq!(
+            authorization_code_from_url(&success).as_deref(),
+            Some("abc123")
+        );
         assert!(authorization_code_from_url(&lookalike).is_none());
         assert!(authorization_code_from_url(&insecure).is_none());
         assert!(
@@ -390,6 +397,8 @@ mod tests {
     #[test]
     fn the_login_url_encodes_its_redirect_uri() {
         let url = login_url();
-        assert!(url.contains("redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient"));
+        assert!(url.contains(
+            "redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient"
+        ));
     }
 }

@@ -297,7 +297,8 @@ pub async fn uninstall_plugin(
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err("That is not a plugin Orivo installed.".into());
         }
-        fs::remove_dir_all(&directory).map_err(|_| "The plugin could not be removed.".to_string())?;
+        fs::remove_dir_all(&directory)
+            .map_err(|_| "The plugin could not be removed.".to_string())?;
         let _ = fs::remove_file(trust_marker_path(&service.plugin_root, &plugin_id));
         Ok(())
     })
@@ -434,7 +435,9 @@ fn install_package(
         signature,
     };
     let validated: ValidatedPluginPackage = validate_plugin_package(manifest, &inspection)
-        .map_err(|errors| format!("This package does not meet Orivo's plugin contract: {errors}"))?;
+        .map_err(|errors| {
+            format!("This package does not meet Orivo's plugin contract: {errors}")
+        })?;
 
     // The policy check above proves the manifest is well formed; this proves
     // the bytes in the archive are the ones it describes.
@@ -777,7 +780,10 @@ mod tests {
             ("manifest.json", manifest_json("com.orivo.quiky", &catalog)),
             ("component.wasm", EMPTY_COMPONENT.to_vec()),
             // The manifest still pins the original digest and length.
-            ("assets/catalog.json", br#"{"version":1,"titles":[ ]}"#.to_vec()),
+            (
+                "assets/catalog.json",
+                br#"{"version":1,"titles":[ ]}"#.to_vec(),
+            ),
         ]);
 
         assert_eq!(
@@ -862,7 +868,10 @@ mod tests {
         assert!(root.join("com.orivo.quiky/assets/catalog.json").is_file());
         // The signature file itself is never written into the plugin tree.
         assert!(!root.join("com.orivo.quiky/signature.ed25519").exists());
-        assert!(trust_marker_path(&root, "com.orivo.quiky").is_file(), "marked trusted");
+        assert!(
+            trust_marker_path(&root, "com.orivo.quiky").is_file(),
+            "marked trusted"
+        );
 
         // A manifest edited after signing breaks the signature, and the strict
         // channel is the one that must notice.

@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost game-media: data: blob: https://cdn.cloudflare.steamstatic.com https://cdn.akamai.steamstatic.com https://shared.akamai.steamstatic.com https://store.akamai.steamstatic.com https://upload.wikimedia.org https://images.igdb.com https://lh3.googleusercontent.com https://encrypted-tbn0.gstatic.com https://cdn1.epicgames.com https://cdn2.epicgames.com https://cdn.epicgames.com https://cdn1.unrealengine.com https://cdn2.unrealengine.com https://cdn.unrealengine.com https://*.gog-statics.com https://*.gog.com https://*.ubi.com https://*.ubisoft.com https://ubistatic-a.akamaihd.net https://ubistatic3-a.akamaihd.net https://ubistatic19-a.akamaihd.net https://store-images.s-microsoft.com https://images-eds.xboxlive.com https://images-eds-ssl.xboxlive.com https://*.xboxlive.com https://gaming-cdn.com https://*.gaming-cdn.com https://*.instant-gaming.com; media-src 'self' asset: http://asset.localhost game-media:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com",
+      "csp": "default-src 'self' asset: http://asset.localhost; img-src 'self' asset: http://asset.localhost game-media: data: blob: https://cdn.cloudflare.steamstatic.com https://cdn.akamai.steamstatic.com https://shared.akamai.steamstatic.com https://store.akamai.steamstatic.com https://cdn2.steamgriddb.com https://cdn.steamgriddb.com https://upload.wikimedia.org https://images.igdb.com https://lh3.googleusercontent.com https://encrypted-tbn0.gstatic.com https://cdn1.epicgames.com https://cdn2.epicgames.com https://cdn.epicgames.com https://cdn1.unrealengine.com https://cdn2.unrealengine.com https://cdn.unrealengine.com https://*.gog-statics.com https://*.gog.com https://*.ubi.com https://*.ubisoft.com https://ubistatic-a.akamaihd.net https://ubistatic3-a.akamaihd.net https://ubistatic19-a.akamaihd.net https://store-images.s-microsoft.com https://images-eds.xboxlive.com https://images-eds-ssl.xboxlive.com https://*.xboxlive.com https://gaming-cdn.com https://*.gaming-cdn.com https://*.instant-gaming.com; media-src 'self' asset: http://asset.localhost game-media:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://github.com https://objects.githubusercontent.com https://*.githubusercontent.com https://*.ingest.sentry.io https://*.ingest.us.sentry.io https://*.ingest.de.sentry.io",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPCACHE/media/**/*"]
@@ -39,7 +39,7 @@
     "createUpdaterArtifacts": true,
     "publisher": "Orivo",
     "homepage": "https://github.com/justeozan/orivo",
-    "copyright": "Copyright © 2026 Orivo",
+    "copyright": "Copyright © 2026 Ozan Sahin — PolyForm Noncommercial 1.0.0",
     "category": "Entertainment",
     "shortDescription": "A focused local game library",
     "longDescription": "Orivo is a local-first game library with a cinematic selector.",

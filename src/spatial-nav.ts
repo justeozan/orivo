@@ -53,6 +53,37 @@ const isTypingTarget = (node: EventTarget | null): boolean => {
 };
 
 /**
+ * The element a key event really came from.
+ *
+ * A listener on `window` sees `event.target` retargeted to the shadow host, so
+ * a keystroke typed inside a shadow root arrives looking like it landed on a
+ * plain wrapper element. Sentry's feedback form is exactly that case: every
+ * single-key shortcut fired while someone was writing a bug report, which ate
+ * the letters bound to shortcuts. `composedPath()[0]` is the way back to the
+ * field being typed in.
+ */
+export const composedTarget = (event: Event): HTMLElement | null => {
+  const [first] = event.composedPath();
+  const node = first ?? event.target;
+  return node instanceof HTMLElement ? node : null;
+};
+
+/** Focus followed through any shadow roots, for the same reason. */
+const deepActiveElement = (): Element | null => {
+  let active: Element | null = document.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  return active;
+};
+
+/**
+ * True when a key belongs to a text field rather than to a shortcut. Both
+ * checks are needed: the event path catches the keystroke, and focus catches a
+ * field that is being typed into after an event dispatched straight at window.
+ */
+export const isTypingEvent = (event: Event): boolean =>
+  isTypingTarget(composedTarget(event)) || isTypingTarget(deepActiveElement());
+
+/**
  * `inert` and `hidden` are how the page host parks the routes that are not on
  * screen, so honouring them is what keeps the engine scoped to one page.
  */
@@ -294,9 +325,7 @@ export function createSpatialNav(hooks: SpatialNavHooks): SpatialNav {
     // The shell and the pages get first refusal on every key.
     if (event.defaultPrevented) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
-    // The event target is enough for real keystrokes, but a key replayed on
-    // `window` carries no target, so the focused field is the safer witness.
-    if (isTypingTarget(event.target) || isTypingTarget(document.activeElement)) return;
+    if (isTypingEvent(event)) return;
 
     setInputMode("keyboard");
 

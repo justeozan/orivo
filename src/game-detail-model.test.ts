@@ -39,6 +39,7 @@ import {
   resolvePrimaryAction,
   selectActionOffer,
   shouldOfferAboutToggle,
+  statusChips,
   toGameDetailRestoreState,
   visibleSections,
   type GameDetailPageState,
@@ -63,7 +64,9 @@ const media = (
 
 // A minimal base: the editorial fallback with its social/related showcase and
 // rating stripped, so a test opts into that content explicitly via overrides.
-function detailWith(overrides: Partial<GameDetailViewModel> = {}): GameDetailViewModel {
+function detailWith(
+  overrides: Partial<GameDetailViewModel> = {},
+): GameDetailViewModel {
   const detail = createFallbackGameDetail("game_1");
   detail.relatedGames = [];
   delete detail.friends;
@@ -73,7 +76,9 @@ function detailWith(overrides: Partial<GameDetailViewModel> = {}): GameDetailVie
   return { ...detail, ...overrides };
 }
 
-function readyState(overrides: Partial<GameDetailViewModel> = {}): GameDetailPageState {
+function readyState(
+  overrides: Partial<GameDetailViewModel> = {},
+): GameDetailPageState {
   const detail = detailWith(overrides);
   let state = reduceGameDetailState(createInitialGameDetailState(), {
     type: "activate",
@@ -82,23 +87,42 @@ function readyState(overrides: Partial<GameDetailViewModel> = {}): GameDetailPag
     online: true,
     restore: null,
   });
-  state = reduceGameDetailState(state, { type: "request-started", requestId: 1 });
-  return reduceGameDetailState(state, { type: "detail-loaded", requestId: 1, detail });
+  state = reduceGameDetailState(state, {
+    type: "request-started",
+    requestId: 1,
+  });
+  return reduceGameDetailState(state, {
+    type: "detail-loaded",
+    requestId: 1,
+    detail,
+  });
 }
 
 describe("primary action resolution", () => {
   it("maps every backend action to a contextual button", () => {
-    expect(resolvePrimaryAction(detailWith({ primaryAction: "play" }), "game_1")).toMatchObject({
+    expect(
+      resolvePrimaryAction(detailWith({ primaryAction: "play" }), "game_1"),
+    ).toMatchObject({
       label: "Play",
       intent: "play",
       disabled: false,
     });
-    expect(resolvePrimaryAction(detailWith({ primaryAction: "configure-wine" }), "game_1")).toMatchObject({
+    expect(
+      resolvePrimaryAction(
+        detailWith({ primaryAction: "configure-wine" }),
+        "game_1",
+      ),
+    ).toMatchObject({
       label: "Configure Wine",
       intent: "navigate",
       route: { page: "settings", section: "plugins", attachGameId: "game_1" },
     });
-    expect(resolvePrimaryAction(detailWith({ primaryAction: "unavailable" }), "game_1")).toMatchObject({
+    expect(
+      resolvePrimaryAction(
+        detailWith({ primaryAction: "unavailable" }),
+        "game_1",
+      ),
+    ).toMatchObject({
       label: "Unavailable",
       intent: "none",
       disabled: true,
@@ -106,7 +130,12 @@ describe("primary action resolution", () => {
   });
 
   it("disables offer actions when no offer exists and enables them when one does", () => {
-    expect(resolvePrimaryAction(detailWith({ primaryAction: "view-offer" }), "game_1")).toMatchObject({
+    expect(
+      resolvePrimaryAction(
+        detailWith({ primaryAction: "view-offer" }),
+        "game_1",
+      ),
+    ).toMatchObject({
       intent: "none",
       disabled: true,
       offerId: null,
@@ -179,7 +208,10 @@ describe("media grouping and preview", () => {
     expect(state.appliedMediaId).toBe("w1");
     expect(canApplyMedia(state)).toBe(false);
 
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "w2" });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "w2",
+    });
     expect(state.previewMediaId).toBe("w2");
     // Nothing was persisted: the applied selection is untouched.
     expect(state.appliedMediaId).toBe("w1");
@@ -189,9 +221,18 @@ describe("media grouping and preview", () => {
 
   it("keeps the previous selection and surfaces an inline error when Apply fails", () => {
     let state = readyState({ media: items });
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "w2" });
-    state = reduceGameDetailState(state, { type: "media-busy-changed", busy: true });
-    state = reduceGameDetailState(state, { type: "media-failed", message: "Disk is full." });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "w2",
+    });
+    state = reduceGameDetailState(state, {
+      type: "media-busy-changed",
+      busy: true,
+    });
+    state = reduceGameDetailState(state, {
+      type: "media-failed",
+      message: "Disk is full.",
+    });
     expect(state.previewMediaId).toBe("w1");
     expect(state.appliedMediaId).toBe("w1");
     expect(state.mediaBusy).toBe(false);
@@ -200,7 +241,10 @@ describe("media grouping and preview", () => {
 
   it("adopts the backend media list after a successful Apply", () => {
     let state = readyState({ media: items });
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "w2" });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "w2",
+    });
     state = reduceGameDetailState(state, {
       type: "media-committed",
       media: [media("w1", "wallpaper"), media("w2", "wallpaper", true)],
@@ -213,7 +257,10 @@ describe("media grouping and preview", () => {
 
   it("switching kind resets the preview to that kind's applied item", () => {
     let state = readyState({ media: items });
-    state = reduceGameDetailState(state, { type: "media-kind-changed", kind: "cover" });
+    state = reduceGameDetailState(state, {
+      type: "media-kind-changed",
+      kind: "cover",
+    });
     expect(state.activeMediaKind).toBe("cover");
     expect(state.previewMediaId).toBe("c1");
     expect(canApplyMedia(state)).toBe(false);
@@ -221,7 +268,10 @@ describe("media grouping and preview", () => {
 
   it("uses the video poster for the hero rather than the video stream", () => {
     let state = readyState({ media: items });
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "v1" });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "v1",
+    });
     expect(state.activeMediaKind).toBe("video");
     expect(heroImageUrl(state)).toBe("/poster.png");
   });
@@ -236,8 +286,14 @@ describe("state reducer", () => {
       online: true,
       restore: null,
     });
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 1 });
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 2 });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 1,
+    });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 2,
+    });
     const stale = reduceGameDetailState(state, {
       type: "detail-loaded",
       requestId: 1,
@@ -255,8 +311,15 @@ describe("state reducer", () => {
 
   it("reports not-found without throwing when the backend returns nothing", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 9 });
-    state = reduceGameDetailState(state, { type: "detail-loaded", requestId: 9, detail: null });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 9,
+    });
+    state = reduceGameDetailState(state, {
+      type: "detail-loaded",
+      requestId: 9,
+      detail: null,
+    });
     expect(state.phase).toBe("not-found");
     expect(state.detail).toBeNull();
     expect(state.media).toEqual([]);
@@ -264,7 +327,10 @@ describe("state reducer", () => {
 
   it("keeps rendering the loaded game when a later refresh fails", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 4 });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 4,
+    });
     state = reduceGameDetailState(state, {
       type: "request-failed",
       requestId: 4,
@@ -278,18 +344,30 @@ describe("state reducer", () => {
 
   it("marks the page offline and clears the notice when connectivity returns", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "connectivity-changed", online: false });
+    state = reduceGameDetailState(state, {
+      type: "connectivity-changed",
+      online: false,
+    });
     expect(state.phase).toBe("offline");
     expect(state.errorMessage).not.toBe("");
-    state = reduceGameDetailState(state, { type: "connectivity-changed", online: true });
+    state = reduceGameDetailState(state, {
+      type: "connectivity-changed",
+      online: true,
+    });
     expect(state.phase).toBe("ready");
     expect(state.errorMessage).toBe("");
   });
 
   it("clears a stuck busy flag and wipes media errors on re-activation", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "media-busy-changed", busy: true });
-    state = reduceGameDetailState(state, { type: "media-failed", message: "boom" });
+    state = reduceGameDetailState(state, {
+      type: "media-busy-changed",
+      busy: true,
+    });
+    state = reduceGameDetailState(state, {
+      type: "media-failed",
+      message: "boom",
+    });
     state = reduceGameDetailState(state, {
       type: "activate",
       gameId: "game_1",
@@ -304,7 +382,10 @@ describe("state reducer", () => {
 
   it("toggles wishlist and about without touching anything else", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "wishlist-changed", wishlisted: true });
+    state = reduceGameDetailState(state, {
+      type: "wishlist-changed",
+      wishlisted: true,
+    });
     expect(state.detail?.wishlisted).toBe(true);
     state = reduceGameDetailState(state, { type: "about-toggled" });
     expect(state.aboutExpanded).toBe(true);
@@ -312,7 +393,10 @@ describe("state reducer", () => {
 });
 
 describe("wallpaper search state", () => {
-  const candidate = (id: string, category: WallpaperCategory): WallpaperCandidateView => ({
+  const candidate = (
+    id: string,
+    category: WallpaperCategory,
+  ): WallpaperCandidateView => ({
     id,
     title: id,
     thumbnailUrl: `/${id}.png`,
@@ -324,7 +408,6 @@ describe("wallpaper search state", () => {
     candidateIds: readonly string[],
   ): WallpaperSearchView => ({
     phase: "ready",
-    source: "igdb",
     category,
     query: "elden ring",
     message: "",
@@ -350,8 +433,13 @@ describe("wallpaper search state", () => {
     });
   }
 
-  const rowIds = (state: GameDetailPageState, category: WallpaperCategory): string[] =>
-    state.wallpaperSearch.categories[category].candidates.map((entry) => entry.id);
+  const rowIds = (
+    state: GameDetailPageState,
+    category: WallpaperCategory,
+  ): string[] =>
+    state.wallpaperSearch.categories[category].candidates.map(
+      (entry) => entry.id,
+    );
 
   /** A game with no rail wallpapers, so the dialog opens with no active slide. */
   const emptyRail = () => readyState({ media: [] });
@@ -371,7 +459,10 @@ describe("wallpaper search state", () => {
 
   it("keeps a query the user already typed when reopening", () => {
     let state = readyState();
-    state = reduceGameDetailState(state, { type: "wallpaper-search-query-changed", query: "souls" });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-query-changed",
+      query: "souls",
+    });
     state = reduceGameDetailState(state, { type: "wallpaper-search-closed" });
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     expect(state.wallpaperSearch.query).toBe("souls");
@@ -382,7 +473,10 @@ describe("wallpaper search state", () => {
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     const before = state.wallpaperSearch.categories;
 
-    state = reduceGameDetailState(state, { type: "wallpaper-search-started", category: "cover" });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-started",
+      category: "cover",
+    });
     expect(state.wallpaperSearch.categories.cover).toMatchObject({
       busy: true,
       phase: "idle",
@@ -408,8 +502,12 @@ describe("wallpaper search state", () => {
     // The backend echoes the query it actually ran.
     expect(state.wallpaperSearch.query).toBe("elden ring");
     // No portrait result bled into the wide rows.
-    expect(state.wallpaperSearch.categories.landscape).toEqual(createWallpaperCategoryState());
-    expect(state.wallpaperSearch.categories.background).toEqual(createWallpaperCategoryState());
+    expect(state.wallpaperSearch.categories.landscape).toEqual(
+      createWallpaperCategoryState(),
+    );
+    expect(state.wallpaperSearch.categories.background).toEqual(
+      createWallpaperCategoryState(),
+    );
     // With no rail wallpaper to sit on, the dialog lands on the first result.
     expect(state.wallpaperSearch.activeId).toBe("c1");
   });
@@ -440,39 +538,28 @@ describe("wallpaper search state", () => {
     // A failed "search more" keeps what that row had already shown.
     expect(rowIds(state, "landscape")).toEqual(["l1"]);
     // And the failure stays in its own row: the neighbours still render.
-    expect(state.wallpaperSearch.categories.cover).toMatchObject({ phase: "ready", busy: false });
+    expect(state.wallpaperSearch.categories.cover).toMatchObject({
+      phase: "ready",
+      busy: false,
+    });
     expect(rowIds(state, "cover")).toEqual(["c1", "c2"]);
-    expect(state.wallpaperSearch.categories.background).toMatchObject({ phase: "ready" });
+    expect(state.wallpaperSearch.categories.background).toMatchObject({
+      phase: "ready",
+    });
     expect(rowIds(state, "background")).toEqual(["b1"]);
   });
 
   it("drops every row's results when the source changes, and only then", () => {
     let state = emptyRail();
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    state = reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: "cover" });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-focus-changed",
+      focus: "cover",
+    });
     for (const category of WALLPAPER_CATEGORIES) {
       state = runSearch(state, category, [`${category}-1`]);
     }
 
-    // Re-picking the source already in use must not throw the results away.
-    expect(
-      reduceGameDetailState(state, {
-        type: "wallpaper-search-source-changed",
-        source: state.wallpaperSearch.source,
-      }),
-    ).toBe(state);
-
-    state = reduceGameDetailState(state, {
-      type: "wallpaper-search-source-changed",
-      source: "google-images",
-    });
-    expect(state.wallpaperSearch.source).toBe("google-images");
-    // Another source means other artwork, so all three rows are stale.
-    for (const category of WALLPAPER_CATEGORIES) {
-      expect(state.wallpaperSearch.categories[category]).toEqual(createWallpaperCategoryState());
-    }
-    expect(allWallpaperCandidates(state.wallpaperSearch)).toEqual([]);
-    // The session itself survives: same dialog, same query, same narrowing.
     expect(state.wallpaperSearch.open).toBe(true);
     expect(state.wallpaperSearch.query).toBe("elden ring");
     expect(state.wallpaperSearch.focus).toBe("cover");
@@ -497,10 +584,16 @@ describe("wallpaper search state", () => {
       }),
     ).toBe(state);
 
-    state = reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: null });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-search-focus-changed",
+      focus: null,
+    });
     expect(state.wallpaperSearch.focus).toBeNull();
     expect(
-      reduceGameDetailState(state, { type: "wallpaper-search-focus-changed", focus: null }),
+      reduceGameDetailState(state, {
+        type: "wallpaper-search-focus-changed",
+        focus: null,
+      }),
     ).toBe(state);
   });
 
@@ -526,7 +619,14 @@ describe("wallpaper search state", () => {
       category: "cover",
       results: backendResults("cover", ["c5", "c6"]),
     });
-    expect(rowIds(state, "cover")).toEqual(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    expect(rowIds(state, "cover")).toEqual([
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+      "c5",
+      "c6",
+    ]);
     expect(state.wallpaperSearch.categories.cover.offset).toBe(6);
     expect(state.wallpaperSearch.categories.cover.hasMore).toBe(true);
     expect(state.wallpaperSearch.activeId).toBe("c1");
@@ -572,18 +672,14 @@ describe("wallpaper search state", () => {
     state = runSearch(state, "background", ["b1"]);
     state = runSearch(state, "landscape", ["l1", "l2"]);
     state = runSearch(state, "cover", ["c1"]);
-    expect(allWallpaperCandidates(state.wallpaperSearch).map((entry) => entry.id)).toEqual([
-      "c1",
-      "l1",
-      "l2",
-      "b1",
-    ]);
-    expect(allWallpaperCandidates(state.wallpaperSearch).map((entry) => entry.category)).toEqual([
-      "cover",
-      "landscape",
-      "landscape",
-      "background",
-    ]);
+    expect(
+      allWallpaperCandidates(state.wallpaperSearch).map((entry) => entry.id),
+    ).toEqual(["c1", "l1", "l2", "b1"]);
+    expect(
+      allWallpaperCandidates(state.wallpaperSearch).map(
+        (entry) => entry.category,
+      ),
+    ).toEqual(["cover", "landscape", "landscape", "background"]);
   });
 
   it("keeps in-flight rows busy when the dialog closes, so a reopen cannot double-fire", () => {
@@ -623,7 +719,10 @@ describe("wallpaper search state", () => {
     let state = readyState({
       media: [media("w1", "wallpaper", true), media("w2", "wallpaper")],
     });
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "w2" });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "w2",
+    });
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     expect(state.wallpaperSearch.activeId).toBe("w2");
 
@@ -639,11 +738,17 @@ describe("wallpaper search state", () => {
     // A search left the user browsing one of its results.
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     state = runSearch(state, "cover", ["c1"]);
-    state = reduceGameDetailState(state, { type: "wallpaper-slide-changed", slideId: "c1" });
+    state = reduceGameDetailState(state, {
+      type: "wallpaper-slide-changed",
+      slideId: "c1",
+    });
     state = reduceGameDetailState(state, { type: "wallpaper-search-closed" });
     expect(state.wallpaperSearch.activeId).toBe("c1");
     // The user then previewed a downloaded wallpaper; the dialog must open on it.
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "w2" });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "w2",
+    });
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
     expect(state.wallpaperSearch.activeId).toBe("w2");
   });
@@ -651,9 +756,10 @@ describe("wallpaper search state", () => {
   it("lets the slide controls move the active wallpaper without searching", () => {
     let state = readyState();
     state = reduceGameDetailState(state, { type: "wallpaper-search-opened" });
-    const slides = state.detail?.media
-      .filter((item) => item.kind === "wallpaper")
-      .map((item) => item.id) ?? [];
+    const slides =
+      state.detail?.media
+        .filter((item) => item.kind === "wallpaper")
+        .map((item) => item.id) ?? [];
     expect(slides.length).toBeGreaterThan(1);
     state = reduceGameDetailState(state, {
       type: "wallpaper-slide-changed",
@@ -672,32 +778,45 @@ describe("wallpaper search state", () => {
       cover: "/media/igdb/covers/",
       landscape: "/media/igdb/landscapes/",
       background: "/media/igdb/heroes/",
+      // No wordmarks ship with the app, so this row is empty in the browser.
+      logo: "",
     };
-    for (const category of WALLPAPER_CATEGORIES) {
-      const view = createFallbackWallpaperSearch("igdb", category, "elden ring");
+    for (const category of WALLPAPER_CATEGORIES.filter(
+      (category) => category !== "logo",
+    )) {
+      const view = createFallbackWallpaperSearch(category, "elden ring");
       expect(view).toMatchObject({
         phase: "ready",
-        source: "igdb",
         category,
         query: "elden ring",
       });
       expect(view.candidates).toHaveLength(5);
-      expect(view.candidates.map((entry) => entry.category)).toEqual(Array(5).fill(category));
+      expect(view.candidates.map((entry) => entry.category)).toEqual(
+        Array(5).fill(category),
+      );
       expect(
-        view.candidates.filter((entry) => entry.thumbnailUrl.startsWith(folders[category])),
+        view.candidates.filter((entry) =>
+          entry.thumbnailUrl.startsWith(folders[category]),
+        ),
       ).toHaveLength(5);
     }
   });
 
   it("pages the fallback rows and never reuses an id across rows", () => {
     expect(
-      createFallbackWallpaperSearch("igdb", "cover", "q", 5).candidates.map((entry) => entry.id),
+      createFallbackWallpaperSearch("cover", "q", 5).candidates.map(
+        (entry) => entry.id,
+      ),
     ).toEqual(["candidate-cover-6"]);
-    expect(createFallbackWallpaperSearch("igdb", "cover", "q", 6).candidates).toEqual([]);
+    expect(
+      createFallbackWallpaperSearch("cover", "q", 6).candidates,
+    ).toEqual([]);
 
     // All three rows live in one dialog, so their ids must not collide.
     const ids = WALLPAPER_CATEGORIES.flatMap((category) =>
-      createFallbackWallpaperSearch("igdb", category, "q").candidates.map((entry) => entry.id),
+      createFallbackWallpaperSearch(category, "q").candidates.map(
+        (entry) => entry.id,
+      ),
     );
     expect(new Set(ids).size).toBe(ids.length);
   });
@@ -705,8 +824,13 @@ describe("wallpaper search state", () => {
 
 describe("restore state", () => {
   it("round-trips scroll, focus and the selected media", () => {
-    let state = readyState({ media: [media("w1", "wallpaper", true), media("c1", "cover", true)] });
-    state = reduceGameDetailState(state, { type: "media-previewed", mediaId: "c1" });
+    let state = readyState({
+      media: [media("w1", "wallpaper", true), media("c1", "cover", true)],
+    });
+    state = reduceGameDetailState(state, {
+      type: "media-previewed",
+      mediaId: "c1",
+    });
     const restore = toGameDetailRestoreState(state, 412.6, "media-apply");
     expect(restore).toEqual({
       scrollTop: 413,
@@ -737,11 +861,16 @@ describe("restore state", () => {
       online: true,
       restore,
     });
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 1 });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 1,
+    });
     state = reduceGameDetailState(state, {
       type: "detail-loaded",
       requestId: 1,
-      detail: detailWith({ media: [media("w1", "wallpaper", true), media("c1", "cover", true)] }),
+      detail: detailWith({
+        media: [media("w1", "wallpaper", true), media("c1", "cover", true)],
+      }),
     });
     expect(state.activeMediaKind).toBe("cover");
     expect(state.previewMediaId).toBe("c1");
@@ -762,11 +891,16 @@ describe("restore state", () => {
       online: true,
       restore,
     });
-    state = reduceGameDetailState(state, { type: "request-started", requestId: 1 });
+    state = reduceGameDetailState(state, {
+      type: "request-started",
+      requestId: 1,
+    });
     state = reduceGameDetailState(state, {
       type: "detail-loaded",
       requestId: 1,
-      detail: detailWith({ media: [media("w1", "wallpaper", true), media("c1", "cover", true)] }),
+      detail: detailWith({
+        media: [media("w1", "wallpaper", true), media("c1", "cover", true)],
+      }),
     });
     expect(state.activeMediaKind).toBe("wallpaper");
     expect(state.previewMediaId).toBe("w1");
@@ -781,13 +915,25 @@ describe("restore state", () => {
       previewMediaId: null,
     });
     expect(
-      readGameDetailRestoreState({ scrollTop: -5, focusKey: null, filters: ["kind:nope"] }),
-    ).toMatchObject({ scrollTop: 0, activeMediaKind: null, previewMediaId: null });
+      readGameDetailRestoreState({
+        scrollTop: -5,
+        focusKey: null,
+        filters: ["kind:nope"],
+      }),
+    ).toMatchObject({
+      scrollTop: 0,
+      activeMediaKind: null,
+      previewMediaId: null,
+    });
   });
 });
 
 describe("section predicates", () => {
   it("only lists sections that have real content", () => {
+    // Game info is the one section a loaded game always fills: at the very
+    // least it says where the game came from. It used to vanish for any title
+    // whose provider published no developer, date, genre or platform — most of
+    // a Microsoft Store or local library — and left a hole in the page.
     expect(
       visibleSections(
         detailWith({
@@ -803,7 +949,7 @@ describe("section predicates", () => {
           supportedPlatforms: [],
         }),
       ),
-    ).toEqual([]);
+    ).toEqual(["info"]);
     expect(visibleSections(detailWith())).toEqual([
       "gallery",
       "about",
@@ -815,11 +961,15 @@ describe("section predicates", () => {
 
   it("never renders friends or activity without real data", () => {
     expect(visibleSections(detailWith()).includes("friends")).toBe(false);
-    expect(visibleSections(detailWith({ friends: [] })).includes("friends")).toBe(false);
+    expect(
+      visibleSections(detailWith({ friends: [] })).includes("friends"),
+    ).toBe(false);
     expect(
       visibleSections(
         detailWith({
-          friends: [{ id: "f1", name: "Valkyrie", avatarUrl: "", status: "Online" }],
+          friends: [
+            { id: "f1", name: "Valkyrie", avatarUrl: "", status: "Online" },
+          ],
           activity: [
             {
               id: "a1",
@@ -901,13 +1051,20 @@ describe("normalisation", () => {
       normaliseWallpaperSearch(
         {
           phase: "ready",
-          source: "google-images",
           category: "landscape",
           query: " elden ring ",
           message: "10 results",
           candidates: [
-            { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png" },
-            { id: "c1", title: "Duplicate", thumbnailUrl: "https://x.test/b.png" },
+            {
+              id: "c1",
+              title: "Key art",
+              thumbnailUrl: "https://x.test/a.png",
+            },
+            {
+              id: "c1",
+              title: "Duplicate",
+              thumbnailUrl: "https://x.test/b.png",
+            },
             { id: "c2", thumbnailUrl: "https://x.test/c.png" },
             { id: "c3", title: "No thumb" },
             "junk",
@@ -917,13 +1074,22 @@ describe("normalisation", () => {
       ),
     ).toEqual({
       phase: "ready",
-      source: "google-images",
       category: "landscape",
       query: " elden ring ",
       message: "10 results",
       candidates: [
-        { id: "c1", title: "Key art", thumbnailUrl: "https://x.test/a.png", category: "landscape" },
-        { id: "c2", title: "Wallpaper", thumbnailUrl: "https://x.test/c.png", category: "landscape" },
+        {
+          id: "c1",
+          title: "Key art",
+          thumbnailUrl: "https://x.test/a.png",
+          category: "landscape",
+        },
+        {
+          id: "c2",
+          title: "Wallpaper",
+          thumbnailUrl: "https://x.test/c.png",
+          category: "landscape",
+        },
       ],
     });
   });
@@ -937,8 +1103,18 @@ describe("normalisation", () => {
         message: "",
         candidates: [
           { id: "c1", title: "Silent", thumbnailUrl: "/a.png" },
-          { id: "c2", title: "Garbage", thumbnailUrl: "/b.png", category: "screenshot" },
-          { id: "c3", title: "Explicit", thumbnailUrl: "/c.png", category: "background" },
+          {
+            id: "c2",
+            title: "Garbage",
+            thumbnailUrl: "/b.png",
+            category: "screenshot",
+          },
+          {
+            id: "c3",
+            title: "Explicit",
+            thumbnailUrl: "/c.png",
+            category: "background",
+          },
         ],
       },
       "cover",
@@ -957,7 +1133,6 @@ describe("normalisation", () => {
   it("falls back to a safe shape for a malformed search payload", () => {
     expect(normaliseWallpaperSearch(null, "landscape")).toEqual({
       phase: "error",
-      source: "steam-store",
       category: "landscape",
       query: "",
       message: "",
@@ -965,12 +1140,15 @@ describe("normalisation", () => {
     });
     expect(
       normaliseWallpaperSearch(
-        { phase: "mystery", source: "nope", category: "portrait", candidates: "x" },
+        {
+          phase: "mystery",
+          category: "portrait",
+          candidates: "x",
+        },
         "cover",
       ),
     ).toMatchObject({
       phase: "error",
-      source: "steam-store",
       category: "cover",
       candidates: [],
     });
@@ -984,14 +1162,20 @@ describe("formatting", () => {
     expect(formatPlayTime(460_800)).toBe("Played 128h");
     const now = Date.parse("2026-08-01T12:00:00Z");
     expect(formatLastPlayed(null, now)).toBe("Never played");
-    expect(formatLastPlayed("2026-07-30T12:00:00Z", now)).toBe("Last played 2 days ago");
-    expect(formatLastPlayed("2026-08-01T09:00:00Z", now)).toBe("Last played 3h ago");
+    expect(formatLastPlayed("2026-07-30T12:00:00Z", now)).toBe(
+      "Last played 2 days ago",
+    );
+    expect(formatLastPlayed("2026-08-01T09:00:00Z", now)).toBe(
+      "Last played 3h ago",
+    );
   });
 
   it("formats release dates and achievement progress", () => {
     expect(formatReleaseDate("2022-02-25")).toBe("February 25, 2022");
     expect(formatReleaseDate("not a date")).toBe("not a date");
-    expect(formatAchievementProgress({ unlocked: 67, total: 82, items: [] })).toEqual({
+    expect(
+      formatAchievementProgress({ unlocked: 67, total: 82, items: [] }),
+    ).toEqual({
       label: "67/82 unlocked",
       percent: 82,
     });
@@ -999,16 +1183,115 @@ describe("formatting", () => {
   });
 
   it("omits the achievements stat when the game has none", () => {
-    const facts = buildStatFacts(detailWith({ achievements: null }), Date.now());
+    const facts = buildStatFacts(
+      detailWith({ achievements: null }),
+      Date.now(),
+    );
     expect(facts.map((fact) => fact.id)).toEqual(["playtime", "last-played"]);
   });
 
   it("shows no playtime facts at all for a never-played game", () => {
     const facts = buildStatFacts(
-      detailWith({ playTimeSeconds: 0, lastPlayedAt: null, achievements: null }),
+      detailWith({
+        playTimeSeconds: 0,
+        lastPlayedAt: null,
+        achievements: null,
+      }),
       Date.now(),
     );
     expect(facts).toEqual([]);
+  });
+});
+
+describe("status chips", () => {
+  const detailWithStatus = (
+    overrides: Partial<
+      Pick<
+        GameDetailViewModel,
+        "installState" | "installPercent" | "macCompatibility"
+      >
+    >,
+  ): GameDetailViewModel => ({
+    ...createFallbackGameDetail("epic:abc"),
+    installState: "unknown",
+    installPercent: null,
+    macCompatibility: "unknown",
+    ...overrides,
+  });
+
+  it("leaves the install chip to the button when the game is not downloaded", () => {
+    // The Install button already says this; a chip repeating it is noise.
+    expect(
+      statusChips(detailWithStatus({ installState: "not-installed" })),
+    ).toEqual([]);
+  });
+
+  it("says nothing at all when neither answer is known", () => {
+    expect(statusChips(detailWithStatus({}))).toEqual([]);
+    expect(statusChips(null)).toEqual([]);
+  });
+
+  it("names the two Mac answers apart, and never invents the third", () => {
+    expect(
+      statusChips(detailWithStatus({ macCompatibility: "native" }))[0].label,
+    ).toBe("Mac native");
+    expect(
+      statusChips(detailWithStatus({ macCompatibility: "not-native" }))[0].label,
+    ).toBe("Windows only");
+    expect(
+      statusChips(detailWithStatus({ macCompatibility: "unknown" })),
+    ).toEqual([]);
+  });
+
+  it("leaves a running download to the button's own progress bar", () => {
+    expect(
+      statusChips(
+        detailWithStatus({ installState: "installing", installPercent: 12 }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("turns the primary action into the download bar while Epic transfers", () => {
+    const detail = {
+      ...detailWithStatus({ installState: "installing", installPercent: 12 }),
+      primaryAction: "install-epic" as const,
+    };
+
+    const action = resolvePrimaryAction(detail, "epic:abc");
+    expect(action.label).toBe("Downloading 12%");
+    expect(action.progress).toBe(12);
+    // A transfer already running is not a second install to start.
+    expect(action.disabled).toBe(true);
+    expect(action.intent).toBe("none");
+    // A live measurement beats the catalogue's last-known percentage.
+    expect(resolvePrimaryAction(detail, "epic:abc", 63).label).toBe(
+      "Downloading 63%",
+    );
+  });
+
+  it("offers a plain Install button when nothing is downloading", () => {
+    const action = resolvePrimaryAction(
+      {
+        ...detailWithStatus({ installState: "not-installed" }),
+        primaryAction: "install-epic" as const,
+      },
+      "epic:abc",
+    );
+
+    expect(action.label).toBe("Install");
+    expect(action.progress).toBeNull();
+    expect(action.disabled).toBe(false);
+  });
+
+  it("shows both facts together once both are known", () => {
+    const chips = statusChips(
+      detailWithStatus({
+        installState: "installed",
+        macCompatibility: "native",
+      }),
+    );
+
+    expect(chips.map((chip) => chip.label)).toEqual(["Installed", "Mac native"]);
   });
 });
 
@@ -1016,21 +1299,43 @@ describe("formatting", () => {
 /* Page lifecycle (DOM)                                                        */
 /* -------------------------------------------------------------------------- */
 
-function stubClient(overrides: Partial<GameDetailPageClient> = {}): GameDetailPageClient {
+function stubClient(
+  overrides: Partial<GameDetailPageClient> = {},
+): GameDetailPageClient {
   return {
-    getDetail: async () => detailWith({ media: [media("w1", "wallpaper", true), media("w2", "wallpaper")] }),
+    getDetail: async () =>
+      detailWith({
+        media: [media("w1", "wallpaper", true), media("w2", "wallpaper")],
+      }),
     setWishlist: async () => undefined,
-    selectMedia: async () => [media("w1", "wallpaper"), media("w2", "wallpaper", true)],
+    selectMedia: async () => [
+      media("w1", "wallpaper"),
+      media("w2", "wallpaper", true),
+    ],
     importMedia: async () => [],
     exportMedia: async () => undefined,
     cancelMediaDownload: async () => undefined,
-    searchWallpapers: async (_source, category) =>
-      createFallbackWallpaperSearch("igdb", category, ""),
+    searchWallpapers: async (category) =>
+      createFallbackWallpaperSearch(category, ""),
     importWallpaper: async () => [],
     openOffer: async () => undefined,
+    installEpicGame: async () => undefined,
+    uninstallEpicGame: async () => undefined,
+    epicInstallStatus: async () => ({
+      appName: "Sugar",
+      state: "not-installed" as const,
+      percent: 0,
+      installedBytes: 0,
+      totalBytes: 0,
+      installPath: null,
+    }),
     searchArtwork: async () => undefined,
-    resetArtwork: async () => ({ title: "Test", replaced: ["cover", "landscape", "background"] as WallpaperRole[] }),
+    resetArtwork: async () => ({
+      title: "Test",
+      replaced: ["cover", "landscape", "background"] as WallpaperRole[],
+    }),
     removeGame: async () => undefined,
+    setGameHidden: async () => undefined,
     setHomeImage: async () => undefined,
     ...overrides,
   };
@@ -1038,7 +1343,10 @@ function stubClient(overrides: Partial<GameDetailPageClient> = {}): GameDetailPa
 
 function activationFor(
   route: AppRoute,
-  options: { isCurrent?: () => boolean; restoreState?: PageRestoreState | null } = {},
+  options: {
+    isCurrent?: () => boolean;
+    restoreState?: PageRestoreState | null;
+  } = {},
 ): { activation: PageActivation; controller: AbortController } {
   const controller = new AbortController();
   return {
@@ -1057,7 +1365,11 @@ const gameRoute: AppRoute = { page: "game", gameId: "game_1", from: "library" };
 function mountPage(
   client: GameDetailPageClient,
   overrides: Partial<GameDetailPageOptions> = {},
-): { page: ReturnType<typeof createGameDetailPage>; host: HTMLElement; options: GameDetailPageOptions } {
+): {
+  page: ReturnType<typeof createGameDetailPage>;
+  host: HTMLElement;
+  options: GameDetailPageOptions;
+} {
   const host = document.createElement("div");
   document.body.replaceChildren(host);
   const options: GameDetailPageOptions = {
@@ -1074,8 +1386,12 @@ function mountPage(
 
 /** Opens the wallpaper dialog the way the UI now does: through the "…" menu. */
 function openWallpaperDialog(host: HTMLElement): void {
-  host.querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")?.click();
-  host.querySelector<HTMLButtonElement>("[data-focus-key='menu-wallpaper']")?.click();
+  host
+    .querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")
+    ?.click();
+  host
+    .querySelector<HTMLButtonElement>("[data-focus-key='menu-wallpaper']")
+    ?.click();
 }
 
 describe("game detail page lifecycle", () => {
@@ -1083,11 +1399,20 @@ describe("game detail page lifecycle", () => {
     const { page, host } = mountPage(stubClient());
     const { activation } = activationFor(gameRoute);
     await page.activate(activation);
-    expect(host.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
-    expect(host.querySelector(".gd-primary-action")?.textContent).toContain("Play");
-    expect(host.querySelectorAll(".gd-gallery__tile:not(.gd-gallery__tile--empty)").length).toBe(2);
+    expect(host.querySelector(".gd-hero__title")?.textContent).toBe(
+      "Elden Ring",
+    );
+    expect(host.querySelector(".gd-primary-action")?.textContent).toContain(
+      "Play",
+    );
+    expect(
+      host.querySelectorAll(".gd-gallery__tile:not(.gd-gallery__tile--empty)")
+        .length,
+    ).toBe(2);
     // Adding a wallpaper lives in the "…" menu now, not on the rail.
-    expect(host.querySelector("[data-focus-key='menu-wallpaper']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-focus-key='menu-wallpaper']"),
+    ).not.toBeNull();
   });
 
   it("discards a late response once the activation is no longer current", async () => {
@@ -1100,7 +1425,9 @@ describe("game detail page lifecycle", () => {
         },
       }),
     );
-    const { activation } = activationFor(gameRoute, { isCurrent: () => current });
+    const { activation } = activationFor(gameRoute, {
+      isCurrent: () => current,
+    });
     await page.activate(activation);
     expect(host.textContent).not.toContain("Stale paint");
     expect(host.querySelector(".gd-skeleton")).not.toBeNull();
@@ -1120,7 +1447,9 @@ describe("game detail page lifecycle", () => {
       stubClient({ getDetail: async () => null as never }),
     );
     await page.activate(activationFor(gameRoute).activation);
-    expect(host.querySelector(".gd-notice__title")?.textContent).toBe("Game not found");
+    expect(host.querySelector(".gd-notice__title")?.textContent).toBe(
+      "Game not found",
+    );
   });
 
   it("survives a rejected detail request and offers a retry", async () => {
@@ -1133,14 +1462,20 @@ describe("game detail page lifecycle", () => {
     );
     await page.activate(activationFor(gameRoute).activation);
     expect(host.textContent).toContain("backend exploded");
-    expect(host.querySelector("[data-focus-key='notice-retry']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-focus-key='notice-retry']"),
+    ).not.toBeNull();
   });
 
   it("captures and restores scroll, focus and the previewed media", async () => {
     const { page, host } = mountPage(stubClient());
     await page.activate(activationFor(gameRoute).activation);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")?.focus();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")
+      ?.focus();
     const restore = page.deactivate();
     expect(restore).toMatchObject({
       focusKey: "more-actions",
@@ -1148,56 +1483,100 @@ describe("game detail page lifecycle", () => {
       filters: ["kind:wallpaper", "media:w2"],
     });
 
-    await page.activate(activationFor(gameRoute, { restoreState: restore }).activation);
+    await page.activate(
+      activationFor(gameRoute, { restoreState: restore }).activation,
+    );
     expect(
-      host.querySelector("[data-focus-key='media-w2']")?.classList.contains("gd-gallery__tile--selected"),
+      host
+        .querySelector("[data-focus-key='media-w2']")
+        ?.classList.contains("gd-gallery__tile--selected"),
     ).toBe(true);
   });
 
   it("chooses a rail wallpaper as the home background and commits it on click", async () => {
-    const selectMedia = vi.fn(async () => [media("w1", "wallpaper"), media("w2", "wallpaper", true)]);
+    const selectMedia = vi.fn(async () => [
+      media("w1", "wallpaper"),
+      media("w2", "wallpaper", true),
+    ]);
     const setHomeImage = vi.fn(async () => undefined);
     const { page, host } = mountPage(stubClient({ selectMedia, setHomeImage }));
     await page.activate(activationFor(gameRoute).activation);
 
     // Clicking a rail wallpaper chooses it as the home (Library) background: it
     // persists the selection and promotes the media, with opaque ids only.
-    host.querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")?.click();
-    await vi.waitFor(() => expect(selectMedia).toHaveBeenCalledWith("game_1", "w2", expect.anything()));
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")
+      ?.click();
     await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w2", "background", expect.anything()),
+      expect(selectMedia).toHaveBeenCalledWith(
+        "game_1",
+        "w2",
+        expect.anything(),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(setHomeImage).toHaveBeenCalledWith(
+        "game_1",
+        "w2",
+        "background",
+        expect.anything(),
+      ),
     );
   });
 
   it("commits and promotes a ticked wallpaper as the home background", async () => {
-    const selectMedia = vi.fn(async () => [media("w1", "wallpaper"), media("w2", "wallpaper", true)]);
+    const selectMedia = vi.fn(async () => [
+      media("w1", "wallpaper"),
+      media("w2", "wallpaper", true),
+    ]);
     const setHomeImage = vi.fn(async () => undefined);
     const { page, host } = mountPage(stubClient({ selectMedia, setHomeImage }));
     await page.activate(activationFor(gameRoute).activation);
 
     openWallpaperDialog(host);
     // Tick an existing wallpaper in the grid, then apply it.
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")?.click();
-    const apply = host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']");
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")
+      ?.click();
+    const apply = host.querySelector<HTMLButtonElement>(
+      "[data-focus-key='wallpaper-apply']",
+    );
     expect(apply?.disabled).toBe(false);
     apply?.click();
-    await vi.waitFor(() => expect(selectMedia).toHaveBeenCalledWith("game_1", "w2", expect.anything()));
     await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w2", "background", expect.anything()),
+      expect(selectMedia).toHaveBeenCalledWith(
+        "game_1",
+        "w2",
+        expect.anything(),
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(setHomeImage).toHaveBeenCalledWith(
+        "game_1",
+        "w2",
+        "background",
+        expect.anything(),
+      ),
     );
     await vi.waitFor(() => expect(host.querySelector(".gd-modal")).toBeNull());
   });
 
   it("applies each pick to the slot its own row stands for, all three at once", async () => {
-    const selectMedia = vi.fn(async () => [media("w1", "wallpaper"), media("w2", "wallpaper", true)]);
+    const selectMedia = vi.fn(async () => [
+      media("w1", "wallpaper"),
+      media("w2", "wallpaper", true),
+    ]);
     const setHomeImage = vi.fn(
-      async (_gameId: string, _mediaId: string, _role: WallpaperRole) => undefined,
+      async (_gameId: string, _mediaId: string, _role: WallpaperRole) =>
+        undefined,
     );
     // Each import echoes back a media id derived from the candidate, so the
     // assertion can tell which row's pick produced which call.
-    const importWallpaper = vi.fn(async (_gameId: string, candidateId: string) => [
-      { ...media(`saved-${candidateId}`, "wallpaper", true) },
-    ]);
+    const importWallpaper = vi.fn(
+      async (_gameId: string, candidateId: string) => [
+        { ...media(`saved-${candidateId}`, "wallpaper", true) },
+      ],
+    );
     const { page, host } = mountPage(
       stubClient({ selectMedia, setHomeImage, importWallpaper }),
     );
@@ -1205,14 +1584,30 @@ describe("game detail page lifecycle", () => {
 
     openWallpaperDialog(host);
     await vi.waitFor(() =>
-      expect(host.querySelector("[data-focus-key='wall-candidate-cover-1']")).not.toBeNull(),
+      expect(
+        host.querySelector("[data-focus-key='wall-candidate-cover-1']"),
+      ).not.toBeNull(),
     );
 
     // One tile per row — no "Apply as" step in between.
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-cover-1']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-landscape-1']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-candidate-background-1']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
+    host
+      .querySelector<HTMLButtonElement>(
+        "[data-focus-key='wall-candidate-cover-1']",
+      )
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>(
+        "[data-focus-key='wall-candidate-landscape-1']",
+      )
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>(
+        "[data-focus-key='wall-candidate-background-1']",
+      )
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")
+      ?.click();
 
     await vi.waitFor(() => expect(setHomeImage).toHaveBeenCalledTimes(3));
     const roles = setHomeImage.mock.calls.map((call) => [call[1], call[2]]);
@@ -1235,10 +1630,16 @@ describe("game detail page lifecycle", () => {
     );
     await page.activate(activationFor(gameRoute).activation);
     openWallpaperDialog(host);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wall-w2']")
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")
+      ?.click();
     await vi.waitFor(() =>
-      expect(host.querySelector(".gd-modal__error")?.textContent).toContain("read-only"),
+      expect(host.querySelector(".gd-modal__error")?.textContent).toContain(
+        "read-only",
+      ),
     );
     expect(host.querySelector(".gd-modal")).not.toBeNull();
   });
@@ -1247,16 +1648,22 @@ describe("game detail page lifecycle", () => {
     const play = vi.fn();
     const { page, host } = mountPage(stubClient(), { play });
     await page.activate(activationFor(gameRoute).activation);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")
+      ?.click();
     expect(play).toHaveBeenCalledWith("game_1");
 
     const navigate = vi.fn();
     const wine = mountPage(
-      stubClient({ getDetail: async () => detailWith({ primaryAction: "configure-wine" }) }),
+      stubClient({
+        getDetail: async () => detailWith({ primaryAction: "configure-wine" }),
+      }),
       { navigate },
     );
     await wine.page.activate(activationFor(gameRoute).activation);
-    wine.host.querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")?.click();
+    wine.host
+      .querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")
+      ?.click();
     expect(navigate).toHaveBeenCalledWith({
       page: "settings",
       section: "plugins",
@@ -1290,7 +1697,9 @@ describe("game detail page lifecycle", () => {
       }),
     );
     await page.activate(activationFor(gameRoute).activation);
-    host.querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='primary-action']")
+      ?.click();
     await vi.waitFor(() => expect(openOffer).toHaveBeenCalledTimes(1));
     expect(openOffer).toHaveBeenCalledWith("offer_1", expect.anything());
   });
@@ -1308,30 +1717,45 @@ describe("game detail page lifecycle", () => {
       stubClient({ getDetail: async () => detailWith({ media: [] }) }),
     );
     await page.activate(activationFor(gameRoute).activation);
-    expect(host.querySelector(".gd-hero__title")?.textContent).toBe("Elden Ring");
+    expect(host.querySelector(".gd-hero__title")?.textContent).toBe(
+      "Elden Ring",
+    );
     expect(host.querySelector(".gd-modal")).toBeNull();
     // No media yet: the rail is gone entirely, but the "…" menu still offers a
     // way to add a wallpaper.
     expect(host.querySelector(".gd-gallery")).toBeNull();
     expect(host.querySelectorAll(".gd-gallery__tile")).toHaveLength(0);
-    expect(host.querySelector("[data-focus-key='menu-wallpaper']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-focus-key='menu-wallpaper']"),
+    ).not.toBeNull();
   });
 
   it("downloads a ticked search result and applies it to its own row's slot", async () => {
     // Every row is fetched on its own, so each answers with its own art.
-    const searchWallpapers = vi.fn(async (_source, category: WallpaperCategory) => ({
-      phase: "ready" as const,
-      source: "steam-store" as const,
-      category,
-      query: "elden ring",
-      message: "",
-      candidates: [{ id: `c1-${category}`, title: "Key art", thumbnailUrl: "/a.png", category }],
+    const searchWallpapers = vi.fn(async (category: WallpaperCategory) => ({
+        phase: "ready" as const,
+        category,
+        query: "elden ring",
+        message: "",
+        candidates: [
+          {
+            id: `c1-${category}`,
+            title: "Key art",
+            thumbnailUrl: "/a.png",
+            category,
+          },
+        ],
     }));
     const importWallpaper = vi.fn(async () => [media("w9", "wallpaper", true)]);
     const selectMedia = vi.fn(async () => [media("w9", "wallpaper", true)]);
     const setHomeImage = vi.fn(async () => undefined);
     const { page, host } = mountPage(
-      stubClient({ searchWallpapers, importWallpaper, selectMedia, setHomeImage }),
+      stubClient({
+        searchWallpapers,
+        importWallpaper,
+        selectMedia,
+        setHomeImage,
+      }),
     );
     await page.activate(activationFor(gameRoute).activation);
 
@@ -1340,40 +1764,59 @@ describe("game detail page lifecycle", () => {
     await vi.waitFor(() => expect(searchWallpapers).toHaveBeenCalled());
     // The candidate lands as a tile in its own row; tick it and apply.
     await vi.waitFor(() =>
-      expect(host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1-cover']")).not.toBeNull(),
+      expect(
+        host.querySelector<HTMLButtonElement>(
+          "[data-focus-key='wall-c1-cover']",
+        ),
+      ).not.toBeNull(),
     );
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wall-c1-cover']")?.click();
-    host.querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wall-c1-cover']")
+      ?.click();
+    host
+      .querySelector<HTMLButtonElement>("[data-focus-key='wallpaper-apply']")
+      ?.click();
 
     await vi.waitFor(() =>
-      expect(importWallpaper).toHaveBeenCalledWith("game_1", "c1-cover", expect.anything()),
+      expect(importWallpaper).toHaveBeenCalledWith(
+        "game_1",
+        "c1-cover",
+        expect.anything(),
+      ),
     );
     // It was ticked in the Cover row, so it fills the cover slot — not the
     // background, which used to be the hardcoded default.
     await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith("game_1", "w9", "cover", expect.anything()),
+      expect(setHomeImage).toHaveBeenCalledWith(
+        "game_1",
+        "w9",
+        "cover",
+        expect.anything(),
+      ),
     );
     await vi.waitFor(() => expect(host.querySelector(".gd-modal")).toBeNull());
   });
 
-  it("shows a not-configured notice instead of a broken search", async () => {
+  it("shows why a row came back empty rather than a bare 'no results'", async () => {
     const { page, host } = mountPage(
       stubClient({
-        searchWallpapers: async (_source, category) => ({
-          phase: "not-configured" as const,
-          source: "igdb" as const,
+        searchWallpapers: async (category) => ({
+          phase: "ready" as const,
           category,
           query: "elden ring",
-          message: "IGDB needs a client id and secret.",
+          message:
+            "No 4K background matched that search. SteamGridDB API Key is missing — add it under Settings.",
           candidates: [],
         }),
       }),
     );
     await page.activate(activationFor(gameRoute).activation);
     openWallpaperDialog(host);
-    host.querySelector<HTMLFormElement>(".gd-search__form")?.requestSubmit();
+    host.querySelector<HTMLFormElement>(".gd-wallhead__search")?.requestSubmit();
     await vi.waitFor(() =>
-      expect(host.querySelector(".gd-search__notice")?.textContent).toContain("client id and secret"),
+      expect(host.querySelector(".gd-search__notice")?.textContent).toContain(
+        "SteamGridDB API Key is missing",
+      ),
     );
     expect(host.querySelector(".gd-search__status")).toBeNull();
   });

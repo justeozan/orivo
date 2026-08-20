@@ -7,6 +7,7 @@ export type IconName =
   | "settings"
   | "search"
   | "bell"
+  | "feedback"
   | "clock"
   | "trophy"
   | "play"
@@ -75,6 +76,7 @@ const paths: Record<IconName, string> = {
     '<circle cx="12" cy="12" r="3.5" /><path d="M4 12h2M18 12h2M12 4v2M12 18v2M6.35 6.35l1.4 1.4M16.25 16.25l1.4 1.4M17.65 6.35l-1.4 1.4M7.75 16.25l-1.4 1.4" />',
   search: '<circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" />',
   bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 8-3 10h18c0-2-3-3-3-10M10 22h4" />',
+  feedback: '<path d="M4 5.5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8.6L7 21v-4.5H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z" />',
   clock: '<circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" />',
   trophy:
     '<path d="M8 4h8v4c0 2.5-1.5 4.5-4 5-2.5-.5-4-2.5-4-5zM12 13v5M8 21h8M6 6H3v2c0 2 1.3 3.6 3.2 4M18 6h3v2c0 2-1.3 3.6-3.2 4" />',

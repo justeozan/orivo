@@ -22,6 +22,8 @@ export interface Preferences {
   showShowcaseGames: boolean;
   /** Debug-only: fill detail pages with sample achievements, friends and activity. */
   debugSampleSocial: boolean;
+  /** Surfaces that are not finished yet. Off by default; the Me page is one. */
+  betaFeatures: boolean;
 }
 
 export interface PreferencesUpdate {
@@ -30,6 +32,7 @@ export interface PreferencesUpdate {
   motion?: MotionPreference;
   showShowcaseGames?: boolean;
   debugSampleSocial?: boolean;
+  betaFeatures?: boolean;
   reset?: boolean;
 }
 
@@ -45,6 +48,7 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   motion: "system",
   showShowcaseGames: false,
   debugSampleSocial: false,
+  betaFeatures: false,
 });
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -97,6 +101,7 @@ export function normalisePreferences(value: unknown): Preferences {
     motion: readEnum(record, ["motion"], MOTION_PREFERENCES, DEFAULT_PREFERENCES.motion),
     showShowcaseGames: record.showShowcaseGames === true || record.show_showcase_games === true,
     debugSampleSocial: record.debugSampleSocial === true || record.debug_sample_social === true,
+    betaFeatures: record.betaFeatures === true || record.beta_features === true,
   };
 }
 
@@ -114,6 +119,10 @@ export const EMPTY_WALLPAPER_CREDENTIALS: WallpaperCredentials = {
   googleApiKey: "",
   googleCseId: "",
   steamgriddbApiKey: "",
+  searchTermCover: "",
+  searchTermLandscape: "",
+  searchTermBackground: "",
+  searchTermLogo: "",
 };
 
 export function normaliseWallpaperCredentials(value: unknown): WallpaperCredentials {
@@ -124,6 +133,16 @@ export function normaliseWallpaperCredentials(value: unknown): WallpaperCredenti
     googleApiKey: readString(record.googleApiKey ?? record.google_api_key),
     googleCseId: readString(record.googleCseId ?? record.google_cse_id),
     steamgriddbApiKey: readString(record.steamgriddbApiKey ?? record.steamgriddb_api_key),
+    // Empty means "use Orivo's default term", so a missing value is not a
+    // missing feature — it is the tuned query the search already ships with.
+    searchTermCover: readString(record.searchTermCover ?? record.search_term_cover),
+    searchTermLandscape: readString(
+      record.searchTermLandscape ?? record.search_term_landscape,
+    ),
+    searchTermBackground: readString(
+      record.searchTermBackground ?? record.search_term_background,
+    ),
+    searchTermLogo: readString(record.searchTermLogo ?? record.search_term_logo),
   };
 }
 
