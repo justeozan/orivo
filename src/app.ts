@@ -5143,13 +5143,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * paint of the library.
    */
   if (isTauriRuntime()) {
+    // A shell that was torn down while the check was still waiting has no panel
+    // left to write into: `renderUpdatePanel` would paint refs that are no
+    // longer in the document, and the round trip would be spent on nothing.
+    // Both delays are long enough for that to happen, so both are guarded.
+    const stillMounted = (): boolean => root.isConnected;
+
     // `requestIdleCallback` takes an options object, `setTimeout` takes
     // milliseconds. Passing the object to both meant the fallback coerced it to
     // NaN and fired immediately, which is the opposite of waiting for quiet.
     window.setTimeout(() => {
+      if (!stillMounted()) return;
       const idle = window.requestIdleCallback;
-      if (idle) idle(() => void checkForUpdates(), { timeout: 2_000 });
-      else void checkForUpdates();
+      if (idle) {
+        idle(
+          () => {
+            if (stillMounted()) void checkForUpdates();
+          },
+          { timeout: 2_000 },
+        );
+      } else void checkForUpdates();
     }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   }
 }
