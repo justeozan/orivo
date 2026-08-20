@@ -6,3 +6,4 @@
 .gstack/
 .context/
 e2e/__screenshots__/
+.conductor/settings.local.toml
