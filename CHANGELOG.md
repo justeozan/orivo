@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-21
+
+### Added
+
+- The bottom bar is now the only control the library needs. One button cycles through four ways of reading your collection — `Activity`, `Genre`, `Source`, `Platform` — and the segments for the current mode sit in the middle of the bar. `Activity` offers `Recently Played`, `Most Played`, `Play Next`, `Resume` and `Never Played`; the first two only sort, so the library never opens on an empty rail, and the others appear only when they hold something. `Genre`, `Source` and `Platform` list the values actually present in your library rather than a fixed list, and a library with nothing to divide by shows `All Games`. The two dropdowns above the rail, which did nothing, are gone.
+- A mood switch on the left of the bar, between `Orivo` and `Rage`. It filters nothing: the brand becomes the spiral and the accent colour changes.
+- Epic games now know whether they are installed on this machine. Orivo reads the Epic Games Launcher's own install manifests and nothing else — it never asks Epic's servers what is on your disk, and it never writes into the launcher's data.
+- An in-app feedback button beside your profile picture, and crash reports, both through Sentry. Neither exists unless a DSN is configured: a build from source initialises nothing and makes no network call.
+- README, LICENSE (PolyForm Noncommercial 1.0.0), CONTRIBUTING and `.env.example`.
+
+### Changed
+
+- The Selector hero draws the game's own wordmark where the title used to be, at the same place and weight, and falls back to the text immediately if the image is missing or fails to decode. Hero artwork is now chosen unbranded where possible, so a game never shows two logos.
+- The hero no longer carries a synopsis — that belongs to the game's page — and `Play` is its only action. The last session is written in plain language (`2 days ago`) instead of whatever a connector returned.
+- Rail covers are bare: no title, no play time, no gradient over the artwork. That information lives in the hero.
+- The game detail page and the model behind it were rewritten.
+- Wallpaper search reworked, and SteamGridDB's CDN added to the content security policy so its artwork can load in the packaged app.
+
+## [0.3.3] - 2026-08-20
+
 ### Added
 
 - Connect six more game libraries from Settings › Libraries: Epic Games, GOG, Ubisoft Connect, Xbox, Microsoft Store and Instant Gaming. Each signs in through that store's own window, and the games you own appear in your library with their store artwork. Every connected store also appears in the top-left Sources menu, where selecting it syncs it.
