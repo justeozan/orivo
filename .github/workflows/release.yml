@@ -143,8 +143,13 @@ jobs:
     name: Verify staged release
     needs: release
     runs-on: ubuntu-latest
+    # This job only reads, but it cannot use `contents: read`. The release it
+    # checks is still a draft, GitHub lists draft releases only for tokens with
+    # push access, and `GET /releases/tags/{tag}` never returns a draft at all.
+    # A read-only token therefore sees no release and reports every asset as
+    # missing, which is exactly what happened to v0.3.3.
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -167,15 +172,27 @@ jobs:
 
           assets=''
           found=''
+          visible=''
           for attempt in 1 2 3 4 5; do
-            assets="$(gh release view "$tag" --json assets --jq '.assets[].name' || true)"
-            if printf '%s\n' "$assets" | grep -qx 'latest.json'; then
-              found=yes
-              break
+            if assets="$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null)"; then
+              visible=yes
+              if printf '%s\n' "$assets" | grep -qx 'latest.json'; then
+                found=yes
+                break
+              fi
+              echo "latest.json not visible yet (attempt $attempt/5), waiting..."
+            else
+              echo "release $tag not visible yet (attempt $attempt/5), waiting..."
             fi
-            echo "latest.json not visible yet (attempt $attempt/5), waiting..."
             sleep 10
           done
+
+          # An invisible release and an incomplete one need different fixes, so
+          # do not let the first masquerade as the second.
+          if [ -z "$visible" ]; then
+            echo "::error::Release $tag is not visible to this job. A staged release is a draft, and drafts are listed only for tokens with push access, so this job needs 'contents: write' even though it only reads."
+            exit 1
+          fi
 
           if [ -z "$found" ]; then
             echo "::error::latest.json is missing from release $tag. The in-app updater endpoint will 404."
