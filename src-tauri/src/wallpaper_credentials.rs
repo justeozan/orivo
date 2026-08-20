@@ -30,6 +30,18 @@ pub struct WallpaperCredentialsDto {
     /// falls back to Steam's official artwork when it is not.
     #[serde(default)]
     pub steamgriddb_api_key: String,
+    /// Per-row search term templates for the keyword-driven sources, the way
+    /// Playnite exposes one editable term per media field. Empty means "use the
+    /// built-in default", so a user who never opens this form still gets the
+    /// tuned query rather than a blank one.
+    #[serde(default)]
+    pub search_term_cover: String,
+    #[serde(default)]
+    pub search_term_landscape: String,
+    #[serde(default)]
+    pub search_term_background: String,
+    #[serde(default)]
+    pub search_term_logo: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -40,6 +52,10 @@ pub struct WallpaperCredentialsUpdate {
     pub google_api_key: Option<String>,
     pub google_cse_id: Option<String>,
     pub steamgriddb_api_key: Option<String>,
+    pub search_term_cover: Option<String>,
+    pub search_term_landscape: Option<String>,
+    pub search_term_background: Option<String>,
+    pub search_term_logo: Option<String>,
 }
 
 /// Shared, mutable credential store. The same instance backs the Settings
@@ -55,12 +71,13 @@ impl WallpaperCredentialsService {
     pub fn load(path: PathBuf) -> Self {
         let stored = if path.is_file() {
             match fs::read_to_string(&path).and_then(|encoded| {
-                serde_json::from_str::<WallpaperCredentialsDto>(&encoded)
-                    .map_err(io::Error::other)
+                serde_json::from_str::<WallpaperCredentialsDto>(&encoded).map_err(io::Error::other)
             }) {
                 Ok(dto) => trim_all(dto),
                 Err(error) => {
-                    eprintln!("orivo: wallpaper credentials are unreadable ({error}); starting empty");
+                    eprintln!(
+                        "orivo: wallpaper credentials are unreadable ({error}); starting empty"
+                    );
                     WallpaperCredentialsDto::default()
                 }
             }
@@ -86,7 +103,10 @@ impl WallpaperCredentialsService {
             .unwrap_or_default()
     }
 
-    pub fn update(&self, update: WallpaperCredentialsUpdate) -> Result<WallpaperCredentialsDto, String> {
+    pub fn update(
+        &self,
+        update: WallpaperCredentialsUpdate,
+    ) -> Result<WallpaperCredentialsDto, String> {
         let mut next = self.dto();
         if let Some(value) = update.igdb_client_id {
             next.igdb_client_id = value.trim().to_owned();
@@ -102,6 +122,18 @@ impl WallpaperCredentialsService {
         }
         if let Some(value) = update.steamgriddb_api_key {
             next.steamgriddb_api_key = value.trim().to_owned();
+        }
+        if let Some(value) = update.search_term_cover {
+            next.search_term_cover = value.trim().to_owned();
+        }
+        if let Some(value) = update.search_term_landscape {
+            next.search_term_landscape = value.trim().to_owned();
+        }
+        if let Some(value) = update.search_term_background {
+            next.search_term_background = value.trim().to_owned();
+        }
+        if let Some(value) = update.search_term_logo {
+            next.search_term_logo = value.trim().to_owned();
         }
         self.save(&next)?;
         Ok(next)
@@ -148,6 +180,10 @@ fn trim_all(dto: WallpaperCredentialsDto) -> WallpaperCredentialsDto {
         google_api_key: dto.google_api_key.trim().to_owned(),
         google_cse_id: dto.google_cse_id.trim().to_owned(),
         steamgriddb_api_key: dto.steamgriddb_api_key.trim().to_owned(),
+        search_term_cover: dto.search_term_cover.trim().to_owned(),
+        search_term_landscape: dto.search_term_landscape.trim().to_owned(),
+        search_term_background: dto.search_term_background.trim().to_owned(),
+        search_term_logo: dto.search_term_logo.trim().to_owned(),
     }
 }
 
@@ -223,10 +259,8 @@ mod tests {
             root.service().dto(),
             WallpaperCredentialsDto {
                 igdb_client_id: "client-id".into(),
-                igdb_client_secret: String::new(),
                 google_api_key: "key".into(),
-                google_cse_id: String::new(),
-                steamgriddb_api_key: String::new(),
+                ..WallpaperCredentialsDto::default()
             }
         );
     }

@@ -151,7 +151,10 @@ describe("About panel updater wiring", () => {
     window.location.hash = "";
   });
 
-  it("does not touch the updater plugin until the button is pressed", () => {
+  it("never downloads or restarts on its own", () => {
+    // Orivo looks for a release by itself, once the shell has gone quiet — that
+    // is the whole point of an app that updates itself. Looking is all it does:
+    // nothing is fetched and nothing restarts until the button is pressed.
     expect(updater.check).not.toHaveBeenCalled();
     expect(processPlugin.relaunch).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);

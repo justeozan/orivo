@@ -122,7 +122,9 @@ impl SourceProvider {
     }
 
     pub fn from_token(token: &str) -> Option<Self> {
-        Self::all().into_iter().find(|provider| provider.token() == token)
+        Self::all()
+            .into_iter()
+            .find(|provider| provider.token() == token)
     }
 
     pub fn catalog_source(self) -> GameSource {
@@ -197,7 +199,10 @@ impl SourceProvider {
     /// sells keys redeemed elsewhere and Xbox titles are console entitlements,
     /// so neither pretends to be launchable.
     pub fn launchable(self) -> bool {
-        matches!(self, Self::Epic | Self::Gog | Self::Ubisoft | Self::MicrosoftStore)
+        matches!(
+            self,
+            Self::Epic | Self::Gog | Self::Ubisoft | Self::MicrosoftStore
+        )
     }
 
     /// Hosts whose artwork this provider may point the main window at. A URL
@@ -294,11 +299,35 @@ pub struct SourceLibraryGame {
     pub title: String,
     pub description: Option<String>,
     pub genre: Option<String>,
+    /// The studio, which is not a genre. Kept apart so no connector is ever
+    /// tempted to bill one as the other again.
+    pub developer: Option<String>,
+    /// The transparent wordmark, if the store publishes one apart from its
+    /// artwork. Drawn over the scene; never used as a wallpaper.
+    pub logo_url: Option<String>,
     pub cover_url: Option<String>,
     pub hero_url: Option<String>,
     pub landscape_url: Option<String>,
     pub play_time_seconds: u64,
     pub last_played_at: Option<String>,
+    /// Whether the store says this game ships a build that runs natively on
+    /// macOS. `None` means the connector has no answer, which is not the same
+    /// as "no": only a store that publishes per-platform entitlements can tell.
+    pub native_mac: Option<bool>,
+    /// What the store's own client reports about this game on this machine.
+    /// `None` for a store with no local client to ask.
+    pub install: Option<SourceInstallStatus>,
+}
+
+/// Local install state a connector observed through its store's own client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInstallStatus {
+    pub installed: bool,
+    /// A download or repair the store client is still running.
+    pub installing: bool,
+    /// 0-100. Only meaningful while `installing`.
+    pub percent: u8,
+    pub install_path: Option<String>,
 }
 
 /// What a connector produced for one account, including what it had to drop.
@@ -339,6 +368,10 @@ impl SourceLibrary {
             title,
             description: game.description.and_then(|text| normalize_text(&text, 600)),
             genre: game.genre.and_then(|text| normalize_text(&text, 80)),
+            developer: game.developer.and_then(|text| normalize_text(&text, 120)),
+            logo_url: game
+                .logo_url
+                .and_then(|url| sanitize_media_url(&url, provider)),
             cover_url: game
                 .cover_url
                 .and_then(|url| sanitize_media_url(&url, provider)),
@@ -404,7 +437,10 @@ impl fmt::Display for SourceError {
                 "Orivo could not read the secure {provider} connection from the system keychain. Connect {provider} again."
             ),
             Self::InvalidCredential(_) => {
-                write!(f, "{provider} rejected the account connection. Connect it again.")
+                write!(
+                    f,
+                    "{provider} rejected the account connection. Connect it again."
+                )
             }
             Self::SessionExpired(_) => write!(
                 f,
@@ -673,7 +709,10 @@ pub fn status_from_credential(
 pub fn load_credential(
     provider: SourceProvider,
 ) -> Result<Option<StoredSourceCredential>, SourceError> {
-    let key = provider.credential_namespace().keychain_account().to_string();
+    let key = provider
+        .credential_namespace()
+        .keychain_account()
+        .to_string();
     if let Ok(cache) = credential_cache().lock()
         && let Some(credential) = cache.get(&key)
     {
@@ -716,12 +755,14 @@ pub fn save_credential(
     provider: SourceProvider,
     credential: &StoredSourceCredential,
 ) -> Result<(), SourceError> {
-    let encoded =
-        serde_json::to_string(credential).map_err(|_| SourceError::Keychain(provider))?;
+    let encoded = serde_json::to_string(credential).map_err(|_| SourceError::Keychain(provider))?;
     credential_entry(provider)?
         .set_password(&encoded)
         .map_err(|error| keychain_error(provider, "write", error))?;
-    let key = provider.credential_namespace().keychain_account().to_string();
+    let key = provider
+        .credential_namespace()
+        .keychain_account()
+        .to_string();
     cache_credential(&key, credential);
     remember_connection(provider, credential.account_label());
     Ok(())
@@ -733,9 +774,7 @@ fn cache_credential(key: &str, credential: &StoredSourceCredential) {
     }
 }
 
-pub fn require_credential(
-    provider: SourceProvider,
-) -> Result<StoredSourceCredential, SourceError> {
+pub fn require_credential(provider: SourceProvider) -> Result<StoredSourceCredential, SourceError> {
     load_credential(provider)?.ok_or(SourceError::NotConnected(provider))
 }
 
@@ -759,18 +798,11 @@ fn credential_entry(provider: SourceProvider) -> Result<Entry, SourceError> {
     .map_err(|error| keychain_error(provider, "open", error))
 }
 
-fn keychain_error(
-    provider: SourceProvider,
-    operation: &str,
-    error: KeyringError,
-) -> SourceError {
+fn keychain_error(provider: SourceProvider, operation: &str, error: KeyringError) -> SourceError {
     // `keyring::Error` carries an OS status category but never the stored
     // value, so retaining it in stderr makes a denied ACL or a locked keychain
     // observable from the native process without weakening secrecy.
-    eprintln!(
-        "{} keychain {operation} failed: {error}",
-        provider.label()
-    );
+    eprintln!("{} keychain {operation} failed: {error}", provider.label());
     SourceError::Keychain(provider)
 }
 
@@ -817,9 +849,10 @@ pub fn sanitize_media_url(url: &str, provider: SourceProvider) -> Option<String>
         return None;
     }
     let host = parsed.host_str()?.to_ascii_lowercase();
-    let allowed = provider.media_hosts().iter().any(|candidate| {
-        host == *candidate || host.ends_with(&format!(".{candidate}"))
-    });
+    let allowed = provider
+        .media_hosts()
+        .iter()
+        .any(|candidate| host == *candidate || host.ends_with(&format!(".{candidate}")));
     allowed.then(|| parsed.to_string())
 }
 
@@ -830,12 +863,57 @@ pub fn normalize_title(value: &str) -> Option<String> {
 }
 
 pub fn normalize_text(value: &str, max_characters: usize) -> Option<String> {
+    // A control character is a boundary, not nothing: dropping it outright glued
+    // the two halves of a store description together and shipped
+    // "BUILD YOUR OWN VIKING LEGENDBecome Eivor" to the library. Turning it into
+    // a space first lets the collapse below do the rest.
     let collapsed = value
         .chars()
-        .filter(|character| !character.is_control())
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>();
     let collapsed = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
     (!collapsed.is_empty()).then(|| collapsed.chars().take(max_characters).collect())
+}
+
+/// The tags a store description uses to end one block of prose and start the
+/// next. Everything else is inline and joins the words around it.
+fn is_block_tag(tag: &str) -> bool {
+    let name: String = tag
+        .trim_start_matches('/')
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        name.as_str(),
+        "br" | "p"
+            | "div"
+            | "li"
+            | "ul"
+            | "ol"
+            | "tr"
+            | "td"
+            | "th"
+            | "table"
+            | "section"
+            | "article"
+            | "header"
+            | "footer"
+            | "blockquote"
+            | "hr"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+    )
 }
 
 /// Strip the HTML a store description can carry so the library never renders a
@@ -843,13 +921,26 @@ pub fn normalize_text(value: &str, max_characters: usize) -> Option<String> {
 /// actually appear are decoded.
 pub fn normalize_html_text(value: &str, max_characters: usize) -> Option<String> {
     let mut plain = String::with_capacity(value.len());
+    let mut tag = String::new();
     let mut in_tag = false;
     for character in value.chars() {
         match character {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                // A tag that ended a block of prose leaves a space behind it, or
+                // "</h3><p>" welds a heading onto the paragraph under it. An
+                // inline tag leaves nothing: "word<b>s</b>" is one word, and a
+                // space there would break it in half.
+                if is_block_tag(&tag) {
+                    plain.push(' ');
+                }
+            }
             _ if !in_tag => plain.push(character),
-            _ => {}
+            _ => tag.push(character),
         }
     }
     let plain = plain
@@ -974,6 +1065,8 @@ pub fn session_result_from_eval(provider: SourceProvider, result: &str) -> Sessi
                     title: game.title,
                     description: (!game.description.is_empty()).then_some(game.description),
                     genre: (!game.genre.is_empty()).then_some(game.genre),
+                    developer: None,
+                    logo_url: None,
                     cover_url: (!game.cover.is_empty()).then_some(game.cover.clone()),
                     hero_url: (!game.hero.is_empty())
                         .then_some(game.hero.clone())
@@ -983,6 +1076,8 @@ pub fn session_result_from_eval(provider: SourceProvider, result: &str) -> Sessi
                         .or_else(|| (!game.cover.is_empty()).then_some(game.cover)),
                     play_time_seconds: 0,
                     last_played_at: None,
+                    native_mac: None,
+                    install: None,
                 },
             );
         }
@@ -1079,7 +1174,9 @@ mod tests {
             sanitize_media_url("//images-2.gog-statics.com/a.jpg", SourceProvider::Gog),
             Some("https://images-2.gog-statics.com/a.jpg".to_string())
         );
-        assert!(sanitize_media_url("http://cdn1.epicgames.com/a.png", SourceProvider::Epic).is_none());
+        assert!(
+            sanitize_media_url("http://cdn1.epicgames.com/a.png", SourceProvider::Epic).is_none()
+        );
         assert!(sanitize_media_url("https://evil.example/a.png", SourceProvider::Epic).is_none());
         // A host that merely *contains* an allowed name must not pass.
         assert!(
@@ -1098,11 +1195,15 @@ mod tests {
                 title: "  The Witcher   ".into(),
                 description: None,
                 genre: None,
+                developer: None,
+                logo_url: None,
                 cover_url: None,
                 hero_url: None,
                 landscape_url: None,
                 play_time_seconds: 0,
                 last_played_at: None,
+                native_mac: None,
+                install: None,
             },
         );
         library.push(
@@ -1114,11 +1215,15 @@ mod tests {
                 title: "Traversal".into(),
                 description: None,
                 genre: None,
+                developer: None,
+                logo_url: None,
                 cover_url: None,
                 hero_url: None,
                 landscape_url: None,
                 play_time_seconds: 0,
                 last_played_at: None,
+                native_mac: None,
+                install: None,
             },
         );
         library.push(
@@ -1129,11 +1234,15 @@ mod tests {
                 title: "   ".into(),
                 description: None,
                 genre: None,
+                developer: None,
+                logo_url: None,
                 cover_url: None,
                 hero_url: None,
                 landscape_url: None,
                 play_time_seconds: 0,
                 last_played_at: None,
+                native_mac: None,
+                install: None,
             },
         );
 
@@ -1154,11 +1263,15 @@ mod tests {
                     title: title.into(),
                     description: None,
                     genre: None,
+                    developer: None,
+                    logo_url: None,
                     cover_url: None,
                     hero_url: None,
                     landscape_url: None,
                     play_time_seconds: 0,
                     last_played_at: None,
+                    native_mac: None,
+                    install: None,
                 },
             );
         }
@@ -1172,6 +1285,42 @@ mod tests {
         assert_eq!(
             normalize_html_text("<p>Play <b>now</b> &amp; win</p>", 600).as_deref(),
             Some("Play now & win")
+        );
+    }
+
+    #[test]
+    fn a_description_keeps_the_break_between_its_headline_and_its_body() {
+        // Xbox hands back a headline and a paragraph separated by newlines, and
+        // the library used to show them welded together.
+        assert_eq!(
+            normalize_text("BUILD YOUR OWN VIKING LEGEND\r\n\r\nBecome Eivor.", 600).as_deref(),
+            Some("BUILD YOUR OWN VIKING LEGEND Become Eivor.")
+        );
+        assert_eq!(
+            normalize_html_text(
+                "<h3>BUILD YOUR OWN VIKING LEGEND</h3><p>Become Eivor.</p>",
+                600
+            )
+            .as_deref(),
+            Some("BUILD YOUR OWN VIKING LEGEND Become Eivor.")
+        );
+        assert_eq!(
+            normalize_html_text("Raid<br>Settle<br/>Conquer", 600).as_deref(),
+            Some("Raid Settle Conquer")
+        );
+    }
+
+    #[test]
+    fn an_inline_tag_does_not_cut_a_word_in_half() {
+        // Only block tags stand for a break: an inline one joins what it wraps,
+        // and a title is not allowed to arrive as "Assassin s Creed".
+        assert_eq!(
+            normalize_html_text("Assassin<b>'s</b> Creed<sup>®</sup>", 600).as_deref(),
+            Some("Assassin's Creed®")
+        );
+        assert_eq!(
+            normalize_html_text("<p>Save <b>50</b>% today</p>", 600).as_deref(),
+            Some("Save 50% today")
         );
     }
 
@@ -1239,9 +1388,11 @@ mod tests {
             expires_at_ms: expiry_from_seconds(3_600),
         };
         assert!(!fresh.needs_refresh());
-        assert!(!StoredSourceCredential::Session {
-            account_label: "Player".into()
-        }
-        .needs_refresh());
+        assert!(
+            !StoredSourceCredential::Session {
+                account_label: "Player".into()
+            }
+            .needs_refresh()
+        );
     }
 }

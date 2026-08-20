@@ -41,11 +41,22 @@
   background: var(--gd-bg);
 }
 
+/* A loaded game is a frame, not a document: the hero takes the top band and
+   every panel shares exactly what is left. Nothing here scrolls — a panel with
+   more than fits scrolls inside its own card, so the page never hides a section
+   below the fold. */
+.gd-page--fit {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
+  overflow: hidden;
+}
+
 /* Content rows share the reference's asymmetric insets; the hero reaches out
    to the viewport edges behind them. */
-.gd-topline,
-.gd-panels,
-.gd-social {
+.gd-topline {
   margin-inline: var(--gd-mg-left) var(--gd-mg-right);
 }
 
@@ -129,11 +140,15 @@
 
 /* Floating variant inside the hero. The hero art now bleeds up behind the
    transparent topbar, so the back pill is pushed below the bar's bottom edge. */
+/* In the hero's own grid, not floating over it. Absolute positioning meant the
+   pill and the bottom-aligned copy converged as the band shrank, and every fix
+   was a padding number tuned per viewport. A row of its own cannot collide. */
 .gd-hero .gd-back {
-  position: absolute;
+  position: relative;
   z-index: 4;
-  top: calc(var(--topbar-height) + clamp(8px, 1.4vw, 16px));
-  left: var(--gd-mg-left);
+  grid-row: 1;
+  align-self: start;
+  justify-self: start;
   margin-left: -6px;
 }
 
@@ -304,18 +319,29 @@
   /* Cancels the page's topbar clearance so the art reaches the very top edge and
      runs behind the transparent bar; the floating back pill and rail are nudged
      back down below the bar. */
-  margin-top: calc(-1 * var(--topbar-height));
-  /* The hero's first 88px sit behind the shell topbar, so its visible height is
-     min-height − 88 ≈ the reference's ~500px band. */
-  min-height: clamp(540px, 62svh, 640px);
-  align-items: end;
+  /* The hero's first 88px sit behind the shell topbar, and the next ~46 belong
+     to the floating back pill — the copy is bottom-aligned, so that row has to
+     be reserved or a tall title rides up into it. It is a band with a ceiling
+     now, not an open-ended block: whatever it does not use belongs to the
+     panels under it. */
+  height: clamp(340px, 64svh, 900px);
+  min-height: 0;
+  align-items: stretch;
   /* Extra bottom padding absorbs the content band's negative margin, so the
      cards overlap the art but never the stats row. */
-  padding: clamp(28px, 5vw, 60px) var(--gd-mg-right) clamp(78px, 8vw, 110px)
-    var(--gd-mg-left);
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: calc(var(--topbar-height) + 12px) var(--gd-mg-right)
+    clamp(52px, 8svh, 132px) var(--gd-mg-left);
   overflow: hidden;
   isolation: isolate;
   background: #0c0d11;
+}
+
+/* The copy owns the second row and sits at its foot, so the band's spare height
+   opens up between the pill and the title rather than under the actions. */
+.gd-hero__copy {
+  grid-row: 2;
+  align-self: end;
 }
 
 .gd-hero__media {
@@ -402,19 +428,12 @@
   word-break: keep-all;
   hyphens: none;
   text-wrap: balance;
-  font-size: clamp(42px, 5.2vw, 100px);
+  font-size: clamp(32px, 3.8vw, 62px);
   font-weight: 700;
   line-height: 1.04;
   letter-spacing: -0.02em;
 }
 
-.gd-hero__summary {
-  max-width: 430px;
-  margin: 0;
-  color: #d7d3df;
-  font-size: 22px;
-  line-height: 1.5;
-}
 
 .gd-hero__actions {
   display: flex;
@@ -487,6 +506,90 @@
 .gd-source .icon {
   width: 26px;
   height: 26px;
+}
+
+/* The primary action doubles as the download bar: a fill under the label, so
+   the button keeps its size and place instead of being replaced by a separate
+   progress control that then has to be taken away again. */
+.gd-primary-action {
+  position: relative;
+  overflow: hidden;
+}
+
+.gd-primary-action__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: rgba(255, 255, 255, 0.26);
+  transition: width 400ms ease;
+  pointer-events: none;
+}
+
+.gd-primary-action[data-progress] > :not(.gd-primary-action__fill) {
+  position: relative;
+}
+
+/* Disabled while downloading is a statement, not a dead end, so it keeps its
+   full contrast rather than being dimmed like an unavailable action. */
+.gd-primary-action[data-progress]:disabled {
+  opacity: 1;
+  filter: none;
+  cursor: default;
+}
+
+/* ---------------------------------------------------------- status chips */
+
+/* "Not installed" and "Windows only" are the two things the Play button cannot
+   say. They sit on their own row above the actions so a player reads them
+   before reaching for the button, not after. */
+.gd-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.gd-status__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(18, 16, 24, 0.55);
+  backdrop-filter: blur(12px);
+  color: #e8e5ec;
+  font-size: 14px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.gd-status__chip .icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+/* Ready is the only state that earns colour; the rest stay quiet so the row
+   never competes with the primary action beside it. */
+.gd-status__chip[data-tone="ready"] {
+  border-color: rgba(150, 240, 190, 0.34);
+  color: #9df3c4;
+}
+
+.gd-status__chip[data-tone="pending"] {
+  color: var(--gd-muted);
+}
+
+.gd-status__chip[data-tone="progress"] {
+  border-color: rgba(198, 186, 255, 0.42);
+  color: #cdbcff;
+}
+
+.gd-status__chip[data-tone="warn"] {
+  border-color: rgba(255, 214, 153, 0.3);
+  color: #f2ce9a;
 }
 
 /* ------------------------------------------------------------ fact lists */
@@ -687,7 +790,10 @@
 .gd-menu {
   position: absolute;
   z-index: 20;
-  top: calc(100% + 8px);
+  /* Upward. The hero is a band with a ceiling and the page clips its overflow,
+     so a menu dropping below the button was cut in half by the panels under
+     it. There is always room above: the button sits at the band's foot. */
+  bottom: calc(100% + 8px);
   left: 0;
   display: flex;
   flex-direction: column;
@@ -734,6 +840,14 @@
   background: rgba(255, 255, 255, 0.07);
 }
 
+/* Armed: the first press turns the label into the question, the second answers
+   it. A native confirm() never answers inside the WebView, which is why this
+   action used to look dead. */
+.gd-menu__item--armed {
+  color: #ffd9db;
+  background: rgba(201, 73, 80, 0.22);
+}
+
 .gd-menu__item--danger {
   color: #f0a9a3;
 }
@@ -770,12 +884,18 @@
   position: absolute;
   z-index: 3;
   top: calc(var(--topbar-height) + clamp(12px, 1.6vw, 22px));
+  bottom: clamp(14px, 1.8vw, 26px);
   right: var(--gd-mg-right);
   display: flex;
   flex-direction: column;
   gap: 9px;
   width: clamp(168px, 13vw, 196px);
   padding: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-snap-type: y proximity;
+  /* A compact glass rail: the tiles themselves say there is more below. */
+  scrollbar-width: none;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--gd-r-lg);
   background: rgba(14, 15, 20, 0.5);
@@ -786,18 +906,27 @@
 
 
 /* Tiles */
+/* The tiles keep their frame; the rail scrolls. Dividing the band between them
+   gave 2px each for a fourteen-image gallery, and letting them keep their
+   natural height sliced the last one on the band's edge. */
 .gd-gallery__tile {
   position: relative;
   display: block;
   overflow: hidden;
   width: 100%;
+  flex: none;
   aspect-ratio: 16 / 9;
   padding: 0;
+  scroll-snap-align: start;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 15px;
   background: rgba(20, 21, 26, 0.85);
   cursor: pointer;
   transition: border-color 140ms ease, transform 140ms ease, box-shadow 140ms ease;
+}
+
+.gd-gallery::-webkit-scrollbar {
+  display: none;
 }
 
 .gd-gallery__tile:not(.gd-gallery__tile--empty):hover {
@@ -815,7 +944,12 @@
   background: rgba(10, 11, 15, 0.72);
 }
 
+/* Taken out of the flow so it cannot report an intrinsic height back to the
+   tile that is meant to be sizing it. `height: 100%` of a box whose height
+   comes from this image is circular, and the tile grew to the full picture. */
 .gd-gallery__tile-image {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -1082,16 +1216,9 @@
   min-height: 44px;
 }
 
-.gd-search__form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.gd-search__source,
 .gd-search__input {
-  min-height: 38px;
+  min-height: 34px;
+  min-width: 0;
   padding: 0 12px;
   border: 1px solid var(--gd-line);
   border-radius: var(--gd-r-pill);
@@ -1100,28 +1227,8 @@
   font-size: 13px;
 }
 
-.gd-search__source {
-  flex: 0 0 auto;
-  cursor: pointer;
-}
-
-.gd-search__input {
-  flex: 1 1 180px;
-  min-width: 0;
-}
-
 .gd-search__input::placeholder {
   color: var(--gd-dim);
-}
-
-.gd-search__submit {
-  min-height: 38px;
-}
-
-.gd-search__more {
-  align-self: center;
-  min-height: 38px;
-  margin-top: 12px;
 }
 
 .gd-search__status {
@@ -1160,33 +1267,80 @@
 
 /* -------------------------------------------------- wallpaper category rows */
 
+/*
+ * The picker is two columns: the card shapes stack on the left as sideways
+ * rails, and the background runs down the right. They are split because they
+ * cannot share a rail — a 2:3 cover and a 3:1 hero in one strip means one of
+ * them is unreadably small — and because a background is the only one of these
+ * that fills a screen, so it earns a tile big enough to actually judge.
+ *
+ * It is wider than the other dialogs for the same reason: two columns of real
+ * artwork need the room.
+ */
 .gd-modal__dialog--wallpapers {
-  width: min(940px, 100%);
-}
-
-.gd-modal__heading {
   display: flex;
-  min-width: 0;
+  width: min(1180px, 100%);
+  height: min(84vh, 860px);
+  flex-direction: column;
+  /*
+   * The dialog itself does not scroll — its two columns do, independently. A
+   * scrolling dialog would carry the chips and the Apply button off-screen,
+   * which are exactly the two controls that have to stay reachable while you
+   * hunt through a long list of backgrounds.
+   */
+  overflow: hidden;
+}
+
+/*
+ * Every control lives in one header row: which shape, what to look for, and
+ * close. There is no source picker — all providers are asked at once — and no
+ * title, because four labelled rows already say what the dialog is.
+ */
+.gd-wallhead {
+  display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-/* The app mark beside the dialog title. */
-.gd-modal__brand {
+.gd-wallhead__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.gd-wallhead__submit {
   display: grid;
-  flex: 0 0 auto;
   place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid var(--gd-line-strong);
-  border-radius: 8px;
-  color: var(--gd-accent);
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border: 1px solid var(--gd-line);
+  border-radius: 50%;
+  color: var(--gd-muted);
   background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease;
 }
 
-.gd-modal__brand .icon {
+.gd-wallhead__submit:hover:not(:disabled) {
+  border-color: var(--gd-accent);
+  color: var(--gd-text);
+}
+
+.gd-wallhead__submit:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.gd-wallhead__submit .icon {
   width: 15px;
   height: 15px;
+}
+
+.gd-wallhead .gd-modal__close {
+  flex: 0 0 auto;
 }
 
 /* Filter chips: one per shape, the lit one narrowing the dialog to its row. */
@@ -1194,7 +1348,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 16px;
 }
 
 .gd-chip {
@@ -1253,18 +1406,53 @@
   stroke-width: 2.6;
 }
 
-.gd-wallrows {
+/*
+ * `minmax(0, …)` on both tracks is what lets the columns scroll instead of
+ * growing: without it a grid item takes its content's height and the dialog
+ * stretches past the viewport.
+ */
+.gd-wallpanes {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 28px;
+  margin-top: 20px;
+}
+
+/* A chip narrows the dialog to one row, which then takes the full width. */
+.gd-wallpanes--single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.gd-wallpanes__cards {
   display: flex;
+  min-width: 0;
+  min-height: 0;
   flex-direction: column;
-  gap: 22px;
-  margin-top: 18px;
+  gap: 26px;
+  overflow-y: auto;
+}
+
+.gd-wallpanes__feed {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .gd-wallrow {
   display: flex;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
   gap: 10px;
+}
+
+/* The background row owns its column's height so its own list is what scrolls. */
+.gd-wallpanes__feed .gd-wallrow {
+  flex: 1 1 auto;
 }
 
 .gd-wallrow__header {
@@ -1295,11 +1483,8 @@
 }
 
 /* Pushed to the far right of the header row. */
-.gd-wallrow__seeall {
-  display: inline-flex;
-  align-items: center;
+.gd-wallrow__more {
   margin-left: auto;
-  gap: 5px;
   padding: 0;
   border: 0;
   color: var(--gd-muted);
@@ -1310,13 +1495,8 @@
   transition: color 140ms ease;
 }
 
-.gd-wallrow__seeall:hover {
+.gd-wallrow__more:hover {
   color: var(--gd-text);
-}
-
-.gd-wallrow__seeall .icon {
-  width: 14px;
-  height: 14px;
 }
 
 .gd-wallrow__status {
@@ -1324,25 +1504,90 @@
 }
 
 /*
- * Five even tiles per row. The shape is the point of the design, so it hangs
- * off the row's category: portrait box art for Cover, 16:9 for the two wide
- * shapes. Narrowed to one row the grid keeps its columns and simply wraps.
+ * A row is a scroller, not a fixed grid. The card shapes scroll sideways at a
+ * fixed tile width; the background scrolls down at full column width. Shape
+ * hangs off the row's category, which is the whole point of the design: portrait
+ * for Cover, 16:9 for the wide ones.
  */
 .gd-wallgrid {
   --gd-wall-ratio: 16 / 9;
+  --gd-wall-tile: 132px;
 
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  display: flex;
+  min-height: 0;
   gap: 12px;
   padding: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
 }
 
 .gd-wallgrid[data-category="cover"] {
   --gd-wall-ratio: 2 / 3;
 }
 
+/*
+ * A wordmark is a wide transparent PNG, so its tiles are short and are drawn
+ * whole rather than cropped — a logo cut off at the edges is unreadable, which
+ * is the one thing the other rows tolerate and this one cannot. The chequered
+ * backdrop is what makes the transparency visible, and therefore what makes a
+ * logo-on-a-solid-box tell itself apart from a real one at a glance.
+ */
+.gd-wallgrid[data-category="logo"] {
+  --gd-wall-ratio: 5 / 2;
+}
+
+.gd-wallgrid[data-category="logo"] .gd-wallgrid__tile {
+  background-color: rgba(20, 21, 26, 0.85);
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, 0.05) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(255, 255, 255, 0.05) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.05) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.05) 75%);
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-size: 12px 12px;
+}
+
+.gd-wallgrid[data-category="logo"] .gd-wallgrid__image {
+  object-fit: contain;
+  padding: 8px;
+}
+
+/* The background column: one tile per line, scrolling down. */
+.gd-wallgrid[data-category="background"] {
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.gd-wallgrid[data-category="background"] .gd-wallgrid__tile,
+.gd-wallgrid[data-category="background"] .gd-wallgrid__ghost {
+  width: 100%;
+  flex: 0 0 auto;
+}
+
+/* Narrowed to one row, every shape gets the width to wrap into a grid. */
+.gd-wallpanes--single .gd-wallgrid {
+  flex-flow: row wrap;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/*
+ * Two per line rather than one. A background tile spanning the whole dialog
+ * shows exactly one candidate at a time, which is the opposite of what
+ * narrowing to this row was for.
+ */
+.gd-wallpanes--single .gd-wallgrid[data-category="background"] .gd-wallgrid__tile,
+.gd-wallpanes--single .gd-wallgrid[data-category="background"] .gd-wallgrid__ghost {
+  width: calc((100% - 12px) / 2);
+  flex: 0 0 calc((100% - 12px) / 2);
+}
+
 .gd-wallgrid__tile,
 .gd-wallgrid__ghost {
+  width: var(--gd-wall-tile);
+  flex: 0 0 var(--gd-wall-tile);
   aspect-ratio: var(--gd-wall-ratio);
   border-radius: var(--gd-r-sm);
 }
@@ -1473,20 +1718,46 @@
 
 /* The content band rides up into the hero's fading art, as designed — no
    separator hairline between the two. */
-.gd-panels {
+/* Every panel in one grid: three columns, rows that split the leftover height
+   evenly. No negative top margin — the cards used to ride up over the artwork,
+   which in a bounded frame means riding over the hero's own actions. */
+.gd-body {
   position: relative;
   z-index: 1;
-  display: flex;
-  align-items: flex-start;
-  gap: clamp(24px, 3vw, 40px);
-  margin-top: -44px;
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.3fr) minmax(0, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: clamp(14px, 1.5vw, 24px);
+  margin-inline: var(--gd-mg-left) var(--gd-mg-right);
+  padding-bottom: clamp(18px, 2.4vw, 34px);
+}
+
+/* Every direct child of the grid is a bounded box that scrolls its own
+   content. `min-height: 0` is what lets a grid item be shorter than its
+   content instead of stretching the row.
+   The mask fades the last few pixels out, so a panel with more to say ends in
+   a soft edge rather than a line sliced in half — a cut line reads as a bug,
+   a fade reads as an invitation. It costs nothing on a panel that fits: there
+   is only empty space down there to fade. */
+.gd-body > * {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+  scrollbar-width: none;
+}
+
+.gd-body > *::-webkit-scrollbar {
+  display: none;
 }
 
 /* Section headings, shared by panels and the social row. */
 .gd-panel__title {
   margin: 0;
   color: var(--gd-text);
-  font-size: 22px;
+  font-size: clamp(14px, 1.05vw, 16.5px);
   font-weight: 600;
   letter-spacing: -0.01em;
 }
@@ -1495,12 +1766,10 @@
    Tarnished, and be guided by grace to brandish the power" on one line, which
    needs the wider measure. */
 .gd-about {
-  flex: 1 1 340px;
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 16px;
-  max-width: 520px;
+  gap: 8px;
 }
 
 .gd-about__body {
@@ -1512,14 +1781,14 @@
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 3;
 }
 
 .gd-about__paragraph {
   margin: 0;
   color: var(--gd-muted);
-  font-size: 16.5px;
-  line-height: 1.65;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .gd-about__toggle {
@@ -1551,20 +1820,12 @@
 .gd-infocard {
   display: flex;
   min-width: 0;
-  gap: clamp(18px, 2.2vw, 34px);
-  padding: 26px clamp(24px, 2vw, 32px);
+  gap: clamp(12px, 1.5vw, 22px);
+  padding: 14px clamp(14px, 1.2vw, 20px);
   border: 1px solid var(--gd-line);
   border-radius: 20px;
   background: var(--gd-card);
   box-shadow: var(--gd-elev-card);
-}
-
-.gd-infocard--facts {
-  flex: 1.35 1 470px;
-}
-
-.gd-infocard--achievements {
-  flex: 1.1 1 380px;
 }
 
 /* The hairline dividing Game info from Features inside the shared card. */
@@ -1591,7 +1852,10 @@
 }
 
 .gd-achievements {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* -------------------------------------------------------------- game info */
@@ -1605,14 +1869,14 @@
 
 .gd-info__term {
   color: #b0aeb4;
-  font-size: 14.5px;
+  font-size: 12.5px;
 }
 
 .gd-info__value {
   margin: 0;
   overflow-wrap: break-word;
   color: var(--gd-text);
-  font-size: 14.5px;
+  font-size: 12.5px;
 }
 
 .gd-info__value--icons {
@@ -1643,9 +1907,9 @@
 .gd-features__item {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 9px;
   color: #e4e3e8;
-  font-size: 14.5px;
+  font-size: 12.5px;
   line-height: 1.2;
 }
 
@@ -1663,23 +1927,62 @@
 
 /* ----------------------------------------------------------- achievements */
 
-.gd-achievements__count {
-  margin: 0;
-  color: #d6d6d8;
-  font-size: 15.5px;
-}
-
-.gd-achievements__progress {
+/* The meter lives in the panel's top-right corner, beside the title rather
+   than under it: a third of the screen has no room for a four-storey column. */
+.gd-achievements__header {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 16px;
 }
+
+.gd-achievements__gauge {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 260px;
+  align-items: center;
+  gap: 9px;
+}
+
+.gd-achievements__count {
+  margin: 0;
+  flex: none;
+  color: #d6d6d8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* Across, not down. The panel is wider than it is tall, so the achievements
+   run along it and every one of them is in view. */
+.gd-achievements__list {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 7px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gd-achievements__chip {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 8px;
+  border: 1px solid var(--gd-line);
+  border-radius: var(--gd-r-pill);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--gd-muted);
+  font-size: 12px;
+}
+
 
 .gd-achievements__meter {
   position: relative;
   overflow: hidden;
   flex: 1 1 auto;
-  height: 8px;
+  height: 6px;
   border-radius: var(--gd-r-pill);
   background: rgba(255, 255, 255, 0.07);
 }
@@ -1691,6 +1994,19 @@
   background: linear-gradient(90deg, #4a3d96, #806bbb);
 }
 
+
+
+.gd-achievements__glyph {
+  flex: none;
+  color: var(--gd-accent);
+}
+
+.gd-achievements__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gd-achievements__percent {
   flex: none;
   color: #f5f5f7;
@@ -1699,54 +2015,15 @@
   font-variant-numeric: tabular-nums;
 }
 
-.gd-achievements__rail {
-  display: flex;
-  gap: 15px;
-  margin: 4px 0 0;
-  padding: 0;
-  list-style: none;
-}
 
 /* The design's trophy tiles are large — nearly the size of a friend avatar
    row — with the featured one framed in the accent. */
-.gd-achievements__cell {
-  overflow: hidden;
-  flex: 1 1 0;
-  aspect-ratio: 1 / 1;
-  max-width: 94px;
-  border: 1px solid var(--gd-line);
-  border-radius: 14px;
-  background: rgba(16, 18, 26, 0.8);
-}
 
-.gd-achievements__cell--featured {
-  border: 2px solid #7c6fdb;
-  box-shadow: 0 0 14px rgba(124, 92, 255, 0.38);
-}
 
-.gd-achievements__icon {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
 
-.gd-achievements__cell--missing .gd-achievements__icon {
-  opacity: 0;
-}
 
 /* ------------------------------------------------------------- social row */
 
-/* Column split mirrors the reference: a narrow friends rail, a wide activity
-   feed, then the related grid. */
-.gd-social {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 205fr) minmax(0, 640fr) minmax(0, 455fr);
-  align-items: start;
-  column-gap: clamp(16px, 1.8vw, 24px);
-  margin-top: clamp(60px, 5.6vw, 96px);
-}
 
 .gd-friends {
   display: flex;
@@ -1806,10 +2083,24 @@
   gap: 18px;
 }
 
+/* The heading stays put while the feed runs under it. A panel that scrolls its
+   own content must not scroll away the word that says what it is. `gd-activity`
+   is the scroll container itself, so the heading sticks to its top edge and
+   carries the panel's own backdrop to hide the rows passing behind it. */
+.gd-activity .gd-panel__title {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  padding-bottom: 8px;
+  background: linear-gradient(var(--gd-bg) 72%, transparent);
+}
+
+/* One entry per row. Three cards abreast inside a third of the page wrapped
+   every other word — a feed is a list, and the panel is taller than it is
+   wide. */
 .gd-activity__list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
+  gap: 10px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -1818,11 +2109,10 @@
 .gd-activity__item {
   display: flex;
   min-width: 0;
-  flex-direction: column;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  min-height: 156px;
-  padding: 19px 18px 17px;
+  gap: 10px;
+  padding: 8px 11px;
   border: 1px solid var(--gd-line);
   border-radius: var(--gd-r-md);
   background: var(--gd-card-2);
@@ -1831,7 +2121,9 @@
 .gd-activity__head {
   display: flex;
   min-width: 0;
-  gap: 9px;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
 }
 
 .gd-activity__avatar {
@@ -1958,17 +2250,47 @@
 /* ------------------------------------------------------------ narrow view */
 
 @media (max-width: 1040px) {
-  .gd-panels {
-    flex-wrap: wrap;
-  }
-
   .gd-about {
-    flex-basis: 100%;
     max-width: none;
   }
+}
 
-  .gd-social {
-    flex-wrap: wrap;
+/* Only here does a third column stop being readable. Two columns cost a third
+   row, so the hero gives up height to pay for it. */
+@media (max-width: 860px) {
+  .gd-body {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .gd-hero {
+    height: clamp(240px, 52svh, 420px);
+  }
+}
+
+/* A short window has no height to spare: the band shrinks first, and it stops
+   reserving room it no longer has — the padding under the actions was sized for
+   cards that used to ride up into it. The threshold covers a 900px window,
+   where the roomy copy is 259px against a 203px box and rides into the back
+   pill. The roomy copy only has room to spare above about 1000px: at 949 it is
+   259px against a 237px row and pushes up into the pill's own row. */
+@media (max-height: 1000px) {
+  .gd-hero {
+    height: clamp(300px, 62svh, 620px);
+    padding-bottom: clamp(34px, 6svh, 74px);
+  }
+
+  .gd-hero__title {
+    font-size: clamp(30px, 3.4vw, 46px);
+  }
+
+  .gd-hero__copy {
+    gap: 10px;
+  }
+
+  /* Played time and achievements are both already spelled out in the panels
+     under the band. On a short window the band cannot afford to say them
+     twice. */
+  .gd-hero .gd-stats {
+    display: none;
   }
 }
 

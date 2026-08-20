@@ -952,8 +952,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
       card.append(install.button);
     }
 
+    // Pointing at a card previews it; taking the pointer away does not undo
+    // that. Reverting on `pointerleave` threw the scene back to the editorial
+    // default the instant the mouse moved, so the game you were looking at was
+    // gone before you could read it.
     card.addEventListener("pointerenter", () => previewGame(game.id));
-    card.addEventListener("pointerleave", () => previewGame(null));
     return card;
   };
 

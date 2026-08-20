@@ -96,25 +96,33 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 - Bloc texte à gauche, largeur maximale 560-620px, ancré dans le tiers inférieur du hero.
 - Eyebrow de genre en capsule discrète.
 - Titre Selector: 64-76px, poids 650-700, ligne unique si possible, maximum deux lignes.
-- Description courte: 16-18px, maximum deux lignes.
-- Métadonnées en ligne: temps joué, dernière session, progression ou statut local.
-- Actions: Play primaire 132 x 48px, Bookmark et More en boutons icon-only.
+- **Le titre est le repli, pas la cible.** Quand le store publie le wordmark du jeu, c'est lui qui s'affiche, à la place et au poids exacts du titre — même marge haute, même espace en dessous, pour que logo et texte ne déplacent jamais les métadonnées. Il est borné en hauteur et non en largeur: une marque large et une marque haute doivent lire comme le même meuble. Le texte reste dans le markup, porte le nom accessible et revient immédiatement si l'image manque, 404 ou ne décode pas.
+- **Le wallpaper du hero est choisi sans logo incrusté.** Maintenant qu'Orivo dessine le wordmark lui-même, une key art déjà brandée en afficherait deux. Ordre: le wallpaper choisi par le joueur, puis l'artwork que le store publie nu (`library_hero.jpg` côté Steam, que le client compose lui-même avec `logo.png`), et seulement en dernier recours la capsule brandée.
+- Pas de résumé du jeu dans le hero: le synopsis appartient à la page du jeu. Le hero nomme le jeu et dit dans quel état il est, rien de plus.
+- Métadonnées en ligne: temps joué, dernière session, progression ou statut local. La dernière session est toujours écrite en clair (`2 days ago`), jamais sous la forme brute renvoyée par un connecteur.
+- Action: Play, seul. La page d'un jeu s'ouvre depuis sa carte (second clic) et depuis la route directe; un chevron à côté de Play était une affordance de trop pour la seule chose que cette scène sert à faire.
 - Flèches précédent/suivant: cercles 48px, centrés verticalement sur la scène, à 24-32px des bords.
 
 #### Rail de jeux
 
-- Label `Recently Played` aligné à gauche, au-dessus du rail.
+- Label aligné à gauche, au-dessus du rail: c'est le nom du segment affiché (`Recently Played`, `RPG`, `Xbox`…), jamais un titre figé. Une recherche le remplace par `Search results`.
+- La jaquette reste nue: ni titre, ni temps de jeu, ni dégradé par-dessus l'artwork. Ces informations vivent dans le hero.
 - Cartes de 220-240px de large, ratio image 16:9, hauteur totale environ 180-196px avec métadonnée.
 - La carte sélectionnée possède une bordure Orivo Violet de 1.5-2px et une élévation très légère.
 - Les cartes adjacentes restent visibles et légèrement moins lumineuses; elles ne sont jamais floutées au point de perdre leur identité.
 - Le rail peut dépasser le bord droit du canvas pour suggérer la suite, sans overflow global de la page.
 
-#### HUD contrôleur
+#### Barre de navigation
 
-- Gauche: catégorie ou collection active, par exemple `Popular`.
-- Centre: segments de pagination; le segment actif est violet.
-- Droite: raccourcis contextualisés, par exemple Navigate, Select, Back.
-- Les indications manette sont masquées ou remplacées par des raccourcis clavier selon le dernier périphérique utilisé.
+La barre du bas est le seul contrôle de la bibliothèque: il n'y a ni menu déroulant ni bouton de vue au-dessus du rail.
+
+- Droite: un bouton unique qui fait tourner le mode de lecture à chaque pression, `Activity` → `Genre` → `Source` → `Platform` → `Activity`.
+- Centre: les segments du mode courant, groupés et centrés — des mots seuls, sans barre sous chacun; l'actif se distingue par sa graisse et sa clarté. Une règle sous chaque mot faisait un graphisme de trop pour une rangée de mots. Le mode et son segment décident ensemble de ce que contient le rail et de ce que montre le hero.
+  - `Activity`: `Recently Played`, `Most Played`, `Play Next`, `Resume`, `Never Played`. Les deux premiers ne font que trier — la bibliothèque ne s'ouvre jamais sur un rail vide — les autres sont de vraies étagères et n'apparaissent que si elles contiennent quelque chose.
+  - `Genre`, `Source`, `Platform`: les valeurs réellement présentes dans la bibliothèque, jamais une liste figée. Une bibliothèque sans quoi se diviser affiche `All Games`.
+- Gauche: l'humeur de l'application, un vrai interrupteur — piste et pastille qui glisse, `role="switch"` — entre `Orivo` et `Rage`. Rage ne filtre rien: la marque devient la spirale et l'accent change.
+- Droite: le bouton de mode est une pastille de verre, sans chevron. Le mot change à chaque pression: c'est toute l'affordance dont il a besoin.
+- La barre garde la géométrie de l'ancien bandeau de raccourcis manette, mais elle est un contrôle: elle reste à pleine intensité même sans manette connectée.
 
 #### États de sélection
 
@@ -130,7 +138,7 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 - Le jeu sélectionné reçoit le média haute résolution; les voisins utilisent des dérivés légers préchargés.
 - Le changement de jeu anime uniquement `opacity`, `transform` et les propriétés GPU dédiées.
 - Aucun décodage, redimensionnement lourd ou chargement disque ne doit bloquer la navigation.
-- Le blur est limité aux petites surfaces glass : il ne s'applique ni au hero ni au viewport complet. En l'absence de `backdrop-filter`, les contrôles utilisent une surface Obsidian plus opaque sans modifier la géométrie.
+- Le blur est limité aux petites surfaces glass : il ne s'applique ni au hero ni au viewport complet. En l'absence de `backdrop-filter`, les contrôles utilisent une surface Obsidian plus opaque sans modifier la géométrie. La lisibilité sur l'artwork est l'affaire de l'ombre portée, pas du flou : un voile flou derrière le texte a été essayé et se lit comme une tache posée sur l'image.
 - Le Selector doit rester utilisable avec une image statique si le backend vidéo, le fichier ou le décodage matériel est indisponible.
 
 ### 4.2 Home / Game Hub — référence secondaire (surface non livrée)
@@ -241,6 +249,19 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
 - Every page added on top of the shell owns exactly one stylesheet with a class prefix reserved to it: `store-` in `store-page.css`, `gd-` in `game-detail-page.css`. A page never styles another page's classes and never restyles a shell class.
 - **A page stylesheet must not fight the shell's top padding.** The shell gives scrolling pages their clearance with `.app-page--scroll { padding-top: var(--topbar-height) }`. No negative top margin, no `padding-top: 0` on the host, no repositioning of the host, no re-declaring `position` or `inset` on `.app-page`. A page that needs full-bleed artwork under the topbar draws it inside its own root element instead of cancelling the shell's padding.
 
+### 4.2b Page d'un jeu — un cadre, pas un document
+
+- **Tout tient dans l'écran. La page ne défile pas.** Elle est une grille à deux rangées: la bande hero en haut, et une grille de panneaux qui se partage exactement ce qui reste. Une section n'est jamais cachée sous une ligne de flottaison.
+- Un panneau qui contient plus que sa case **défile chez lui**, dans sa propre carte. C'est le seul défilement de la page.
+- **La bande prend deux tiers de l'écran, le bandeau d'information le tiers restant.** L'artwork et la galerie sont ce pour quoi on ouvre la page d'un jeu; les panneaux sont compacts par conception, d'une graisse en dessous du reste de l'app. La bande a un plafond (`clamp`), pas une hauteur libre: ce qu'elle n'utilise pas appartient aux panneaux.
+- Un panneau qui a plus à dire que sa case se termine par un **fondu** de quelques pixels. Une ligne tranchée net se lit comme un bug, un fondu comme une invitation. Elle réserve deux rangées en haut — celle du topbar et celle de la pastille retour — parce que sa colonne de texte est alignée en bas et remonterait dedans.
+- Sur une fenêtre courte, la bande cède la première: elle rétrécit, et elle cesse de répéter le temps joué et les succès, que les panneaux disent déjà.
+- **Game info ne disparaît jamais.** Un jeu chargé a toujours quelque chose à y dire: au minimum d'où il vient. Le panneau s'évanouissait pour tout titre dont le store ne publie ni studio, ni date, ni genre, ni plateforme — la majorité d'une bibliothèque Microsoft Store ou locale — et laissait un trou dans la grille.
+- **Les succès sont nommés, pas illustrés.** Aucun store auquel Orivo parle ne publie d'art de badge; un trophée et le nom du succès disent quelque chose, cinq jaquettes empruntées à la bibliothèque ne disent rien.
+- **Le fil d'activité est une liste**, une entrée par ligne. Trois cartes côte à côte dans un tiers de page se coupaient à un mot par ligne.
+- **La galerie de droite est bornée par la bande et défile.** Ses tuiles gardent leur cadre 16:9: se partager la hauteur donnait 2px par tuile sur une galerie de quatorze images, et les laisser à leur taille naturelle en tranchait une sur le bord de la bande.
+- Les états de chargement, d'erreur et de page introuvable ne prennent pas ce cadre: ce sont des états courts et centrés, qui paraîtraient perdus étirés sur un viewport.
+
 ## 5. Hero Cinématique partagé
 
 - Le hero est une image plein fond de jeu, non une carte.
@@ -248,6 +269,7 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
   - haut: `rgba(20,18,20,0.35)`
   - gauche: `rgba(12,13,15,0.42)`
   - bas: `rgba(11,11,13,0.88)`
+- **La scène du Selector fait exception et n'assombrit que deux bords.** L'artwork y est rendu à pleine intensité, sans voile global et sans dégradé haut: le sol sous le rail et la barre de navigation, transparent à mi-hauteur, et une ombre légère à gauche sous le bloc texte, éteinte à mi-largeur. Les deux restent très en-dessous du lavis d'origine (`.92` au bord, encore `.6` au quart) — le sujet de l'image n'est jamais dans l'ombre. Le reste du contraste vient de l'ombre portée du texte, pas d'un assombrissement de l'image.
 - Le sujet principal de l'image doit rester visible vers centre-droit.
 - Texte hero positionne gauche, jamais centre:
   - eyebrow 16px "Jump back in"
@@ -345,6 +367,7 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - Priorite aux visuels de jeux cinematiques: paysages, personnages, scenes contrastees.
 - Chaque image recoit un overlay sombre pour garantir la lisibilite.
 - Les couleurs des images peuvent apporter chaleur et variete, mais l'UI garde sa palette sombre + violet.
+- **Pas de teinte d'ambiance.** Le verre reste noir/gris, quelle que soit l'image derrière lui. Une teinte empruntée à l'artwork a été essayée dans les deux sens — colorée, puis quasi neutre avec un niveau suivant la clarté de l'image — et les deux se lisent comme une interface qui change d'avis. La lisibilité sur l'artwork est l'affaire de l'ombre portée et des deux scrims de scène.
 - Eviter les images stock abstraites, floues ou purement decoratives.
 
 ## 10. Responsive

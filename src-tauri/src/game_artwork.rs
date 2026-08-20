@@ -48,11 +48,14 @@ pub enum ArtworkRole {
     Landscape,
     /// The full-bleed home background.
     Background,
+    /// The game's own wordmark on transparency, drawn over the scene in place
+    /// of the hero title. Not artwork: it is never a wallpaper.
+    Logo,
 }
 
 impl ArtworkRole {
-    pub fn all() -> [Self; 3] {
-        [Self::Cover, Self::Landscape, Self::Background]
+    pub fn all() -> [Self; 4] {
+        [Self::Cover, Self::Landscape, Self::Background, Self::Logo]
     }
 
     /// The `set_home_image` role token, so the reset and a manual pick write
@@ -62,6 +65,7 @@ impl ArtworkRole {
             Self::Cover => "cover",
             Self::Landscape => "landscape",
             Self::Background => "background",
+            Self::Logo => "logo",
         }
     }
 }
@@ -73,6 +77,7 @@ pub struct ArtworkSet {
     pub cover: Vec<String>,
     pub landscape: Vec<String>,
     pub background: Vec<String>,
+    pub logo: Vec<String>,
 }
 
 impl ArtworkSet {
@@ -81,6 +86,7 @@ impl ArtworkSet {
             ArtworkRole::Cover => &self.cover,
             ArtworkRole::Landscape => &self.landscape,
             ArtworkRole::Background => &self.background,
+            ArtworkRole::Logo => &self.logo,
         }
     }
 
@@ -184,6 +190,8 @@ pub fn steam_artwork(app_id: u64) -> ArtworkSet {
             asset("library_hero.jpg"),
             asset("page.bg.jpg"),
         ],
+        // Steam's own wordmark, the asset its client composites over the hero.
+        logo: vec![asset("logo.png"), asset("library_logo.png")],
     }
 }
 
@@ -246,6 +254,33 @@ struct GridDbAsset {
     width: u32,
 }
 
+/// The `styles` filter is the reason artwork comes back clean — but the
+/// vocabulary is **per asset kind**, and mixing them up is a hard 400.
+///
+/// SteamGridDB tags every upload with a style. For grids the set is `alternate |
+/// blurred | white_logo | material | no_logo`, and two of those — `white_logo`
+/// and `material` — are variants with the game's wordmark burned into the
+/// picture. Asking a grid unfiltered returns those alongside the rest, which is
+/// exactly the "artwork with a logo on it" a card must not wear when the app
+/// already composites the real wordmark over the scene. `alternate` is the plain
+/// publisher art and `no_logo` is the community's explicitly de-logoed cut, so
+/// the two together are the whole usable grid set.
+///
+/// Heroes accept only `alternate | blurred | material` — there is no `no_logo`
+/// for a hero, and sending one is rejected outright rather than ignored. None is
+/// needed: a hero is the scene Steam paints a separate wordmark over, so it has
+/// no title in it to begin with, and naming `alternate` alone already leaves out
+/// the `material` treatment.
+///
+/// `logos` is the one role that wants the wordmark, and has its own set again
+/// (`official | white | black | custom`).
+pub const GRID_STYLES: &str = "alternate,no_logo";
+pub const HERO_STYLES: &str = "alternate";
+pub const LOGO_STYLES: &str = "official,white";
+/// Joke uploads and NSFW edits are tagged, and neither belongs on a library
+/// card that a reset filled without anyone watching.
+const CLEAN_FILTERS: &str = "nsfw=false&humor=false&types=static";
+
 /// SteamGridDB, used only when the user supplied a key. Assets come back
 /// sorted by width so the sharpest one is tried first — this is the tier that
 /// actually delivers 4K-class backgrounds.
@@ -259,9 +294,54 @@ async fn steamgriddb_artwork(
         return ArtworkSet::default();
     };
     ArtworkSet {
-        cover: griddb_assets(client, "grids", game_id, key, "600x900,660x930,512x512").await,
-        landscape: griddb_assets(client, "grids", game_id, key, "920x430,460x215,1920x620").await,
-        background: griddb_assets(client, "heroes", game_id, key, "1920x620,3840x1240").await,
+        cover: griddb_assets(
+            client,
+            "grids",
+            game_id,
+            key,
+            "dimensions=600x900,660x930,512x512",
+            GRID_STYLES,
+        )
+        .await,
+        landscape: griddb_assets(
+            client,
+            "grids",
+            game_id,
+            key,
+            "dimensions=920x430,460x215",
+            GRID_STYLES,
+        )
+        .await,
+        // Widest first: SteamGridDB sorts by width inside a request, but the
+        // `dimensions` filter is a set, not an order. Asking for the 4K hero
+        // alone first is what actually gets a 4K background rather than the
+        // 1920 one that happens to be more common.
+        background: {
+            let mut wide = griddb_assets(
+                client,
+                "heroes",
+                game_id,
+                key,
+                "dimensions=3840x1240",
+                HERO_STYLES,
+            )
+            .await;
+            wide.extend(
+                griddb_assets(
+                    client,
+                    "heroes",
+                    game_id,
+                    key,
+                    "dimensions=1920x620",
+                    HERO_STYLES,
+                )
+                .await,
+            );
+            wide
+        },
+        // Wordmarks come in every shape there is, so this is the one role that
+        // cannot be asked for by dimension.
+        logo: griddb_assets(client, "logos", game_id, key, "", LOGO_STYLES).await,
     }
 }
 
@@ -297,8 +377,9 @@ async fn griddb_assets(
     game_id: u64,
     key: &str,
     dimensions: &str,
+    styles: &str,
 ) -> Vec<String> {
-    let url = format!("{STEAMGRIDDB_API}/{kind}/game/{game_id}?dimensions={dimensions}");
+    let url = griddb_asset_url(kind, game_id, dimensions, styles);
     let Some(mut assets) = griddb_get::<Vec<GridDbAsset>>(client, &url, key).await else {
         return Vec::new();
     };
@@ -309,6 +390,24 @@ async fn griddb_assets(
         .filter(|url| is_trusted_artwork_url(url))
         .take(4)
         .collect()
+}
+
+/// Builds one asset request. `dimensions` is already a `key=value` pair (or
+/// empty for the roles that have no dimension vocabulary), so the only thing
+/// left to decide here is where the `?` goes.
+fn griddb_asset_url(kind: &str, game_id: u64, dimensions: &str, styles: &str) -> String {
+    let mut query = Vec::new();
+    if !dimensions.is_empty() {
+        query.push(dimensions.to_owned());
+    }
+    if !styles.is_empty() {
+        query.push(format!("styles={styles}"));
+    }
+    query.push(CLEAN_FILTERS.to_owned());
+    format!(
+        "{STEAMGRIDDB_API}/{kind}/game/{game_id}?{}",
+        query.join("&")
+    )
 }
 
 async fn griddb_get<T: for<'de> Deserialize<'de> + Default>(
@@ -380,7 +479,10 @@ mod tests {
         // Each role is distinct, which is the whole point of the reset.
         assert_ne!(set.cover.first(), set.landscape.first());
         assert_ne!(set.landscape.first(), set.background.first());
-        assert!(set.for_role(ArtworkRole::Cover).len() > 1, "a fallback per role");
+        assert!(
+            set.for_role(ArtworkRole::Cover).len() > 1,
+            "a fallback per role"
+        );
         assert!(set.iter_is_trusted());
     }
 
@@ -398,8 +500,12 @@ mod tests {
         assert!(is_trusted_artwork_url(
             "https://cdn.cloudflare.steamstatic.com/steam/apps/1/a.jpg"
         ));
-        assert!(is_trusted_artwork_url("https://cdn2.steamgriddb.com/hero/abc.png"));
-        assert!(!is_trusted_artwork_url("http://cdn2.steamgriddb.com/hero/abc.png"));
+        assert!(is_trusted_artwork_url(
+            "https://cdn2.steamgriddb.com/hero/abc.png"
+        ));
+        assert!(!is_trusted_artwork_url(
+            "http://cdn2.steamgriddb.com/hero/abc.png"
+        ));
         assert!(!is_trusted_artwork_url("https://evil.example/a.jpg"));
         // A host that merely ends with a trusted name must not pass.
         assert!(!is_trusted_artwork_url(
@@ -422,6 +528,58 @@ mod tests {
         assert!(set.background.first().unwrap().contains("/42/"));
     }
 
+    /// The `styles` filter is what separates "high-resolution artwork" from
+    /// "high-resolution artwork with the game's title painted across it".
+    /// SteamGridDB tags `white_logo` and `material` uploads as exactly that, and
+    /// an unfiltered request returns them mixed in with everything else — which
+    /// is wrong for a card the app already composites the real wordmark onto.
+    #[test]
+    fn artwork_requests_ask_steamgriddb_to_leave_the_title_off() {
+        let url = griddb_asset_url("grids", 42, "dimensions=600x900", GRID_STYLES);
+        assert!(url.starts_with("https://www.steamgriddb.com/api/v2/grids/game/42?"));
+        assert!(url.contains("dimensions=600x900"), "{url}");
+        assert!(url.contains("styles=alternate,no_logo"), "{url}");
+        // Joke and NSFW edits are tagged too, and a reset applies its answer
+        // with nobody watching.
+        assert!(url.contains("nsfw=false"), "{url}");
+        assert!(url.contains("humor=false"), "{url}");
+        // An animated grid is not something the media pipeline can store as a
+        // cover.
+        assert!(url.contains("types=static"), "{url}");
+        assert!(!url.contains("white_logo"), "{url}");
+        assert!(!url.contains("material"), "{url}");
+
+        // The wordmark role is the one place a logo is the point, and it has no
+        // dimension vocabulary — a wordmark is as wide as the words are.
+        let logo = griddb_asset_url("logos", 42, "", LOGO_STYLES);
+        assert!(logo.contains("styles=official,white"), "{logo}");
+        assert!(!logo.contains("dimensions"), "{logo}");
+        assert!(!logo.contains("?&"), "{logo}");
+    }
+
+    /// The style vocabulary is per asset kind, and a grid style sent to
+    /// `/heroes` is answered with a flat 400 — which is what made every
+    /// background request fail. A hero needs no de-logoed variant anyway: it is
+    /// the scene Steam paints a separate wordmark over.
+    #[test]
+    fn a_hero_is_never_asked_for_a_style_only_grids_have() {
+        let hero = griddb_asset_url("heroes", 42, "dimensions=3840x1240", HERO_STYLES);
+        assert!(hero.contains("styles=alternate"), "{hero}");
+        assert!(
+            !hero.contains("no_logo"),
+            "heroes reject `no_logo` outright: {hero}"
+        );
+        assert!(!hero.contains("white_logo"), "{hero}");
+        assert!(!hero.contains("material"), "{hero}");
+        // And every style named for a hero has to be one heroes actually accept.
+        for style in HERO_STYLES.split(',') {
+            assert!(
+                ["alternate", "blurred", "material"].contains(&style),
+                "{style} is not in the hero vocabulary"
+            );
+        }
+    }
+
     #[test]
     fn titles_are_cleaned_before_a_store_is_asked_about_them() {
         assert_eq!(
@@ -430,7 +588,13 @@ mod tests {
         );
         assert_eq!(normalize_query("   ").as_deref(), None);
         // Punctuation and case never decide whether a title matches.
-        assert_eq!(comparison_key("Marvel's Spider-Man"), comparison_key("marvel s spider man"));
-        assert_ne!(comparison_key("Halo Infinite"), comparison_key("Halo Infinite OST"));
+        assert_eq!(
+            comparison_key("Marvel's Spider-Man"),
+            comparison_key("marvel s spider man")
+        );
+        assert_ne!(
+            comparison_key("Halo Infinite"),
+            comparison_key("Halo Infinite OST")
+        );
     }
 }

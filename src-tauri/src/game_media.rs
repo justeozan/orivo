@@ -6,7 +6,7 @@
 //! game id, an opaque media id, and a closed media kind: it can never supply a
 //! URL, a filesystem path, a MIME type, or a command. Downloads are limited by
 //! a hardcoded host allowlist, a bounded redirect chain that is re-validated at
-//! every hop, declared-MIME *and* magic-byte agreement, per-kind size caps that
+//! every hop, magic-byte format detection, per-kind size caps that
 //! are enforced while streaming, a durable cache quota, and a small concurrency
 //! budget with in-flight deduplication. Selection is committed in a single
 //! atomic state mutation, so a failed apply always leaves the previous
@@ -97,7 +97,10 @@ fn is_public_domain_host(host: &str) -> bool {
     }
     let mut has_named_label = false;
     for label in &labels {
-        if label.is_empty() || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        if label.is_empty()
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             return false;
         }
@@ -108,10 +111,7 @@ fn is_public_domain_host(host: &str) -> bool {
     if !has_named_label {
         return false;
     }
-    let tld = labels
-        .last()
-        .unwrap_or(&"")
-        .to_ascii_lowercase();
+    let tld = labels.last().unwrap_or(&"").to_ascii_lowercase();
     !matches!(
         tld.as_str(),
         "local" | "localhost" | "internal" | "invalid" | "test" | "home" | "lan" | "arpa"
@@ -376,7 +376,8 @@ impl MediaFormat {
         self == Self::Mp4
     }
 
-    /// The declared type must name the same format the bytes actually are.
+    /// Whether this format is what a header claims. Used to decide whether a
+    /// declared type names a media format at all — never to overrule the bytes.
     pub fn matches_declared(self, declared: &str) -> bool {
         let declared = declared
             .split(';')
@@ -1282,7 +1283,6 @@ impl Drop for StagedFile {
 struct MediaStaging {
     root: PathBuf,
     kind: GameMediaKind,
-    declared: Option<String>,
     cap: u64,
     budget: u64,
     staged: StagedFile,
@@ -1313,7 +1313,6 @@ impl MediaStaging {
         Ok(Self {
             root: root.to_path_buf(),
             kind,
-            declared,
             cap,
             budget,
             staged: StagedFile::create(root)?,
@@ -1346,18 +1345,23 @@ impl MediaStaging {
         self.staged.write(chunk)
     }
 
-    /// Magic bytes decide the format; the declared type only gets to agree.
+    /// Magic bytes decide the format, on their own.
+    ///
+    /// The declared type is only ever a claim by a server nobody here controls,
+    /// and it is regularly wrong in a completely harmless way: Steam serves
+    /// `page_bg_raw.jpg` for Unrailed! as `Content-Type: image/jpeg` when the
+    /// bytes are a PNG. Requiring the header to agree rejected that file — a
+    /// real, valid image — for a mislabel on Valve's end.
+    ///
+    /// Dropping the agreement check costs nothing, because the declared type
+    /// never reaches a consumer: the stored file is named and served from
+    /// `format`, which is what the bytes actually are. `MediaStaging::begin`
+    /// still refuses a declared type that is not an image or a video at all, so
+    /// an HTML error page is turned away before a byte is written.
     fn resolve_format(&self) -> Result<MediaFormat, GameMediaError> {
         let format = MediaFormat::from_magic(&self.header).ok_or_else(|| {
             GameMediaError::Unsupported("the file content is not a supported image or video".into())
         })?;
-        if let Some(declared) = self.declared.as_deref()
-            && !format.matches_declared(declared)
-        {
-            return Err(GameMediaError::Unsupported(
-                "the declared media type does not match the file content".into(),
-            ));
-        }
         if !format.permits(self.kind) {
             return Err(GameMediaError::Unsupported(
                 "that file cannot be used for this artwork slot".into(),
@@ -1782,6 +1786,9 @@ mod tests {
             media,
             related_games: Vec::new(),
             primary_action: PrimaryAction::Play,
+            install_state: crate::game_detail::InstallStateView::Unknown,
+            install_percent: None,
+            mac_compatibility: crate::game_detail::MacCompatibilityView::Unknown,
         }
     }
 
@@ -1956,12 +1963,44 @@ mod tests {
         assert!(block_on(shallow.service.apply("local:aaa", "media:cover")).is_ok());
     }
 
+    /// A CDN that mislabels a real image is common and harmless, and refusing
+    /// it cost real artwork: Steam serves Unrailed!'s `page_bg_raw.jpg` as
+    /// `image/jpeg` when the bytes are a PNG. The bytes decide, and the stored
+    /// file is named and served from what the bytes say — so the mislabel never
+    /// reaches anything downstream.
     #[test]
-    fn rejects_declared_type_and_magic_byte_mismatch() {
+    fn a_mislabelled_but_valid_image_is_stored_as_what_its_bytes_say() {
         let url = format!("https://{ALLOWED_HOST}/apps/1/cover.png");
-        let transport = FakeTransport::with(&url, Reply::body("image/png", vec![jpeg_bytes(64)]));
+        let transport = FakeTransport::with(&url, Reply::body("image/jpeg", vec![png_bytes(64)]));
         let test = harness(
             "magic",
+            vec![remote_media("media:cover", GameMediaKind::Cover, &url)],
+            transport,
+            MediaLimits::default(),
+        );
+
+        let stored = block_on(test.service.apply("local:aaa", "media:cover")).unwrap();
+        assert!(
+            stored.iter().any(|entry| entry.available_offline),
+            "the image is kept, not turned away for Valve's header"
+        );
+        assert!(
+            cache_files(test.root.path())
+                .iter()
+                .any(|name| name.ends_with(".png")),
+            "and it is filed as the PNG it actually is"
+        );
+    }
+
+    /// The declared type is still a gate, just not an equality check: something
+    /// that is not an image or a video at all is turned away before a byte is
+    /// written.
+    #[test]
+    fn rejects_a_declared_type_that_is_not_media_at_all() {
+        let url = format!("https://{ALLOWED_HOST}/apps/1/cover.png");
+        let transport = FakeTransport::with(&url, Reply::body("text/html", vec![jpeg_bytes(64)]));
+        let test = harness(
+            "declared",
             vec![remote_media("media:cover", GameMediaKind::Cover, &url)],
             transport,
             MediaLimits::default(),
@@ -2333,7 +2372,11 @@ mod tests {
         let transport = FakeTransport::with(&url, Reply::body("image/png", vec![png_bytes(64)]));
         let test = harness("import-selects", vec![], transport, MediaLimits::default());
 
-        let views = block_on(test.service.download_wallpaper("local:aaa", &url, "Wallpaper")).unwrap();
+        let views = block_on(
+            test.service
+                .download_wallpaper("local:aaa", &url, "Wallpaper"),
+        )
+        .unwrap();
         let imported = views
             .iter()
             .find(|view| view.kind == GameMediaKind::Wallpaper)

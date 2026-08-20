@@ -285,15 +285,15 @@ describe("application shell", () => {
     expect(detail.routes.at(-1)?.page).toBe("game");
   });
 
-  it("lists connected sources and one add-source entry in the library menu", () => {
+  it("offers one add-source entry and no store rows in the library menu", () => {
     root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
     const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
     expect(menu.hidden).toBe(false);
 
-    // No Steam source is connected in the fallback library, so only the
-    // always-present local source is listed.
+    // Connected stores are managed in Settings, so the Sources list holds
+    // nothing at all until a Steam account brings its installed-games import.
     expect(menu.querySelector("[data-library-action='source-steam']")).toBeNull();
-    expect(menu.querySelector("#library-source-list")?.textContent).toContain("Local");
+    expect(menu.querySelector("#library-source-list")?.textContent).toBe("");
     expect(menu.querySelectorAll("[data-library-action='add-source']")).toHaveLength(1);
   });
 });
@@ -412,7 +412,10 @@ describe("application shell against the desktop backend", () => {
     const rows = Array.from(
       root.querySelectorAll<HTMLElement>("[data-source-row]"),
     ).map((row) => row.dataset.sourceRow);
+    // Steam heads the same list as the rest: it is a store like any other to
+    // the person reading this page, even though it has its own backend.
     expect(rows).toEqual([
+      "steam",
       "epic",
       "gog",
       "ubisoft",
@@ -541,36 +544,127 @@ describe("application shell against the desktop backend", () => {
     expect(covers.some((source) => source.includes("elden"))).toBe(false);
   });
 
-  it("never lets a store's display name inject markup into the Sources menu", async () => {
-    // The account label is whatever the store returned — an Epic display name,
-    // a gamertag, a GOG username. It is untrusted text.
-    backend.sources = [
-      {
-        provider: "epic",
-        label: "Epic Games",
-        connected: true,
-        accountLabel: '<img src=x onerror="document.title=\'pwned\'">',
-        style: "token",
-        sharesSignInWith: [],
-        launchable: true,
-      },
-    ];
-    backend.library = [{ ...alpha, id: "epic:1", title: "Fall Guys", source: "epic" }];
-    mount();
-    await goto("#/settings/libraries");
-    await goto("#/library");
+  it("shows a game's wordmark in place of the hero title, and falls back to it", async () => {
+    // The wordmark is decoded off-screen first. Pointing the visible <img> at
+    // it directly brought the title back for the length of every load, so
+    // walking the rail was a strobe of titles with the occasional logo.
+    const probes: HTMLImageElement[] = [];
+    const RealImage = window.Image;
+    window.Image = function (this: unknown) {
+      const probe = new RealImage();
+      Object.defineProperty(probe, "naturalWidth", { value: 512, configurable: true });
+      probes.push(probe);
+      return probe;
+    } as unknown as typeof window.Image;
 
-    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    try {
+      backend.library = [
+        { ...alpha, id: "steam:1", title: "Alpha", logoUrl: "https://cdn.example/alpha-logo.png" },
+      ];
+      mount();
+      await settle();
+
+      const logo = root.querySelector<HTMLImageElement>("#hero-logo");
+      const title = root.querySelector<HTMLElement>("#hero-title");
+      if (!logo || !title) throw new Error("the hero must carry both a logo and a title");
+
+      // Nothing on screen changes until the decode answers.
+      expect(title.hidden).toBe(false);
+      expect(logo.hidden).toBe(true);
+      expect(logo.getAttribute("src")).toBeNull();
+
+      const probe = probes.find((image) => image.src.includes("alpha-logo"));
+      expect(probe, "the wordmark must be decoded off-screen").toBeDefined();
+      probe?.onload?.(new Event("load"));
+
+      expect(logo.getAttribute("src")).toBe("https://cdn.example/alpha-logo.png");
+      expect(logo.hidden).toBe(false);
+      expect(logo.alt).toBe("Alpha");
+      expect(title.hidden).toBe(true);
+    } finally {
+      window.Image = RealImage;
+    }
+  });
+
+  it("keeps the title when a wordmark never decodes", async () => {
+    const probes: HTMLImageElement[] = [];
+    const RealImage = window.Image;
+    window.Image = function (this: unknown) {
+      const probe = new RealImage();
+      probes.push(probe);
+      return probe;
+    } as unknown as typeof window.Image;
+
+    try {
+      backend.library = [
+        { ...alpha, id: "steam:3", title: "Gamma", logoUrl: "https://cdn.example/gone.png" },
+      ];
+      mount();
+      await settle();
+
+      probes.find((image) => image.src.includes("gone"))?.onerror?.(new Event("error"));
+
+      expect(root.querySelector<HTMLImageElement>("#hero-logo")?.hidden).toBe(true);
+      expect(root.querySelector<HTMLElement>("#hero-title")?.hidden).toBe(false);
+    } finally {
+      window.Image = RealImage;
+    }
+  });
+
+  it("leaves the hero title alone for a game with no wordmark", async () => {
+    backend.library = [{ ...alpha, id: "steam:2", title: "Beta", logoUrl: "" }];
+    mount();
     await settle();
 
-    const entry = root.querySelector<HTMLElement>(
-      "[data-library-action='source-connected'][data-source-provider='epic']",
-    );
-    expect(entry).not.toBeNull();
-    // The name renders as text, never as an element.
-    expect(entry!.querySelector("img")).toBeNull();
-    expect(entry!.textContent).toContain("onerror");
-    expect(document.title).not.toBe("pwned");
+    expect(root.querySelector<HTMLImageElement>("#hero-logo")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#hero-title")?.hidden).toBe(false);
+  });
+
+  it("keeps a card that stays on screen attached while the window slides", async () => {
+    // The rail renders a 48-card window around the selection. Walking through
+    // the middle of a longer library slides that window every step, and
+    // rebuilding the rail there detached every card — which cancels its
+    // transitions, so the cover stopped growing from portrait to landscape for
+    // the whole middle of the list and only started again at the ends, where
+    // the window is pinned and stops moving.
+    backend.library = Array.from({ length: 70 }, (_, index) => ({
+      ...alpha,
+      id: `xbox:${index}`,
+      title: `Game ${index}`,
+      source: "xbox",
+      // Ordered oldest-last so the rail keeps the backend's order.
+      lastPlayedAt: `${index + 1} days ago`,
+    }));
+    mount();
+    await settle();
+    await settle();
+
+    const cardFor = (id: string): HTMLElement | null =>
+      root.querySelector<HTMLElement>(`#game-cards .game-card[data-game-id="${id}"]`);
+    const rail = root.querySelector<HTMLElement>("#game-cards");
+    if (!rail) throw new Error("the rail must exist");
+
+    // Land in the middle, where the window really does slide on every step.
+    cardFor("xbox:40")?.click();
+    await settle();
+    const survivor = cardFor("xbox:41");
+    expect(survivor, "a card either side of the selection is on screen").not.toBeNull();
+
+    const detached: Node[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) detached.push(...Array.from(record.removedNodes));
+    });
+    observer.observe(rail, { childList: true });
+
+    cardFor("xbox:41")?.click();
+    await settle();
+    observer.takeRecords().forEach((record) => detached.push(...Array.from(record.removedNodes)));
+    observer.disconnect();
+
+    // Something did leave the window, or this test would be proving nothing.
+    expect(detached.length).toBeGreaterThan(0);
+    expect(detached).not.toContain(survivor);
+    expect(cardFor("xbox:41")).toBe(survivor);
   });
 
   it("shows each store's price-data health on its own row instead of a second card", async () => {
@@ -620,22 +714,80 @@ describe("application shell against the desktop backend", () => {
     expect(heroMark?.innerHTML).not.toContain("#f25022");
   });
 
-  it("lists a store in the library Sources menu once it has games", async () => {
+  it("badges a game with the store it came from", async () => {
     backend.library = [
       { ...alpha, id: "epic:Sugar", title: "Fall Guys", source: "epic" },
     ];
     mount();
     await settle();
 
-    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    // The badge is the store's own, never the local fallback.
+    expect(root.querySelector("#hero-source-label")?.textContent).toBe("Epic Games");
+  });
+
+  it("says outright that an owned Epic game is not on this machine", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "epic:Sugar",
+        title: "Fall Guys",
+        source: "epic",
+        launchable: false,
+        installState: "not-installed",
+        macCompatibility: "not-native",
+      },
+    ];
+    mount();
     await settle();
 
-    const entry = root.querySelector<HTMLElement>(
-      "[data-library-action='source-connected'][data-source-provider='epic']",
-    );
-    expect(entry?.textContent).toContain("Epic Games");
-    // Its badge is the store's own, never the local fallback.
-    expect(root.querySelector("#hero-source-label")?.textContent).toBe("Epic Games");
+    // Only the Mac answer earns a chip: "not installed" is what the button
+    // itself says, and two controls repeating it is noise.
+    const chips = Array.from(
+      root.querySelectorAll("#hero-status .hero-status__chip"),
+    ).map((chip) => chip.textContent);
+    expect(chips).toEqual(["Windows only"]);
+    // And the button offers the install rather than sitting dead.
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
+    expect(play?.disabled).toBe(false);
+    expect(play?.textContent).toContain("Install");
+  });
+
+  it("shows a running Epic download as a percentage instead of a dead button", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "epic:Sugar",
+        title: "Fall Guys",
+        source: "epic",
+        launchable: false,
+        installState: "installing",
+        installPercent: 37,
+        macCompatibility: "native",
+      },
+    ];
+    mount();
+    await settle();
+
+    const chips = Array.from(
+      root.querySelectorAll("#hero-status .hero-status__chip"),
+    ).map((chip) => chip.textContent);
+    expect(chips).toEqual(["Mac native"]);
+    // The button is the progress bar: it carries the number and fills to it.
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
+    expect(play?.textContent).toContain("Downloading 37%");
+    const fill = play?.querySelector<HTMLElement>(".play-button__fill");
+    expect(fill?.hidden).toBe(false);
+    expect(fill?.style.width).toBe("37%");
+  });
+
+  it("keeps the status row silent for a game no store client can answer for", async () => {
+    backend.library = [{ ...alpha, id: "local:aaa", source: "local" }];
+    mount();
+    await settle();
+
+    // "unknown" is not "not installed": a local game has no client to ask, so
+    // the row must say nothing rather than claim the game is missing.
+    expect(root.querySelector<HTMLElement>("#hero-status")?.hidden).toBe(true);
   });
 
   it("applies a library refresh that lands after the user left the Library", async () => {

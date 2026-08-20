@@ -11,6 +11,16 @@ import type {
 } from "./contracts";
 import { createGameDetailPage } from "./game-detail-page";
 import { brandIcon, icon, type IconName } from "./icons";
+import {
+  type BrowseMode,
+  type BrowseSegment,
+  browseGames,
+  browseModeLabel,
+  browseSegments,
+  formatLastPlayed,
+  nextBrowseMode,
+  resolveSegment,
+} from "./library-browse";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { fallbackLibrary, formatPlayTime, type LibraryGame } from "./mock-library";
 import type {
@@ -75,10 +85,11 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
-import { createDefaultQuikyClient, normaliseTitle, type QuikyClient } from "./quiky-install";
+import { createDefaultQuikyClient } from "./quiky-install";
 import { createStorePage } from "./store-page";
-import { createSpatialNav } from "./spatial-nav";
+import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
+import { attachFeedbackTo, initErrorReporting } from "./sentry";
 import "./game-detail-page.css";
 import "./me-page.css";
 import "./store-page.css";
@@ -210,6 +221,7 @@ interface LibraryMediaTokens {
   heroUrl: string;
   coverUrl: string;
   landscapeUrl: string;
+  logoUrl: string;
 }
 
 interface LibraryLoad {
@@ -257,11 +269,20 @@ interface SourceAccountsState {
   pendingDisconnect: ConnectedSource | null;
 }
 
+interface BrowseState {
+  mode: BrowseMode;
+  /** The segment last chosen in each mode, so cycling back restores the view. */
+  segments: Partial<Record<BrowseMode, string>>;
+  /** Rage: the same library, wearing the spiral. */
+  rage: boolean;
+}
+
 interface State {
   games: LibraryGame[];
   libraryMediaTokens: Map<string, LibraryMediaTokens>;
   selectedId: string;
   query: string;
+  browse: BrowseState;
   libraryMenuOpen: boolean;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
@@ -295,6 +316,20 @@ const MAX_RENDERED_LIBRARY_CARDS = 48;
 // the rendered window left later cards showing a placeholder indefinitely,
 // because nothing re-runs hydration for a card that is already on screen.
 const MAX_LIBRARY_MEDIA_HYDRATION = 64;
+/**
+ * How often the library re-reads the Epic launcher's manifests while a download
+ * runs. A download is minutes long and measuring it walks a directory, so a
+ * slow tick keeps the percentage honest without turning progress into churn.
+ */
+const INSTALL_WATCH_MS = 2500;
+/**
+ * How long a watch started by an explicit Install click keeps looking before
+ * giving up: the Epic launcher shows a folder-choice dialog first, so the user
+ * may take a while to actually start the transfer.
+ */
+const INSTALL_WATCH_GRACE_TICKS = 48;
+/** How long the automatic update check waits for the shell to go quiet. */
+const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
@@ -311,6 +346,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     libraryMediaTokens: new Map(),
     selectedId: fallbackLibrary[0].id,
     query: "",
+    browse: { mode: "activity", segments: {}, rage: false },
     libraryMenuOpen: false,
     steam: {
       open: false,
@@ -376,10 +412,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   const refs = {
     topbar: get<HTMLElement>(".topbar"),
+    feedbackButton: get<HTMLButtonElement>("#feedback-button"),
     heroLayers: [get<HTMLImageElement>("#hero-a"), get<HTMLImageElement>("#hero-b")],
     genre: get<HTMLElement>("#hero-genre"),
     title: get<HTMLElement>("#hero-title"),
-    description: get<HTMLElement>("#hero-description"),
+    logo: get<HTMLImageElement>("#hero-logo"),
     playTime: get<HTMLElement>("#hero-play-time"),
     lastPlayed: get<HTMLElement>("#hero-last-played"),
     source: get<HTMLElement>("#hero-source"),
@@ -388,8 +425,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     sourceDivider: get<HTMLElement>("#hero-source-divider"),
     metadata: get<HTMLElement>("#hero-metadata"),
     platform: get<HTMLElement>("#hero-platform"),
+    status: get<HTMLElement>("#hero-status"),
     platformLabel: get<HTMLElement>("#hero-platform-label"),
     cards: get<HTMLElement>("#game-cards"),
+    railTitle: get<HTMLElement>("#recently-played-title"),
+    browseSegments: get<HTMLElement>("#browse-segments"),
+    browseMode: get<HTMLButtonElement>("#browse-mode"),
+    browseModeLabel: get<HTMLElement>("#browse-mode-label"),
+    rageToggle: get<HTMLButtonElement>("#rage-toggle"),
+    rageLabel: get<HTMLElement>("#rage-label"),
+    brandMarkRing: get<HTMLElement>("#brand-mark-ring"),
+    brandMarkSpiral: get<HTMLElement>("#brand-mark-spiral"),
     search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
@@ -403,10 +449,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     steamRefresh: get<HTMLButtonElement>("#steam-refresh"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
+    steamSourceRow: get<HTMLElement>("#steam-source-row"),
     sourceAccountsPanel: get<HTMLElement>("#source-accounts-panel"),
     sourceAccountsBody: get<HTMLElement>("#source-accounts-body"),
     playButton: get<HTMLButtonElement>("#play-button"),
-    detailsButton: get<HTMLButtonElement>("#details-button"),
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
@@ -422,6 +468,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     wallpaperGoogleApiKey: get<HTMLInputElement>("#wallpaper-google-api-key"),
     wallpaperGoogleCseId: get<HTMLInputElement>("#wallpaper-google-cse-id"),
     wallpaperSteamGridDbApiKey: get<HTMLInputElement>("#wallpaper-steamgriddb-api-key"),
+    wallpaperSearchTermCover: get<HTMLInputElement>("#wallpaper-search-term-cover"),
+    wallpaperSearchTermLandscape: get<HTMLInputElement>("#wallpaper-search-term-landscape"),
+    wallpaperSearchTermBackground: get<HTMLInputElement>("#wallpaper-search-term-background"),
+    wallpaperSearchTermLogo: get<HTMLInputElement>("#wallpaper-search-term-logo"),
     libraryPage: get<HTMLElement>("#app-page-library"),
     storePage: get<HTMLElement>("#app-page-store"),
     mePage: get<HTMLElement>("#app-page-me"),
@@ -440,9 +490,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   let activeHero = 0;
   let heroRequest = 0;
+  // One decoded wordmark is remembered per URL, so walking back along the rail
+  // costs a set lookup rather than another load.
+  let heroLogoSource = "";
+  const heroLogosReady = new Set<string>();
+  const heroLogoWaiters = new Map<string, Array<() => void>>();
   let toastTimer: number | undefined;
   let steamRequest = 0;
   let libraryRequest = 0;
+  /** Ticks the library while an Epic download runs; null when nothing is. */
+  let installWatchTimer: number | null = null;
   const pendingLibraryMediaIds = new Map<string, number>();
   const pendingSteamPreviewMediaIds = new Map<string, number>();
   let steamPreviewMediaRefreshQueued = false;
@@ -460,18 +517,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     navigate({ page: "game", gameId, from: "library" });
   };
 
+  /** The segments the browse bar can offer for the library as it stands now. */
+  const currentSegments = (): BrowseSegment[] => browseSegments(state.games, state.browse.mode);
+
+  /** The segment on screen: the remembered one while it still exists. */
+  const currentSegmentId = (): string =>
+    resolveSegment(currentSegments(), state.browse.segments[state.browse.mode]);
+
   const visibleGames = (): LibraryGame[] => {
     const term = state.query.trim().toLocaleLowerCase();
-    if (!term) {
-      return state.games;
+    const searched = term
+      ? state.games.filter((game) =>
+          [game.title, game.genre, game.description, game.metadata]
+            .join(" ")
+            .toLocaleLowerCase()
+            .includes(term),
+        )
+      : state.games;
+
+    // Searching is the stronger intent: a query looks through the whole
+    // library rather than through the segment that happens to be selected.
+    if (term) {
+      return searched;
     }
 
-    return state.games.filter((game) =>
-      [game.title, game.genre, game.description, game.metadata]
-        .join(" ")
-        .toLocaleLowerCase()
-        .includes(term),
-    );
+    return browseGames(searched, state.browse.mode, currentSegmentId());
   };
 
   const railGames = (games: LibraryGame[]): LibraryGame[] => {
@@ -565,9 +635,109 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     image.src = initialSource;
   };
 
+  /**
+   * The wordmark, when the store published one.
+   *
+   * The image is decoded off-screen before anything on screen changes. Setting
+   * the visible <img>'s src directly meant the title came back for the length
+   * of every load, so walking the rail was a strobe of titles with the
+   * occasional logo — the artwork was fine, the swap was not.
+   *
+   * The title is not a placeholder to be swapped out and forgotten either: it
+   * stays in the markup, holds the accessible name, and is what stands when a
+   * game has no wordmark, when a CDN 404s, and when an image decodes to
+   * nothing.
+   */
+  const updateHeroLogo = (game: LibraryGame): void => {
+    const source = game.logoUrl ?? "";
+    // The artwork is the identity, not a counter: one selection is rendered
+    // several times over, and a slower logo for a game already left behind
+    // must never land on the one now on screen.
+    heroLogoSource = source;
+
+    if (!source) {
+      showHeroTitle();
+      return;
+    }
+    if (refs.logo.getAttribute("src") === source && !refs.logo.hidden) {
+      return;
+    }
+    // Until this one is ready the title stands: showing the previous game's
+    // wordmark over the new game's artwork would be worse than showing none.
+    showHeroTitle();
+
+    if (heroLogosReady.has(source)) {
+      showHeroLogo(source, game.title);
+      return;
+    }
+    preloadHeroLogo(source, () => {
+      if (heroLogoSource === source) showHeroLogo(source, game.title);
+    });
+  };
+
+  /**
+   * Decode one wordmark and remember that it is good. A second caller for an
+   * image already in flight waits on the same decode, which is what lets the
+   * neighbour pass and the selection itself ask for the same picture without
+   * racing.
+   */
+  const preloadHeroLogo = (source: string, done?: () => void): void => {
+    if (!source || heroLogosReady.has(source)) {
+      done?.();
+      return;
+    }
+    const waiting = heroLogoWaiters.get(source);
+    if (waiting) {
+      if (done) waiting.push(done);
+      return;
+    }
+    heroLogoWaiters.set(source, done ? [done] : []);
+
+    const probe = new Image();
+    probe.decoding = "async";
+    probe.onload = () => {
+      const waiters = heroLogoWaiters.get(source) ?? [];
+      heroLogoWaiters.delete(source);
+      if (probe.naturalWidth === 0) return;
+      heroLogosReady.add(source);
+      for (const waiter of waiters) waiter();
+    };
+    probe.onerror = () => heroLogoWaiters.delete(source);
+    probe.src = source;
+  };
+
+  /** The wordmarks either side of the selection, decoded while nothing else is. */
+  const primeNeighbourLogos = (): void => {
+    const games = visibleGames();
+    const index = games.findIndex((game) => game.id === state.selectedId);
+    if (index < 0) return;
+    const idle = window.requestIdleCallback ?? window.setTimeout;
+    idle(() => {
+      for (const neighbour of [games[index - 1], games[index + 1], games[index + 2]]) {
+        if (neighbour?.logoUrl) preloadHeroLogo(neighbour.logoUrl);
+      }
+    });
+  };
+
+  const showHeroLogo = (source: string, title: string): void => {
+    refs.logo.src = source;
+    refs.logo.alt = title;
+    refs.logo.hidden = false;
+    refs.title.hidden = true;
+  };
+
+  const showHeroTitle = (): void => {
+    refs.logo.hidden = true;
+    refs.title.hidden = false;
+  };
+
+  /** The artwork a game is shown by, and the artwork its colour comes from. */
+  const heroSourceFor = (game: LibraryGame): string =>
+    game.heroUrl || game.coverUrl || steamAssetUrl(game, "header.jpg");
+
   const updateHeroImage = (game: LibraryGame, immediate = false): void => {
     const fallback = steamAssetUrl(game, "header.jpg");
-    const source = game.heroUrl || game.coverUrl || fallback;
+    const source = heroSourceFor(game);
     const current = refs.heroLayers[activeHero];
 
     if (current.getAttribute("src") === source) {
@@ -620,6 +790,138 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
+  /**
+   * The browse bar and the rail heading. Both are derived from the same two
+   * pieces of state — the mode and its segment — so the row of segments, the
+   * heading above the cards and the cards themselves can never drift apart.
+   */
+  const renderBrowseBar = (): void => {
+    const segments = currentSegments();
+    const activeId = currentSegmentId();
+    const active = segments.find((segment) => segment.id === activeId) ?? segments[0];
+
+    // The accessible name keeps the visible word intact, so "click Activity"
+    // still hits this button under speech control.
+    refs.browseModeLabel.textContent = browseModeLabel(state.browse.mode);
+    refs.browseMode.setAttribute(
+      "aria-label",
+      `Browsing by ${browseModeLabel(state.browse.mode)}, press to change`,
+    );
+
+    const existing = Array.from(
+      refs.browseSegments.querySelectorAll<HTMLButtonElement>(".browse-bar__segment"),
+    );
+    // Every selection redraws this bar, so the row is only rebuilt when the
+    // segments themselves changed. Re-appending a button detaches it first,
+    // which would drop the focus a controller or the keyboard is holding.
+    const matchesCurrentOrder =
+      existing.length === segments.length &&
+      existing.every((button, index) => button.dataset.segmentId === segments[index].id);
+
+    if (matchesCurrentOrder) {
+      for (const [index, segment] of segments.entries()) {
+        syncSegmentButton(existing[index], segment, segment.id === active?.id);
+      }
+    } else {
+      const byId = new Map(existing.map((button) => [button.dataset.segmentId ?? "", button]));
+      const fragment = document.createDocumentFragment();
+      for (const segment of segments) {
+        const button = byId.get(segment.id) ?? createSegmentButton();
+        syncSegmentButton(button, segment, segment.id === active?.id);
+        fragment.append(button);
+      }
+      refs.browseSegments.replaceChildren(fragment);
+    }
+
+    // The heading names the shelf on screen; a search overrides it, because
+    // what is on the rail then is the search, not the segment.
+    const heading = state.query.trim() ? "Search results" : (active?.label ?? "Library");
+    refs.railTitle.textContent = heading;
+    refs.cards.setAttribute("aria-label", heading);
+  };
+
+  const createSegmentButton = (): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "browse-bar__segment";
+
+    const label = document.createElement("span");
+    label.className = "browse-bar__segment-label";
+
+    button.append(label);
+    button.addEventListener("click", () => {
+      const id = button.dataset.segmentId;
+      if (id) selectSegment(id);
+    });
+    return button;
+  };
+
+  const syncSegmentButton = (
+    button: HTMLButtonElement,
+    segment: BrowseSegment,
+    selected: boolean,
+  ): void => {
+    button.dataset.segmentId = segment.id;
+    button.classList.toggle("is-active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    // A genre or a store name comes from the backend, so it is set as text and
+    // never interpolated into markup.
+    const label = button.querySelector<HTMLElement>(".browse-bar__segment-label");
+    if (label) label.textContent = segment.label;
+  };
+
+  /**
+   * Changing what the rail holds moves the hero with it: the selection is only
+   * kept when the game is still on the new shelf, otherwise the shelf's first
+   * game takes over rather than leaving the hero showing something the rail no
+   * longer offers.
+   */
+  const applyBrowseChange = (): void => {
+    const games = visibleGames();
+    if (!games.some((game) => game.id === state.selectedId)) {
+      state.selectedId = games[0]?.id ?? state.selectedId;
+    }
+    renderSelection();
+    refs.cards.scrollTo?.({ left: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  };
+
+  const selectSegment = (id: string): void => {
+    if (currentSegmentId() === id) return;
+    state.browse.segments[state.browse.mode] = id;
+    applyBrowseChange();
+  };
+
+  const cycleBrowseMode = (): void => {
+    state.browse.mode = nextBrowseMode(state.browse.mode);
+    applyBrowseChange();
+  };
+
+  /**
+   * Rage mode. It changes no data and filters nothing: the mark becomes the
+   * spiral and the accent turns, and that is the whole feature for now.
+   */
+  const setRageMode = (rage: boolean): void => {
+    state.browse.rage = rage;
+    if (rage) document.body.dataset.mood = "rage";
+    else delete document.body.dataset.mood;
+    refs.rageToggle.setAttribute("aria-checked", String(rage));
+    refs.rageToggle.classList.toggle("is-active", rage);
+    refs.rageLabel.textContent = rage ? "Rage" : "Orivo";
+    refs.brandMarkRing.hidden = rage;
+    refs.brandMarkSpiral.hidden = !rage;
+
+    // The spiral arrives spinning. Restarting the animation needs the class off,
+    // a reflow, then the class on — the same three steps the hero title uses,
+    // because re-adding a class the element already wears animates nothing.
+    if (rage && !prefersReducedMotion()) {
+      refs.brandMarkSpiral.classList.remove("brand-mark--arriving");
+      void refs.brandMarkSpiral.offsetWidth;
+      refs.brandMarkSpiral.classList.add("brand-mark--arriving");
+    } else {
+      refs.brandMarkSpiral.classList.remove("brand-mark--arriving");
+    }
+  };
+
   const renderCards = (): void => {
     const games = railGames(visibleGames());
 
@@ -633,28 +935,72 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
-    const cards = Array.from(refs.cards.querySelectorAll<HTMLButtonElement>(".game-card"));
-    const cardsById = new Map(cards.map((card) => [card.dataset.gameId, card]));
-    const visibleIds = games.map((game) => game.id);
-    const matchesCurrentOrder =
-      cards.length === games.length && cards.every((card, index) => card.dataset.gameId === visibleIds[index]);
+    refs.cards.querySelector(".rail-empty")?.remove();
 
-    if (!matchesCurrentOrder) {
-      const fragment = document.createDocumentFragment();
+    const cardsById = new Map(
+      Array.from(refs.cards.querySelectorAll<HTMLButtonElement>(".game-card")).map((card) => [
+        card.dataset.gameId,
+        card,
+      ]),
+    );
+    const wanted = new Set(games.map((game) => game.id));
 
-      for (const [index, game] of games.entries()) {
-        const card = cardsById.get(game.id) ?? createGameCard();
-        syncGameCard(card, game, index, game.id === state.selectedId);
-        fragment.append(card);
+    // A card that leaves the rendered window goes, and nothing else is touched.
+    // Rebuilding the whole rail used to detach every card, which cancels its
+    // transitions: past the 48-card window the cover stopped growing from
+    // portrait to landscape on selection, because the browser never saw the
+    // class change happen — the node arrived already wearing the result.
+    for (const [id, card] of cardsById) {
+      if (!wanted.has(id ?? "")) {
+        card.remove();
+        cardsById.delete(id);
       }
-
-      refs.cards.replaceChildren(fragment);
-      return;
     }
 
+    // Whatever survived kept its relative order, so this walk only ever
+    // inserts, and a card that stays put is never moved.
+    let cursor = refs.cards.firstElementChild;
     for (const [index, game] of games.entries()) {
-      const card = cards[index];
+      const card = cardsById.get(game.id) ?? createGameCard();
+      if (cursor === card) {
+        cursor = cursor.nextElementSibling;
+      } else {
+        refs.cards.insertBefore(card, cursor);
+      }
       syncGameCard(card, game, index, game.id === state.selectedId);
+    }
+  };
+
+  /**
+   * The two facts the Play button cannot carry: whether the game is on this
+   * machine, and whether it runs natively here. The meta row deliberately
+   * strips runtime state, so these get their own row.
+   */
+  const renderHeroStatus = (game: LibraryGame): void => {
+    const chips: Array<{ label: string; icon: IconName; tone: string }> = [];
+    // Only "installed" earns a chip. "Not installed" and "downloading" are
+    // already what the Play button says — the first as its Install label, the
+    // second as the bar filling behind it.
+    if (game.installState === "installed") {
+      chips.push({ label: "Installed", icon: "check", tone: "ready" });
+    }
+    if (game.macCompatibility === "native") {
+      chips.push({ label: "Mac native", icon: "check", tone: "ready" });
+    } else if (game.macCompatibility === "not-native") {
+      chips.push({ label: "Windows only", icon: "windows", tone: "warn" });
+    }
+
+    refs.status.hidden = chips.length === 0;
+    refs.status.replaceChildren();
+    for (const chip of chips) {
+      const item = document.createElement("span");
+      item.className = "hero-status__chip";
+      item.dataset.tone = chip.tone;
+      item.innerHTML = icon(chip.icon);
+      const label = document.createElement("span");
+      label.textContent = chip.label;
+      item.append(label);
+      refs.status.append(item);
     }
   };
 
@@ -679,12 +1025,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     media.append(portrait, landscape);
 
-    // The art stands alone: no name overlay and no darkening gradient. The
-    // title lives in the aria-label, and the playtime keeps its own corner.
-    const time = document.createElement("span");
-    time.className = "card-time";
-
-    card.append(media, time);
+    // The art stands alone: no name overlay, no darkening gradient and no
+    // playtime stamp. Everything about the game is in the hero above the rail,
+    // and the title lives in the aria-label.
+    card.append(media);
     card.addEventListener("focus", () => {
       const id = card.dataset.gameId;
       if (id && currentRoute.page === "library") selectGame(id, false);
@@ -718,7 +1062,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   ): void => {
     const portrait = card.querySelector<HTMLImageElement>(".card-art--portrait");
     const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape");
-    const time = card.querySelector<HTMLElement>(".card-time");
     const portraitSource = game.coverUrl || game.heroUrl;
     const landscapeSource = game.landscapeUrl || game.heroUrl || portraitSource;
     const fallback = steamAssetUrl(game, "header.jpg");
@@ -733,10 +1076,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     assignCardImage(portrait, portraitSource, fallback, index < 7);
     assignCardImage(landscape, landscapeSource, fallback, index < 7);
-    if (time) {
-      time.textContent = formatPlayTime(game.playTimeSeconds);
-      time.hidden = game.playTimeSeconds <= 0;
-    }
   };
 
   const hydrateLibraryMedia = (candidates: LibraryGame[]): void => {
@@ -752,7 +1091,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const tokens = state.libraryMediaTokens.get(game.id);
       if (
         !tokens ||
-        (!tokens.heroUrl && !tokens.coverUrl && !tokens.landscapeUrl) ||
+        (!tokens.heroUrl && !tokens.coverUrl && !tokens.landscapeUrl && !tokens.logoUrl) ||
         pendingLibraryMediaIds.has(game.id)
       ) {
         continue;
@@ -767,12 +1106,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     void Promise.all(
       targets.map(async ({ id, tokens }) => {
-        const [heroUrl, coverUrl, landscapeUrl] = await Promise.all([
+        const [heroUrl, coverUrl, landscapeUrl, logoUrl] = await Promise.all([
           tokens.heroUrl ? resolveMediaUrl(tokens.heroUrl) : Promise.resolve(""),
           tokens.coverUrl ? resolveMediaUrl(tokens.coverUrl) : Promise.resolve(""),
           tokens.landscapeUrl ? resolveMediaUrl(tokens.landscapeUrl) : Promise.resolve(""),
+          tokens.logoUrl ? resolveMediaUrl(tokens.logoUrl) : Promise.resolve(""),
         ]);
-        return { id, heroUrl, coverUrl, landscapeUrl };
+        return { id, heroUrl, coverUrl, landscapeUrl, logoUrl };
       }),
     )
       .then((resolved) => {
@@ -789,14 +1129,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
           const heroUrl = media.heroUrl || game.heroUrl;
           const coverUrl = media.coverUrl || game.coverUrl;
           const landscapeUrl = media.landscapeUrl || game.landscapeUrl;
+          const logoUrl = media.logoUrl || game.logoUrl || "";
           if (
             heroUrl !== game.heroUrl ||
             coverUrl !== game.coverUrl ||
-            landscapeUrl !== game.landscapeUrl
+            landscapeUrl !== game.landscapeUrl ||
+            logoUrl !== game.logoUrl
           ) {
             game.heroUrl = heroUrl;
             game.coverUrl = coverUrl;
             game.landscapeUrl = landscapeUrl;
+            game.logoUrl = logoUrl;
             changed = true;
           }
         }
@@ -826,19 +1169,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     refs.genre.textContent = game.genre || "Library";
     refs.title.textContent = game.title;
+    updateHeroLogo(game);
     if (titleChanged && !immediateHero && !prefersReducedMotion()) {
       refs.title.classList.remove("is-changing");
       void refs.title.offsetWidth;
       refs.title.classList.add("is-changing");
     }
-    refs.description.textContent = game.description || "Ready for your next session.";
     refs.playTime.textContent = formatPlayTime(game.playTimeSeconds);
     if (refs.playTime.parentElement) refs.playTime.parentElement.hidden = game.playTimeSeconds <= 0;
     // A game that was never launched shows no "last played" chip at all rather
-    // than a "Not played yet" placeholder.
-    refs.lastPlayed.textContent = game.lastPlayedAt ? `Last played ${game.lastPlayedAt}` : "";
+    // than a "Not played yet" placeholder. Connectors hand back a raw instant
+    // ("2024-02-26T19:22:09.4406448Z"), which the hero never prints as-is.
+    const lastPlayed = formatLastPlayed(game.lastPlayedAt);
+    refs.lastPlayed.textContent = lastPlayed ? `Last played ${lastPlayed}` : "";
     if (refs.lastPlayed.parentElement) refs.lastPlayed.parentElement.hidden = !game.lastPlayedAt;
     const isSteamInstallable = game.source === "steam" && !game.launchable;
+    // Epic is the one connected store that will accept an install request from
+    // Orivo, so it is the one that gets a live Install button here.
+    const isEpicInstallable =
+      game.source === "epic" && game.installState === "not-installed";
+    const isEpicInstalling = game.installState === "installing";
+    renderHeroStatus(game);
     // Every source the catalog can return has a badge, so a game synced from a
     // connected store is never mislabelled as a local one.
     const badge = sourceBadge(game.source);
@@ -872,24 +1223,52 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // hidden.
     refs.platform.hidden = true;
     refs.platformLabel.textContent = "";
-    refs.playButton.disabled = !game.launchable && !isSteamInstallable;
+    // A download already running is not a second install to start, so the
+    // button reports it rather than offering to queue another.
+    refs.playButton.disabled =
+      !game.launchable &&
+      !isSteamInstallable &&
+      !isEpicInstallable &&
+      !isEpicInstalling;
+    // The button doubles as the progress bar, so it keeps its size and place
+    // rather than being swapped for a separate control mid-download.
+    const fill = refs.playButton.querySelector<HTMLElement>(".play-button__fill");
+    if (fill) {
+      const percent =
+        isEpicInstalling && typeof game.installPercent === "number"
+          ? Math.min(100, Math.max(0, game.installPercent))
+          : null;
+      fill.hidden = percent === null;
+      fill.style.width = percent === null ? "0%" : `${percent}%`;
+      refs.playButton.classList.toggle("is-downloading", percent !== null);
+    }
     refs.playButton.setAttribute(
       "aria-label",
       game.launchable
         ? "Play " + game.title
         : isSteamInstallable
           ? "Install " + game.title + " in Steam"
-          : game.title + " is unavailable",
+          : isEpicInstallable
+            ? "Install " + game.title + " from Epic Games"
+            : isEpicInstalling
+              ? "Downloading " + game.title
+              : game.title + " is unavailable",
     );
     const playLabel = refs.playButton.querySelector<HTMLElement>("span");
     if (playLabel) {
       playLabel.textContent = game.launchable
         ? "Play"
-        : isSteamInstallable
+        : isSteamInstallable || isEpicInstallable
           ? "Install"
-          : "Unavailable";
+          : isEpicInstalling
+            ? typeof game.installPercent === "number"
+              ? `Downloading ${game.installPercent}%`
+              : "Downloading"
+            : "Unavailable";
     }
     updateHeroImage(game, immediateHero);
+    primeNeighbourLogos();
+    renderBrowseBar();
     renderCards();
     renderLaunchFeedback();
     hydrateLibraryMedia([game, ...railGames(visibleGames())]);
@@ -950,13 +1329,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   // Same rule for every other store: a synced game is proof the account was
   // connected, even before Settings has loaded its status list.
-  const connectedSourcesInMenu = (): ConnectedSource[] =>
-    CONNECTED_SOURCES.filter(
-      (descriptor) =>
-        sourceStatus(descriptor.provider).connected ||
-        state.games.some((game) => game.source === descriptor.provider),
-    ).map((descriptor) => descriptor.provider);
-
   const renderLibrarySources = (): void => {
     const list = refs.librarySourceList;
     list.replaceChildren();
@@ -974,48 +1346,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       list.append(steam);
     }
 
-    for (const provider of connectedSourcesInMenu()) {
-      const descriptor = connectedSourceDescriptor(provider);
-      const status = sourceStatus(provider);
-      const entry = document.createElement("button");
-      entry.type = "button";
-      entry.className = "library-source-action";
-      entry.setAttribute("role", "menuitem");
-      entry.dataset.libraryAction = "source-connected";
-      entry.dataset.sourceProvider = provider;
-      const detail = status.connected
-        ? `${sourceStatusLine(status)} · sync now`
-        : "Imported games · reconnect to sync";
-      // The account label is the display name the store returned, so it is
-      // untrusted text and is set through textContent. Interpolating it into
-      // innerHTML would let a display name inject markup into this menu.
-      const entryIcon = document.createElement("span");
-      entryIcon.className = "library-source-action__icon library-source-action__icon--library";
-      entryIcon.setAttribute("aria-hidden", "true");
-      entryIcon.innerHTML = icon(descriptor.icon);
-      const entryCopy = document.createElement("span");
-      entryCopy.className = "library-source-action__copy";
-      const entryName = document.createElement("strong");
-      entryName.textContent = descriptor.label;
-      const entryDetail = document.createElement("small");
-      entryDetail.textContent = detail;
-      entryCopy.append(entryName, entryDetail);
-      const entryChevron = document.createElement("span");
-      entryChevron.innerHTML = icon("chevron-right", "library-source-action__chevron");
-      entry.append(entryIcon, entryCopy, entryChevron.firstElementChild ?? entryChevron);
-      list.append(entry);
-    }
+    // Connected stores are deliberately not listed here. They live in
+    // Settings › Libraries & Sources, which is where they can actually be
+    // managed; repeating them in this menu made it long without adding an
+    // action beyond "sync now".
 
-    // The local source is always present: it is this Mac itself. It is a
-    // status row, not an action — importing a local game keeps its own entry
-    // under "This Mac" below.
-    const local = document.createElement("div");
-    local.className = "library-source-action library-source-row";
-    local.setAttribute("role", "none");
-    local.innerHTML =
-      `<span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>` +
-      `<span class="library-source-action__copy"><strong>Local</strong><small>Games on this Mac</small></span>`;
-    list.append(local);
   };
 
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
@@ -1032,6 +1367,42 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     } else if (!open && restoreFocus) {
       refs.libraryMenuButton.focus();
     }
+  };
+
+  /**
+   * Epic never calls back while it downloads, so Orivo measures the launcher's
+   * own manifests itself. Refreshing the library re-reads them, which is what
+   * makes the percentage move — including for a download the user started in
+   * the Epic launcher rather than here.
+   */
+  const startInstallWatch = (graceTicks = 0): void => {
+    if (installWatchTimer !== null) return;
+    // Epic takes a few seconds to write its pending manifest and create the
+    // folder, so a watch started by an explicit Install click waits that out
+    // rather than concluding after one empty tick that nothing is happening.
+    let remainingGrace = graceTicks;
+    const tick = async (): Promise<void> => {
+      installWatchTimer = null;
+      await refreshLibrary();
+      const inFlight = state.games.some(
+        (game) => game.installState === "installing",
+      );
+      if (inFlight) remainingGrace = 0;
+      // Stop as soon as nothing is in flight: an idle library must not keep
+      // re-reading the disk every few seconds forever.
+      if (inFlight || remainingGrace-- > 0) {
+        installWatchTimer = window.setTimeout(
+          () => void tick(),
+          INSTALL_WATCH_MS,
+        );
+      }
+    };
+    installWatchTimer = window.setTimeout(() => void tick(), INSTALL_WATCH_MS);
+  };
+
+  const stopInstallWatch = (): void => {
+    if (installWatchTimer !== null) window.clearTimeout(installWatchTimer);
+    installWatchTimer = null;
   };
 
   const refreshLibrary = async (importedId?: string): Promise<void> => {
@@ -1055,6 +1426,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         ? state.selectedId
         : library.games[0]?.id ?? lastUsedFallback.id;
     renderSelection();
+    // A download started in the Epic launcher is just as real as one started
+    // here, so the watch follows the data rather than the click.
+    if (state.games.some((game) => game.installState === "installing")) {
+      startInstallWatch();
+    } else {
+      stopInstallWatch();
+    }
     // A pending Wine attachment cannot resolve its game until the library has
     // arrived, so the Wine plugin detail re-renders as soon as it does.
     if (state.pluginView === "wine") {
@@ -1284,17 +1662,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     return row;
   };
 
-  let discoveredInstaller: Awaited<ReturnType<QuikyClient["getStatus"]>> | null = null;
+  // Quiky is the Store's installer, not a plugin the user manages: it has no
+  // row in Settings and nothing to query on startup. It is subscribed to
+  // because the host writes the finished game straight into the catalog, and
+  // the shell reloads the library on its own rather than making the user find
+  // a refresh.
   const installerClient = createDefaultQuikyClient();
-  void installerClient
-    .getStatus(new AbortController().signal)
-    .then((status) => {
-      discoveredInstaller = status;
-      renderPluginList();
-    })
-    .catch(() => {});
-  // The host writes the finished game straight into the catalog, so the shell
-  // reloads the library on its own rather than making the user find a refresh.
   installerClient.subscribe((progress) => {
     if (progress.phase === "installed") void refreshLibrary();
   });
@@ -1305,28 +1678,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * is the row that can be uninstalled, and two rows for one plugin is worse
    * than either of them alone.
    */
-  const discoveredInstallerRow = (installed: InstalledPluginView[]): HTMLElement | null => {
-    const status = discoveredInstaller;
-    if (!status?.available) return null;
-    const name = normaliseTitle(status.pluginName);
-    if (name && installed.some((plugin) => normaliseTitle(plugin.name) === name)) return null;
-    const row = document.createElement("div");
-    row.className = "settings-row plugin-row";
-    row.dataset.pluginManaged = "installer";
-    row.dataset.pluginDiscovered = "installer";
-    const installable = status.titles.length;
-    row.innerHTML = `
-      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("download")}</span>
-      <div class="settings-row__copy">
-        <strong></strong>
-        <small>Installe les jeux du Store — ${installable} titre${installable > 1 ? "s" : ""} disponible${installable > 1 ? "s" : ""}</small>
-      </div>
-      <span class="plugin-row__state">Installed</span>`;
-    // The plugin names itself; that name never reaches innerHTML.
-    row.querySelector("strong")!.textContent = status.pluginName;
-    return row;
-  };
-
   // Third-party plugins are discovered on disk, so the Installed group is the
   // two native runners plus whatever the registry found. Nothing extra renders
   // when the registry is empty: the panel then looks exactly as it did before.
@@ -1336,10 +1687,44 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     const installed = pluginManager.catalog().installed;
     const rows = installed.map(renderInstalledPluginRow);
-    const discovered = discoveredInstallerRow(installed);
-    if (discovered) rows.push(discovered);
     refs.pluginsInstalledList.append(...rows);
   };
+
+  /**
+   * What Orivo is being built towards, named rather than promised in a
+   * changelog. These are not installable and say so: a row marked "Soon" is an
+   * honest roadmap entry, an install button that fails is not.
+   */
+  const COMING_SOON_PLUGINS: ReadonlyArray<{ icon: IconName; name: string; summary: string }> = [
+    { icon: "sparkle", name: "Spotify", summary: "What you are listening to, beside what you are playing." },
+    { icon: "monitor", name: "Moonlight / Sunshine", summary: "Stream a game from another machine on your network." },
+    { icon: "collections", name: "Playnite", summary: "Import a Playnite library, its metadata and its categories." },
+    { icon: "cloud", name: "Ludusavi", summary: "Back up and restore your save games." },
+  ];
+
+  const renderComingSoonPlugins = (term: string): HTMLElement[] =>
+    COMING_SOON_PLUGINS.filter(
+      (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
+    ).map((entry) => {
+      const row = document.createElement("div");
+      row.className = "settings-row plugin-row plugin-row--soon";
+      const mark = document.createElement("span");
+      mark.className = "settings-card__mark plugin-row__mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.innerHTML = icon(entry.icon);
+      const copy = document.createElement("div");
+      copy.className = "settings-row__copy";
+      const name = document.createElement("strong");
+      name.textContent = entry.name;
+      const summary = document.createElement("small");
+      summary.textContent = entry.summary;
+      copy.append(name, summary);
+      const state = document.createElement("span");
+      state.className = "plugin-row__state plugin-row__state--soon";
+      state.textContent = "Soon";
+      row.append(mark, copy, state);
+      return row;
+    });
 
   const renderPluginList = (): void => {
     const showList = state.pluginView === "list";
@@ -1354,8 +1739,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const matches = available.filter(
       (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
     );
-    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogRow));
-    refs.pluginsCatalogEmpty.hidden = matches.length > 0;
+    const soon = renderComingSoonPlugins(term);
+    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogRow), ...soon);
+    refs.pluginsCatalogEmpty.hidden = matches.length + soon.length > 0;
     // An empty registry and a search that matched nothing are different
     // problems, and telling the user to refine a search they never typed is
     // the kind of dead end this panel used to have.
@@ -1672,6 +2058,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   const renderSteamPanel = (): void => {
     const steam = state.steam;
+    // Collapsed by default: the scan is reached from the Steam row's "Installed
+    // games" button, so an idle pitch for it no longer needs to hold a card.
+    refs.steamPanel.hidden = !steam.open;
     refs.steamPanel.setAttribute("aria-busy", String(steam.phase === "scanning" || steam.phase === "importing"));
     const hasAvailablePreview = steam.preview?.status === "available";
     refs.steamRefresh.hidden = !hasAvailablePreview || !steam.open;
@@ -1679,20 +2068,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       !hasAvailablePreview || steam.phase === "scanning" || steam.phase === "importing";
 
     if (!steam.open) {
-      const idle = document.createElement("section");
-      idle.className = "steam-state steam-state--idle";
-      const heading = document.createElement("h2");
-      heading.textContent = "Import games already installed on this Mac";
-      const message = document.createElement("p");
-      message.textContent =
-        "Orivo reads your local Steam libraries. Nothing leaves this Mac and nothing is imported until you choose.";
-      const scan = document.createElement("button");
-      scan.type = "button";
-      scan.className = "settings-button settings-button--primary";
-      scan.dataset.steamAction = "scan";
-      scan.textContent = "Scan Steam libraries";
-      idle.append(heading, message, scan);
-      refs.steamBody.replaceChildren(idle);
+      refs.steamBody.replaceChildren();
       refs.steamFooter.hidden = true;
       return;
     }
@@ -1980,6 +2356,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const renderSteamAccountPanel = (): void => {
     const account = state.steamAccount;
     const restoreFocus = refs.steamAccountPanel.contains(document.activeElement);
+    // The row states what Steam is doing whether or not the panel is expanded,
+    // so it is rendered before the early return below.
+    renderSteamSourceRow();
     refs.steamAccountPanel.hidden = !account.open;
     refs.steamAccountPanel.setAttribute(
       "aria-busy",
@@ -2204,6 +2583,96 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       state.steamAccount.noticeTone = "error";
     }
     renderSteamAccountPanel();
+  };
+
+  /**
+   * Steam's row in the stores list.
+   *
+   * Steam is not a `ConnectedSource` — it has its own backend, its own sign-in
+   * states and a local scan the other stores have no equivalent for — so it
+   * cannot come from the same loop. It is rendered to match those rows exactly,
+   * because to the person reading the page it is simply another store.
+   */
+  const renderSteamSourceRow = (): void => {
+    const account = state.steamAccount;
+    const connected = account.status?.connected === true;
+    const busy = account.phase === "connecting" || account.phase === "syncing";
+    const row = document.createElement("div");
+    row.className = "settings-row source-account-row";
+    row.classList.toggle("is-connected", connected);
+    row.dataset.sourceRow = "steam";
+
+    const mark = document.createElement("span");
+    mark.className = "source-account-row__mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = brandIcon("steam");
+
+    const copy = document.createElement("div");
+    copy.className = "settings-row__copy source-account-row__copy";
+    const name = document.createElement("strong");
+    name.textContent = "Steam";
+    const detail = document.createElement("small");
+    // The Steam ID is the account's own identifier, so it goes in as text.
+    detail.textContent = connected
+      ? account.status?.steamId
+        ? `Connected as ${account.status.steamId}`
+        : "Connected"
+      : "See the games you own, and import the ones installed on this Mac.";
+    copy.append(name, detail);
+
+    // Steam's price-data health rides on its row, the same way every other
+    // store's does, instead of being repeated under "Store data only".
+    const health = state.providerStatuses.find((provider) => provider.provider === "steam");
+    if (health) {
+      const dot = document.createElement("span");
+      dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
+      dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
+      dot.setAttribute("role", "img");
+      dot.setAttribute("aria-label", `Store data: ${health.health.replace("-", " ")}`);
+      name.append(dot);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "source-account-row__actions";
+    const button = (
+      action: string,
+      label: string,
+      className: string,
+      iconName: IconName,
+    ): HTMLButtonElement => {
+      const element = document.createElement("button");
+      element.type = "button";
+      element.className = className;
+      element.dataset.steamRowAction = action;
+      element.innerHTML = icon(iconName);
+      element.append(document.createTextNode(label));
+      return element;
+    };
+
+    if (busy) {
+      const spinner = document.createElement("span");
+      spinner.className = "steam-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const waiting = document.createElement("span");
+      waiting.className = "source-account-row__waiting";
+      waiting.setAttribute("role", "status");
+      waiting.textContent = account.phase === "syncing" ? "Syncing…" : "Continue in the window…";
+      actions.append(spinner, waiting);
+    } else if (connected) {
+      actions.append(
+        button("sync", "Sync", "steam-import-button", "refresh"),
+        button("import", "Installed games", "steam-secondary-button", "download"),
+        button("manage", "Manage", "steam-secondary-button", "settings"),
+      );
+    } else {
+      actions.append(
+        button("connect", "Connect", "steam-import-button", "steam"),
+        button("import", "Installed games", "steam-secondary-button", "download"),
+      );
+    }
+
+    row.append(mark, copy, actions);
+    refs.steamSourceRow.replaceChildren(row);
   };
 
   // The Steam account card is part of Settings › Libraries, so "open" simply
@@ -2658,6 +3127,38 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderSourceAccountsPanel();
   };
 
+  /**
+   * Re-sync every connected store, one after another.
+   *
+   * A library already in the catalog keeps the artwork it was imported with:
+   * a connector that learns to fetch something new — a wordmark, a cleaner
+   * wallpaper — changes nothing for the games already there. This is how the
+   * user asks for that work to be done again without disconnecting anything.
+   *
+   * Sequential on purpose: each store is rate-limited on its own account, and
+   * a burst of parallel syncs is how a provider decides to stop answering.
+   */
+  const resyncEveryLibrary = async (): Promise<void> => {
+    if (!isTauriRuntime()) return;
+    const connected = state.sourceAccounts.statuses
+      .filter((status) => status.connected)
+      .map((status) => status.provider);
+    if (connected.length === 0) {
+      showToast("Connect a store first — there is nothing to refresh yet.");
+      return;
+    }
+
+    showToast(
+      connected.length === 1
+        ? "Refreshing 1 library…"
+        : `Refreshing ${connected.length} libraries…`,
+    );
+    for (const provider of connected) {
+      await syncSourceLibrary(provider);
+    }
+    showToast("Every connected library has been refreshed.");
+  };
+
   const cancelSourceLogin = async (provider: ConnectedSource): Promise<void> => {
     if (!isTauriRuntime()) {
       return;
@@ -3013,6 +3514,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         if (game.source === "steam") {
           showToast("Opening Steam to install " + game.title + "…");
           await invoke("install_steam_game", { gameId: game.id });
+        } else if (game.source === "epic" && game.installState === "installing") {
+          // The download the launcher is already running is the answer here,
+          // not a reason to start a second one.
+          showToast(game.title + " is already downloading.");
+        } else if (game.source === "epic") {
+          showToast("Starting the download for " + game.title + "…");
+          await invoke("install_epic_game", { gameId: game.id });
+          // Epic reports nothing back, so Orivo starts watching the launcher's
+          // own manifests and paints the percentage itself. The grace ticks
+          // cover the dialog the launcher puts up before the transfer begins.
+          startInstallWatch(INSTALL_WATCH_GRACE_TICKS);
         } else if (game.source === "wine") {
           state.launchFeedback = {
             gameId: game.id,
@@ -3086,6 +3598,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
     const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
     if (sampleSocial) sampleSocial.checked = state.preferences.debugSampleSocial;
+    const beta = root.querySelector<HTMLInputElement>("#preference-beta");
+    if (beta) beta.checked = state.preferences.betaFeatures;
+    applyBetaFeatures();
     applyMotionPreference();
   };
 
@@ -3097,9 +3612,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const renderProviderStatuses = (): void => {
     const list = root.querySelector<HTMLElement>("#provider-status-list");
     const group = root.querySelector<HTMLElement>(".source-providers");
+    // Steam's row carries its health dot, so it has to be redrawn whenever
+    // these statuses land.
+    renderSteamSourceRow();
     if (!list) return;
+    // Steam is excluded by name rather than through `providerStatusForSource`:
+    // it is a row in this list now, but it is not a `ConnectedSource`, so it
+    // has no descriptor for that mapping to return.
     const remaining = state.providerStatuses.filter(
-      (provider) => providerStatusForSource(provider.provider) === null,
+      (provider) =>
+        provider.provider !== "steam" && providerStatusForSource(provider.provider) === null,
     );
     if (group) group.hidden = remaining.length === 0;
     const fragment = document.createDocumentFragment();
@@ -3314,6 +3836,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.wallpaperGoogleApiKey.value = state.wallpaperCredentials.googleApiKey;
     refs.wallpaperGoogleCseId.value = state.wallpaperCredentials.googleCseId;
     refs.wallpaperSteamGridDbApiKey.value = state.wallpaperCredentials.steamgriddbApiKey;
+    // An empty box is not an unset feature: the placeholder shows the default
+    // term the search already uses, so the form reads as "override this".
+    refs.wallpaperSearchTermCover.value = state.wallpaperCredentials.searchTermCover;
+    refs.wallpaperSearchTermLandscape.value = state.wallpaperCredentials.searchTermLandscape;
+    refs.wallpaperSearchTermBackground.value = state.wallpaperCredentials.searchTermBackground;
+    refs.wallpaperSearchTermLogo.value = state.wallpaperCredentials.searchTermLogo;
     refs.wallpaperCredentialsSave.disabled = state.wallpaperCredentialsSaving;
     refs.wallpaperCredentialsSave.textContent = state.wallpaperCredentialsSaving
       ? "Saving…"
@@ -3346,6 +3874,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       googleApiKey: refs.wallpaperGoogleApiKey.value.trim(),
       googleCseId: refs.wallpaperGoogleCseId.value.trim(),
       steamgriddbApiKey: refs.wallpaperSteamGridDbApiKey.value.trim(),
+      searchTermCover: refs.wallpaperSearchTermCover.value.trim(),
+      searchTermLandscape: refs.wallpaperSearchTermLandscape.value.trim(),
+      searchTermBackground: refs.wallpaperSearchTermBackground.value.trim(),
+      searchTermLogo: refs.wallpaperSearchTermLogo.value.trim(),
     };
     if (!isTauriRuntime()) {
       state.wallpaperCredentials = { ...EMPTY_WALLPAPER_CREDENTIALS, ...update };
@@ -3538,15 +4070,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       closeLibraryMenu();
       navigate({ page: "settings", section: "libraries", attachGameId: null });
       setSteamPanelOpen(true);
-    } else if (action === "source-connected") {
-      // A connected store row goes to Settings and syncs it straight away,
-      // which is the only thing there is to do with an already-signed-in store.
-      const provider = trigger.dataset.sourceProvider ?? "";
-      closeLibraryMenu();
-      navigate({ page: "settings", section: "libraries", attachGameId: null });
-      if (isConnectedSource(provider) && sourceStatus(provider).connected) {
-        void syncSourceLibrary(provider);
-      }
     } else if (action === "add-source") {
       // "Add a new source" opens the existing library connection flow: the
       // Settings › Libraries page auto-expands the Steam account connect card.
@@ -3731,6 +4254,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     toggles[nextIndex]?.focus();
   });
 
+  // Steam's row and the two panels it expands share one card, so the listener
+  // sits on the card rather than on each panel.
+  refs.sourceAccountsPanel.addEventListener("click", (event) => {
+    const target = event.target as Element | null;
+    const action = target?.closest<HTMLButtonElement>("[data-steam-row-action]")?.dataset.steamRowAction;
+    if (!action) return;
+
+    if (action === "connect" || action === "manage") {
+      setSteamAccountPanelOpen(!(state.steamAccount.open && action === "manage"));
+    } else if (action === "sync") {
+      void syncSteamAccountLibrary();
+    } else if (action === "import") {
+      setSteamPanelOpen(!state.steam.open);
+    } else if (action === "close-import") {
+      setSteamPanelOpen(false);
+    }
+  });
+
   refs.steamAccountPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
     const action = target?.closest<HTMLButtonElement>("[data-steam-account-action]")?.dataset.steamAccountAction;
@@ -3781,6 +4322,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     if (action === "refresh") {
       void refreshSourceAccounts();
+      return;
+    }
+    if (action === "resync") {
+      void resyncEveryLibrary();
       return;
     }
     const provider = trigger.dataset.sourceProvider ?? "";
@@ -3984,6 +4529,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (refs.search.value !== state.query) refs.search.value = state.query;
   };
 
+  /**
+   * Beta surfaces are hidden, not disabled: the nav link goes away and the route
+   * stops being reachable, but the page and its data are untouched. A user who
+   * is on Me when the switch goes off is walked back to the Library rather than
+   * left on a page that no longer has a way back to it.
+   */
+  const applyBetaFeatures = (): void => {
+    const beta = state.preferences.betaFeatures;
+    for (const link of refs.navLinks) {
+      if (link.dataset.navPage === "me") link.hidden = !beta;
+    }
+    if (!beta && currentRoute.page === "me") navigate({ page: "library" }, { replace: true });
+  };
+
   const syncTopbar = (route: AppRoute): void => {
     const current = navPageForRoute(route);
     // The Library and the Store are full-bleed heroes with their own top
@@ -3997,6 +4556,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         route.page !== "game" &&
         route.page !== "me",
     );
+    // The Library shows its wallpaper at full strength with nothing over it, so
+    // the navigation there earns its contrast from a text shadow rather than
+    // from a band of darkness across the top of the artwork.
+    refs.topbar.classList.toggle("topbar--over-art", route.page === "library");
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
       link.classList.toggle("is-active", active);
@@ -4072,7 +4635,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void loadPreferences(request);
 
       if (route.section === "libraries") {
-        setSteamAccountPanelOpen(true);
+        // The connect panel stays collapsed — the row is what the page shows —
+        // but its status still has to be read, or the row cannot say whether
+        // Steam is connected.
+        renderSteamSourceRow();
+        void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
       } else if (state.steamAccount.open) {
@@ -4191,7 +4758,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     });
   }
 
-  refs.detailsButton.addEventListener("click", () => openGameDetail(selectedGame().id));
+  refs.browseMode.addEventListener("click", () => cycleBrowseMode());
+  refs.rageToggle.addEventListener("click", () => setRageMode(!state.browse.rage));
 
   refs.notFoundPage.addEventListener("click", (event) => {
     const target = event.target as Element | null;
@@ -4287,6 +4855,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (target instanceof HTMLInputElement && target.id === "preference-debug-social") {
       // Purely a detail-page overlay: no library reload needed.
       void savePreferences({ debugSampleSocial: target.checked });
+    }
+    if (target instanceof HTMLInputElement && target.id === "preference-beta") {
+      void savePreferences({ betaFeatures: target.checked });
     }
   });
 
@@ -4403,9 +4974,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   });
 
   window.addEventListener("keydown", (event) => {
-    // A key event can be dispatched straight at `window`, so the target is only
-    // usable once it is known to be an element in this document.
-    const target = event.target instanceof HTMLElement ? event.target : null;
+    // `composedTarget` rather than `event.target`: a listener on `window` sees
+    // the shadow host, not the field inside it, and Sentry's feedback form
+    // lives in a shadow root.
+    const target = composedTarget(event);
     if (refs.libraryMenu.contains(target)) {
       return;
     }
@@ -4416,11 +4988,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
-    const typing =
-      target?.tagName === "INPUT" ||
-      target?.tagName === "TEXTAREA" ||
-      target?.tagName === "SELECT" ||
-      target?.isContentEditable === true;
+    const typing = isTypingEvent(event);
     const commandSearch = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k";
 
     // Focusing the contextual search is the only shortcut shared by every page.
@@ -4531,6 +5099,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   renderSteamPanel();
   renderWineSettingsPanel();
   renderPreferenceControls();
+  /**
+   * Crash reports and the feedback form.
+   *
+   * Started before the router so an error thrown during the first render is
+   * still caught. Without a DSN this does nothing and the button stays hidden,
+   * which is the state every test and every source build runs in.
+   */
+  if (initErrorReporting(isTauriRuntime() ? "desktop" : "browser")) {
+    // The page and the game on screen travel with the report: "the covers are
+    // wrong" is a shrug, the same sentence tagged with a title is a lead.
+    const attached = attachFeedbackTo(refs.feedbackButton, () => ({
+      page: currentRoute.page,
+      game: selectedGame().title,
+    }));
+    refs.feedbackButton.hidden = !attached;
+  }
+
   router.start((route) => {
     dispatchRoute(route);
     spatialNav.enterPage();
@@ -4538,12 +5123,35 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   void refreshLibrary();
   void (async () => {
     await loadPreferences();
+    // Preferences decide which surfaces exist, so the beta gate is applied the
+    // moment they land rather than the first time Settings is opened.
+    applyBetaFeatures();
     const hash = window.location.hash;
     const isDefaultEntry = hash === "" || hash === "#" || hash === "#/";
     if (isDefaultEntry && state.preferences.startPage === "store") {
       navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" }, { replace: true });
     }
   })();
+
+  /**
+   * Look for a new release once, shortly after the shell settles.
+   *
+   * Nothing is downloaded and nothing interrupts: the check writes the About
+   * panel's status and stops there, so the only way an update installs is
+   * still the user pressing the button. Deferred rather than immediate,
+   * because a network round trip has no business competing with the first
+   * paint of the library.
+   */
+  if (isTauriRuntime()) {
+    // `requestIdleCallback` takes an options object, `setTimeout` takes
+    // milliseconds. Passing the object to both meant the fallback coerced it to
+    // NaN and fired immediately, which is the opposite of waiting for quiet.
+    window.setTimeout(() => {
+      const idle = window.requestIdleCallback;
+      if (idle) idle(() => void checkForUpdates(), { timeout: 2_000 });
+      else void checkForUpdates();
+    }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
+  }
 }
 
 async function loadLibrary(): Promise<LibraryLoad | null> {
@@ -4623,6 +5231,10 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
                 ? "showcase"
                 : fallback.source ?? "local";
   const heroToken = readString(record, "heroUrl", "hero_url");
+  // The wordmark travels the same road as the artwork: a logo a reset wrote to
+  // the cache arrives as a `cache:` token, which an <img> cannot load until the
+  // media directory has turned it into a real URL.
+  const logoToken = readString(record, "logoUrl", "logo_url");
   const coverToken = readString(record, "coverUrl", "cover_url");
   const landscapeToken = readString(record, "landscapeUrl", "landscape_url");
   const rawHostPlatform = readString(record, "hostPlatform", "host_platform");
@@ -4653,17 +5265,22 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       // never been launched locally. Do not borrow a fixture's last-played
       // date merely because the backend intentionally returned an empty one.
       lastPlayedAt: readOptionalString(record, "lastPlayedAt", "last_played_at") ?? fallback.lastPlayedAt,
+      logoUrl: immediateMediaUrl(logoToken),
       playTimeSeconds: readNumber(record, "playTimeSeconds", "play_time_seconds") ?? fallback.playTimeSeconds,
       launchable: readBoolean(record, "launchable") ?? fallback.launchable,
       hostPlatform,
       supportedPlatforms,
       compatibleWithHost: readBoolean(record, "compatibleWithHost", "compatible_with_host"),
       wineAttachable: readBoolean(record, "wineAttachable", "wine_attachable") ?? false,
+      installState: readInstallState(record),
+      installPercent: readNumber(record, "installPercent", "install_percent") ?? null,
+      macCompatibility: readMacCompatibility(record),
     },
     mediaTokens: {
       heroUrl: heroToken,
       coverUrl: coverToken,
       landscapeUrl: landscapeToken,
+      logoUrl: logoToken,
     },
   };
 }
@@ -5038,6 +5655,22 @@ function readBoolean(record: BackendRecord, ...keys: string[]): boolean | undefi
   return undefined;
 }
 
+function readInstallState(record: BackendRecord): LibraryGame["installState"] {
+  const value = readString(record, "installState", "install_state");
+  return value === "installed" ||
+    value === "installing" ||
+    value === "not-installed"
+    ? value
+    : "unknown";
+}
+
+function readMacCompatibility(
+  record: BackendRecord,
+): LibraryGame["macCompatibility"] {
+  const value = readString(record, "macCompatibility", "mac_compatibility");
+  return value === "native" || value === "not-native" ? value : "unknown";
+}
+
 function readStringArray(record: BackendRecord, ...keys: string[]): string[] {
   for (const key of keys) {
     const value = record[key];
@@ -5093,7 +5726,10 @@ function shell(): string {
         <div class="nav-cluster">
           <div class="library-menu-control">
             <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="Open library sources" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
-              <img class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
+              <img id="brand-mark-ring" class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
+              <!-- Rage mode wears the spiral instead of the ring. Both marks
+                   live in the markup so the swap is a class, not a fetch. -->
+              <img id="brand-mark-spiral" class="brand-mark" src="/media/orivo-spiral-icon.png" alt="" hidden />
             </button>
             <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="Library sources" hidden>
               <p class="library-source-menu__label" id="library-sources-label">Sources</p>
@@ -5128,8 +5764,12 @@ function shell(): string {
         </label>
 
         <div class="profile-cluster">
-          <button type="button" class="quiet-icon" aria-label="Notifications">${icon("bell")}</button>
-          <span class="top-divider top-divider--right" aria-hidden="true"></span>
+          <!-- Reporting a problem sits beside the profile picture rather than
+               buried in Settings: the moment someone wants to complain is the
+               moment they are looking at the thing that went wrong. Hidden
+               until Sentry is configured, so a source build shows no dead
+               control. -->
+          <button id="feedback-button" class="feedback-button" type="button" aria-label="Send feedback" title="Send feedback" hidden>${icon("feedback")}</button>
           <img class="avatar" src="/media/steam-avatar.png" alt="Steam profile" />
         </div>
       </header>
@@ -5140,17 +5780,26 @@ function shell(): string {
         <img id="hero-a" class="hero-image" alt="" />
         <img id="hero-b" class="hero-image" alt="" />
       </div>
+      <!-- Two scrims and no blur: a floor under the rail and the browse bar,
+           and a light shading down the left that gives the text block a little
+           ground of its own. Both stay far below the wash the scene used to
+           carry — the artwork is still the point of the page, and the text
+           leans on its shadow in styles.css for the rest. -->
       <div class="scene-overlay scene-overlay--left" aria-hidden="true"></div>
       <div class="scene-overlay scene-overlay--bottom" aria-hidden="true"></div>
-      <div class="scene-overlay scene-overlay--top" aria-hidden="true"></div>
 
       <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="Previous game">${icon("chevron-left")}</button>
       <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="Next game">${icon("chevron-right")}</button>
 
       <section class="hero-content" aria-live="polite">
-        <span id="hero-genre" class="genre-chip">RPG</span>
+        <!-- The wordmark when a store published one, the title text when it did
+             not. Both live in the markup: the logo is a swap, not a rebuild,
+             and the title keeps the accessible name either way. The genre pill
+             follows the mark rather than leading it — the mark is what the eye
+             should land on first. -->
+        <img id="hero-logo" class="hero-logo" alt="" hidden />
         <h1 id="hero-title" class="hero-title">Elden Ring</h1>
-        <p id="hero-description" class="hero-description"></p>
+        <span id="hero-genre" class="genre-chip">RPG</span>
         <div class="hero-meta" aria-label="Game metadata">
           <span>${icon("clock")}<span id="hero-play-time"></span></span>
           <span>${icon("clock")}<span id="hero-last-played"></span></span>
@@ -5164,42 +5813,48 @@ function shell(): string {
             ${icon("monitor")}<span id="hero-platform-label"></span>
           </span>
         </div>
+        <!-- What the Play button cannot say: whether the game is actually on
+             this machine, and whether it runs natively here. -->
+        <div id="hero-status" class="hero-status" hidden></div>
+        <!-- Play stands alone. A card opens its own page on a second click and
+             the detail route is a link away, so a chevron beside Play was one
+             affordance too many for the one thing this scene is for. -->
         <div class="hero-actions">
-          <button id="play-button" class="play-button" type="button">${icon("play")}<span>Play</span></button>
-          <button id="details-button" class="round-button" type="button" aria-label="Open game details">${icon("chevron-right")}</button>
+          <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
         </div>
         <div id="launch-feedback" class="launch-feedback" role="status" aria-live="polite" hidden></div>
       </section>
 
       <section class="recently-played" aria-label="Library games">
         <div class="rail-header">
+          <!-- The heading is the active segment: the rail and its title can
+               never disagree about what is on screen. -->
           <h2 id="recently-played-title">Recently Played</h2>
-          <div class="rail-filters" aria-label="Library view controls">
-            <button type="button" class="compact-filter">All Games ${icon("chevron-down")}</button>
-            <button type="button" class="compact-filter">Recent ${icon("chevron-down")}</button>
-            <button type="button" class="compact-icon" aria-label="Grid view">${icon("grid")}</button>
-            <button type="button" class="compact-icon" aria-label="Compact grid view">${icon("layout")}</button>
-          </div>
         </div>
-        <div id="game-cards" class="game-cards" role="list" aria-label="Recently played games"></div>
+        <div id="game-cards" class="game-cards" role="list" aria-label="Recently Played"></div>
       </section>
 
-      <footer class="controller-hud" aria-label="Keyboard controls">
-        <span class="hud-category"><i></i><span>Popular</span></span>
-        <span class="hud-pagination" aria-hidden="true"><i></i><i class="is-active"></i><i></i><i></i><i></i></span>
-        <span class="hud-controls">
-          <span>${icon("navigate")}<em>Navigate</em></span>
-          <span><b class="gamepad-a">A</b><em>Open</em></span>
-          <span><b class="gamepad-x">X</b><em>Play</em></span>
-          <span><b class="gamepad-b">B</b><em>Back</em></span>
-        </span>
+      <!-- The browse bar. One button cycles the mode, the row beside it holds
+           that mode's segments, and the mark on the left is the app's own
+           mood. -->
+      <footer class="browse-bar" aria-label="Library browsing">
+        <!-- A switch, not a button that happens to remember a state: the role
+             says so, and the track says so. -->
+        <button id="rage-toggle" class="browse-bar__mood" type="button" role="switch" aria-checked="false">
+          <span class="browse-bar__switch" aria-hidden="true"><i></i></span>
+          <span id="rage-label">Orivo</span>
+        </button>
+        <div id="browse-segments" class="browse-bar__segments" role="group" aria-label="Library segments"></div>
+        <button id="browse-mode" class="browse-bar__mode" type="button">
+          <span id="browse-mode-label">Activity</span>
+        </button>
       </footer>
       </div>
 
       <div id="app-page-store" class="app-page app-page--store"></div>
       <div id="app-page-me" class="app-page app-page--scroll app-page--overlay"></div>
 
-      <div id="app-page-game" class="app-page app-page--scroll app-page--overlay"></div>
+      <div id="app-page-game" class="app-page app-page--fit app-page--overlay"></div>
 
       <div id="app-page-settings" class="app-page app-page--scroll app-page--settings">
         <div class="settings-layout">
@@ -5263,37 +5918,14 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-libraries" data-settings-panel="libraries" aria-labelledby="settings-tab-libraries" tabindex="0" hidden>
-              <section id="steam-account-panel" class="settings-card" data-settings-searchable aria-labelledby="steam-account-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("steam")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="steam-account-title">Steam library</strong>
-                    <small>Private, local-first connection</small>
-                  </div>
-                </header>
-                <div id="steam-account-body" class="steam-account-body"></div>
-              </section>
-
-              <section id="steam-import-panel" class="settings-card" data-settings-searchable aria-labelledby="steam-import-title" aria-describedby="steam-import-detail">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("download")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="steam-import-title">Import installed games</strong>
-                    <small id="steam-import-detail">A local Steam source</small>
-                  </div>
-                  <button id="steam-refresh" type="button" class="steam-header-button" data-steam-action="refresh" aria-label="Refresh Steam library" hidden>${icon("refresh")}</button>
-                </header>
-                <div id="steam-import-body" class="steam-import-body"></div>
-                <footer id="steam-import-footer" class="steam-import-footer" hidden>
-                  <p id="steam-selection-summary"></p>
-                  <button id="steam-import-selected" class="steam-import-button" type="button" data-steam-action="import">Import selected</button>
-                </footer>
-              </section>
-
               <!-- Connecting a library and reading that store's prices were two
                    cards saying different things about the same shops. They are
                    one list now: each store shows its connection and, on the same
-                   row, whether its price data is reachable. -->
+                   row, whether its price data is reachable. Steam is in that
+                   list too — it used to own two cards above it, which made the
+                   one store that needs no introduction the loudest thing on the
+                   page. Its two extra affordances, signing in and scanning this
+                   Mac for installed games, expand under its row. -->
               <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-labelledby="source-accounts-title">
                 <header class="settings-card__header">
                   <span class="settings-card__mark" aria-hidden="true">${icon("collections")}</span>
@@ -5301,8 +5933,36 @@ function shell(): string {
                     <strong id="source-accounts-title">Game libraries &amp; providers</strong>
                     <small>Connect a store to see the games you own, and check where store data can come from.</small>
                   </div>
+                  <!-- Two different refreshes, and the difference matters: the
+                       first only re-reads which accounts are connected, the
+                       second re-syncs every one of their libraries. -->
+                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">Refresh all libraries</button>
                   <button id="source-accounts-refresh" type="button" class="steam-header-button" data-source-action="refresh" aria-label="Refresh library source connections">${icon("refresh")}</button>
                 </header>
+
+                <div class="steam-source-block">
+                  <div id="steam-source-row"></div>
+                  <div id="steam-account-panel" class="steam-inline-panel" aria-labelledby="steam-account-title" hidden>
+                    <strong id="steam-account-title" class="steam-inline-panel__title">Steam library</strong>
+                    <div id="steam-account-body" class="steam-account-body"></div>
+                  </div>
+                  <div id="steam-import-panel" class="steam-inline-panel" aria-labelledby="steam-import-title" aria-describedby="steam-import-detail" hidden>
+                    <div class="steam-inline-panel__header">
+                      <div class="settings-card__copy">
+                        <strong id="steam-import-title" class="steam-inline-panel__title">Import installed games</strong>
+                        <small id="steam-import-detail">A local Steam source</small>
+                      </div>
+                      <button id="steam-refresh" type="button" class="steam-header-button" data-steam-action="refresh" aria-label="Refresh Steam library" hidden>${icon("refresh")}</button>
+                      <button type="button" class="steam-header-button" data-steam-row-action="close-import" aria-label="Close installed games">${icon("close")}</button>
+                    </div>
+                    <div id="steam-import-body" class="steam-import-body"></div>
+                    <footer id="steam-import-footer" class="steam-import-footer" hidden>
+                      <p id="steam-selection-summary"></p>
+                      <button id="steam-import-selected" class="steam-import-button" type="button" data-steam-action="import">Import selected</button>
+                    </footer>
+                  </div>
+                </div>
+
                 <div id="source-accounts-body" class="source-accounts-body"></div>
                 <div class="source-providers">
                   <p class="source-providers__label">Store data only</p>
@@ -5398,7 +6058,25 @@ function shell(): string {
                   <div class="credentials-form__field">
                     <label for="wallpaper-steamgriddb-api-key">SteamGridDB API Key</label>
                     <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="From steamgriddb.com/profile/preferences/api" />
-                    <small>Optional. With a key, “Reset the covers” pulls 4K artwork for all three formats; without one it uses Steam's official art.</small>
+                    <small>Optional, and the one worth adding. It is the only source that can be asked for artwork <em>without</em> the game's title painted across it, and the only one publishing 4K key art. With a key, “Reset the covers” uses it for every format; without one it falls back to Steam's official art.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-search-term-cover">Cover search term</label>
+                    <input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' />
+                    <small>Used by the keyword sources (Google, Wikimedia, Openverse). <code>{name}</code> becomes the game. Leave a box empty to keep Orivo's default. Quoting the name is what stops a search for “Doom” answering with Doom Eternal; the noun after it is what separates box art from gameplay.</small>
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-search-term-landscape">Key art search term</label>
+                    <input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' />
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-search-term-background">Background search term</label>
+                    <input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' />
+                  </div>
+                  <div class="credentials-form__field">
+                    <label for="wallpaper-search-term-logo">Logo search term</label>
+                    <input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' />
+                    <small>Steam Store, SteamGridDB and IGDB ignore these boxes: they resolve the game first and then ask a typed endpoint, so no keyword is involved and nothing has to be guessed.</small>
                   </div>
                   <div class="credentials-form__actions">
                     <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
@@ -5452,6 +6130,21 @@ function shell(): string {
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-show-showcase" />
                     <span><strong>Show demo games</strong><small>Adds Elden Ring, Cyberpunk 2077 and other fixtures to your library.</small></span>
+                  </label>
+                </div>
+              </section>
+              <section class="settings-card" data-settings-searchable aria-labelledby="beta-preference-title">
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("sparkle")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="beta-preference-title">Beta features</strong>
+                    <small>Surfaces that are still being built. They are hidden by default because they are not finished, not because they are broken.</small>
+                  </div>
+                </header>
+                <div class="settings-choices">
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-beta" />
+                    <span><strong>Show the Me dashboard</strong><small>Your play habits, scored and charted. Reads your library only.</small></span>
                   </label>
                 </div>
               </section>

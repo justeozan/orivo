@@ -522,7 +522,20 @@
   text-align: left;
 }
 
-.store-card__open:focus-visible { outline-offset: -4px; }
+/* The ring traces the card's own edge instead of floating four pixels inside
+   it. A focused card is already the featured one — border plus outer stroke —
+   so an inset line on top of that read as three separate frames. */
+.store-card__open:focus-visible,
+.store-card__open[data-nav-focus] {
+  outline-offset: -1px;
+  border-radius: var(--card-radius);
+}
+/* One frame, not two: the card drops its own outer ring while it wears a
+   focus ring. */
+.store-card:has(.store-card__open:focus-visible) ,
+.store-card:has(.store-card__open[data-nav-focus]) {
+  box-shadow: none;
+}
 
 .store-card__media {
   position: relative;

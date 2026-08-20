@@ -70,6 +70,8 @@ pub struct PreferencesDto {
     /// feed. Off by default.
     #[serde(default)]
     pub debug_sample_social: bool,
+    #[serde(default)]
+    pub beta_features: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -80,6 +82,7 @@ pub struct PreferencesUpdate {
     pub motion: Option<MotionPreference>,
     pub show_showcase_games: Option<bool>,
     pub debug_sample_social: Option<bool>,
+    pub beta_features: Option<bool>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -146,6 +149,9 @@ impl PreferencesService {
             }
             if let Some(debug_sample_social) = update.debug_sample_social {
                 preferences.debug_sample_social = debug_sample_social;
+            }
+            if let Some(beta_features) = update.beta_features {
+                preferences.beta_features = beta_features;
             }
         }
         self.save_atomically(&preferences)?;
@@ -338,6 +344,7 @@ mod tests {
                 motion: Some(MotionPreference::Reduced),
                 show_showcase_games: Some(true),
                 debug_sample_social: Some(true),
+                beta_features: Some(true),
                 reset: false,
             })
             .unwrap();

@@ -7,20 +7,10 @@ export type GameId = string;
  * launched by another.
  */
 export type ConnectedSource =
-  | "epic"
-  | "gog"
-  | "ubisoft"
-  | "xbox"
-  | "microsoft-store"
-  | "instant-gaming";
+  "epic" | "gog" | "ubisoft" | "xbox" | "microsoft-store" | "instant-gaming";
 
 export type GameSource =
-  | "steam"
-  | "wine"
-  | "local"
-  | "showcase"
-  | "store"
-  | ConnectedSource;
+  "steam" | "wine" | "local" | "showcase" | "store" | ConnectedSource;
 
 /**
  * How a store proves who you are. `token` stores an OAuth credential in the
@@ -72,9 +62,11 @@ export type StoreProvider =
  * stay separate: the filter bar speaks platforms, the price logic speaks
  * providers.
  */
-export type StorePlatform = "pc" | "playstation" | "xbox" | "switch" | "emulators";
+export type StorePlatform =
+  "pc" | "playstation" | "xbox" | "switch" | "emulators";
 
-export type ProviderHealth = "available" | "degraded" | "unavailable" | "not-configured";
+export type ProviderHealth =
+  "available" | "degraded" | "unavailable" | "not-configured";
 export type StoreCategory =
   | "for-you"
   | "good-for-brain"
@@ -84,12 +76,7 @@ export type StoreCategory =
   | "all-games";
 
 export type SettingsSection =
-  | "general"
-  | "libraries"
-  | "plugins"
-  | "appearance"
-  | "data"
-  | "about";
+  "general" | "libraries" | "plugins" | "appearance" | "data" | "about";
 
 export type GameMediaKind = "wallpaper" | "video" | "icon" | "cover";
 
@@ -104,14 +91,7 @@ export interface GameMediaView {
   availableOffline: boolean;
 }
 
-export type WallpaperSource =
-  | "steam-store"
-  | "wikimedia"
-  | "openverse"
-  | "igdb"
-  | "google-images";
-
-export type WallpaperSearchPhase = "ready" | "not-configured" | "error";
+export type WallpaperSearchPhase = "ready" | "error";
 
 /**
  * The shape of artwork a row asks for. A search is scoped to exactly one:
@@ -119,15 +99,19 @@ export type WallpaperSearchPhase = "ready" | "not-configured" | "error";
  * never land in the portrait cover row.
  *
  * - `cover`     portrait box art, ~2:3
- * - `landscape` wide key art, ~16:9
- * - `background` atmospheric backgrounds and screenshots
+ * - `landscape` wide key art
+ * - `background` atmospheric backgrounds
+ * - `logo`      the game's wordmark on transparency, drawn over the hero —
+ *               having it as its own row is what lets the other three prefer
+ *               artwork with no title burned into it
  */
-export type WallpaperCategory = "cover" | "landscape" | "background";
+export type WallpaperCategory = "cover" | "landscape" | "background" | "logo";
 
 export const WALLPAPER_CATEGORIES: readonly WallpaperCategory[] = [
   "cover",
   "landscape",
   "background",
+  "logo",
 ];
 
 /** One result in a wallpaper search, addressable only by its opaque id. */
@@ -138,9 +122,13 @@ export interface WallpaperCandidateView {
   category: WallpaperCategory;
 }
 
+/**
+ * One row's answer. There is no source on it: a row is filled from every
+ * provider at once and merged, so naming one would be a lie about where its
+ * tiles came from.
+ */
 export interface WallpaperSearchView {
   phase: WallpaperSearchPhase;
-  source: WallpaperSource;
   category: WallpaperCategory;
   query: string;
   message: string;
@@ -159,7 +147,27 @@ export interface WallpaperCredentials {
    * falls back to Steam's official artwork when it is not.
    */
   steamgriddbApiKey: string;
+  /**
+   * Per-row search term templates for the keyword-driven sources, the way
+   * Playnite exposes one search term per media field. `{name}` expands to the
+   * game; empty means "use Orivo's default", so a user who never opens this
+   * form still gets the tuned query rather than a blank one.
+   */
+  searchTermCover: string;
+  searchTermLandscape: string;
+  searchTermBackground: string;
+  searchTermLogo: string;
 }
+
+/** What each term box shows when the user has not overridden it. */
+export const DEFAULT_WALLPAPER_SEARCH_TERMS: Readonly<
+  Record<WallpaperCategory, string>
+> = {
+  cover: '"{name}" box art cover',
+  landscape: '"{name}" key art',
+  background: '"{name}" wallpaper',
+  logo: '"{name}" logo transparent',
+};
 
 export type WallpaperCredentialsUpdate = Partial<WallpaperCredentials>;
 
@@ -246,16 +254,44 @@ export interface GameDetailView extends GameSummary {
   achievements: {
     unlocked: number;
     total: number;
-    items: Array<{ id: string; title: string; iconUrl: string }>;
+    /** Badge art is optional: no store Orivo talks to publishes it yet, and
+     *  the panel names an achievement rather than picturing it. */
+    items: Array<{ id: string; title: string; iconUrl?: string }>;
   } | null;
   media: GameMediaView[];
   relatedGames: GameSummary[];
+  /**
+   * Whether the store's own client has this game on this machine. `unknown` is
+   * distinct from `not-installed`: a store with no local client to ask cannot
+   * tell us, and the UI must not claim otherwise.
+   */
+  installState: "installed" | "installing" | "not-installed" | "unknown";
+  /** 0-100, present only while a download is running. */
+  installPercent: number | null;
+  /** Whether the game ships a build that runs natively on macOS. */
+  macCompatibility: "native" | "not-native" | "unknown";
   primaryAction:
     | "play"
     | "install-steam"
+    | "install-epic"
     | "configure-wine"
     | "view-offer"
     | "unavailable";
+}
+
+/**
+ * What the local Epic Games Launcher reports for one owned entitlement. Epic
+ * publishes no download-progress API, so `percent` is measured from the bytes
+ * on disk against the size the launcher recorded, and never reaches 100 until
+ * the launcher itself marks the install complete.
+ */
+export interface EpicInstallStatus {
+  appName: string;
+  state: "not-installed" | "installing" | "installed";
+  percent: number;
+  installedBytes: number;
+  totalBytes: number;
+  installPath: string | null;
 }
 
 export type AppRoute =

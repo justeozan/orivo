@@ -27,6 +27,8 @@ describe("settings model", () => {
       motion: "reduced",
       showShowcaseGames: true,
       debugSampleSocial: true,
+      // Absent from the record and so false: a beta surface is opt-in.
+      betaFeatures: false,
     });
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -40,6 +42,7 @@ describe("settings model", () => {
       motion: "reduced",
       showShowcaseGames: true,
       debugSampleSocial: true,
+      betaFeatures: true,
     } as const;
     expect(applyPreferencesUpdate(current, { reset: true, storeRegion: "de" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -72,14 +75,18 @@ describe("settings model", () => {
         igdb_client_secret: "secret",
         googleApiKey: 42,
         googleCseId: "",
+        searchTermCover: '"{name}" cover',
+        search_term_logo: 7,
         path: "/private/credentials",
       }),
     ).toEqual({
+      ...EMPTY_WALLPAPER_CREDENTIALS,
       igdbClientId: "twitch-client",
       igdbClientSecret: "secret",
-      googleApiKey: "",
-      googleCseId: "",
-      steamgriddbApiKey: "",
+      // A term the user saved survives; a non-string one falls back to empty,
+      // which means "use Orivo's default term" rather than "search for nothing".
+      searchTermCover: '"{name}" cover',
+      searchTermLogo: "",
     });
     expect(normaliseWallpaperCredentials(null)).toEqual(EMPTY_WALLPAPER_CREDENTIALS);
   });

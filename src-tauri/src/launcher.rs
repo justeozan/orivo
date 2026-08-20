@@ -28,6 +28,11 @@ pub enum LaunchError {
         label: &'static str,
         status: ExitStatus,
     },
+    /// The store has a client here, but publishes no way for another app to ask
+    /// it to start a download.
+    ProviderInstallUnsupported {
+        label: &'static str,
+    },
     /// Third-party runner execution is intentionally unavailable until the
     /// plugin host can resolve a validated profile into a typed launch intent.
     /// The built-in Wine-Staging adapter is resolved earlier by the trusted
@@ -78,6 +83,10 @@ impl std::fmt::Display for LaunchError {
             Self::ProviderDispatchFailed { label, status } => {
                 write!(f, "{label} could not accept the launch request ({status})")
             }
+            Self::ProviderInstallUnsupported { label } => write!(
+                f,
+                "{label} does not let another app start a download. Install this game in {label} itself."
+            ),
             Self::Process(error) => write!(f, "process could not be started: {error}"),
         }
     }
@@ -123,6 +132,10 @@ pub struct ProviderClient {
     /// The client's URI scheme template. `{ref}` is replaced by the launch
     /// reference after percent-encoding.
     uri_template: &'static str,
+    /// The same client's "start a download" template, for the stores that
+    /// publish one. `None` means Orivo has no way to ask that client to
+    /// install, so it never offers the button.
+    install_uri_template: Option<&'static str>,
     /// Absolute locations that prove the client is installed. Detection is a
     /// plain existence check: Orivo never asks a store where it lives.
     macos_bundles: &'static [&'static str],
@@ -136,6 +149,10 @@ pub fn provider_client(provider: &str) -> Option<ProviderClient> {
         "epic" => Some(ProviderClient {
             label: "Epic Games",
             uri_template: "com.epicgames.launcher://apps/{ref}?action=launch&silent=true",
+            // The launcher owns the download itself: disk choice, confirmation
+            // and progress all stay in Epic's hands, exactly as Steam's
+            // `steam://install` works.
+            install_uri_template: Some("com.epicgames.launcher://apps/{ref}?action=install"),
             macos_bundles: &["/Applications/Epic Games Launcher.app"],
             windows_relative_paths: &["Epic Games/Launcher/Portal/Binaries/Win32"],
             windows_builtin: false,
@@ -145,6 +162,7 @@ pub fn provider_client(provider: &str) -> Option<ProviderClient> {
             // Galaxy has no documented direct-launch URI, so this opens the
             // game in Galaxy, which is where Play and Install live.
             uri_template: "goggalaxy://openGameView/{ref}",
+            install_uri_template: None,
             macos_bundles: &["/Applications/GOG Galaxy.app"],
             windows_relative_paths: &["GOG Galaxy"],
             windows_builtin: false,
@@ -152,6 +170,7 @@ pub fn provider_client(provider: &str) -> Option<ProviderClient> {
         "ubisoft" => Some(ProviderClient {
             label: "Ubisoft Connect",
             uri_template: "uplay://launch/{ref}/0",
+            install_uri_template: None,
             // Ubisoft Connect has no macOS build, so this list is empty on
             // purpose: detection then reports the client as missing.
             macos_bundles: &[],
@@ -161,6 +180,7 @@ pub fn provider_client(provider: &str) -> Option<ProviderClient> {
         "microsoft-store" => Some(ProviderClient {
             label: "Microsoft Store",
             uri_template: "shell:AppsFolder\\{ref}!App",
+            install_uri_template: None,
             macos_bundles: &[],
             windows_relative_paths: &[],
             windows_builtin: true,
@@ -197,12 +217,44 @@ impl ProviderClient {
         self.uri_template
             .replace("{ref}", &percent_encode_reference(app_ref))
     }
+
+    fn install_uri(&self, app_ref: &str) -> Option<String> {
+        self.install_uri_template
+            .map(|template| template.replace("{ref}", &percent_encode_reference(app_ref)))
+    }
 }
 
 /// Whether the Play button on a connected-store game should be live. This is
 /// what keeps Orivo from offering to start something it cannot start.
 pub fn provider_launchable(provider: &str) -> bool {
     provider_client(provider).is_some_and(|client| client.installed())
+}
+
+/// Whether Orivo can hand this store an install request at all. Same rule as
+/// launching — the client has to be here — plus a published install URI.
+pub fn provider_installable(provider: &str) -> bool {
+    provider_client(provider)
+        .is_some_and(|client| client.install_uri_template.is_some() && client.installed())
+}
+
+/// Ask a connected store's own client to begin a download. Like Steam's install
+/// path this deliberately works for a game that is owned but not installed yet;
+/// the client owns confirmation, disk selection and the download itself.
+pub fn install_provider(provider: &str, app_ref: &str) -> Result<(), LaunchError> {
+    let client = provider_client(provider).ok_or(LaunchError::ProviderNotLaunchable {
+        label: "This store",
+    })?;
+    if !client.installed() {
+        return Err(LaunchError::ProviderClientMissing {
+            label: client.label,
+        });
+    }
+    let uri = client
+        .install_uri(app_ref)
+        .ok_or(LaunchError::ProviderInstallUnsupported {
+            label: client.label,
+        })?;
+    dispatch_provider_uri(&client, &uri)
 }
 
 fn launch_provider(provider: &str, app_ref: &str) -> Result<(), LaunchError> {
@@ -447,6 +499,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -481,6 +534,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,
@@ -516,6 +570,26 @@ mod tests {
     }
 
     #[test]
+    fn only_epic_publishes_an_install_uri_and_it_encodes_its_reference() {
+        assert_eq!(
+            provider_client("epic")
+                .unwrap()
+                .install_uri("d5241c:a1b2c3:Sugar")
+                .as_deref(),
+            Some("com.epicgames.launcher://apps/d5241c%3Aa1b2c3%3ASugar?action=install")
+        );
+        assert!(provider_client("gog").unwrap().install_uri("123").is_none());
+        assert!(
+            provider_client("microsoft-store")
+                .unwrap()
+                .install_uri("x")
+                .is_none()
+        );
+        // No client on this machine, no install request — same rule as Play.
+        assert!(!provider_installable("instant-gaming"));
+    }
+
+    #[test]
     fn stores_that_sell_entitlements_never_get_a_launch_path() {
         assert!(provider_client("xbox").is_none());
         assert!(provider_client("instant-gaming").is_none());
@@ -548,6 +622,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,

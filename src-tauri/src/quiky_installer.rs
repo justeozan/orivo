@@ -366,8 +366,7 @@ pub async fn get_quiky_status(
                     match_titles: title.match_titles,
                     download_bytes: title.download_bytes,
                     installed,
-                    install_path: installed
-                        .then(|| destination.to_string_lossy().into_owned()),
+                    install_path: installed.then(|| destination.to_string_lossy().into_owned()),
                 }
             })
             .collect::<Vec<_>>();
@@ -453,10 +452,9 @@ pub async fn start_quiky_install(
             .lock()
             .map_err(|_| "The installer is busy.".to_string())?;
         if let Some(existing) = jobs.get(&slug)
-            && existing
-                .progress
-                .lock()
-                .is_ok_and(|progress| matches!(progress.phase, "queued" | "downloading" | "extracting"))
+            && existing.progress.lock().is_ok_and(|progress| {
+                matches!(progress.phase, "queued" | "downloading" | "extracting")
+            })
         {
             return Err("This game is already being installed.".into());
         }
@@ -478,7 +476,14 @@ pub async fn start_quiky_install(
     let job_app = app.clone();
     let job_service = Arc::clone(&service);
     tauri::async_runtime::spawn(async move {
-        let outcome = run_install(&job_app, &job_service, &title, game_id.as_deref(), &cancelled).await;
+        let outcome = run_install(
+            &job_app,
+            &job_service,
+            &title,
+            game_id.as_deref(),
+            &cancelled,
+        )
+        .await;
         match outcome {
             Ok(path) => publish(
                 &job_app,
@@ -498,7 +503,15 @@ pub async fn start_quiky_install(
                 error,
                 None,
             ),
-            Err(error) => publish(&job_app, &job_service, &title.slug, "failed", 0, error, None),
+            Err(error) => publish(
+                &job_app,
+                &job_service,
+                &title.slug,
+                "failed",
+                0,
+                error,
+                None,
+            ),
         }
     });
     Ok(())
@@ -719,7 +732,8 @@ async fn download_package(
     cancelled: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
     let directory = service.downloads_root.join(&title.slug);
-    fs::create_dir_all(&directory).map_err(|_| "The download folder is unavailable.".to_string())?;
+    fs::create_dir_all(&directory)
+        .map_err(|_| "The download folder is unavailable.".to_string())?;
     let package = directory.join("setup.exe");
 
     // A previously completed, digest-matching download is reused rather than
@@ -766,7 +780,11 @@ async fn download_package(
                 &title.slug,
                 "downloading",
                 percentage(written, total),
-                format!("Downloading {} of {}", human_bytes(written), human_bytes(total)),
+                format!(
+                    "Downloading {} of {}",
+                    human_bytes(written),
+                    human_bytes(total)
+                ),
                 None,
             );
         },
@@ -812,7 +830,11 @@ async fn fetch_verified_package(
                     .url()
                     .host_str()
                     .is_some_and(|host| host_allowed(host, &redirect_allowlist));
-            if allowed { attempt.follow() } else { attempt.stop() }
+            if allowed {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
         }))
         .build()
         .map_err(|_| "The download client could not start.".to_string())?;
@@ -1076,9 +1098,7 @@ fn run_installer(
         }
         // NSIS: /S is the silent switch and /D must come last, unquoted.
         InstallerKind::Nsis => {
-            command
-                .arg("/S")
-                .arg(format!("/D={windows_destination}"));
+            command.arg("/S").arg(format!("/D={windows_destination}"));
         }
     }
     if let Some(parent) = package.parent() {
@@ -1256,7 +1276,9 @@ fn primary_executable(directory: &Path) -> Option<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_symlink() {
                 continue;
             }
@@ -1294,7 +1316,9 @@ fn directory_bytes(path: &Path) -> u64 {
             if visited > MAX_SIZE_SCAN_ENTRIES {
                 return total;
             }
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
             if kind.is_symlink() {
                 continue;
             }
@@ -1327,7 +1351,10 @@ mod tests {
 
     #[test]
     fn only_allowlisted_https_hosts_are_usable() {
-        let allowlist = vec!["cdn.openttd.org".to_string(), "*.githubusercontent.com".to_string()];
+        let allowlist = vec![
+            "cdn.openttd.org".to_string(),
+            "*.githubusercontent.com".to_string(),
+        ];
         assert!(host_allowed("cdn.openttd.org", &allowlist));
         assert!(host_allowed("objects.githubusercontent.com", &allowlist));
         assert!(host_allowed("githubusercontent.com", &allowlist));
@@ -1337,7 +1364,10 @@ mod tests {
 
     #[test]
     fn plain_http_and_credentialed_urls_have_no_host() {
-        assert_eq!(url_host("https://cdn.openttd.org/a.exe").as_deref(), Some("cdn.openttd.org"));
+        assert_eq!(
+            url_host("https://cdn.openttd.org/a.exe").as_deref(),
+            Some("cdn.openttd.org")
+        );
         assert_eq!(url_host("http://cdn.openttd.org/a.exe"), None);
         assert_eq!(url_host("https://user:pass@cdn.openttd.org/a.exe"), None);
         assert_eq!(url_host("https:///a.exe"), None);
@@ -1396,10 +1426,17 @@ mod tests {
 
         assert_eq!(plugin.id, "com.orivo.quiky");
         assert_eq!(plugin.state, PluginState::Ready, "{}", plugin.message);
-        assert!(plugin.network_domains.contains(&"cdn.openttd.org".to_string()));
+        assert!(
+            plugin
+                .network_domains
+                .contains(&"cdn.openttd.org".to_string())
+        );
 
         let titles = load_catalog(&plugin);
-        assert!(!titles.is_empty(), "the catalogue resolves at least one title");
+        assert!(
+            !titles.is_empty(),
+            "the catalogue resolves at least one title"
+        );
         let openttd = titles
             .iter()
             .find(|title| title.slug == "openttd")
@@ -1468,7 +1505,10 @@ mod tests {
             &cancelled,
             &mut |_| {},
         ));
-        assert_eq!(outcome, Err("The package failed its integrity check.".into()));
+        assert_eq!(
+            outcome,
+            Err("The package failed its integrity check.".into())
+        );
         assert!(!temporary.exists(), "a rejected package is removed");
         let _ = fs::remove_dir_all(temporary.parent().expect("directory"));
     }

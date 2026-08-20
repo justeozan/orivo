@@ -21,8 +21,14 @@ const CLIENT_SECRET: &str = "daafbccc737745039dffe53d94fc76cf";
 const REDIRECT_URL: &str = "https://www.epicgames.com/id/api/redirect?clientId=34a02cf8f4414e29b15921876da36f9a&responseType=code";
 const OAUTH_TOKEN_ENDPOINT: &str =
     "https://account-public-service-prod.ol.epicgames.com/account/api/oauth/token";
+/// Epic's entitlement list is platform-scoped. The Windows list is the whole
+/// library — nearly every Epic game ships a Windows build — and the Mac list is
+/// exactly the subset that has a native macOS build. Asking for both is how
+/// Orivo can say "runs natively on this Mac" without guessing.
 const LAUNCHER_ASSETS_ENDPOINT: &str =
-    "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/Windows";
+    "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets";
+const WINDOWS_PLATFORM: &str = "Windows";
+const MAC_PLATFORM: &str = "Mac";
 const CATALOG_HOST: &str = "https://catalog-public-service-prod06.ol.epicgames.com";
 /// Epic answers a bulk catalog request per namespace. Keeping the batch small
 /// avoids a request URL long enough for the service to reject outright.
@@ -60,7 +66,10 @@ pub fn login_url() -> String {
 /// identity hosts and any embedded challenge; extraction does not.
 pub fn is_authorization_page(url: &reqwest::Url) -> bool {
     url.scheme() == "https"
-        && matches!(url.host_str(), Some("www.epicgames.com") | Some("epicgames.com"))
+        && matches!(
+            url.host_str(),
+            Some("www.epicgames.com") | Some("epicgames.com")
+        )
         && url.path() == "/id/api/redirect"
 }
 
@@ -218,7 +227,22 @@ struct CatalogCategory {
 pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
     let token = access_token().await?;
     let client = sources::http_client(PROVIDER)?;
-    let assets = fetch_assets(&client, &token).await?;
+    let assets = fetch_assets(&client, &token, WINDOWS_PLATFORM).await?;
+    // Native-Mac is an enhancement to a library, never a precondition for one:
+    // if Epic will not answer for the Mac platform right now, every game simply
+    // goes unmarked rather than the sync failing.
+    let native_mac = fetch_assets(&client, &token, MAC_PLATFORM)
+        .await
+        .map(|assets| {
+            assets
+                .into_iter()
+                .map(|asset| asset.app_name)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    // Locally installed games are joined in by app name, which is exactly the
+    // `source_id` the catalog already stores for an Epic entry.
+    let installations = crate::epic_install::installations();
 
     // Group by namespace: Epic's bulk catalog endpoint is namespace-scoped, so
     // one request per namespace batch replaces one request per game.
@@ -254,7 +278,18 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
                 if !is_game(item) {
                     continue;
                 }
-                library.push(PROVIDER, library_game(&namespace, asset, item));
+                library.push(
+                    PROVIDER,
+                    library_game(
+                        &namespace,
+                        asset,
+                        item,
+                        native_mac.contains(&asset.app_name),
+                        installations
+                            .get(&asset.app_name)
+                            .map(crate::epic_install::status_for),
+                    ),
+                );
             }
         }
     }
@@ -266,9 +301,10 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
 async fn fetch_assets(
     client: &reqwest::Client,
     token: &str,
+    platform: &str,
 ) -> Result<Vec<LauncherAsset>, SourceError> {
     let response = client
-        .get(LAUNCHER_ASSETS_ENDPOINT)
+        .get(format!("{LAUNCHER_ASSETS_ENDPOINT}/{platform}"))
         .query(&[("label", "Live")])
         .bearer_auth(token)
         .send()
@@ -340,18 +376,34 @@ fn is_game(item: &CatalogItem) -> bool {
     is_game
 }
 
-fn library_game(namespace: &str, asset: &LauncherAsset, item: &CatalogItem) -> SourceLibraryGame {
+fn library_game(
+    namespace: &str,
+    asset: &LauncherAsset,
+    item: &CatalogItem,
+    native_mac: bool,
+    install: Option<crate::epic_install::EpicInstallStatus>,
+) -> SourceLibraryGame {
     SourceLibraryGame {
+        native_mac: Some(native_mac),
+        install: install.map(Into::into),
         source_id: asset.app_name.clone(),
         // The Epic launcher URI needs all three parts, so the launch reference
         // keeps them joined rather than storing three loose fields.
         launch_ref: format!("{}:{}:{}", namespace, asset.catalog_item_id, asset.app_name),
         title: item.title.clone(),
         description: sources::normalize_html_text(&item.description, 600),
-        genre: (!item.developer.trim().is_empty()).then(|| item.developer.clone()),
+        // Epic's bulk catalog carries no genre — `categories` files an entry as
+        // `games`, not as an RPG — so the library takes none from here. The
+        // studio used to be put in this field for want of anything better,
+        // which is how "Ubisoft Montréal" ended up billed as a genre.
+        genre: None,
+        developer: (!item.developer.trim().is_empty()).then(|| item.developer.clone()),
         cover_url: key_image(item, &["DieselGameBoxTall", "OfferImageTall", "Thumbnail"]),
-        // Deliberately no `DieselGameBoxLogo` fallback: a transparent logo makes
-        // a terrible wallpaper, and no wallpaper reads better than a bad one.
+        // Epic ships the wordmark apart from the artwork precisely so a client
+        // can lay one over the other. Orivo now does, so it is worth taking —
+        // as a logo. It is still never a wallpaper: a transparent PNG makes a
+        // terrible one, and no wallpaper reads better than a bad one.
+        logo_url: key_image(item, &["DieselGameBoxLogo"]),
         hero_url: key_image(item, &["DieselGameBox", "OfferImageWide"]),
         landscape_url: key_image(item, &["DieselGameBox", "OfferImageWide"]),
         play_time_seconds: 0,
@@ -465,14 +517,49 @@ mod tests {
             ..CatalogItem::default()
         };
 
-        let game = library_game("d5241c", &asset, &item);
+        let game = library_game("d5241c", &asset, &item, false, None);
         assert_eq!(game.source_id, "Sugar");
         assert_eq!(game.launch_ref, "d5241c:a1b2c3:Sugar");
         assert_eq!(
             game.cover_url.as_deref(),
             Some("https://cdn1.epicgames.com/tall.png")
         );
-        assert!(crate::catalog::is_valid_provider_reference(&game.launch_ref));
+        assert!(crate::catalog::is_valid_provider_reference(
+            &game.launch_ref
+        ));
+        assert_eq!(game.native_mac, Some(false));
+        assert!(game.install.is_none());
+    }
+
+    #[test]
+    fn a_mac_entitlement_and_a_running_download_travel_with_the_library_record() {
+        let asset = LauncherAsset {
+            app_name: "Sugar".into(),
+            catalog_item_id: "a1b2c3".into(),
+            namespace: "d5241c".into(),
+        };
+        let item = CatalogItem {
+            title: "Fall Guys".into(),
+            categories: vec![CatalogCategory {
+                path: "games".into(),
+            }],
+            ..CatalogItem::default()
+        };
+        let install = crate::epic_install::EpicInstallStatus {
+            app_name: "Sugar".into(),
+            state: crate::epic_install::EpicInstallState::Installing,
+            percent: 42,
+            installed_bytes: 42,
+            total_bytes: 100,
+            install_path: Some("/Users/Shared/Epic/Fall Guys".into()),
+        };
+
+        let game = library_game("d5241c", &asset, &item, true, Some(install));
+        assert_eq!(game.native_mac, Some(true));
+        let install = game.install.unwrap();
+        assert!(install.installing);
+        assert!(!install.installed);
+        assert_eq!(install.percent, 42);
     }
 
     #[test]

@@ -7,7 +7,8 @@
 
 use crate::catalog::{
     Catalog, Game, GameSource as CatalogGameSource, LaunchTarget, SOURCE_COVER_URL_KEY,
-    SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_LANDSCAPE_URL_KEY, STEAM_STORE_GENRE_KEY,
+    SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_INSTALL_PERCENT_KEY, SOURCE_INSTALLED_KEY,
+    SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY, STEAM_STORE_GENRE_KEY,
     STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -165,11 +166,39 @@ pub enum PlatformView {
     Android,
 }
 
+/// Whether the store's own client has this game on this machine. `Unknown` is
+/// the honest answer for a game from a store that has no local client to ask —
+/// it is not the same as "not installed", and the UI must not claim it is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstallStateView {
+    Installed,
+    Installing,
+    NotInstalled,
+    Unknown,
+}
+
+/// Whether the game ships a build that runs natively on macOS. Again `Unknown`
+/// is distinct from `NotNative`: only a store that publishes per-platform
+/// entitlements can tell us, and saying "Windows only" about a game we simply
+/// have not asked about would be a lie.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MacCompatibilityView {
+    Native,
+    NotNative,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrimaryAction {
     Play,
     InstallSteam,
+    /// The Epic Games Launcher is here and this entitlement is not downloaded
+    /// yet. Epic is the one connected store that publishes an install URI, so
+    /// it is the one connected store that gets its own install action.
+    InstallEpic,
     ConfigureWine,
     ViewOffer,
     Unavailable,
@@ -261,6 +290,11 @@ pub struct GameDetailView {
     pub media: Vec<GameMediaView>,
     pub related_games: Vec<GameSummaryView>,
     pub primary_action: PrimaryAction,
+    pub install_state: InstallStateView,
+    /// Only set while a download is running, so the UI can show how far along
+    /// the store's client actually is.
+    pub install_percent: Option<u8>,
+    pub mac_compatibility: MacCompatibilityView,
 }
 
 /// Normalised provider/library record accepted by the detail service. Store
@@ -278,6 +312,11 @@ pub struct GameDetailRecord {
     pub media: Vec<GameMediaAsset>,
     pub related_games: Vec<GameSummaryView>,
     pub primary_action: PrimaryAction,
+    pub install_state: InstallStateView,
+    /// Only set while a download is running, so the UI can show how far along
+    /// the store's client actually is.
+    pub install_percent: Option<u8>,
+    pub mac_compatibility: MacCompatibilityView,
 }
 
 impl GameDetailRecord {
@@ -653,6 +692,9 @@ impl GameDetailService {
             media,
             related_games: record.related_games,
             primary_action: record.primary_action,
+            install_state: record.install_state,
+            install_percent: record.install_percent,
+            mac_compatibility: record.mac_compatibility,
         }))
     }
 }
@@ -692,6 +734,65 @@ pub fn set_game_wishlist(
     })
 }
 
+/// The single place a catalog record becomes an install answer. The Library and
+/// the detail page both read it, so the two can never disagree about whether a
+/// game is on this machine — the way they once could about its badge.
+pub fn install_state_of(game: &Game) -> InstallStateView {
+    // Only a store whose client this machine can be asked about has a real
+    // answer. Epic is that store today; everything else is honestly unknown.
+    let asks_a_local_client = matches!(
+        &game.launch_target,
+        LaunchTarget::Provider { provider, .. } if provider == "epic"
+    );
+    if !asks_a_local_client {
+        return InstallStateView::Unknown;
+    }
+    if flag(game, SOURCE_INSTALLED_KEY) {
+        InstallStateView::Installed
+    } else if flag(game, SOURCE_INSTALLING_KEY) {
+        InstallStateView::Installing
+    } else {
+        InstallStateView::NotInstalled
+    }
+}
+
+pub fn install_percent_of(game: &Game) -> Option<u8> {
+    game.extra
+        .get(SOURCE_INSTALL_PERCENT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .map(|percent| percent.min(100) as u8)
+}
+
+/// An absent key means the connector never got an answer, which is not a "no".
+/// Only a value Epic actually published decides this.
+pub fn mac_compatibility_of(game: &Game) -> MacCompatibilityView {
+    match game
+        .extra
+        .get(SOURCE_NATIVE_MAC_KEY)
+        .and_then(serde_json::Value::as_bool)
+    {
+        Some(true) => MacCompatibilityView::Native,
+        Some(false) => MacCompatibilityView::NotNative,
+        None => MacCompatibilityView::Unknown,
+    }
+}
+
+/// Whether a connected-store game can actually be started here. Having the
+/// store's client is necessary but not sufficient: where the client can tell us
+/// the game is not downloaded, Play must not be offered.
+pub fn provider_game_launchable(game: &Game, provider: &str) -> bool {
+    crate::launcher::provider_launchable(provider)
+        && install_state_of(game) != InstallStateView::NotInstalled
+        && install_state_of(game) != InstallStateView::Installing
+}
+
+fn flag(game: &Game, key: &str) -> bool {
+    game.extra
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn project_catalog_game(
     game: &Game,
     catalog: &Catalog,
@@ -720,15 +821,24 @@ fn project_catalog_game(
                 && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
         }
         LaunchTarget::Runner { .. } => false,
+        // Epic tells us, through the launcher's own manifests, whether this
+        // game is actually on disk. Having the client is no longer enough:
+        // Play must not be offered for something that is only owned.
         // Only a store whose client is on this machine gets a live Play
-        // button; the rest stay records of what the account owns.
-        LaunchTarget::Provider { provider, .. } => crate::launcher::provider_launchable(provider),
+        // button, and only where that client does not tell us the game is
+        // still missing.
+        LaunchTarget::Provider { provider, .. } => provider_game_launchable(game, provider),
     };
     let primary_action = if launchable {
         PrimaryAction::Play
     } else {
         match (&game.launch_target, source) {
             (LaunchTarget::Steam { .. }, _) => PrimaryAction::InstallSteam,
+            (LaunchTarget::Provider { provider, .. }, _)
+                if crate::launcher::provider_installable(provider) =>
+            {
+                PrimaryAction::InstallEpic
+            }
             (LaunchTarget::Runner { runner_id, .. }, GameSourceView::Wine)
                 if runner_id == WINE_STAGING_RUNNER_ID =>
             {
@@ -763,6 +873,22 @@ fn project_catalog_game(
             _ => None,
         })
         .collect::<Vec<_>>();
+    // Epic lists its entitlements per platform, so a game present in its Mac
+    // list has a real native macOS build. That is a fact about the game, not
+    // about this machine, so it belongs beside the Steam platform badges.
+    let mut supported_platforms = supported_platforms;
+    if game
+        .extra
+        .get(SOURCE_NATIVE_MAC_KEY)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !supported_platforms.contains(&PlatformView::Macos)
+    {
+        supported_platforms.push(PlatformView::Macos);
+    }
+    let install_state = install_state_of(game);
+    let install_percent = install_percent_of(game);
+    let mac_compatibility = mac_compatibility_of(game);
     let media = catalog_media(game, cache_dir);
     let hero_url = media
         .iter()
@@ -820,6 +946,9 @@ fn project_catalog_game(
         media,
         related_games: Vec::new(),
         primary_action,
+        install_state,
+        install_percent,
+        mac_compatibility,
     }
 }
 
@@ -1321,6 +1450,101 @@ mod tests {
         ))
     }
 
+    fn epic_game(extra: BTreeMap<String, serde_json::Value>) -> Game {
+        let mut game = Game::from_executable("/bin/sh").unwrap();
+        game.id = "epic:sugar".into();
+        game.title = "Rocket League".into();
+        game.executable_path = None;
+        game.source = CatalogGameSource::Epic;
+        game.source_id = Some("Sugar".into());
+        game.launch_target = LaunchTarget::Provider {
+            provider: "epic".into(),
+            app_ref: "d5241c:a1b2c3:Sugar".into(),
+        };
+        game.extra = extra;
+        game
+    }
+
+    /// The two facts the Play button cannot express have to reach the view, and
+    /// an absent answer must stay absent rather than becoming a "no".
+    #[test]
+    fn an_epic_record_reports_its_install_state_and_mac_answer() {
+        let catalog = Catalog::default();
+
+        let untouched = project_catalog_game(&epic_game(BTreeMap::new()), &catalog, None);
+        assert_eq!(untouched.install_state, InstallStateView::NotInstalled);
+        // An owned-but-not-downloaded game must never offer Play. Asserted
+        // against the client probe rather than a literal, so this holds on a
+        // machine with the Epic launcher and on CI without it.
+        assert!(!untouched.summary.launchable);
+        assert_eq!(
+            untouched.primary_action,
+            if crate::launcher::provider_installable("epic") {
+                PrimaryAction::InstallEpic
+            } else {
+                PrimaryAction::Unavailable
+            }
+        );
+        assert_eq!(untouched.mac_compatibility, MacCompatibilityView::Unknown);
+        assert_eq!(untouched.install_percent, None);
+
+        let installed = project_catalog_game(
+            &epic_game(BTreeMap::from([
+                (
+                    SOURCE_INSTALLED_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    SOURCE_NATIVE_MAC_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+            ])),
+            &catalog,
+            None,
+        );
+        assert_eq!(installed.install_state, InstallStateView::Installed);
+        assert_eq!(installed.mac_compatibility, MacCompatibilityView::Native);
+
+        let downloading = project_catalog_game(
+            &epic_game(BTreeMap::from([
+                (
+                    SOURCE_INSTALLING_KEY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    SOURCE_INSTALL_PERCENT_KEY.to_string(),
+                    serde_json::Value::from(42u8),
+                ),
+                (
+                    SOURCE_NATIVE_MAC_KEY.to_string(),
+                    serde_json::Value::Bool(false),
+                ),
+            ])),
+            &catalog,
+            None,
+        );
+        assert_eq!(downloading.install_state, InstallStateView::Installing);
+        assert_eq!(downloading.install_percent, Some(42));
+        assert_eq!(
+            downloading.mac_compatibility,
+            MacCompatibilityView::NotNative
+        );
+    }
+
+    /// A local game has no store client to ask, so it must not be labelled
+    /// "not installed" — it is simply not a question that applies.
+    #[test]
+    fn a_game_with_no_store_client_reports_an_unknown_install_state() {
+        let record = project_catalog_game(
+            &Game::from_executable("/bin/sh").unwrap(),
+            &Catalog::default(),
+            None,
+        );
+
+        assert_eq!(record.install_state, InstallStateView::Unknown);
+        assert_eq!(record.mac_compatibility, MacCompatibilityView::Unknown);
+    }
+
     fn record(id: &str, owned: bool, action: PrimaryAction) -> GameDetailRecord {
         GameDetailRecord {
             summary: GameSummaryView {
@@ -1366,6 +1590,9 @@ mod tests {
             }],
             related_games: Vec::new(),
             primary_action: action,
+            install_state: InstallStateView::Unknown,
+            install_percent: None,
+            mac_compatibility: MacCompatibilityView::Unknown,
         }
     }
 

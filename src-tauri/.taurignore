@@ -1,0 +1,4 @@
+# Keep the Tauri window stable while agents edit the backend. Restart `tauri dev`
+# manually when a Rust, capability, or Cargo dependency change needs loading.
+capabilities/
+src/

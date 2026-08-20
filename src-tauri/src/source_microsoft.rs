@@ -446,7 +446,12 @@ fn library_game(provider: SourceProvider, title: &TitleEntry) -> SourceLibraryGa
         launch_ref: launch_ref.to_string(),
         title: title.name.clone(),
         description: sources::normalize_html_text(&detail.description, 600),
-        genre: detail.genres.first().and_then(|genre| sources::normalize_text(genre, 80)),
+        genre: detail
+            .genres
+            .first()
+            .and_then(|genre| sources::normalize_text(genre, 80)),
+        developer: None,
+        logo_url: None,
         cover_url: non_empty(&title.display_image),
         hero_url: non_empty(&title.display_image),
         landscape_url: non_empty(&title.display_image),
@@ -455,6 +460,8 @@ fn library_game(provider: SourceProvider, title: &TitleEntry) -> SourceLibraryGa
             .title_history
             .as_ref()
             .and_then(|history| normalize_timestamp(&history.last_time_played)),
+        native_mac: None,
+        install: None,
     }
 }
 
@@ -504,7 +511,8 @@ mod tests {
             &reqwest::Url::parse("https://login.live.com/oauth20_authorize.srf").unwrap()
         ));
         assert!(!is_redirect_page(
-            &reqwest::Url::parse("https://login.live.com.evil.example/oauth20_desktop.srf").unwrap()
+            &reqwest::Url::parse("https://login.live.com.evil.example/oauth20_desktop.srf")
+                .unwrap()
         ));
     }
 
@@ -564,8 +572,13 @@ mod tests {
         let store = library_game(SourceProvider::MicrosoftStore, &title);
         assert_eq!(store.source_id, "1017535743");
         assert_eq!(store.launch_ref, "Microsoft.MinecraftUWP_8wekyb3d8bbwe");
-        assert!(crate::catalog::is_valid_provider_reference(&store.launch_ref));
-        assert_eq!(store.last_played_at.as_deref(), Some("2026-01-04T18:00:00.0000000Z"));
+        assert!(crate::catalog::is_valid_provider_reference(
+            &store.launch_ref
+        ));
+        assert_eq!(
+            store.last_played_at.as_deref(),
+            Some("2026-01-04T18:00:00.0000000Z")
+        );
 
         let xbox = library_game(SourceProvider::Xbox, &title);
         assert_eq!(xbox.launch_ref, "1017535743");

@@ -26,6 +26,8 @@
   initial-value: 0deg;
 }
 
+
+
 * { box-sizing: border-box; }
 
 html, body, #app { width: 100%; min-width: 320px; min-height: 100%; margin: 0; }
@@ -67,15 +69,49 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   transition: opacity 220ms cubic-bezier(.2, .8, .2, 1), transform 800ms ease-out;
 }
 
-.hero-image.is-active { opacity: .84; transform: scale(1); }
+/* Full strength. The wallpaper is the page, so nothing veils it: the flat 16%
+   the art used to lose here is back, and the text above it carries its own
+   shadow instead of standing on a tint. */
+.hero-image.is-active { opacity: 1; transform: scale(1); }
 
 .scene-overlay { z-index: -2; }
 
-.scene-overlay--left { background: linear-gradient(90deg, rgba(9,10,14,.92) 0%, rgba(9,10,14,.6) 25%, rgba(9,10,14,0) 74%); }
+/* Legibility without darkness: the text block sits on blurred artwork rather
+   than on a black wash, so a bright, busy wallpaper keeps its light and its
+   colour and simply stops competing with the words. The mask fades the blur out
+   well before the middle, which is where the subject of the art lives. */
+/* A hint of shade behind the text block, nowhere near the wash this used to be
+   (.92 at the edge, still .6 a quarter of the way in). It is gone by half
+   width, so the subject of the artwork never sits in it. */
+.scene-overlay--left { background: linear-gradient(90deg, rgba(8,9,13,.4) 0%, rgba(8,9,13,.19) 24%, rgba(8,9,13,0) 52%); }
 
-.scene-overlay--bottom { background: linear-gradient(0deg, rgba(8,9,13,.91) 0%, rgba(8,9,13,.415) 24%, rgba(8,9,13,0) 49%, rgba(8,9,13,.27) 100%); }
+/* A floor under the card rail and the browse bar, clear of the artwork by half
+   height. */
+.scene-overlay--bottom { background: linear-gradient(0deg, rgba(8,9,13,.94) 0%, rgba(8,9,13,.74) 14%, rgba(8,9,13,.34) 32%, rgba(8,9,13,0) 52%); }
 
-.scene-overlay--top { height: 118px; background: linear-gradient(180deg, rgba(9,10,14,.58), rgba(9,10,14,0)); }
+/* Contrast without a veil: a tight shadow draws the glyph edge and a wide one
+   lays a halo behind it, which holds up over a bright wallpaper while leaving
+   the wallpaper itself untouched. The Library is the only page whose artwork is
+   undimmed, so it is the only page whose topbar needs this.
+   Every button is named on its own: a form control does not inherit
+   `text-shadow` from its container, so listing the container alone silently
+   leaves every label in it flat. */
+.topbar--over-art .primary-nav,
+.topbar--over-art .nav-link,
+.hero-content h1,
+.hero-meta,
+.rail-header h2,
+.browse-bar,
+.browse-bar__mood,
+.browse-bar__segment,
+.browse-bar__mode {
+  text-shadow: 0 1px 2px rgba(6,6,10,.7), 0 2px 16px rgba(6,6,10,.55);
+}
+
+/* Glyphs and translucent pills cannot take a text shadow, and their surfaces
+   were tuned against the scrims this page no longer has. Over bare artwork they
+   carry a little more of their own. */
+.topbar--over-art .search-control { background: rgba(16,15,19,.6); }
 
 .topbar {
   position: absolute;
@@ -112,7 +148,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .topbar--over-content::before { opacity: 1; }
 
-.nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .rail-filters, .controller-hud, .hud-category, .hud-pagination, .hud-controls, .hud-controls > span { display: flex; align-items: center; }
+.nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
 
 .nav-cluster { min-width: 0; gap: clamp(12px, 1.45vw, 22px); }
 
@@ -132,6 +168,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .brand-mark-button:active { transform: scale(.96); }
 .brand-mark { width: 32px; height: 30px; object-fit: contain; }
 .brand-mark-button:hover .brand-mark { animation: brand-mark-spin 620ms cubic-bezier(.2,.72,.25,1); }
+/* Wins over the hover spin: switching Rage on while the pointer rests on the
+   mark must still play the arrival. */
+.brand-mark.brand-mark--arriving,
+.brand-mark-button:hover .brand-mark.brand-mark--arriving {
+  animation: rage-mark-arrive 760ms cubic-bezier(.16, .84, .3, 1.06) both;
+}
 
 .library-source-menu {
   position: absolute;
@@ -188,8 +230,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .library-source-action__chevron { width: 16px; height: 16px; color: #bdb6c8; }
 /* A connected source listed for information only: same anatomy as an action
    row, but it never lights up as a pressable item. */
-.library-source-row { min-height: 48px; cursor: default; }
-.library-source-row:hover { color: #ebe7ee; background: transparent; }
 
 .top-divider { width: 1px; height: 22px; background: rgba(255,255,255,.11); }
 
@@ -207,9 +247,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   transition: background 160ms ease, color 160ms ease;
 }
 
+/* The shared `display: flex` above outranks the UA `[hidden]` rule, so a nav
+   link hidden behind a preference would still paint. */
+.nav-link[hidden] { display: none !important; }
 .nav-link .icon { width: 15px; height: 15px; }
 .nav-link:hover { color: #fff; background: rgba(255,255,255,.08); }
-.nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.52); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); }
+.nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
 .search-control {
   width: 100%;
@@ -243,11 +286,25 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
 
 .profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
-.quiet-icon { display: grid; width: 22px; height: 24px; padding: 0; place-items: center; color: #e8e4e8; background: transparent; }
-.quiet-icon:hover { color: #fff; }
-.quiet-icon .icon { width: 16px; height: 16px; }
-.top-divider--right { margin-left: -5px; }
 .avatar { width: 40px; height: 40px; border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
+
+.feedback-button {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  background: rgba(255,255,255,.06);
+  color: rgba(255,255,255,.72);
+  transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+}
+.feedback-button:hover { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+.feedback-button svg { width: 18px; height: 18px; }
+/* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
+   Sentry DSN would still paint the button. */
+.feedback-button[hidden] { display: none !important; }
 
 .scene-arrow {
   position: absolute;
@@ -293,12 +350,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   height: 29px;
   align-items: center;
   align-self: flex-start;
+  margin-top: 2px;
   padding: 0 12px;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,.14);
   border-radius: 16px;
   color: #ddd9e0;
-  background: rgba(20,18,24,.37);
+  /* Sits directly on undimmed artwork, so the pill carries its own backdrop. */
+  background: rgba(20,18,24,.55);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -309,7 +368,20 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 /* Long titles wrap between words and are clamped, never broken mid-word. */
 .hero-content h1 { display: -webkit-box; overflow: hidden; max-width: 560px; max-height: 1.96em; margin: 14px 0 18px; color: #f4f2f7; font-size: clamp(48px, 4.3vw, 66px); font-weight: 460; hyphens: none; letter-spacing: -.046em; line-height: .98; overflow-wrap: normal; word-break: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .hero-content h1.is-changing { animation: hero-title-arrive 420ms cubic-bezier(.16, .8, .2, 1) both; }
-.hero-description { display: -webkit-box; overflow: hidden; max-width: 340px; margin: 0; color: #d0cdd4; font-size: 17px; font-weight: 400; line-height: 1.38; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+/* The wordmark stands where the title would, at the title's own weight in the
+   layout: same top margin, same room below, so a logo and a text fallback never
+   move the metadata under them. Height-bounded rather than width-bounded — a
+   wide mark and a tall one have to look like the same piece of furniture. */
+.hero-logo {
+  max-width: min(760px, 100%);
+  height: clamp(150px, 22svh, 300px);
+  margin: 0 0 14px;
+  object-fit: contain;
+  object-position: left center;
+  filter: drop-shadow(0 2px 10px rgba(6,6,10,.55));
+}
+.hero-content [hidden] { display: none !important; }
 
 .hero-meta { flex-wrap: wrap; row-gap: 8px; gap: 24px; margin-top: 11px; color: #c7c2ca; font-size: 14px; }
 .hero-meta > span { display: inline-flex; min-width: 0; align-items: center; gap: 8px; white-space: nowrap; }
@@ -325,16 +397,32 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .hero-platform.is-compatible { color: #b6dfc1; }
 .hero-platform.is-incompatible { color: #e2b3b6; }
 
+/* The status row: what the Play button cannot say. It sits between the meta
+   line and the actions so a player reads "Not installed" before reaching for
+   the button, not after the Epic launcher has opened on top of Orivo. */
+.hero-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.hero-status__chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px 5px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(18,16,24,.55); color: #e8e5ec; font-size: 13.5px; font-weight: 550; white-space: nowrap; }
+.hero-status__chip .icon { width: 15px; height: 15px; flex: none; }
+/* Ready is the only state that earns colour; the rest stay quiet so the row
+   never competes with the primary action beside it. */
+.hero-status__chip[data-tone="ready"] { border-color: rgba(150,240,190,.34); color: #9df3c4; }
+.hero-status__chip[data-tone="pending"] { color: #c7c2ca; }
+.hero-status__chip[data-tone="progress"] { border-color: rgba(198,186,255,.42); color: #cdbcff; }
+.hero-status__chip[data-tone="warn"] { border-color: rgba(255,214,153,.3); color: #f2ce9a; }
+
 .hero-actions { gap: 13px; margin-top: 24px; }
 .play-button { display: inline-flex; align-items: center; justify-content: center; width: 148px; min-width: 148px; height: 50px; gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 16px; font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
 .play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
-.play-button:active, .round-button:active { transform: translateY(1px) scale(.98); }
+.play-button:active { transform: translateY(1px) scale(.98); }
 .play-button .icon { width: 14px; height: 14px; }
 .play-button:disabled { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
+/* While Epic transfers, the button *is* the progress bar: a fill behind the
+   label, so nothing moves and nothing has to be taken away when it finishes. */
+.play-button { position: relative; overflow: hidden; }
+.play-button > :not(.play-button__fill) { position: relative; }
+.play-button__fill { position: absolute; inset: 0 auto 0 0; background: rgba(26,24,32,.20); transition: width 400ms ease; pointer-events: none; }
+.play-button.is-downloading:disabled { opacity: 1; filter: none; }
 
-.round-button { display: grid; width: 50px; height: 50px; padding: 0; place-items: center; border: 1px solid rgba(255,255,255,.15); border-radius: 50%; color: #f0edf1; background: rgba(15,16,22,.39); box-shadow: inset 0 1px rgba(255,255,255,.05); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); transition: transform 160ms ease, background 160ms ease; }
-.round-button:hover { background: rgba(255,255,255,.13); transform: translateY(-1px); }
-.round-button .icon { width: 19px; height: 19px; }
 
 /* The Steam import and Steam account surfaces are cards inside
    Settings › Libraries & Sources. They are no longer floating dialogs, so the
@@ -384,6 +472,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .steam-header-button:active:not(:disabled) { transform: scale(.96); }
 .steam-header-button:disabled { cursor: default; opacity: .45; }
 .steam-header-button .icon { width: 16px; height: 16px; }
+/* The base button is a 34px icon square. One header button carries words
+   instead, and inside that square they wrapped to three lines and spilled out
+   of the card — so a labelled variant sizes to its text and refuses to wrap. */
+.steam-header-button--label {
+  width: auto;
+  padding: 0 13px;
+  font-size: 12.5px;
+  font-weight: 560;
+  white-space: nowrap;
+}
 
 .steam-import-body {
   min-height: 0;
@@ -995,6 +1093,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 @keyframes steam-panel-enter { from { opacity: 0; transform: translateY(-8px) scale(.988); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes steam-spin { to { transform: rotate(360deg); } }
 @keyframes brand-mark-spin { to { transform: rotate(360deg); } }
+/* Rage arriving: the spiral winds up out of nothing and settles. One turn and
+   a little overshoot in the easing — it is a flourish, not a loading state. */
+@keyframes rage-mark-arrive {
+  from { opacity: 0; transform: rotate(-330deg) scale(.55); }
+  to { opacity: 1; transform: rotate(0deg) scale(1); }
+}
 
 .recently-played {
   --rail-card-height: 222px;
@@ -1008,14 +1112,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .rail-header { height: 36px; justify-content: space-between; padding-right: 78px; }
 .rail-header h2 { margin: 0; color: #f1eef3; font-size: 15px; font-weight: 600; transform: translateY(-6px); }
-
-.rail-filters { gap: 10px; }
-.compact-filter, .compact-icon { height: 34px; border: 1px solid rgba(255,255,255,.12); color: #d6d2d8; background: rgba(12,13,17,.35); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(16px) saturate(125%); backdrop-filter: blur(16px) saturate(125%); }
-.compact-filter { display: inline-flex; align-items: center; gap: 8px; padding: 0 13px; border-radius: 17px; font-size: 12px; }
-.compact-filter .icon { width: 11px; height: 11px; }
-.compact-icon { display: grid; width: 38px; padding: 0; place-items: center; border-radius: 17px; }
-.compact-icon .icon { width: 16px; height: 16px; }
-.compact-filter:hover, .compact-icon:hover { background: rgba(255,255,255,.11); color: #fff; }
 
 .game-cards {
   display: flex;
@@ -1134,28 +1230,85 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .game-card.is-selected .card-art--landscape { opacity: 1; transform: scale(1); }
 .game-card:hover .card-art { transform: scale(1.035); }
 
-.card-time { position: absolute; z-index: 2; right: 14px; left: 14px; }
-
-.card-time { bottom: 14px; color: #d4cfd7; font-size: 12px; opacity: .82; text-shadow: 0 2px 12px rgba(0,0,0,.92); transform: translateY(4px); transition: opacity 220ms ease 30ms, transform 300ms cubic-bezier(.22, .74, .2, 1) 30ms; }
-.game-card.is-selected .card-time { opacity: 1; transform: translateY(0); }
 @keyframes cover-glint-orbit { to { --cover-glint-angle: 360deg; } }
 @keyframes hero-title-arrive { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 .rail-empty { width: 230px; padding: 20px; color: #b6b0bb; }
 
-.controller-hud { position: absolute; z-index: 3; right: 40px; bottom: 45px; left: 67px; justify-content: space-between; color: #c8c4cb; font-size: 13px; }
-.hud-category { gap: 8px; color: #eeebf0; }
-.hud-category::before { content: ""; width: 37px; height: 3px; border-radius: 2px; background: #33313a; }
-.hud-category i { width: 7px; height: 7px; margin-left: -16px; border-radius: 50%; background: var(--violet); }
-.hud-pagination { gap: 15px; }
-.hud-pagination i { width: 100px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.1); }
-.hud-pagination .is-active { background: var(--violet); }
-.hud-controls { gap: 26px; }
-.hud-controls > span { gap: 9px; }
-.hud-controls .icon { width: 24px; height: 24px; padding: 6px; border-radius: 50%; color: #ddd9df; background: rgba(255,255,255,.09); }
-.hud-controls em { font-style: normal; }
-.hud-controls b { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; font-size: 13px; }
-.gamepad-a { color: #74e392; background: #1e5131; }
-.gamepad-b { color: #f06b6e; background: #4c2428; }
+/* The browse bar: mood on the left, the mode's segments across the middle, the
+   mode button on the right. It keeps the footprint of the controller hint bar
+   it replaced, because that line is exactly where the eye already rests. */
+.browse-bar { position: absolute; z-index: 3; right: 40px; bottom: 45px; left: 67px; gap: 28px; color: #c8c4cb; font-size: 13px; }
+
+.browse-bar__mood { flex: none; gap: 10px; padding: 0; color: #cfcad6; background: none; font-size: inherit; transition: color 200ms ease; }
+.browse-bar__mood[aria-checked="true"] { color: #f4f2f7; }
+
+/* A real switch: a track the knob travels, not a dash with a dot parked on it.
+   The knob is what moves, so the eye reads the state before the word does. */
+.browse-bar__switch {
+  display: block;
+  position: relative;
+  width: 38px;
+  height: 21px;
+  flex: none;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.35);
+  transition: background 220ms ease, border-color 220ms ease;
+}
+.browse-bar__switch i {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: #b9b3c6;
+  box-shadow: 0 1px 3px rgba(0,0,0,.45);
+  transition: transform 260ms cubic-bezier(.22, .74, .2, 1), background 220ms ease;
+}
+.browse-bar__mood:hover .browse-bar__switch { border-color: rgba(255,255,255,.28); }
+.browse-bar__mood[aria-checked="true"] .browse-bar__switch {
+  border-color: color-mix(in oklab, var(--violet) 55%, transparent);
+  background: color-mix(in oklab, var(--violet) 40%, transparent);
+}
+.browse-bar__mood[aria-checked="true"] .browse-bar__switch i {
+  background: #fff;
+  transform: translateX(17px);
+}
+
+/* The segments are a group in the middle of the bar, not a scale stretched
+   across it: labels alone, gathered and centred, with weight for the one you
+   are on. A rule under each word was one graphic too many for a row of words. */
+.browse-bar__segments { min-width: 0; flex: 1; justify-content: center; gap: clamp(18px, 2.6vw, 40px); }
+.browse-bar__segment { min-width: 0; flex: none; padding: 0; color: #97929f; background: none; font-size: 12.5px; text-align: center; transition: color 180ms ease; }
+.browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browse-bar__segment:hover { color: #ded9e4; }
+.browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
+
+/* Glass, like every other floating control, and no chevron: the word already
+   changes each time it is pressed, which is the whole affordance. */
+.browse-bar__mode {
+  flex: none;
+  height: 32px;
+  padding: 0 16px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  color: #e6e2ec;
+  background: rgba(18,17,22,.42);
+  box-shadow: inset 0 1px rgba(255,255,255,.06);
+  font-size: 12px;
+  font-weight: 560;
+  letter-spacing: .01em;
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  transition: background 180ms ease, color 180ms ease, border-color 180ms ease;
+}
+.browse-bar__mode:hover { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(30,28,36,.55); }
+.browse-bar__mode:active { transform: translateY(1px); }
+
+/* Rage changes nothing about the library and everything about the accent. */
+body[data-mood="rage"] { --violet: #f2453c; }
 
 .toast { position: absolute; z-index: 12; bottom: 90px; left: 50%; max-width: min(480px, calc(100vw - 48px)); margin: 0; padding: 10px 14px; transform: translate(-50%, 10px); border: 1px solid rgba(255,255,255,.15); border-radius: 10px; color: #f4f2f7; background: rgba(22,21,27,.88); box-shadow: 0 16px 44px rgba(0,0,0,.35); opacity: 0; pointer-events: none; -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); transition: opacity 160ms ease, transform 160ms ease; font-size: 13px; }
 .toast.is-visible { transform: translate(-50%, 0); opacity: 1; }
@@ -1163,7 +1316,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 @media (max-width: 1180px) {
   .topbar { grid-template-columns: minmax(0, 1fr) minmax(200px, min(352px, 31vw)) minmax(0, 1fr); }
   .nav-link { padding: 0 8px; }
-  .hud-pagination i { width: 68px; }
+  .browse-bar { gap: 20px; }
+  .browse-bar__segments { gap: 18px; }
 }
 
 @media (max-width: 860px) {
@@ -1176,7 +1330,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
      the rest of a taller window and shorten every internal scroll container. */
   .selector { min-height: max(760px, 100svh); }
   .topbar { grid-template-columns: 1fr auto; }
-  .primary-nav, .top-divider, .quiet-icon { display: none; }
+  .primary-nav, .top-divider { display: none; }
   .nav-cluster { gap: 0; }
   .profile-cluster { gap: 0; }
   .library-source-menu { top: calc(100% + 65px); left: -5px; width: min(330px, calc(100vw - 40px)); }
@@ -1186,8 +1340,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   .scene-arrow { top: 360px; }
   .recently-played { right: 0; bottom: 82px; left: 32px; }
   .rail-header { padding-right: 24px; }
-  .rail-filters { display: none; }
-  .controller-hud { display: none; }
+  /* The bar stays: it is the only way to change what the rail holds, so a
+     narrow window loses the mood mark rather than the controls. */
+  .browse-bar { right: 20px; bottom: 28px; left: 32px; gap: 14px; }
+  .browse-bar__mood { display: none; }
   .wine-panel {
     top: 76px;
     right: 16px;
@@ -1204,18 +1360,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 @media (max-height: 800px) and (min-width: 861px) {
   .hero-content { top: 19vh; bottom: 358px; }
   .hero-content h1 { margin: 12px 0 14px; font-size: clamp(44px, 4.2vw, 58px); }
-  .hero-description { font-size: 16px; }
   .hero-meta { margin-top: 9px; }
   .hero-actions { margin-top: 14px; }
   .recently-played { bottom: 66px; }
-  .controller-hud { bottom: 24px; }
+  .browse-bar { bottom: 24px; }
   .wine-panel { top: 72px; bottom: 16px; }
 }
 
 @media (max-height: 740px) and (min-width: 861px) {
   .hero-content { top: 17vh; bottom: 358px; }
   .hero-content h1 { margin: 10px 0 12px; font-size: clamp(40px, 3.9vw, 52px); }
-  .hero-description { -webkit-line-clamp: 1; }
   .hero-meta { display: none; }
   .hero-actions { margin-top: 12px; }
   .steam-panel-header { min-height: 69px; padding-top: 12px; padding-bottom: 12px; }
@@ -1252,6 +1406,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   overscroll-behavior: contain;
   scrollbar-color: rgba(210,200,255,.32) transparent;
   scrollbar-width: thin;
+}
+
+/* A page that fits its own frame: no scrolling here, and no topbar clearance
+   either — the page places its content inside the box and lets whatever needs
+   to scroll do so in its own card. */
+.app-page--fit {
+  overflow: hidden;
 }
 
 /* Pages whose own art or gradient runs edge to edge (game detail, Me) drop the
@@ -1511,7 +1672,16 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .plugins-group__header .plugins-group__label { margin: 0; }
 .plugins-group__action { height: 30px; padding: 0 11px; font-size: 12px; }
 .plugins-group__action .icon { width: 14px; height: 14px; }
-.plugin-row { gap: 13px; padding: 13px 18px; }
+/* A grid, not a flex row with `space-between`: the copy column has to start at
+   the same x on every row, and a row that happens to have no chevron must not
+   pull its status label across. */
+.plugin-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 13px;
+  padding: 13px 18px;
+}
 .plugin-row__mark {
   width: 34px;
   height: 34px;
@@ -1526,6 +1696,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 /* A plugin the host refused to load must not read in the same green as one
    that runs. */
+.plugin-row__state--soon { color: #9b96a6; font-weight: 500; }
+.plugin-row--soon { opacity: .84; }
 .plugin-row__state--warn { color: #ecd08a; }
 .plugin-row__state--error { color: #f0a3a3; }
 .plugin-uninstall-button { height: 30px; padding: 0 11px; font-size: 12px; }
@@ -1626,6 +1798,24 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 /* Connected libraries: one row per store, each with its own state and its own
    actions, so a sign-in in progress never greys out the rest of the list. */
+/* Steam's row sits at the head of the same list as every other store, so it
+   carries the same separator its neighbours use. The panels it expands are
+   indented under it, to read as belonging to that row rather than as two more
+   stores. */
+.steam-source-block { display: grid; }
+.steam-source-block .source-account-row { border-bottom: 1px solid rgba(255,255,255,.05); }
+.steam-inline-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px 18px;
+  border-bottom: 1px solid rgba(255,255,255,.05);
+  background: rgba(255,255,255,.02);
+}
+.steam-inline-panel[hidden] { display: none !important; }
+.steam-inline-panel__header { display: flex; align-items: center; gap: 12px; }
+.steam-inline-panel__header .settings-card__copy { flex: 1; min-width: 0; }
+.steam-inline-panel__title { font-size: 15px; }
+
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
 .source-account-entry { display: grid; }
@@ -1786,20 +1976,6 @@ main[data-nav-focus] {
 .game-card[data-nav-focus] {
   outline-offset: 5px;
 }
-.store-card__open[data-nav-focus] {
-  outline-offset: -4px;
-}
 body[data-input-mode="pointer"] [data-nav-focus] {
   outline: none;
 }
-/* controller hint bar: only meaningful once a pad is connected */
-.controller-hud {
-  transition: opacity 160ms ease;
-}
-body:not([data-gamepad="connected"]) .controller-hud {
-  opacity: 0.35;
-}
-body[data-gamepad="connected"] .controller-hud {
-  opacity: 1;
-}
-.gamepad-x { color: #7fb6ff; background: #1e3a55; }

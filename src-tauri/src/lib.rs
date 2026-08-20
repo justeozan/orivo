@@ -1,11 +1,12 @@
 mod catalog;
+mod epic_install;
 mod game_artwork;
 mod game_detail;
 mod game_media;
 mod launcher;
+mod plugin_installer;
 mod plugin_manifest;
 mod plugin_registry;
-mod plugin_installer;
 mod plugin_runtime;
 mod preferences;
 mod quiky_installer;
@@ -290,6 +291,9 @@ struct GameView {
     hero_url: Option<String>,
     cover_url: Option<String>,
     landscape_url: Option<String>,
+    /// The game's own wordmark on transparency, drawn in place of the hero
+    /// title. Empty when no store published one, and the title text stands.
+    logo_url: String,
     last_played_at: String,
     play_time_seconds: u64,
     launchable: bool,
@@ -300,6 +304,13 @@ struct GameView {
     /// direct launcher. The UI can instead offer a profile-scoped Wine
     /// association using only this existing catalog id.
     wine_attachable: bool,
+    /// Whether the store's own client has this game on this machine. The same
+    /// three-way answer the detail page uses: `unknown` for a store with no
+    /// local client to ask, which is not the same as "not installed".
+    install_state: game_detail::InstallStateView,
+    /// 0-100, set only while a download is running.
+    install_percent: Option<u8>,
+    mac_compatibility: game_detail::MacCompatibilityView,
 }
 
 #[derive(Debug, Serialize)]
@@ -591,11 +602,14 @@ pub fn run() {
             sources::set_connections_path(app_data.join(sources::CONNECTIONS_FILE));
             // The same credential store backs both the Settings commands and
             // the wallpaper search, so a saved key is used without a restart.
-            let wallpaper_credentials = Arc::new(wallpaper_credentials::WallpaperCredentialsService::load(
-                app_data.join(wallpaper_credentials::CREDENTIALS_FILE),
-            ));
+            let wallpaper_credentials =
+                Arc::new(wallpaper_credentials::WallpaperCredentialsService::load(
+                    app_data.join(wallpaper_credentials::CREDENTIALS_FILE),
+                ));
             app.manage(Arc::clone(&wallpaper_credentials));
-            app.manage(wallpaper_search::WallpaperSearchService::new(wallpaper_credentials));
+            app.manage(wallpaper_search::WallpaperSearchService::new(
+                wallpaper_credentials,
+            ));
             // Acquisition is optional. The service is always constructed, but
             // it reports itself unavailable until a plugin declaring the
             // installer extension is present, so Orivo never depends on one.
@@ -611,7 +625,9 @@ pub fn run() {
             app.manage(Arc::new(quiky_installer::QuikyService::new(
                 app_data.join(PLUGINS_DIRECTORY),
                 app_data.join(WINE_PREFIXES_DIRECTORY),
-                app.path().app_cache_dir().unwrap_or_else(|_| app_data.clone()),
+                app.path()
+                    .app_cache_dir()
+                    .unwrap_or_else(|_| app_data.clone()),
                 games_root,
                 env!("CARGO_PKG_VERSION"),
             )));
@@ -629,6 +645,7 @@ pub fn run() {
             fetch_game_artwork,
             reset_game_artwork,
             remove_game,
+            set_game_hidden,
             set_home_image,
             get_steam_import_preview,
             get_steam_preview_media,
@@ -669,6 +686,9 @@ pub fn run() {
             delete_wine_profile,
             launch_game,
             install_steam_game,
+            install_epic_game,
+            uninstall_epic_game,
+            get_epic_install_status,
             get_game_detail,
             set_game_wishlist,
             store::get_store_home,
@@ -2051,6 +2071,7 @@ fn wine_catalog_game(profile_id: &str, candidate: &wine_runner::ScannedWineGame)
         home_image_path: None,
         landscape_image_path: None,
         logo_path: None,
+        hidden: false,
         hero_video_path: None,
         last_played_at: None,
         play_time_seconds: 0,
@@ -3017,11 +3038,114 @@ async fn import_wine_games(
 
 #[tauri::command]
 fn get_library(app: AppHandle, state: State<'_, AppState>) -> Result<LibraryState, String> {
+    // A game installed or removed in the Epic launcher has to show up here
+    // without waiting for the next account sync, so the manifests are re-read
+    // on every Library load.
+    refresh_epic_install_state(&state)?;
     let catalog = state
         .catalog
         .read()
         .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
     Ok(library_state(&app, &catalog))
+}
+
+/// Join the Epic Games Launcher's own manifests into the catalog. This is a
+/// purely local read: no account, no token and no network, so it works for a
+/// library that was synced long ago and stays correct when the user installs
+/// something in the launcher itself. Nothing is written unless something
+/// actually changed, so opening the Library does not churn the catalog file.
+fn refresh_epic_install_state(state: &State<'_, AppState>) -> Result<(), String> {
+    let has_epic_games = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .games
+        .iter()
+        .any(|game| game.source == GameSource::Epic);
+    if !has_epic_games {
+        return Ok(());
+    }
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next_catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    if !apply_epic_install_state(&mut next_catalog) {
+        return Ok(());
+    }
+    // A launcher state Orivo could not persist is not worth failing the whole
+    // Library over: the next load re-reads the same manifests.
+    if let Err(error) = persist_catalog(&next_catalog, &state.catalog_path) {
+        eprintln!("orivo: the Epic install state could not be persisted: {error}");
+        return Ok(());
+    }
+    let mut catalog = state
+        .catalog
+        .write()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    *catalog = next_catalog;
+    Ok(())
+}
+
+/// Rewrite every Epic record's install state from the launcher's manifests.
+/// Returns whether anything moved.
+fn apply_epic_install_state(catalog: &mut Catalog) -> bool {
+    let installations = epic_install::installations();
+    let mut changed = false;
+
+    for game in catalog.games.iter_mut() {
+        if game.source != GameSource::Epic {
+            continue;
+        }
+        let status = game
+            .source_id
+            .as_deref()
+            .and_then(|app_name| installations.get(app_name))
+            .map(epic_install::status_for);
+
+        // A flag, never a path. Only a finished install counts: a download
+        // still running must not make a game look ready to launch.
+        let installed = status
+            .as_ref()
+            .is_some_and(|status| status.state == epic_install::EpicInstallState::Installed);
+        changed |= set_or_remove_extra(
+            game,
+            catalog::SOURCE_INSTALLED_KEY,
+            installed.then_some(serde_json::Value::Bool(true)),
+        );
+
+        let installing = status
+            .as_ref()
+            .filter(|status| status.state == epic_install::EpicInstallState::Installing);
+        let installing_value = installing.map(|status| serde_json::Value::from(status.percent));
+        changed |= set_or_remove_extra(
+            game,
+            catalog::SOURCE_INSTALLING_KEY,
+            installing.map(|_| serde_json::Value::Bool(true)),
+        );
+        changed |= set_or_remove_extra(game, catalog::SOURCE_INSTALL_PERCENT_KEY, installing_value);
+    }
+    changed
+}
+
+/// Write an `extra` key, or drop it when the provider no longer reports one.
+/// Returns whether the record changed.
+fn set_or_remove_extra(game: &mut Game, key: &str, value: Option<serde_json::Value>) -> bool {
+    match value {
+        Some(value) => {
+            if game.extra.get(key) == Some(&value) {
+                return false;
+            }
+            game.extra.insert(key.to_string(), value);
+            true
+        }
+        None => game.extra.remove(key).is_some(),
+    }
 }
 
 /// Adds a freshly installed executable to the library through the same
@@ -3049,7 +3173,8 @@ pub(crate) fn register_installed_game(
             (STORE_LANDSCAPE_URL_KEY, presentation.landscape_url),
         ] {
             if !url.trim().is_empty() {
-                game.extra.insert(key.into(), serde_json::Value::String(url));
+                game.extra
+                    .insert(key.into(), serde_json::Value::String(url));
             }
         }
     }
@@ -3219,7 +3344,11 @@ async fn fetch_game_artwork(
         .read()
         .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
         .clone();
-    let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+    let Some(game) = next_catalog
+        .games
+        .iter_mut()
+        .find(|game| game.id == game_id)
+    else {
         return Err("This game is no longer in your library.".to_string());
     };
     game.artwork_path = Some(path.clone());
@@ -3269,9 +3398,7 @@ async fn reset_game_artwork(
 
     let artwork = game_artwork::resolve(&title, credentials.steamgriddb_api_key().as_deref()).await;
     if artwork.is_empty() {
-        return Err(format!(
-            "No artwork was found for \u{201c}{title}\u{201d}."
-        ));
+        return Err(format!("No artwork was found for \u{201c}{title}\u{201d}."));
     }
 
     let cache_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
@@ -3304,6 +3431,7 @@ async fn reset_game_artwork(
                 game_artwork::ArtworkRole::Cover => "usercover",
                 game_artwork::ArtworkRole::Landscape => "landscape",
                 game_artwork::ArtworkRole::Background => "home",
+                game_artwork::ArtworkRole::Logo => "logo",
             };
             // A fresh filename each time, so the WebView repaints instead of
             // serving its cached copy of a stable path.
@@ -3334,7 +3462,11 @@ async fn reset_game_artwork(
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
             .clone();
         {
-            let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+            let Some(game) = next_catalog
+                .games
+                .iter_mut()
+                .find(|game| game.id == game_id)
+            else {
                 return Err("This game is no longer in your library.".to_string());
             };
             for (role, path) in downloaded {
@@ -3352,6 +3484,11 @@ async fn reset_game_artwork(
                         game.home_image_path = Some(path.clone());
                         game.artwork_path = Some(path.clone());
                         game.artwork_source_path = Some(path);
+                    }
+                    game_artwork::ArtworkRole::Logo => {
+                        // The field has been in the catalog since v7 with
+                        // nothing ever written to it. This is what fills it.
+                        game.logo_path = Some(path);
                     }
                 }
                 replaced.push(role.token().to_string());
@@ -3457,13 +3594,58 @@ fn remove_game(
             .remove(&game_id)
             .map_err(|error| error.to_string())?
         {
-            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            persist_catalog(&next_catalog, &state.catalog_path)
+                .map_err(|error| error.to_string())?;
             let mut catalog = state
                 .catalog
                 .write()
                 .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
             *catalog = next_catalog;
         }
+    }
+    let catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    Ok(library_state(&app, &catalog))
+}
+
+/// Hide a game from the library without forgetting it.
+///
+/// The catalog record stays whole — artwork, play time, launch configuration —
+/// so unhiding restores the card exactly as it was. This is the reversible door;
+/// `remove_game` is the other one.
+#[tauri::command]
+fn set_game_hidden(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    game_id: String,
+    hidden: bool,
+) -> Result<LibraryState, String> {
+    {
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next_catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        let Some(game) = next_catalog
+            .games
+            .iter_mut()
+            .find(|game| game.id == game_id)
+        else {
+            return Err("This game is no longer in your library.".to_string());
+        };
+        game.hidden = hidden;
+        persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+        let mut catalog = state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        *catalog = next_catalog;
     }
     let catalog = state
         .catalog
@@ -3498,10 +3680,13 @@ fn set_home_image(
         return Err("That image could not be found on disk.".to_string());
     }
     // The chosen image fills one role: the home background, the portrait card
-    // cover, or the wide landscape card — each stored independently.
+    // cover, the wide landscape card, or the wordmark drawn over the hero —
+    // each stored independently. The wordmark being its own role is what lets
+    // the other three prefer artwork with no title burned into it.
     let prefix = match role.as_str() {
         "cover" => "usercover",
         "landscape" => "landscape",
+        "logo" => "logo",
         _ => "home",
     };
     // Copy the chosen asset into the artwork cache the WebView resolves against.
@@ -3528,7 +3713,11 @@ fn set_home_image(
         .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
         .clone();
     {
-        let Some(game) = next_catalog.games.iter_mut().find(|game| game.id == game_id) else {
+        let Some(game) = next_catalog
+            .games
+            .iter_mut()
+            .find(|game| game.id == game_id)
+        else {
             return Err("This game is no longer in your library.".to_string());
         };
         match role.as_str() {
@@ -3538,6 +3727,9 @@ fn set_home_image(
             }
             "landscape" => {
                 game.landscape_image_path = Some(dest);
+            }
+            "logo" => {
+                game.logo_path = Some(dest);
             }
             _ => {
                 game.home_image_path = Some(dest);
@@ -4044,7 +4236,10 @@ async fn get_source_accounts() -> Result<Vec<sources::SourceAccountStatus>, Stri
                 // rather than failing the whole list: the other five sources
                 // are still perfectly usable.
                 sources::status(provider).unwrap_or_else(|error| {
-                    eprintln!("{} account status is unavailable: {error}", provider.label());
+                    eprintln!(
+                        "{} account status is unavailable: {error}",
+                        provider.label()
+                    );
                     sources::status_from_credential(provider, None)
                 })
             })
@@ -4077,8 +4272,7 @@ async fn connect_source_account(
                     };
                     sources::save_credential(provider, &credential)
                         .map_err(|error| error.to_string())?;
-                    let response =
-                        import_source_library(&state, provider, result.library).await?;
+                    let response = import_source_library(&state, provider, result.library).await?;
                     close_source_window(&app, provider);
                     let _ = app.emit_to(
                         MAIN_WINDOW_LABEL,
@@ -4162,67 +4356,71 @@ async fn connect_token_source(
     let session_for_page_load = Arc::clone(&session);
     let app_for_page_load = app.clone();
 
-    let window = WebviewWindowBuilder::new(
-        app,
-        label.clone(),
-        WebviewUrl::External(initial_url),
-    )
-    .title(format!("Connect {} to Orivo", provider.label()))
-    .inner_size(640.0, 760.0)
-    .min_inner_size(460.0, 580.0)
-    .center()
-    // A token-style sign-in leaves nothing behind: the credential belongs in
-    // the keychain, not in a browser session inside Orivo's app data.
-    .incognito(true)
-    .on_navigation(move |url| {
-        // GOG returns its authorization code in the redirect URL itself, so it
-        // is read here — no script ever runs inside the sign-in page.
-        if provider == sources::SourceProvider::Gog
-            && let Some(code) = source_gog::authorization_code_from_url(url)
-        {
-            finish_gog_login(&app_for_navigation, Arc::clone(&session_for_navigation), code);
-        }
-        is_allowed_source_auth_navigation(url)
-    })
-    .on_new_window(|_, _| NewWindowResponse::Deny)
-    .on_page_load(move |window, payload| {
-        if payload.event() != PageLoadEvent::Finished {
-            return;
-        }
-        let url = payload.url();
-        match provider {
-            sources::SourceProvider::Epic if source_epic::is_authorization_page(url) => {
-                extract_epic_login(&app_for_page_load, &window, Arc::clone(&session_for_page_load));
-            }
-            sources::SourceProvider::Gog => {
-                if let Some(code) = source_gog::authorization_code_from_url(url) {
-                    finish_gog_login(
-                        &app_for_page_load,
-                        Arc::clone(&session_for_page_load),
-                        code,
-                    );
-                }
-            }
-            sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
-                if source_microsoft::is_redirect_page(url) =>
+    let window = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url))
+        .title(format!("Connect {} to Orivo", provider.label()))
+        .inner_size(640.0, 760.0)
+        .min_inner_size(460.0, 580.0)
+        .center()
+        // A token-style sign-in leaves nothing behind: the credential belongs in
+        // the keychain, not in a browser session inside Orivo's app data.
+        .incognito(true)
+        .on_navigation(move |url| {
+            // GOG returns its authorization code in the redirect URL itself, so it
+            // is read here — no script ever runs inside the sign-in page.
+            if provider == sources::SourceProvider::Gog
+                && let Some(code) = source_gog::authorization_code_from_url(url)
             {
-                extract_microsoft_login(
-                    &app_for_page_load,
-                    &window,
-                    provider,
-                    Arc::clone(&session_for_page_load),
+                finish_gog_login(
+                    &app_for_navigation,
+                    Arc::clone(&session_for_navigation),
+                    code,
                 );
             }
-            _ => {}
-        }
-    })
-    .build()
-    .map_err(|error| {
-        format!(
-            "The {} sign-in window could not open: {error}",
-            provider.label()
-        )
-    })?;
+            is_allowed_source_auth_navigation(url)
+        })
+        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .on_page_load(move |window, payload| {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            let url = payload.url();
+            match provider {
+                sources::SourceProvider::Epic if source_epic::is_authorization_page(url) => {
+                    extract_epic_login(
+                        &app_for_page_load,
+                        &window,
+                        Arc::clone(&session_for_page_load),
+                    );
+                }
+                sources::SourceProvider::Gog => {
+                    if let Some(code) = source_gog::authorization_code_from_url(url) {
+                        finish_gog_login(
+                            &app_for_page_load,
+                            Arc::clone(&session_for_page_load),
+                            code,
+                        );
+                    }
+                }
+                sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
+                    if source_microsoft::is_redirect_page(url) =>
+                {
+                    extract_microsoft_login(
+                        &app_for_page_load,
+                        &window,
+                        provider,
+                        Arc::clone(&session_for_page_load),
+                    );
+                }
+                _ => {}
+            }
+        })
+        .build()
+        .map_err(|error| {
+            format!(
+                "The {} sign-in window could not open: {error}",
+                provider.label()
+            )
+        })?;
 
     let session_for_close = Arc::clone(&session);
     let app_for_close = app.clone();
@@ -4272,11 +4470,7 @@ async fn await_source_login(
     }
 }
 
-fn extract_epic_login(
-    app: &AppHandle,
-    window: &WebviewWindow,
-    session: Arc<SourceLoginSession>,
-) {
+fn extract_epic_login(app: &AppHandle, window: &WebviewWindow, session: Arc<SourceLoginSession>) {
     let app = app.clone();
     let login_window = window.clone();
     let _ = window.eval_with_callback(
@@ -4312,13 +4506,7 @@ fn finish_gog_login(app: &AppHandle, session: Arc<SourceLoginSession>, code: Str
     tauri::async_runtime::spawn(async move {
         let outcome = source_gog::connect(code).await;
         let window = app.get_webview_window(&source_window_label(sources::SourceProvider::Gog));
-        settle_token_login_optional(
-            &app,
-            sources::SourceProvider::Gog,
-            session,
-            window,
-            outcome,
-        );
+        settle_token_login_optional(&app, sources::SourceProvider::Gog, session, window, outcome);
     });
 }
 
@@ -4460,23 +4648,20 @@ async fn session_sync(
     timeout: Duration,
     wait_for_sign_in: bool,
 ) -> Result<sources::SessionSyncResult, sources::SourceError> {
-    let (library_url, start_script, is_library_page): (
-        &str,
-        &str,
-        fn(&Url) -> bool,
-    ) = match provider {
-        sources::SourceProvider::Ubisoft => (
-            source_ubisoft::LIBRARY_URL,
-            source_ubisoft::SYNC_START_SCRIPT,
-            source_ubisoft::is_library_page,
-        ),
-        sources::SourceProvider::InstantGaming => (
-            source_instant_gaming::LIBRARY_URL,
-            source_instant_gaming::SYNC_START_SCRIPT,
-            source_instant_gaming::is_library_page,
-        ),
-        other => return Err(sources::SourceError::Unsupported(other)),
-    };
+    let (library_url, start_script, is_library_page): (&str, &str, fn(&Url) -> bool) =
+        match provider {
+            sources::SourceProvider::Ubisoft => (
+                source_ubisoft::LIBRARY_URL,
+                source_ubisoft::SYNC_START_SCRIPT,
+                source_ubisoft::is_library_page,
+            ),
+            sources::SourceProvider::InstantGaming => (
+                source_instant_gaming::LIBRARY_URL,
+                source_instant_gaming::SYNC_START_SCRIPT,
+                source_instant_gaming::is_library_page,
+            ),
+            other => return Err(sources::SourceError::Unsupported(other)),
+        };
 
     let label = source_window_label(provider);
     let window = match app.get_webview_window(&label) {
@@ -4485,8 +4670,8 @@ async fn session_sync(
             window
         }
         None => {
-            let url = Url::parse(library_url)
-                .map_err(|_| sources::SourceError::Unsupported(provider))?;
+            let url =
+                Url::parse(library_url).map_err(|_| sources::SourceError::Unsupported(provider))?;
             WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
                 .title(format!("Connect {} to Orivo", provider.label()))
                 .inner_size(900.0, 820.0)
@@ -4527,8 +4712,9 @@ async fn session_sync(
                     let result = sources::session_result_from_eval(provider, &raw);
                     match result.state {
                         sources::SessionSyncState::Ready => return Ok(result),
-                        sources::SessionSyncState::Idle
-                        | sources::SessionSyncState::Pending => continue,
+                        sources::SessionSyncState::Idle | sources::SessionSyncState::Pending => {
+                            continue;
+                        }
                         // The store answered in a shape this build cannot read.
                         // Waiting out the deadline would only make Orivo look
                         // stuck; say so now so the user can act on it.
@@ -4567,11 +4753,7 @@ async fn session_sync(
 /// Evaluate one expression in a window and return its result. `eval_with_callback`
 /// is callback-shaped, so the value is parked in a slot the caller polls; the
 /// timeout keeps a page that never answers from stalling a sync.
-async fn eval_string(
-    window: &WebviewWindow,
-    script: &str,
-    timeout: Duration,
-) -> Option<String> {
+async fn eval_string(window: &WebviewWindow, script: &str, timeout: Duration) -> Option<String> {
     let slot = Arc::new(Mutex::new(None::<String>));
     let sink = Arc::clone(&slot);
     window
@@ -4631,7 +4813,8 @@ async fn import_source_library(
             }
         }
         if imported_games > 0 || updated_games > 0 {
-            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            persist_catalog(&next_catalog, &state.catalog_path)
+                .map_err(|error| error.to_string())?;
             let mut catalog = state
                 .catalog
                 .write()
@@ -4673,14 +4856,15 @@ async fn fill_missing_source_artwork(library: &mut sources::SourceLibrary) {
         return;
     }
 
-    let lookups = futures_util::stream::iter(pending.into_iter().map(|(index, title)| async move {
-        game_artwork::resolve_steam_only(&title)
-            .await
-            .map(|artwork| (index, artwork))
-    }))
-    .buffer_unordered(MAX_CONCURRENT_SOURCE_ARTWORK_LOOKUPS)
-    .filter_map(|result| async move { result })
-    .collect::<Vec<_>>();
+    let lookups =
+        futures_util::stream::iter(pending.into_iter().map(|(index, title)| async move {
+            game_artwork::resolve_steam_only(&title)
+                .await
+                .map(|artwork| (index, artwork))
+        }))
+        .buffer_unordered(MAX_CONCURRENT_SOURCE_ARTWORK_LOOKUPS)
+        .filter_map(|result| async move { result })
+        .collect::<Vec<_>>();
 
     let resolved = match tokio::time::timeout(SOURCE_ARTWORK_BUDGET, lookups).await {
         Ok(resolved) => resolved,
@@ -4720,10 +4904,44 @@ fn source_library_game_to_catalog_game(
         (catalog::SOURCE_HERO_URL_KEY, game.hero_url),
         (catalog::SOURCE_LANDSCAPE_URL_KEY, game.landscape_url),
         (catalog::SOURCE_GENRE_KEY, game.genre),
+        (catalog::SOURCE_LOGO_URL_KEY, game.logo_url),
     ] {
         if let Some(value) = value {
             extra.insert(key.to_string(), serde_json::Value::String(value));
         }
+    }
+    if let Some(native_mac) = game.native_mac {
+        extra.insert(
+            catalog::SOURCE_NATIVE_MAC_KEY.to_string(),
+            serde_json::Value::Bool(native_mac),
+        );
+    }
+    // A download in flight is recorded so the library can paint its progress
+    // without re-reading the store client for every tile. It is refreshed on
+    // every sync, and the dedicated progress command is what a detail page
+    // polls while the bar is moving.
+    if let Some(install) = game.install.as_ref().filter(|install| install.installing) {
+        extra.insert(
+            catalog::SOURCE_INSTALLING_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        extra.insert(
+            catalog::SOURCE_INSTALL_PERCENT_KEY.to_string(),
+            serde_json::Value::Number(install.percent.into()),
+        );
+    }
+    // Recorded as a flag, never as a path: a connected-source record is
+    // forbidden from carrying a filesystem location, and a half-downloaded
+    // directory must not make a game look ready to launch either way.
+    if game
+        .install
+        .as_ref()
+        .is_some_and(|install| install.installed)
+    {
+        extra.insert(
+            catalog::SOURCE_INSTALLED_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
 
     Game {
@@ -4740,7 +4958,9 @@ fn source_library_game_to_catalog_game(
         working_directory: None,
         arguments: Vec::new(),
         description: game.description,
-        metadata: None,
+        // The studio reads as metadata beside the store badge ("Epic Games ·
+        // Ubisoft Montréal"), which is the one place on the hero it belongs.
+        metadata: game.developer,
         artwork_path: None,
         artwork_source_path: None,
         cover_path: None,
@@ -4748,6 +4968,7 @@ fn source_library_game_to_catalog_game(
         home_image_path: None,
         landscape_image_path: None,
         logo_path: None,
+        hidden: false,
         hero_video_path: None,
         last_played_at: game.last_played_at,
         play_time_seconds: game.play_time_seconds,
@@ -4786,7 +5007,8 @@ async fn disconnect_source_account(
             .clone();
         let removed = next_catalog.remove_source_games(provider.catalog_source());
         if removed > 0 {
-            persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
+            persist_catalog(&next_catalog, &state.catalog_path)
+                .map_err(|error| error.to_string())?;
             let mut catalog = state
                 .catalog
                 .write()
@@ -5102,6 +5324,121 @@ async fn install_steam_game(
     })
 }
 
+/// Ask the locally installed Epic Games Launcher to begin a download for one
+/// owned entitlement. The WebView supplies only a stable catalog id; Rust looks
+/// up the validated launch reference and builds the fixed install URI itself.
+#[tauri::command]
+async fn install_epic_game(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<LaunchResult, String> {
+    let game = {
+        state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .games
+            .iter()
+            .find(|game| game.id == game_id)
+            .cloned()
+            .ok_or_else(|| {
+                "This game is no longer in your library. Refresh Epic Games and try again."
+                    .to_string()
+            })?
+    };
+    let title = game.title.clone();
+    let LaunchTarget::Provider { provider, app_ref } = game.launch_target else {
+        return Err("Only Epic Games library entries can be installed this way.".into());
+    };
+    if provider != "epic" {
+        return Err("Only Epic Games library entries can be installed this way.".into());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || launcher::install_provider(&provider, &app_ref))
+        .await
+        .map_err(|error| format!("Epic install request did not finish: {error}"))?
+        .map_err(|error| error.to_string())?;
+    Ok(LaunchResult {
+        status: format!("Opening Epic Games to install {title}"),
+    })
+}
+
+/// Remove one installed Epic game.
+///
+/// Epic publishes no uninstall URI — the launcher ignores one — so unlike
+/// install, this cannot be handed off. Orivo deletes the directory the
+/// launcher itself recorded, behind the guards in `epic_install::uninstall`,
+/// and the WebView still only ever supplies a stable catalog id.
+#[tauri::command]
+async fn uninstall_epic_game(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<LaunchResult, String> {
+    let game = {
+        state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .games
+            .iter()
+            .find(|game| game.id == game_id)
+            .cloned()
+            .ok_or_else(|| "This game is no longer in your library.".to_string())?
+    };
+    let title = game.title.clone();
+    let LaunchTarget::Provider { provider, app_ref } = game.launch_target else {
+        return Err("Only Epic Games library entries can be uninstalled this way.".into());
+    };
+    if provider != "epic" {
+        return Err("Only Epic Games library entries can be uninstalled this way.".into());
+    }
+
+    let app_name = game
+        .source_id
+        .clone()
+        .ok_or_else(|| "This Epic game has no launcher reference.".to_string())?;
+    let _ = app_ref;
+    let _ = provider;
+
+    tauri::async_runtime::spawn_blocking(move || epic_install::uninstall(&app_name))
+        .await
+        .map_err(|error| format!("Epic uninstall request did not finish: {error}"))?
+        .map_err(|error| error.to_string())?;
+    // The catalog still says "installed" until the manifests are re-read, and
+    // the Library is what re-reads them.
+    refresh_epic_install_state(&state)?;
+    Ok(LaunchResult {
+        status: format!("{title} has been uninstalled"),
+    })
+}
+
+/// What the local Epic launcher reports for one owned entitlement right now:
+/// installed, downloading with a measured percentage, or absent. This is what a
+/// detail page polls while a progress bar is moving, so it reads the launcher's
+/// manifests directly rather than the catalog snapshot.
+#[tauri::command]
+async fn get_epic_install_status(
+    game_id: String,
+    state: State<'_, AppState>,
+) -> Result<epic_install::EpicInstallStatus, String> {
+    let app_name = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        catalog
+            .games
+            .iter()
+            .find(|game| game.id == game_id && game.source == GameSource::Epic)
+            .and_then(|game| game.source_id.clone())
+            .ok_or_else(|| "This is not an Epic Games library entry.".to_string())?
+    };
+
+    tauri::async_runtime::spawn_blocking(move || epic_install::status(&app_name))
+        .await
+        .map_err(|error| format!("Epic install status did not finish: {error}"))
+}
+
 async fn scan_steam_in_worker() -> Result<steam::SteamDiscovery, String> {
     tauri::async_runtime::spawn_blocking(steam::discover_default)
         .await
@@ -5206,6 +5543,7 @@ fn owned_steam_game_to_catalog_game(
         home_image_path: None,
         landscape_image_path: None,
         logo_path: None,
+        hidden: false,
         hero_video_path: None,
         last_played_at: None,
         play_time_seconds: owned_game.play_time_seconds,
@@ -5528,6 +5866,7 @@ fn steam_game_to_catalog_game(steam_game: steam::SteamGame) -> Game {
         home_image_path: None,
         landscape_image_path: None,
         logo_path: None,
+        hidden: false,
         hero_video_path: None,
         last_played_at: None,
         play_time_seconds: 0,
@@ -5849,6 +6188,8 @@ fn library_state(app: &AppHandle, stored_catalog: &Catalog) -> LibraryState {
         games: presentation
             .games
             .iter()
+            // A hidden game keeps everything it had and is simply not projected.
+            .filter(|game| !game.hidden)
             .map(|game| game_view(game, &presentation, cache_dir.as_deref()))
             .collect(),
     }
@@ -5905,6 +6246,15 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
     let steam_wallpaper = steam_store_asset_url(game, "capsule_616x353.jpg");
     let steam_cover = steam_store_asset_url(game, "library_600x900.jpg");
     let steam_landscape = steam_store_asset_url(game, "library_hero.jpg");
+    // The one Steam asset published without the title burned into it: the
+    // client composites `logo.png` over it rather than shipping it pre-branded.
+    // That makes it the right wallpaper now that Orivo draws the logo itself.
+    let steam_clean_hero = steam_landscape.clone();
+    // The wordmark, on transparency, to be drawn over the scene.
+    let steam_logo = steam_store_asset_url(game, "logo.png");
+    let source_logo = source_asset_url(game, catalog::SOURCE_LOGO_URL_KEY);
+    // A wordmark the user reset outranks both: it is the one they asked for.
+    let local_logo = media_source_url(game.logo_path.as_deref(), cache_dir);
     // Artwork a connected store published for its own game, already held to
     // that provider's host allowlist when the sync persisted it.
     let source_cover = source_asset_url(game, catalog::SOURCE_COVER_URL_KEY);
@@ -5940,10 +6290,19 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             },
         }
         .into(),
+        // A wallpaper the player picked outranks everything. After that the
+        // scene prefers art with no title burned into it — the capsule is the
+        // publisher's branded key art and only stands in when nothing cleaner
+        // exists.
         hero_url: home_image
-            .or_else(|| steam_wallpaper.clone())
+            .or_else(|| steam_clean_hero.clone())
             .or_else(|| source_hero.clone())
+            .or_else(|| steam_wallpaper.clone())
             .or_else(|| local_hero.clone()),
+        logo_url: local_logo
+            .or(steam_logo)
+            .or(source_logo)
+            .unwrap_or_default(),
         cover_url: local_cover
             .clone()
             .or_else(|| steam_cover.clone())
@@ -5988,12 +6347,20 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             // A connected-store game is launchable only where that store's own
             // client is installed. Xbox and Instant Gaming have no client to
             // hand a launch to at all, so they are never launchable.
-            LaunchTarget::Provider { provider, .. } => launcher::provider_launchable(provider),
+            // Same rule the detail page applies, through the same helper: the
+            // client has to be here *and* not be telling us the game is still
+            // missing.
+            LaunchTarget::Provider { provider, .. } => {
+                game_detail::provider_game_launchable(game, provider)
+            }
         },
         host_platform: host_platform.into(),
         supported_platforms,
         compatible_with_host,
         wine_attachable: cfg!(target_os = "macos") && is_local_direct_windows_game(game),
+        install_state: game_detail::install_state_of(game),
+        install_percent: game_detail::install_percent_of(game),
+        mac_compatibility: game_detail::mac_compatibility_of(game),
     }
 }
 
@@ -6345,6 +6712,7 @@ fn showcase_game(
         home_image_path: None,
         landscape_image_path: None,
         logo_path: None,
+        hidden: false,
         hero_video_path: None,
         last_played_at: Some(last_played_at.into()),
         play_time_seconds: hours * 3_600,
@@ -6435,6 +6803,79 @@ fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// A game the launcher has no manifest for must lose any install state a
+    /// previous scan wrote, or a game uninstalled in Epic would stay "ready to
+    /// play" in Orivo forever.
+    #[test]
+    fn an_epic_record_drops_install_state_the_launcher_no_longer_reports() {
+        let mut catalog = Catalog::default();
+        let mut game = Game::from_executable("/bin/sh").unwrap();
+        game.id = "epic:not-installed-anywhere".into();
+        game.source = GameSource::Epic;
+        game.source_id = Some("notinstalledanywhere".into());
+        game.extra.insert(
+            catalog::SOURCE_INSTALLED_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        game.extra.insert(
+            catalog::SOURCE_INSTALLING_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        game.extra.insert(
+            catalog::SOURCE_INSTALL_PERCENT_KEY.to_string(),
+            serde_json::Value::from(42u8),
+        );
+        catalog.games.push(game);
+
+        assert!(apply_epic_install_state(&mut catalog));
+        let game = &catalog.games[0];
+        assert!(!game.extra.contains_key(catalog::SOURCE_INSTALLED_KEY));
+        assert!(!game.extra.contains_key(catalog::SOURCE_INSTALLING_KEY));
+        assert!(!game.extra.contains_key(catalog::SOURCE_INSTALL_PERCENT_KEY));
+        // A second pass has nothing left to change, so opening the Library
+        // twice must not rewrite the catalog file twice.
+        assert!(!apply_epic_install_state(&mut catalog));
+    }
+
+    #[test]
+    fn a_non_epic_record_is_never_touched_by_the_epic_manifest_scan() {
+        let mut catalog = Catalog::default();
+        let mut game = Game::from_executable("/bin/sh").unwrap();
+        game.installation_path = Some(PathBuf::from("/Applications"));
+        catalog.games.push(game);
+
+        assert!(!apply_epic_install_state(&mut catalog));
+        assert_eq!(
+            catalog.games[0].installation_path.as_deref(),
+            Some(Path::new("/Applications"))
+        );
+        assert!(catalog.games[0].extra.is_empty());
+    }
+
+    #[test]
+    fn an_extra_key_is_written_once_and_removed_when_it_stops_being_reported() {
+        let mut game = Game::from_executable("/bin/sh").unwrap();
+
+        assert!(set_or_remove_extra(
+            &mut game,
+            "k",
+            Some(serde_json::Value::from(7u8))
+        ));
+        assert!(!set_or_remove_extra(
+            &mut game,
+            "k",
+            Some(serde_json::Value::from(7u8))
+        ));
+        assert!(set_or_remove_extra(
+            &mut game,
+            "k",
+            Some(serde_json::Value::from(8u8))
+        ));
+        assert!(set_or_remove_extra(&mut game, "k", None));
+        assert!(!set_or_remove_extra(&mut game, "k", None));
+    }
     use super::*;
 
     #[test]
@@ -6585,9 +7026,16 @@ mod tests {
         assert_eq!(game.metadata.as_deref(), Some("Not installed"));
         assert_eq!(game.play_time_seconds, 4_200);
         assert!(!view.launchable);
+        // The scene takes the artwork Steam publishes without the title burned
+        // into it. The capsule is the branded key art and would put a second
+        // wordmark behind the one Orivo now draws itself.
         assert_eq!(
             view.hero_url.as_deref(),
-            Some("https://cdn.cloudflare.steamstatic.com/steam/apps/480/capsule_616x353.jpg")
+            Some("https://cdn.cloudflare.steamstatic.com/steam/apps/480/library_hero.jpg")
+        );
+        assert_eq!(
+            view.logo_url,
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/480/logo.png"
         );
         assert_eq!(
             view.cover_url.as_deref(),
@@ -6670,7 +7118,7 @@ mod tests {
         assert!(game.last_played_at.is_none());
         assert_eq!(
             view.hero_url.as_deref(),
-            Some("https://cdn.cloudflare.steamstatic.com/steam/apps/480/capsule_616x353.jpg")
+            Some("https://cdn.cloudflare.steamstatic.com/steam/apps/480/library_hero.jpg")
         );
         assert_eq!(view.last_played_at, "");
     }
@@ -7152,6 +7600,7 @@ mod tests {
             home_image_path: None,
             landscape_image_path: None,
             logo_path: None,
+            hidden: false,
             hero_video_path: None,
             last_played_at: None,
             play_time_seconds: 0,

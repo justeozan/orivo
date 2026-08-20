@@ -6,3 +6,7 @@
 .gstack/
 .context/
 e2e/__screenshots__/
+
+# Local secrets and the Sentry DSN — see .env.example
+.env
+.env.local

@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {
   AppRoute,
+  EpicInstallStatus,
   GameDetailView,
   GameMediaKind,
   GameMediaView,
   GameSummary,
   WallpaperCategory,
   WallpaperSearchView,
-  WallpaperSource,
 } from "./contracts";
 import { icon } from "./icons";
 import { sourceBadge } from "./source-model";
@@ -30,6 +30,7 @@ import {
   normaliseGameMedia,
   normaliseWallpaperSearch,
   platformLabels,
+  statusChips,
   previewedMedia,
   reduceGameDetailState,
   resolvePrimaryAction,
@@ -43,31 +44,68 @@ import {
 
 export interface GameDetailPageClient {
   getDetail(gameId: string, signal: AbortSignal): Promise<GameDetailView>;
-  setWishlist(gameId: string, wishlisted: boolean, signal: AbortSignal): Promise<void>;
-  selectMedia(gameId: string, mediaId: string, signal: AbortSignal): Promise<GameMediaView[]>;
-  importMedia(gameId: string, kind: GameMediaKind, signal: AbortSignal): Promise<GameMediaView[]>;
-  exportMedia(gameId: string, mediaId: string, signal: AbortSignal): Promise<void>;
+  setWishlist(
+    gameId: string,
+    wishlisted: boolean,
+    signal: AbortSignal,
+  ): Promise<void>;
+  selectMedia(
+    gameId: string,
+    mediaId: string,
+    signal: AbortSignal,
+  ): Promise<GameMediaView[]>;
+  importMedia(
+    gameId: string,
+    kind: GameMediaKind,
+    signal: AbortSignal,
+  ): Promise<GameMediaView[]>;
+  exportMedia(
+    gameId: string,
+    mediaId: string,
+    signal: AbortSignal,
+  ): Promise<void>;
   cancelMediaDownload(gameId: string, signal: AbortSignal): Promise<void>;
   /**
-   * One request per row: the category the caller asks for is the only shape
-   * that comes back, which is what keeps a 16:9 screenshot out of the portrait
-   * Cover row.
+   * One request per row, and no source: the backend asks every provider at
+   * once and merges them. The category the caller names is the only shape that
+   * comes back, which is what keeps a 16:9 screenshot out of the portrait Cover
+   * row.
    */
   searchWallpapers(
-    source: WallpaperSource,
     category: WallpaperCategory,
     query: string,
     offset: number,
     signal: AbortSignal,
   ): Promise<WallpaperSearchView>;
-  importWallpaper(gameId: string, candidateId: string, signal: AbortSignal): Promise<GameMediaView[]>;
+  importWallpaper(
+    gameId: string,
+    candidateId: string,
+    signal: AbortSignal,
+  ): Promise<GameMediaView[]>;
   openOffer(offerId: string, signal: AbortSignal): Promise<void>;
+  /** Ask the local Epic Games Launcher to start downloading an owned game. */
+  installEpicGame(gameId: string, signal: AbortSignal): Promise<void>;
+  /** Read what that launcher reports for the game right now. */
+  epicInstallStatus(
+    gameId: string,
+    signal: AbortSignal,
+  ): Promise<EpicInstallStatus>;
+  /** Ask the launcher to remove an installed game; it owns the deletion. */
+  uninstallEpicGame(gameId: string, signal: AbortSignal): Promise<void>;
   /** Fetch cover/hero art for a game the same way an import does. */
   searchArtwork(gameId: string, signal: AbortSignal): Promise<void>;
   /** Refill the portrait cover, landscape cover and background from a reliable source. */
-  resetArtwork(gameId: string, signal: AbortSignal): Promise<ArtworkResetResult>;
+  resetArtwork(
+    gameId: string,
+    signal: AbortSignal,
+  ): Promise<ArtworkResetResult>;
   /** Remove a game from the library (does not touch the game's own files). */
   removeGame(gameId: string, signal: AbortSignal): Promise<void>;
+  setGameHidden(
+    gameId: string,
+    hidden: boolean,
+    signal: AbortSignal,
+  ): Promise<void>;
   /** Promote a chosen media to a game card role: background, cover or landscape. */
   setHomeImage(
     gameId: string,
@@ -78,7 +116,7 @@ export interface GameDetailPageClient {
 }
 
 /** Which library card slot a chosen wallpaper fills. */
-export type WallpaperRole = "background" | "cover" | "landscape";
+export type WallpaperRole = "background" | "cover" | "landscape" | "logo";
 
 /** What a cover reset actually replaced. A role with no art found is absent. */
 export interface ArtworkResetResult {
@@ -103,16 +141,24 @@ const WALLPAPER_ROLE_FOR_CATEGORY: Record<WallpaperCategory, WallpaperRole> = {
   cover: "cover",
   landscape: "landscape",
   background: "background",
+  logo: "logo",
 };
 
 /** How long each background holds before the hero cross-fades to the next. */
 const HERO_SLIDE_MS = 7000;
+/**
+ * How often the Epic download percentage is re-measured. A download is minutes
+ * long and the measurement walks a directory, so a slow tick keeps the bar
+ * honest without turning progress into disk churn.
+ */
+const EPIC_PROGRESS_INTERVAL_MS = 2000;
 
 /** Confirmation toasts per role. */
 const WALLPAPER_ROLE_APPLIED: Record<WallpaperRole, string> = {
   background: "Wallpaper set as your home background.",
   cover: "Portrait cover updated.",
   landscape: "Landscape cover updated.",
+  logo: "Logo updated.",
 };
 
 /** The label and glyph each wallpaper row and its filter chip carry. */
@@ -123,10 +169,17 @@ const WALLPAPER_CATEGORY_META: Record<
   cover: { label: "Cover", icon: "cover" },
   landscape: { label: "Landscape cover", icon: "landscape" },
   background: { label: "Background", icon: "background" },
+  logo: { label: "Logo", icon: "landscape" },
 };
 
 /** Tiles a row shows before "Voir tout" expands it to everything it holds. */
 const WALLPAPER_ROW_TILES = 5;
+/**
+ * How many achievements the panel shows as chips. The header already states the
+ * full count, so these are a sample sized to stay in view — a game with eighty
+ * of them must not turn the panel back into a scroll.
+ */
+const MAX_ACHIEVEMENT_CHIPS = 8;
 
 export interface GameDetailPageOptions {
   /** Routing stays owned by the application shell. */
@@ -155,7 +208,8 @@ function isTauriRuntime(): boolean {
 }
 
 function assertActive(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("The game request was cancelled.", "AbortError");
+  if (signal.aborted)
+    throw new DOMException("The game request was cancelled.", "AbortError");
 }
 
 async function invokeWhileActive<T>(
@@ -173,19 +227,35 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
   return {
     async getDetail(gameId, signal) {
       if (!isTauriRuntime()) return createFallbackGameDetail(gameId);
-      return invokeWhileActive<GameDetailView>("get_game_detail", { gameId }, signal);
+      return invokeWhileActive<GameDetailView>(
+        "get_game_detail",
+        { gameId },
+        signal,
+      );
     },
     async setWishlist(gameId, wishlisted, signal) {
       if (!isTauriRuntime()) return;
-      await invokeWhileActive("set_game_wishlist", { gameId, wishlisted }, signal);
+      await invokeWhileActive(
+        "set_game_wishlist",
+        { gameId, wishlisted },
+        signal,
+      );
     },
     async selectMedia(gameId, mediaId, signal) {
       if (!isTauriRuntime()) return [];
-      return invokeWhileActive<GameMediaView[]>("select_game_media", { gameId, mediaId }, signal);
+      return invokeWhileActive<GameMediaView[]>(
+        "select_game_media",
+        { gameId, mediaId },
+        signal,
+      );
     },
     async importMedia(gameId, kind, signal) {
       if (!isTauriRuntime()) return [];
-      return invokeWhileActive<GameMediaView[]>("import_game_media", { gameId, kind }, signal);
+      return invokeWhileActive<GameMediaView[]>(
+        "import_game_media",
+        { gameId, kind },
+        signal,
+      );
     },
     async exportMedia(gameId, mediaId, signal) {
       if (!isTauriRuntime()) return;
@@ -195,11 +265,12 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("cancel_game_media_download", { gameId }, signal);
     },
-    async searchWallpapers(source, category, query, offset, signal) {
-      if (!isTauriRuntime()) return createFallbackWallpaperSearch(source, category, query, offset);
+    async searchWallpapers(category, query, offset, signal) {
+      if (!isTauriRuntime())
+        return createFallbackWallpaperSearch(category, query, offset);
       return invokeWhileActive<WallpaperSearchView>(
         "search_wallpapers",
-        { source, category, query, offset },
+        { category, query, offset },
         signal,
       );
     },
@@ -215,22 +286,63 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("open_store_offer", { offerId }, signal);
     },
+    async installEpicGame(gameId, signal) {
+      if (!isTauriRuntime()) return;
+      await invokeWhileActive("install_epic_game", { gameId }, signal);
+    },
+    async uninstallEpicGame(gameId, signal) {
+      if (!isTauriRuntime()) return;
+      await invokeWhileActive("uninstall_epic_game", { gameId }, signal);
+    },
+    async epicInstallStatus(gameId, signal) {
+      if (!isTauriRuntime()) {
+        return {
+          appName: gameId,
+          state: "not-installed",
+          percent: 0,
+          installedBytes: 0,
+          totalBytes: 0,
+          installPath: null,
+        };
+      }
+      return invokeWhileActive<EpicInstallStatus>(
+        "get_epic_install_status",
+        { gameId },
+        signal,
+      );
+    },
     async searchArtwork(gameId, signal) {
       if (!isTauriRuntime()) return;
       // The explicit action re-runs the search even if art already exists.
-      await invokeWhileActive("fetch_game_artwork", { gameId, force: true }, signal);
+      await invokeWhileActive(
+        "fetch_game_artwork",
+        { gameId, force: true },
+        signal,
+      );
     },
     async resetArtwork(gameId, signal) {
       if (!isTauriRuntime()) return { title: "", replaced: [] };
-      return invokeWhileActive<ArtworkResetResult>("reset_game_artwork", { gameId }, signal);
+      return invokeWhileActive<ArtworkResetResult>(
+        "reset_game_artwork",
+        { gameId },
+        signal,
+      );
     },
     async removeGame(gameId, signal) {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("remove_game", { gameId }, signal);
     },
+    async setGameHidden(gameId, hidden, signal) {
+      if (!isTauriRuntime()) return;
+      await invokeWhileActive("set_game_hidden", { gameId, hidden }, signal);
+    },
     async setHomeImage(gameId, mediaId, role, signal) {
       if (!isTauriRuntime()) return;
-      await invokeWhileActive("set_home_image", { gameId, mediaId, role }, signal);
+      await invokeWhileActive(
+        "set_home_image",
+        { gameId, mediaId, role },
+        signal,
+      );
     },
   };
 }
@@ -248,7 +360,10 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-function iconElement(name: Parameters<typeof icon>[0], className = ""): HTMLElement {
+function iconElement(
+  name: Parameters<typeof icon>[0],
+  className = "",
+): HTMLElement {
   const wrapper = element("span", `gd-icon ${className}`.trim());
   wrapper.innerHTML = icon(name);
   return wrapper;
@@ -261,7 +376,12 @@ function isAbort(error: unknown): boolean {
 /** A native file dialog dismissal is a normal outcome, not a failure. */
 function isUserCancellation(error: unknown): boolean {
   if (isAbort(error)) return true;
-  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : "";
   return /cancell?ed|dismissed|no file selected/i.test(message);
 }
 
@@ -309,6 +429,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   /** Index into the hero's auto-cycling backgrounds, and its timer. */
   let heroSlide = 0;
   let heroTimer: number | null = null;
+  /** Ticks the Epic download percentage while one is running; null otherwise. */
+  let epicProgressTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The percentage the poll last measured, so the hero chip moves with it. */
+  let epicProgressPercent: number | null = null;
 
   const isActive = (context = activation): context is PageActivation =>
     Boolean(context && context.isCurrent() && !context.signal.aborted);
@@ -317,7 +441,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const isFresh = (context: PageActivation | null, gameId: string): boolean =>
     isActive(context) && state.gameId === gameId;
 
-  const dispatch = (action: GameDetailPageAction, shouldRender = true): void => {
+  const dispatch = (
+    action: GameDetailPageAction,
+    shouldRender = true,
+  ): void => {
     state = reduceGameDetailState(state, action);
     if (shouldRender) render();
   };
@@ -338,7 +465,58 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     dispatch({ type: "status-changed", message: "" });
   };
 
-  const loadDetail = async (context: PageActivation, gameId: string): Promise<void> => {
+  const stopEpicProgress = (): void => {
+    if (epicProgressTimer) clearTimeout(epicProgressTimer);
+    epicProgressTimer = null;
+    epicProgressPercent = null;
+  };
+
+  /**
+   * Poll the launcher while a download runs. Epic never calls back, so the only
+   * honest progress is a re-read; once it finishes, the detail is reloaded so
+   * the button becomes Play instead of Install.
+   */
+  const trackEpicInstall = (context: PageActivation, gameId: string): void => {
+    stopEpicProgress();
+    const tick = async (): Promise<void> => {
+      if (!isFresh(context, gameId)) return stopEpicProgress();
+      let status: EpicInstallStatus;
+      try {
+        status = await client.epicInstallStatus(gameId, context.signal);
+      } catch {
+        // A launcher that will not answer is not a failed install. Stop
+        // reporting rather than replacing a running download with an error.
+        return stopEpicProgress();
+      }
+      if (!isFresh(context, gameId)) return stopEpicProgress();
+      // Any settled state ends the watch: this same loop follows an uninstall,
+      // where "not installed" is the successful outcome rather than a failure.
+      if (status.state !== "installing") {
+        stopEpicProgress();
+        void loadDetail(context, gameId);
+        return;
+      }
+      if (status.state === "installing") {
+        dispatch({
+          type: "status-changed",
+          message: `Downloading… ${status.percent}%`,
+        });
+      }
+      epicProgressTimer = setTimeout(
+        () => void tick(),
+        EPIC_PROGRESS_INTERVAL_MS,
+      );
+    };
+    epicProgressTimer = setTimeout(
+      () => void tick(),
+      EPIC_PROGRESS_INTERVAL_MS,
+    );
+  };
+
+  const loadDetail = async (
+    context: PageActivation,
+    gameId: string,
+  ): Promise<void> => {
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId });
     try {
@@ -347,11 +525,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       let detail = normaliseGameDetail(payload);
       // Debug overlay only: fills empty social sections when the Settings toggle
       // is on, leaving anything the backend actually shipped untouched.
-      if (detail && options.sampleSocialEnabled?.()) detail = withSampleSocialData(detail);
+      if (detail && options.sampleSocialEnabled?.())
+        detail = withSampleSocialData(detail);
       dispatch({ type: "detail-loaded", requestId, detail });
     } catch (error) {
       if (!isFresh(context, gameId)) return;
-      const message = requestErrorMessage(error, "This game could not be loaded right now.");
+      const message = requestErrorMessage(
+        error,
+        "This game could not be loaded right now.",
+      );
       if (!message) return;
       dispatch({
         type: "request-failed",
@@ -366,7 +548,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId) return;
-    const action = resolvePrimaryAction(state.detail, gameId);
+    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent);
     if (action.disabled) return;
     if (action.intent === "play") {
       options.play(gameId);
@@ -376,13 +558,33 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       options.navigate(action.route);
       return;
     }
+    if (action.intent === "install-epic") {
+      try {
+        await client.installEpicGame(gameId, context.signal);
+        if (!isFresh(context, gameId)) return;
+        showTransientStatus("Epic Games is starting the download…");
+        trackEpicInstall(context, gameId);
+      } catch (error) {
+        if (!isFresh(context, gameId) || isUserCancellation(error)) return;
+        showTransientStatus(
+          requestErrorMessage(
+            error,
+            "Epic Games could not start this download.",
+          ),
+        );
+      }
+      return;
+    }
     if (action.intent !== "open-offer" || !action.offerId) return;
     try {
       await client.openOffer(action.offerId, context.signal);
-      if (isFresh(context, gameId)) showTransientStatus("Offer opened in your browser.");
+      if (isFresh(context, gameId))
+        showTransientStatus("Offer opened in your browser.");
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
-      showTransientStatus(requestErrorMessage(error, "The offer could not be opened."));
+      showTransientStatus(
+        requestErrorMessage(error, "The offer could not be opened."),
+      );
     }
   };
 
@@ -407,7 +609,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (!isFresh(context, gameId)) return;
       // A partial result is stated rather than hidden: a game whose publisher
       // never uploaded a wide capsule keeps the landscape image it had.
-      const missing = ROLE_LABELS.filter(({ role }) => !result.replaced.includes(role));
+      const missing = ROLE_LABELS.filter(
+        ({ role }) => !result.replaced.includes(role),
+      );
       if (missing.length === 0) {
         clearTransientStatus();
       } else {
@@ -417,7 +621,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       }
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
-      showTransientStatus(requestErrorMessage(error, "No covers were found for this game."));
+      showTransientStatus(
+        requestErrorMessage(error, "No covers were found for this game."),
+      );
     }
   };
 
@@ -427,7 +633,6 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const gameId = state.gameId;
     const title = state.detail?.title ?? "this game";
     if (!isActive(context) || !gameId) return;
-    if (typeof window !== "undefined" && !window.confirm(`Remove ${title} from your library?`)) return;
     try {
       await client.removeGame(gameId, context.signal);
       if (!isActive(context)) return;
@@ -436,7 +641,49 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       options.back();
     } catch (error) {
       if (!isActive(context) || isUserCancellation(error)) return;
-      showTransientStatus(requestErrorMessage(error, "This game could not be removed."));
+      showTransientStatus(
+        requestErrorMessage(error, "This game could not be removed."),
+      );
+    }
+  };
+
+  const handleUninstall = async (): Promise<void> => {
+    const context = activation;
+    const gameId = state.gameId;
+    const title = state.detail?.title ?? "this game";
+    if (!isActive(context) || !gameId) return;
+    try {
+      await client.uninstallEpicGame(gameId, context.signal);
+      if (!isFresh(context, gameId)) return;
+      showTransientStatus(`${title} has been uninstalled.`);
+      // The files are gone by the time this returns, so the page can repaint
+      // straight away rather than waiting on a launcher that was never asked.
+      options.onLibraryChanged?.();
+      void loadDetail(context, gameId);
+    } catch (error) {
+      if (!isFresh(context, gameId) || isUserCancellation(error)) return;
+      showTransientStatus(
+        requestErrorMessage(error, "This game could not be uninstalled."),
+      );
+    }
+  };
+
+  const handleHideGame = async (): Promise<void> => {
+    const context = activation;
+    const gameId = state.gameId;
+    const title = state.detail?.title ?? "this game";
+    if (!isActive(context) || !gameId) return;
+    try {
+      await client.setGameHidden(gameId, true, context.signal);
+      if (!isActive(context)) return;
+      options.onLibraryChanged?.();
+      showTransientStatus(`${title} is hidden from your library.`);
+      options.back();
+    } catch (error) {
+      if (!isActive(context) || isUserCancellation(error)) return;
+      showTransientStatus(
+        requestErrorMessage(error, "This game could not be hidden."),
+      );
     }
   };
 
@@ -448,16 +695,21 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     // Cover fetch never holds up the Background row.
     for (const category of WALLPAPER_CATEGORIES) {
       const row = state.wallpaperSearch.categories[category];
-      if (!row.busy && row.candidates.length === 0) void handleWallpaperSearch(category);
+      if (!row.busy && row.candidates.length === 0)
+        void handleWallpaperSearch(category);
     }
-    pageRoot?.querySelector<HTMLElement>("[data-focus-key='wallpaper-modal-close']")?.focus();
+    pageRoot
+      ?.querySelector<HTMLElement>("[data-focus-key='wallpaper-modal-close']")
+      ?.focus();
   };
 
   const closeWallpaperSearch = (): void => {
     wallpaperSelection.clear();
     dispatch({ type: "wallpaper-search-closed" });
     // The dialog is opened from the "…" menu now, so focus returns there.
-    pageRoot?.querySelector<HTMLElement>("[data-focus-key='more-actions']")?.focus();
+    pageRoot
+      ?.querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.focus();
   };
 
   /**
@@ -479,7 +731,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       const committed = normaliseGameMedia(media);
       // The browser fallback returns nothing; keep the preview rather than
       // wiping the rail.
-      if (committed.length > 0) dispatch({ type: "media-committed", media: committed });
+      if (committed.length > 0)
+        dispatch({ type: "media-committed", media: committed });
       else dispatch({ type: "media-busy-changed", busy: false });
       await client.setHomeImage(gameId, mediaId, "background", context.signal);
       if (!isFresh(context, gameId)) return;
@@ -489,7 +742,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (!isFresh(context, gameId)) return;
       dispatch({
         type: "media-failed",
-        message: requestErrorMessage(error, "That wallpaper could not be set as your background."),
+        message: requestErrorMessage(
+          error,
+          "That wallpaper could not be set as your background.",
+        ),
       });
     }
   };
@@ -504,14 +760,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   ): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
-    if (!isActive(context) || !gameId || state.wallpaperSearch.categories[category].busy) return;
-    const source = state.wallpaperSearch.source;
+    if (
+      !isActive(context) ||
+      !gameId ||
+      state.wallpaperSearch.categories[category].busy
+    )
+      return;
     const query = state.wallpaperSearch.query.trim();
     if (!query) return;
     dispatch({ type: "wallpaper-search-started", category, more });
     const offset = state.wallpaperSearch.categories[category].offset;
     try {
-      const results = await client.searchWallpapers(source, category, query, offset, context.signal);
+      const results = await client.searchWallpapers(
+        category,
+        query,
+        offset,
+        context.signal,
+      );
       if (!isFresh(context, gameId)) return;
       dispatch({
         type: "wallpaper-search-results",
@@ -523,7 +788,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       dispatch({
         type: "wallpaper-search-failed",
         category,
-        message: requestErrorMessage(error, "That search did not finish. Try again."),
+        message: requestErrorMessage(
+          error,
+          "That search did not finish. Try again.",
+        ),
       });
     }
   };
@@ -566,7 +834,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId || state.mediaBusy) return;
-    const chosen = allWallpaperSlides().filter((slide) => wallpaperSelection.has(slide.id));
+    const chosen = allWallpaperSlides().filter((slide) =>
+      wallpaperSelection.has(slide.id),
+    );
     if (chosen.length === 0) return;
     dispatch({ type: "media-busy-changed", busy: true });
     try {
@@ -576,11 +846,18 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       for (const slide of chosen) {
         const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
         if (slide.candidate) {
-          const media = await client.importWallpaper(gameId, slide.id, context.signal);
+          const media = await client.importWallpaper(
+            gameId,
+            slide.id,
+            context.signal,
+          );
           if (!isFresh(context, gameId)) return;
           const normalised = normaliseGameMedia(media);
-          if (normalised.length > 0) dispatch({ type: "media-imported", media: normalised });
-          const stored = normalised.find((item) => item.selected) ?? normalised[normalised.length - 1];
+          if (normalised.length > 0)
+            dispatch({ type: "media-imported", media: normalised });
+          const stored =
+            normalised.find((item) => item.selected) ??
+            normalised[normalised.length - 1];
           if (stored) saved.push({ mediaId: stored.id, role });
         } else {
           saved.push({ mediaId: slide.id, role });
@@ -588,14 +865,25 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       }
       // The background pick (or a lone pick of any shape) is what the hero and
       // the Library card paint, so that one is also the committed selection.
-      const home = saved.find((entry) => entry.role === "background") ?? saved[0];
+      const home =
+        saved.find((entry) => entry.role === "background") ?? saved[0];
       if (home) {
-        const media = await client.selectMedia(gameId, home.mediaId, context.signal);
+        const media = await client.selectMedia(
+          gameId,
+          home.mediaId,
+          context.signal,
+        );
         if (!isFresh(context, gameId)) return;
         const committed = normaliseGameMedia(media);
-        if (committed.length > 0) dispatch({ type: "media-committed", media: committed });
+        if (committed.length > 0)
+          dispatch({ type: "media-committed", media: committed });
         for (const entry of saved) {
-          await client.setHomeImage(gameId, entry.mediaId, entry.role, context.signal);
+          await client.setHomeImage(
+            gameId,
+            entry.mediaId,
+            entry.role,
+            context.signal,
+          );
           if (!isFresh(context, gameId)) return;
         }
       } else {
@@ -608,13 +896,18 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       showTransientStatus(
         chosen.length > 1
           ? `${chosen.length} wallpapers applied to this game.`
-          : WALLPAPER_ROLE_APPLIED[WALLPAPER_ROLE_FOR_CATEGORY[chosen[0].category]],
+          : WALLPAPER_ROLE_APPLIED[
+              WALLPAPER_ROLE_FOR_CATEGORY[chosen[0].category]
+            ],
       );
     } catch (error) {
       if (!isFresh(context, gameId)) return;
       dispatch({
         type: "media-failed",
-        message: requestErrorMessage(error, "Those wallpapers could not be saved."),
+        message: requestErrorMessage(
+          error,
+          "Those wallpapers could not be saved.",
+        ),
       });
     }
   };
@@ -629,7 +922,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     back.dataset.focusKey = "back";
     back.append(
       element("span", "gd-back__glyph"),
-      element("span", "gd-back__label", state.from === "store" ? "Back to Store" : "Back to Library"),
+      element(
+        "span",
+        "gd-back__label",
+        state.from === "store" ? "Back to Store" : "Back to Library",
+      ),
     );
     (back.firstElementChild as HTMLElement).innerHTML = icon("chevron-left");
     back.addEventListener("click", () => options.back());
@@ -649,17 +946,30 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     status.setAttribute("role", state.phase === "error" ? "alert" : "status");
     status.setAttribute("aria-live", "polite");
     status.append(
-      iconElement(state.phase === "loading" ? "refresh" : state.errorMessage ? "alert" : "navigate"),
+      iconElement(
+        state.phase === "loading"
+          ? "refresh"
+          : state.errorMessage
+            ? "alert"
+            : "navigate",
+      ),
       element("span", "gd-status__copy", message || "Loading game details…"),
     );
     return status;
   };
 
-  const renderNotice = (title: string, copy: string, retry: boolean): HTMLElement => {
+  const renderNotice = (
+    title: string,
+    copy: string,
+    retry: boolean,
+  ): HTMLElement => {
     const notice = element("section", "gd-notice");
     notice.setAttribute("role", "status");
     notice.append(iconElement("alert", "gd-notice__icon"));
-    notice.append(element("h1", "gd-notice__title", title), element("p", "gd-notice__copy", copy));
+    notice.append(
+      element("h1", "gd-notice__title", title),
+      element("p", "gd-notice__copy", copy),
+    );
     const actions = element("div", "gd-notice__actions");
     const back = element("button", "gd-button gd-button--ghost", "Go back");
     back.type = "button";
@@ -667,11 +977,16 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     back.addEventListener("click", () => options.back());
     actions.append(back);
     if (retry) {
-      const again = element("button", "gd-button gd-button--primary", "Try again");
+      const again = element(
+        "button",
+        "gd-button gd-button--primary",
+        "Try again",
+      );
       again.type = "button";
       again.dataset.focusKey = "notice-retry";
       again.addEventListener("click", () => {
-        if (activation && state.gameId) void loadDetail(activation, state.gameId);
+        if (activation && state.gameId)
+          void loadDetail(activation, state.gameId);
       });
       actions.append(again);
     }
@@ -712,15 +1027,40 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   const renderPrimaryAction = (detail: GameDetailViewModel): HTMLElement => {
-    const descriptor = resolvePrimaryAction(detail, state.gameId);
-    const button = element("button", "gd-button gd-button--primary gd-primary-action");
+    const descriptor = resolvePrimaryAction(
+      detail,
+      state.gameId,
+      epicProgressPercent,
+    );
+    const button = element(
+      "button",
+      "gd-button gd-button--primary gd-primary-action",
+    );
     button.type = "button";
     button.dataset.focusKey = "primary-action";
     button.dataset.action = descriptor.kind;
     button.disabled = descriptor.disabled;
     button.title = descriptor.hint;
-    button.setAttribute("aria-label", `${descriptor.label}: ${descriptor.hint}`);
-    button.append(iconElement(descriptor.icon), element("span", "gd-button__label", descriptor.label));
+    button.setAttribute(
+      "aria-label",
+      `${descriptor.label}: ${descriptor.hint}`,
+    );
+    // The fill sits under the label rather than replacing it, so the button
+    // stays a button — same size, same position — while it doubles as the bar.
+    if (typeof descriptor.progress === "number") {
+      const fill = element("span", "gd-primary-action__fill");
+      fill.style.width = `${Math.min(100, Math.max(0, descriptor.progress))}%`;
+      button.append(fill);
+      button.dataset.progress = String(descriptor.progress);
+      button.setAttribute("role", "progressbar");
+      button.setAttribute("aria-valuenow", String(descriptor.progress));
+      button.setAttribute("aria-valuemin", "0");
+      button.setAttribute("aria-valuemax", "100");
+    }
+    button.append(
+      iconElement(descriptor.icon),
+      element("span", "gd-button__label", descriptor.label),
+    );
     button.addEventListener("click", () => void handlePrimaryAction());
     return button;
   };
@@ -729,7 +1069,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const renderPrimaryActionGroup = (detail: GameDetailViewModel): HTMLElement =>
     renderPrimaryAction(detail);
 
-  /** Optimistic wishlist toggle; a failed save flips the button back. */
+  /** Optimistic favourite toggle; a failed save flips the button back. */
   const handleWishlist = async (): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
@@ -742,11 +1082,19 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     } catch (error) {
       if (!isFresh(context, gameId) || isUserCancellation(error)) return;
       dispatch({ type: "wishlist-changed", wishlisted: !next });
-      showTransientStatus(requestErrorMessage(error, "The wishlist could not be updated."));
+      showTransientStatus(
+        requestErrorMessage(error, "Your favourites could not be updated."),
+      );
     }
   };
 
-  const renderWishlistButton = (detail: GameDetailViewModel): HTMLElement => {
+  /**
+   * Favourites, not a wishlist. The library is what you already own, so
+   * "wishlist" never described what this button did. The stored flag keeps its
+   * original name for now — renaming a persisted field is a migration, not a
+   * label change — but nothing user-facing says "wishlist" any more.
+   */
+  const renderFavouriteButton = (detail: GameDetailViewModel): HTMLElement => {
     const button = element("button", "gd-button gd-wishlist");
     button.type = "button";
     button.dataset.focusKey = "wishlist";
@@ -755,12 +1103,16 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     button.setAttribute(
       "aria-label",
       detail.wishlisted
-        ? `Remove ${detail.title} from your wishlist`
-        : `Add ${detail.title} to your wishlist`,
+        ? `Remove ${detail.title} from your favourites`
+        : `Add ${detail.title} to your favourites`,
     );
     button.append(
-      iconElement("bookmark"),
-      element("span", "gd-button__label", detail.wishlisted ? "Wishlisted" : "Wishlist"),
+      iconElement(detail.wishlisted ? "heart-filled" : "heart"),
+      element(
+        "span",
+        "gd-button__label",
+        detail.wishlisted ? "Favourite" : "Favourite",
+      ),
     );
     button.addEventListener("click", () => void handleWishlist());
     return button;
@@ -789,7 +1141,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       }
     };
     // Deferred so the opening click itself does not immediately close it.
-    const timer = setTimeout(() => document.addEventListener("click", onDocClick), 0);
+    const timer = setTimeout(
+      () => document.addEventListener("click", onDocClick),
+      0,
+    );
     document.addEventListener("keydown", onKey);
     moreMenuCleanup = () => {
       clearTimeout(timer);
@@ -825,11 +1180,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       run: () => void,
       danger = false,
     ): HTMLElement => {
-      const entry = element("button", `gd-menu__item${danger ? " gd-menu__item--danger" : ""}`);
+      const entry = element(
+        "button",
+        `gd-menu__item${danger ? " gd-menu__item--danger" : ""}`,
+      );
       entry.type = "button";
       entry.dataset.focusKey = focusKey;
       entry.setAttribute("role", "menuitem");
-      entry.append(iconElement(iconName), element("span", "gd-menu__label", label));
+      entry.append(
+        iconElement(iconName),
+        element("span", "gd-menu__label", label),
+      );
       entry.addEventListener("click", () => {
         closeMoreMenu(button, menu);
         run();
@@ -837,15 +1198,89 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       return entry;
     };
 
+    const remove = element("button", "gd-menu__item gd-menu__item--danger");
+    remove.type = "button";
+    remove.dataset.focusKey = "menu-remove";
+    remove.setAttribute("role", "menuitem");
+    const removeLabel = element(
+      "span",
+      "gd-menu__label",
+      "Remove from library",
+    );
+    remove.append(iconElement("close"), removeLabel);
+    let removeArmed = false;
+    let uninstallArmed = false;
+    let resetUninstall = (): void => {};
+    remove.addEventListener("click", () => {
+      if (!removeArmed) {
+        removeArmed = true;
+        remove.classList.add("gd-menu__item--armed");
+        removeLabel.textContent = "Confirm removal";
+        return;
+      }
+      closeMoreMenu(button, menu);
+      void handleRemoveGame();
+    });
+
     menu.append(
-      item("menu-wallpaper", "background", "Add wallpaper", openWallpaperSearch),
+      item(
+        "menu-wallpaper",
+        "background",
+        "Change wallpaper",
+        openWallpaperSearch,
+      ),
       // "Search cover & images" is deliberately gone: it downloaded one picture
       // and used it as cover, landscape and background at once, which is how
       // games ended up wearing each other's art. "Reset the covers" refills the
       // three roles from their own sources instead.
-      item("menu-artwork", "refresh", "Reset the covers", () => void handleResetArtwork()),
-      item("menu-remove", "close", "Remove from library", () => void handleRemoveGame(), true),
+      item(
+        "menu-artwork",
+        "refresh",
+        "Reset the covers",
+        () => void handleResetArtwork(),
+      ),
+      // Hidden, not removed: the game stays in the catalog with its artwork and
+      // play time, it simply stops appearing in the library.
+      item("menu-hide", "close", "Hide game", () => void handleHideGame()),
+      remove,
     );
+    // Only a store that can actually be asked to remove the files gets the
+    // entry, and only when there is something installed to remove.
+    if (detail.source === "epic" && detail.installState === "installed") {
+      // This really does delete the game's files, so it arms first — the same
+      // two-step the library removal uses, for the same reason.
+      const uninstall = element("button", "gd-menu__item gd-menu__item--danger");
+      uninstall.type = "button";
+      uninstall.dataset.focusKey = "menu-uninstall";
+      uninstall.setAttribute("role", "menuitem");
+      const uninstallLabel = element("span", "gd-menu__label", "Uninstall");
+      uninstall.append(iconElement("close"), uninstallLabel);
+      uninstall.addEventListener("click", () => {
+        if (!uninstallArmed) {
+          uninstallArmed = true;
+          uninstall.classList.add("gd-menu__item--armed");
+          uninstallLabel.textContent = "Delete the game files";
+          return;
+        }
+        closeMoreMenu(button, menu);
+        void handleUninstall();
+      });
+      menu.insertBefore(uninstall, remove);
+      resetUninstall = () => {
+        uninstallArmed = false;
+        uninstall.classList.remove("gd-menu__item--armed");
+        uninstallLabel.textContent = "Uninstall";
+      };
+    }
+
+    // Re-opening the menu starts the removal over: an armed danger action must
+    // not survive out of sight.
+    button.addEventListener("click", () => {
+      removeArmed = false;
+      remove.classList.remove("gd-menu__item--armed");
+      removeLabel.textContent = "Remove from library";
+      resetUninstall();
+    });
 
     button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -869,7 +1304,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       video.autoplay = false;
       video.src = preview.previewUrl;
       if (preview.posterUrl) video.poster = preview.posterUrl;
-      video.setAttribute("aria-label", `${preview.title} trailer for ${detail.title}`);
+      video.setAttribute(
+        "aria-label",
+        `${preview.title} trailer for ${detail.title}`,
+      );
       const play = element("button", "gd-hero__play");
       play.type = "button";
       play.dataset.focusKey = "hero-play";
@@ -893,7 +1331,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     image.setAttribute("aria-hidden", "true");
     // A background the user is previewing or has applied wins outright; with
     // none chosen, the hero cycles the game's backgrounds on its own.
-    attachImage(frame, image, heroSlideshowUrl() ?? heroImageUrl(state), "gd-hero__media--missing");
+    attachImage(
+      frame,
+      image,
+      heroSlideshowUrl() ?? heroImageUrl(state),
+      "gd-hero__media--missing",
+    );
     frame.append(image);
     return frame;
   };
@@ -964,11 +1407,19 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     tile.dataset.focusKey = `media-${item.id}`;
     tile.dataset.mediaKind = item.kind;
     tile.classList.toggle("gd-gallery__tile--selected", selected);
-    tile.setAttribute("aria-label", `${item.title}${item.availableOffline ? "" : " — needs a download"}`);
+    tile.setAttribute(
+      "aria-label",
+      `${item.title}${item.availableOffline ? "" : " — needs a download"}`,
+    );
     const image = element("img", "gd-gallery__tile-image");
     image.loading = "lazy";
     image.decoding = "async";
-    attachImage(tile, image, item.posterUrl ?? item.previewUrl, "gd-gallery__tile--missing");
+    attachImage(
+      tile,
+      image,
+      item.posterUrl ?? item.previewUrl,
+      "gd-gallery__tile--missing",
+    );
     tile.append(image);
     if (item.kind === "video") {
       const play = element("span", "gd-gallery__play");
@@ -995,15 +1446,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
   /** The candidates one row shows, in the order they were fetched. */
   const categorySlides = (category: WallpaperCategory): WallpaperSlide[] => {
-    const slides: WallpaperSlide[] = state.wallpaperSearch.categories[category].candidates.map(
-      (candidate) => ({
-        id: candidate.id,
-        title: candidate.title,
-        url: candidate.thumbnailUrl,
-        candidate: true,
-        category,
-      }),
-    );
+    const slides: WallpaperSlide[] = state.wallpaperSearch.categories[
+      category
+    ].candidates.map((candidate) => ({
+      id: candidate.id,
+      title: candidate.title,
+      url: candidate.thumbnailUrl,
+      candidate: true,
+      category,
+    }));
     // Wallpapers already saved on this game are backgrounds — that is what the
     // kind means — so they join the Background row and no other.
     if (category === "background") {
@@ -1031,28 +1482,44 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     tile.dataset.focusKey = `wall-${slide.id}`;
     const picked = wallpaperSelection.has(slide.id);
     tile.classList.toggle("gd-wallgrid__tile--selected", picked);
-    tile.classList.toggle("gd-wallgrid__tile--current", slide.id === state.appliedMediaId);
+    tile.classList.toggle(
+      "gd-wallgrid__tile--current",
+      slide.id === state.appliedMediaId,
+    );
     tile.setAttribute("aria-pressed", String(picked));
     tile.setAttribute("aria-label", slide.title);
     const image = element("img", "gd-wallgrid__image");
     image.loading = "lazy";
     image.decoding = "async";
+    // A candidate that will not load is not a candidate. Several of the Steam
+    // rows lead with assets a publisher may never have uploaded
+    // (`capsule_616x353`, `page_bg_raw`), so the first tiles of the landscape
+    // and background rows were often dead links offered as choices.
+    image.addEventListener("error", () => tile.remove());
     attachImage(tile, image, slide.url, "gd-wallgrid__tile--missing");
     const check = element("span", "gd-wallgrid__check");
     check.setAttribute("aria-hidden", "true");
     check.append(iconElement("check"));
     tile.append(image, check);
     tile.addEventListener("click", () => {
-      if (wallpaperSelection.has(slide.id)) wallpaperSelection.delete(slide.id);
-      else wallpaperSelection.add(slide.id);
+      // One pick per row, because a row *is* a slot. Ticking a second image in
+      // the same row queued both and the page applied them in turn, so the card
+      // ended up wearing whichever download finished last. Picking across rows
+      // is still how the three slots are filled in one pass.
+      const wasPicked = wallpaperSelection.has(slide.id);
+      for (const sibling of categorySlides(slide.category)) {
+        wallpaperSelection.delete(sibling.id);
+      }
+      if (!wasPicked) wallpaperSelection.add(slide.id);
       render();
     });
     return tile;
   };
 
   /**
-   * A row's own busy / empty / error / not-configured line. It lives inside the
-   * row so one failing category never blanks the two beside it.
+   * A row's own busy / empty / error line. It lives inside the row so one
+   * failing category never blanks the ones beside it — which matters more now
+   * that a row is fed by six sources at once and any of them may be down.
    */
   const renderWallpaperRowStatus = (
     category: WallpaperCategory,
@@ -1060,16 +1527,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   ): HTMLElement | null => {
     const row = state.wallpaperSearch.categories[category];
     if (row.busy) {
-      const busy = element("p", "gd-wallrow__status gd-search__status", "Searching…");
+      const busy = element(
+        "p",
+        "gd-wallrow__status gd-search__status",
+        "Searching…",
+      );
       busy.setAttribute("role", "status");
       return busy;
-    }
-    if (row.phase === "not-configured") {
-      return element(
-        "p",
-        "gd-wallrow__status gd-search__notice",
-        row.message || "This source is not configured yet. Add the required keys and try again.",
-      );
     }
     if (row.phase === "error") {
       const error = element(
@@ -1081,17 +1545,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       return error;
     }
     if (row.phase === "ready" && tiles === 0) {
+      // The backend's own message is the useful one when a row comes back
+      // empty: for a 4K-only row it is usually "add a SteamGridDB key", which
+      // "try another query" would talk straight over.
       return element(
         "p",
         "gd-wallrow__status gd-search__notice",
-        `Nothing matched for ${WALLPAPER_CATEGORY_META[category].label.toLowerCase()}. Try another query.`,
+        row.message ||
+          `Nothing matched for ${WALLPAPER_CATEGORY_META[category].label.toLowerCase()}.`,
       );
     }
     return null;
   };
 
-  /** The three pill filters. The lit one narrows the dialog to its row. */
-  const renderWallpaperChips = (focus: WallpaperCategory | null): HTMLElement => {
+  /** The shape filters. The lit one narrows the dialog to its row alone. */
+  const renderWallpaperChips = (
+    focus: WallpaperCategory | null,
+  ): HTMLElement => {
     const chips = element("div", "gd-chips");
     chips.setAttribute("role", "group");
     chips.setAttribute("aria-label", "Filter wallpapers by shape");
@@ -1112,17 +1582,25 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         element("span", "gd-chip__label", meta.label),
         check,
       );
-      // Clicking the lit chip clears the filter and brings all three rows back.
-      chip.addEventListener("click", () => setWallpaperFocus(active ? null : category));
+      // Clicking the lit chip clears the filter and brings every row back.
+      chip.addEventListener("click", () =>
+        setWallpaperFocus(active ? null : category),
+      );
       chips.append(chip);
     }
     return chips;
   };
 
   /**
-   * One category section: a titled header with a "Voir tout" link, then its own
-   * tiles at that category's aspect ratio (portrait for Cover, 16:9 otherwise).
-   * Narrowed to a single row, the grid keeps its columns and simply wraps.
+   * One category section: a titled header, then every tile that row holds in a
+   * scroller shaped for it.
+   *
+   * The card shapes scroll sideways and the background scrolls down, which is
+   * what puts them in different columns: a 2:3 cover and a 3:1 hero cannot
+   * share a rail without one of them being tiny, and a full-bleed background is
+   * worth showing large enough to actually judge. There is no "see all" and no
+   * five-tile cap any more — a scroller already holds everything, so a control
+   * that only revealed the sixth tile had nothing left to do.
    */
   const renderWallpaperRow = (
     category: WallpaperCategory,
@@ -1130,55 +1608,62 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   ): HTMLElement => {
     const meta = WALLPAPER_CATEGORY_META[category];
     const row = state.wallpaperSearch.categories[category];
-    const expanded = focus === category;
     const slides = categorySlides(category);
-    const shown = expanded ? slides : slides.slice(0, WALLPAPER_ROW_TILES);
 
     const section = element("section", "gd-wallrow");
     section.dataset.category = category;
-    section.classList.toggle("gd-wallrow--expanded", expanded);
+    section.classList.toggle("gd-wallrow--expanded", focus === category);
 
     const header = element("div", "gd-wallrow__header");
     const title = element("h3", "gd-wallrow__title", meta.label);
     title.id = `gd-wallrow-${category}`;
-    const seeAll = element("button", "gd-wallrow__seeall");
-    seeAll.type = "button";
-    seeAll.dataset.focusKey = `wallpaper-seeall-${category}`;
-    seeAll.append(
-      element("span", "gd-wallrow__seeall-label", expanded ? "Voir moins" : "Voir tout"),
-      iconElement(expanded ? "arrow-left" : "arrow-right"),
-    );
-    seeAll.addEventListener("click", () => setWallpaperFocus(expanded ? null : category));
-    header.append(iconElement(meta.icon, "gd-wallrow__icon"), title, seeAll);
+    header.append(iconElement(meta.icon, "gd-wallrow__icon"), title);
+    // Paging is the one control a scroller cannot replace: the tiles it would
+    // reveal have not been fetched yet.
+    if (row.phase === "ready" && row.hasMore && !row.busy) {
+      const more = element("button", "gd-wallrow__more", "Search more");
+      more.type = "button";
+      more.dataset.focusKey = `wallpaper-more-${category}`;
+      more.addEventListener(
+        "click",
+        () => void handleWallpaperSearch(category, true),
+      );
+      header.append(more);
+    }
     section.append(header);
 
     const grid = element("div", "gd-wallgrid");
     grid.dataset.category = category;
     grid.setAttribute("role", "group");
     grid.setAttribute("aria-labelledby", title.id);
-    for (const slide of shown) grid.append(renderWallpaperTile(slide));
-    // Empty slots keep the row at its full width while it loads or comes back
-    // empty, so the dialog never jumps as the three requests land.
-    for (let slot = shown.length; slot < WALLPAPER_ROW_TILES; slot += 1) {
-      const ghost = element("div", "gd-wallgrid__ghost");
-      ghost.setAttribute("aria-hidden", "true");
-      grid.append(ghost);
+    for (const slide of slides) grid.append(renderWallpaperTile(slide));
+    // Placeholders only while a row is still waiting on its first answer, so
+    // the column holds its size instead of snapping open as requests land.
+    if (row.busy && slides.length === 0) {
+      for (let slot = 0; slot < WALLPAPER_ROW_TILES; slot += 1) {
+        const ghost = element("div", "gd-wallgrid__ghost");
+        ghost.setAttribute("aria-hidden", "true");
+        grid.append(ghost);
+      }
     }
     section.append(grid);
 
-    const status = renderWallpaperRowStatus(category, shown.length);
+    const status = renderWallpaperRowStatus(category, slides.length);
     if (status) section.append(status);
-
-    // Paging only makes sense once a row owns the dialog: an unexpanded row
-    // shows five tiles however many it holds.
-    if (expanded && row.phase === "ready" && row.hasMore && !row.busy) {
-      const more = element("button", "gd-button gd-button--ghost gd-search__more", "Search more");
-      more.type = "button";
-      more.dataset.focusKey = "wallpaper-search-more";
-      more.addEventListener("click", () => void handleWallpaperSearch(category, true));
-      section.append(more);
-    }
     return section;
+  };
+
+  /**
+   * Which column a row lives in. The two card shapes and the wordmark are drawn
+   * small and read as a strip; the background is the one image that fills a
+   * screen, so it gets a column of its own where a tile can be big enough to
+   * choose between.
+   */
+  const WALLPAPER_COLUMN: Record<WallpaperCategory, "cards" | "feed"> = {
+    cover: "cards",
+    landscape: "cards",
+    logo: "cards",
+    background: "feed",
   };
 
   const renderWallpaperModal = (): HTMLElement | null => {
@@ -1187,93 +1672,76 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const modal = element("section", "gd-modal");
     modal.setAttribute("role", "dialog");
     modal.setAttribute("aria-modal", "true");
-    modal.setAttribute("aria-labelledby", "gd-wallpaper-title");
+    modal.setAttribute("aria-label", "Wallpapers");
 
     const backdrop = element("div", "gd-modal__backdrop");
     backdrop.addEventListener("click", closeWallpaperSearch);
 
-    const dialog = element("div", "gd-modal__dialog gd-modal__dialog--wallpapers");
-    const header = element("header", "gd-modal__header");
-    const heading = element("div", "gd-modal__heading");
-    const brand = element("span", "gd-modal__brand");
-    brand.setAttribute("aria-hidden", "true");
-    brand.innerHTML = icon("orivo");
-    const title = element("h2", "gd-modal__title", "Wallpapers");
-    title.id = "gd-wallpaper-title";
-    heading.append(brand, title);
+    const dialog = element(
+      "div",
+      "gd-modal__dialog gd-modal__dialog--wallpapers",
+    );
+
+    // The header is the whole set of controls: which shape to look at, and what
+    // to look for. There is no source picker — every provider is asked at once,
+    // so choosing one was a question with no good answer.
+    const header = element("header", "gd-wallhead");
+    header.append(renderWallpaperChips(search.focus));
+
+    const form = element("form", "gd-wallhead__search");
+    form.setAttribute("role", "search");
+    const input = element("input", "gd-search__input") as HTMLInputElement;
+    input.type = "text";
+    input.placeholder = "Search another title…";
+    input.dataset.focusKey = "wallpaper-search-input";
+    input.value = search.query;
+    input.setAttribute("aria-label", "Wallpaper search query");
+    input.addEventListener("input", () =>
+      dispatch(
+        { type: "wallpaper-search-query-changed", query: input.value },
+        false,
+      ),
+    );
+    const anyRowBusy = WALLPAPER_CATEGORIES.some(
+      (category) => search.categories[category].busy,
+    );
+    const submit = element("button", "gd-wallhead__submit");
+    submit.type = "submit";
+    submit.dataset.focusKey = "wallpaper-search-button";
+    submit.setAttribute("aria-label", "Search wallpapers");
+    submit.disabled = anyRowBusy || !search.query.trim();
+    submit.append(iconElement("search"));
+    form.append(input, submit);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      runWallpaperSearches();
+    });
+    header.append(form);
+
     const close = element("button", "gd-modal__close");
     close.type = "button";
     close.dataset.focusKey = "wallpaper-modal-close";
     close.setAttribute("aria-label", "Close wallpapers");
     close.append(iconElement("close"));
     close.addEventListener("click", closeWallpaperSearch);
-    header.append(heading, close);
+    header.append(close);
     dialog.append(header);
 
-    const form = element("form", "gd-search__form");
-    form.setAttribute("role", "search");
-
-    const source = element("select", "gd-search__source");
-    source.dataset.focusKey = "wallpaper-search-source";
-    source.setAttribute("aria-label", "Wallpaper source");
-    // Steam Store is the built-in keyless source that returns real game art;
-    // Wikimedia and Openverse follow as keyless fallbacks. IGDB and Google
-    // Images need keys saved in Settings.
-    for (const option of [
-      ["steam-store", "Steam Store"],
-      ["wikimedia", "Wikimedia Commons"],
-      ["openverse", "Openverse"],
-      ["igdb", "IGDB"],
-      ["google-images", "Google Images"],
-    ] as const) {
-      const entry = document.createElement("option");
-      entry.value = option[0];
-      entry.textContent = option[1];
-      source.append(entry);
-    }
-    source.value = search.source;
-    source.addEventListener("change", () => {
-      dispatch({ type: "wallpaper-search-source-changed", source: source.value as WallpaperSource });
-      // Every row held art from the old source, so all of them refill.
-      runWallpaperSearches();
-    });
-
-    const input = element("input", "gd-search__input") as HTMLInputElement;
-    input.type = "text";
-    input.placeholder = "e.g. Elden Ring wallpaper";
-    input.dataset.focusKey = "wallpaper-search-input";
-    input.value = search.query;
-    input.setAttribute("aria-label", "Wallpaper search query");
-    input.addEventListener("input", () =>
-      dispatch({ type: "wallpaper-search-query-changed", query: input.value }, false),
-    );
-
-    const anyRowBusy = WALLPAPER_CATEGORIES.some(
-      (category) => search.categories[category].busy,
-    );
-    const submit = element("button", "gd-button gd-button--primary gd-search__submit", "Search");
-    submit.type = "submit";
-    submit.dataset.focusKey = "wallpaper-search-button";
-    submit.disabled = anyRowBusy || !search.query.trim();
-    submit.prepend(iconElement("search"));
-
-    form.append(source, input, submit);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      runWallpaperSearches();
-    });
-    dialog.append(form);
-
-    dialog.append(renderWallpaperChips(search.focus));
-
-    // One row per shape, each fed by its own scoped request. A chip (or "Voir
-    // tout") narrows the dialog to a single row, which then wraps.
-    const rows = element("div", "gd-wallrows");
+    // Two columns: the card shapes stack on the left as sideways rails, the
+    // background runs down the right. A chip collapses this to the one row it
+    // names, which then takes the full width.
+    const panes = element("div", "gd-wallpanes");
+    panes.classList.toggle("gd-wallpanes--single", search.focus !== null);
+    const cards = element("div", "gd-wallpanes__cards");
+    const feed = element("div", "gd-wallpanes__feed");
     for (const category of WALLPAPER_CATEGORIES) {
       if (search.focus && search.focus !== category) continue;
-      rows.append(renderWallpaperRow(category, search.focus));
+      const row = renderWallpaperRow(category, search.focus);
+      (WALLPAPER_COLUMN[category] === "feed" ? feed : cards).append(row);
     }
-    dialog.append(rows);
+    if (cards.childElementCount) panes.append(cards);
+    if (feed.childElementCount) panes.append(feed);
+    dialog.append(panes);
 
     if (state.mediaBusy) {
       const busy = element("p", "gd-search__status", "Saving wallpapers…");
@@ -1290,12 +1758,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const picks = wallpaperSelection.size;
 
     // No "Apply as" picker: the row a tile was ticked in already says which
-    // slot it fills, so one pick per row applies all three in a single go.
+    // slot it fills, so one pick per row applies all of them in a single go.
     const actions = element("div", "gd-modal__actions");
     const apply = element(
       "button",
       "gd-button gd-button--primary gd-modal__use",
-      picks > 1 ? `Apply ${picks} wallpapers` : picks === 1 ? "Apply wallpaper" : "Apply wallpaper",
+      picks > 1 ? `Apply ${picks} wallpapers` : "Apply wallpaper",
     );
     apply.type = "button";
     apply.dataset.focusKey = "wallpaper-apply";
@@ -1339,7 +1807,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
    * assistive tech and the tooltip.
    */
   const renderSourceBadge = (detail: GameDetailViewModel): HTMLElement => {
-    const source = sourceBadge(detail.source) ?? { label: "Local", icon: "local" as const };
+    const source = sourceBadge(detail.source) ?? {
+      label: "Local",
+      icon: "local" as const,
+    };
     const badge = element("span", "gd-source");
     badge.dataset.source = detail.source;
     badge.setAttribute("role", "img");
@@ -1347,6 +1818,28 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     badge.title = source.label;
     badge.innerHTML = icon(source.icon);
     return badge;
+  };
+
+  /**
+   * "Not installed" and "Windows only" are the two facts the Play button cannot
+   * express, so they get their own row rather than being folded into the meta
+   * line — which deliberately strips runtime state.
+   */
+  const renderStatusChips = (
+    detail: GameDetailViewModel,
+  ): HTMLElement | null => {
+    const chips = statusChips(detail);
+    if (chips.length === 0) return null;
+    const row = element("div", "gd-status");
+    for (const chip of chips) {
+      const item = element("span", "gd-status__chip");
+      item.dataset.tone = chip.tone;
+      item.dataset.chip = chip.id;
+      item.append(iconElement(chip.icon, "gd-status__icon"));
+      item.append(element("span", "gd-status__label", chip.label));
+      row.append(item);
+    }
+    return row;
   };
 
   const renderHero = (detail: GameDetailViewModel): HTMLElement => {
@@ -1366,13 +1859,19 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const subline = element("div", "gd-hero__subline");
     subline.append(renderSourceBadge(detail));
     const metaFacts = buildMetaFacts(detail);
-    if (metaFacts.length > 0) subline.append(renderFactList("gd-meta", metaFacts, true));
+    if (metaFacts.length > 0)
+      subline.append(renderFactList("gd-meta", metaFacts, true));
     copy.append(subline);
-    if (detail.shortDescription) {
-      copy.append(element("p", "gd-hero__summary", detail.shortDescription));
-    }
+    const chips = renderStatusChips(detail);
+    if (chips) copy.append(chips);
+    // No summary here: "About this game" carries it a few hundred pixels below,
+    // and printing it twice cost the hero the height its actions needed.
     const actions = element("div", "gd-hero__actions");
-    actions.append(renderPrimaryActionGroup(detail), renderWishlistButton(detail), renderMoreButton(detail));
+    actions.append(
+      renderPrimaryActionGroup(detail),
+      renderFavouriteButton(detail),
+      renderMoreButton(detail),
+    );
     copy.append(actions);
     const stats = buildStatFacts(detail);
     if (stats.length > 0) copy.append(renderFactList("gd-stats", stats, false));
@@ -1385,39 +1884,64 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     section.append(element("h2", "gd-panel__title", "About this game"));
     const body = element("div", "gd-about__body");
     body.classList.toggle("gd-about__body--clamped", !state.aboutExpanded);
-    for (const paragraph of detail.about.split(/\n+/).filter((line) => line.trim())) {
+    for (const paragraph of detail.about
+      .split(/\n+/)
+      .filter((line) => line.trim())) {
       body.append(element("p", "gd-about__paragraph", paragraph));
     }
     section.append(body);
     if (shouldOfferAboutToggle(detail.about)) {
-      const toggle = element("button", "gd-about__toggle", state.aboutExpanded ? "Read less" : "Read more");
+      const toggle = element(
+        "button",
+        "gd-about__toggle",
+        state.aboutExpanded ? "Read less" : "Read more",
+      );
       toggle.type = "button";
       toggle.dataset.focusKey = "about-toggle";
       toggle.setAttribute("aria-expanded", String(state.aboutExpanded));
       toggle.append(iconElement("chevron-down"));
-      toggle.addEventListener("click", () => dispatch({ type: "about-toggled" }));
+      toggle.addEventListener("click", () =>
+        dispatch({ type: "about-toggled" }),
+      );
       section.append(toggle);
     }
     return section;
   };
 
   /** Maps a supported platform to its brand glyph for the Game info row. */
-  const platformIcon = (platform: GameSummary["supportedPlatforms"][number]): Parameters<typeof icon>[0] =>
-    platform === "windows" ? "windows" : platform === "macos" || platform === "ios" ? "monitor" : "monitor";
+  const platformIcon = (
+    platform: GameSummary["supportedPlatforms"][number],
+  ): Parameters<typeof icon>[0] =>
+    platform === "windows"
+      ? "windows"
+      : platform === "macos" || platform === "ios"
+        ? "monitor"
+        : "monitor";
 
   const renderGameInfo = (detail: GameDetailViewModel): HTMLElement => {
     const section = element("section", "gd-panel gd-info");
     section.append(element("h2", "gd-panel__title", "Game info"));
     const list = element("dl", "gd-info__list");
+    // Store comes first and is always known: a game Orivo can show came from
+    // somewhere. Without it this panel vanished entirely for any title whose
+    // provider publishes no developer, publisher, date, genre or platform —
+    // which is most of a Microsoft Store or local library.
     const rows: Array<[string, string | null]> = [
+      ["Store", sourceBadge(detail.source)?.label ?? "This Mac"],
       ["Developer", detail.developer],
       ["Publisher", detail.publisher],
-      ["Release date", detail.releaseDate ? formatReleaseDate(detail.releaseDate) : null],
+      [
+        "Release date",
+        detail.releaseDate ? formatReleaseDate(detail.releaseDate) : null,
+      ],
       ["Genre", detail.genres.length > 0 ? detail.genres.join(", ") : null],
     ];
     for (const [label, value] of rows) {
       if (!value) continue;
-      list.append(element("dt", "gd-info__term", label), element("dd", "gd-info__value", value));
+      list.append(
+        element("dt", "gd-info__term", label),
+        element("dd", "gd-info__value", value),
+      );
     }
     // Platform renders as brand glyphs, matching the reference's Windows mark.
     if (detail.supportedPlatforms.length > 0) {
@@ -1440,7 +1964,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const list = element("ul", "gd-features__list");
     for (const feature of detail.features) {
       const item = element("li", "gd-features__item");
-      item.append(iconElement(featureIcon(feature)), element("span", "gd-features__label", feature));
+      item.append(
+        iconElement(featureIcon(feature)),
+        element("span", "gd-features__label", feature),
+      );
       list.append(item);
     }
     section.append(list);
@@ -1449,47 +1976,57 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
   const renderAchievements = (detail: GameDetailViewModel): HTMLElement => {
     const section = element("section", "gd-panel gd-achievements");
-    section.append(element("h2", "gd-panel__title", "Achievements"));
+
+    // Header row: the title on the left, the meter in the top-right corner.
+    // The panel used to stack title, count, bar and list down a column, which
+    // needed more height than a third of the screen has — so most of it was
+    // behind a scroll. Everything it says now says itself at once.
+    const header = element("div", "gd-achievements__header");
+    header.append(element("h2", "gd-panel__title", "Achievements"));
     const progress = formatAchievementProgress(detail.achievements);
     if (progress) {
-      section.append(element("p", "gd-achievements__count", progress.label));
+      const gauge = element("div", "gd-achievements__gauge");
       const meter = element("div", "gd-achievements__meter");
       meter.setAttribute("role", "progressbar");
       meter.setAttribute("aria-valuemin", "0");
       meter.setAttribute("aria-valuemax", "100");
       meter.setAttribute("aria-valuenow", String(progress.percent));
-      meter.setAttribute("aria-label", `${progress.label} (${progress.percent}%)`);
+      meter.setAttribute(
+        "aria-label",
+        `${progress.label} (${progress.percent}%)`,
+      );
       const fill = element("span", "gd-achievements__fill");
       fill.style.width = `${progress.percent}%`;
       meter.append(fill);
-      const row = element("div", "gd-achievements__progress");
-      row.append(meter, element("span", "gd-achievements__percent", `${progress.percent}%`));
-      section.append(row);
+      gauge.append(
+        element("span", "gd-achievements__count", progress.label),
+        meter,
+        element("span", "gd-achievements__percent", `${progress.percent}%`),
+      );
+      header.append(gauge);
     }
+    section.append(header);
+
     const items = detail.achievements?.items ?? [];
     if (items.length > 0) {
-      const rail = element("ul", "gd-achievements__rail");
-      const shown = items.slice(0, 5);
-      // The reference features one badge mid-rail; mirror that on the middle
-      // tile so the row reads as a highlighted showcase.
-      const featured = Math.floor((shown.length - 1) / 2);
-      for (const [index, item] of shown.entries()) {
-        const cell = element("li", "gd-achievements__cell");
-        cell.classList.toggle("gd-achievements__cell--featured", index === featured);
-        cell.title = item.title;
-        const image = element("img", "gd-achievements__icon");
-        image.loading = "lazy";
-        image.alt = item.title;
-        if (item.iconUrl) {
-          image.src = item.iconUrl;
-          image.addEventListener("error", () => cell.classList.add("gd-achievements__cell--missing"));
-        } else {
-          cell.classList.add("gd-achievements__cell--missing");
-        }
-        cell.append(image);
-        rail.append(cell);
+      // Across, not down: a horizontal row of named chips fits the panel's
+      // shape, and the panel is wider than it is tall.
+      // Capped at what the panel can hold in view. The header already states
+      // the full count, so the chips are a sample and never a scroll.
+      const list = element("ul", "gd-achievements__list");
+      for (const item of items.slice(0, MAX_ACHIEVEMENT_CHIPS)) {
+        const chip = element("li", "gd-achievements__chip");
+        const glyph = element("span", "gd-icon gd-achievements__glyph");
+        glyph.setAttribute("aria-hidden", "true");
+        glyph.innerHTML = icon("trophy");
+        chip.append(
+          glyph,
+          element("span", "gd-achievements__name", item.title),
+        );
+        chip.title = item.title;
+        list.append(chip);
       }
-      section.append(rail);
+      section.append(list);
     }
     return section;
   };
@@ -1501,13 +2038,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const friends = detail.friends ?? [];
     for (const friend of friends.slice(0, 4)) {
       const item = element("li", "gd-friends__item");
-      item.title = friend.status ? `${friend.name} — ${friend.status}` : friend.name;
+      item.title = friend.status
+        ? `${friend.name} — ${friend.status}`
+        : friend.name;
       const image = element("img", "gd-friends__avatar");
       image.loading = "lazy";
       image.alt = friend.name;
       if (friend.avatarUrl) {
         image.src = friend.avatarUrl;
-        image.addEventListener("error", () => item.classList.add("gd-friends__item--missing"));
+        image.addEventListener("error", () =>
+          item.classList.add("gd-friends__item--missing"),
+        );
       } else {
         item.classList.add("gd-friends__item--missing");
       }
@@ -1527,7 +2068,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const section = element("section", "gd-panel gd-activity");
     section.append(element("h2", "gd-panel__title", "Activity feed"));
     const list = element("ul", "gd-activity__list");
-    for (const entry of (detail.activity ?? []).slice(0, 3)) {
+    for (const entry of (detail.activity ?? []).slice(0, 6)) {
       const item = element("li", "gd-activity__item");
       const head = element("div", "gd-activity__head");
       const image = element("img", "gd-activity__avatar");
@@ -1535,14 +2076,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       image.alt = "";
       if (entry.avatarUrl) {
         image.src = entry.avatarUrl;
-        image.addEventListener("error", () => head.classList.add("gd-activity__head--missing"));
+        image.addEventListener("error", () =>
+          head.classList.add("gd-activity__head--missing"),
+        );
       } else {
         head.classList.add("gd-activity__head--missing");
       }
       const copy = element("div", "gd-activity__copy");
       copy.append(element("p", "gd-activity__actor", entry.actorName));
       copy.append(element("p", "gd-activity__summary", entry.summary));
-      if (entry.detail) copy.append(element("p", "gd-activity__detail", entry.detail));
+      if (entry.detail)
+        copy.append(element("p", "gd-activity__detail", entry.detail));
       head.append(image, copy);
       item.append(head);
       const relative = formatRelativeTime(entry.occurredAt);
@@ -1565,7 +2109,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     image.loading = "lazy";
     // The reference's related tiles are landscape art with the title baked in,
     // so the card is the framed image alone — the name lives in the aria-label.
-    attachImage(frame, image, game.landscapeUrl || game.coverUrl, "gd-related__media--missing");
+    attachImage(
+      frame,
+      image,
+      game.landscapeUrl || game.coverUrl,
+      "gd-related__media--missing",
+    );
     frame.append(image);
     button.append(frame);
     button.addEventListener("click", () =>
@@ -1579,7 +2128,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const section = element("section", "gd-panel gd-related");
     section.append(element("h2", "gd-panel__title", "Related games"));
     const list = element("ul", "gd-related__list");
-    for (const game of detail.relatedGames.slice(0, 8)) list.append(renderRelatedCard(game));
+    for (const game of detail.relatedGames.slice(0, 8))
+      list.append(renderRelatedCard(game));
     section.append(list);
     return section;
   };
@@ -1587,23 +2137,33 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const renderDetail = (detail: GameDetailViewModel): DocumentFragment => {
     const fragment = document.createDocumentFragment();
     fragment.append(renderHero(detail));
-    const panels = element("div", "gd-panels");
-    if (shouldRenderSection(detail, "about")) panels.append(renderAbout(detail));
+
+    // One grid, not two stacked rows. The page is a fixed frame now: the hero
+    // takes the top band and every panel shares what is left, so a game's
+    // information is seen rather than scrolled to. A panel with more than fits
+    // scrolls inside its own card.
+    const body = element("div", "gd-body");
+    if (shouldRenderSection(detail, "about")) body.append(renderAbout(detail));
     // The design's raised zone is two glass cards: Game info + Features share
     // one (split by a hairline), Achievements stands in its own.
     const facts = element("div", "gd-infocard gd-infocard--facts");
-    if (shouldRenderSection(detail, "info")) facts.append(renderGameInfo(detail));
-    if (shouldRenderSection(detail, "features")) facts.append(renderFeatures(detail));
-    if (facts.childElementCount > 0) panels.append(facts);
+    if (shouldRenderSection(detail, "info"))
+      facts.append(renderGameInfo(detail));
+    if (shouldRenderSection(detail, "features"))
+      facts.append(renderFeatures(detail));
+    if (facts.childElementCount > 0) body.append(facts);
     const trophies = element("div", "gd-infocard gd-infocard--achievements");
-    if (shouldRenderSection(detail, "achievements")) trophies.append(renderAchievements(detail));
-    if (trophies.childElementCount > 0) panels.append(trophies);
-    if (panels.childElementCount > 0) fragment.append(panels);
-    const social = element("div", "gd-social");
-    if (shouldRenderSection(detail, "friends")) social.append(renderFriends(detail));
-    if (shouldRenderSection(detail, "activity")) social.append(renderActivity(detail));
-    if (shouldRenderSection(detail, "related")) social.append(renderRelated(detail));
-    if (social.childElementCount > 0) fragment.append(social);
+    if (shouldRenderSection(detail, "achievements"))
+      trophies.append(renderAchievements(detail));
+    if (trophies.childElementCount > 0) body.append(trophies);
+    if (shouldRenderSection(detail, "friends"))
+      body.append(renderFriends(detail));
+    if (shouldRenderSection(detail, "activity"))
+      body.append(renderActivity(detail));
+    if (shouldRenderSection(detail, "related"))
+      body.append(renderRelated(detail));
+    if (body.childElementCount > 0) fragment.append(body);
+
     const modal = renderWallpaperModal();
     if (modal) fragment.append(modal);
     return fragment;
@@ -1612,15 +2172,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const currentFocusKey = (): string | null => {
     const active = document.activeElement;
     return active instanceof HTMLElement && pageRoot?.contains(active)
-      ? active.dataset.focusKey ?? null
+      ? (active.dataset.focusKey ?? null)
       : null;
   };
 
   const focusByKey = (focusKey: string | null): void => {
     if (!pageRoot || !focusKey) return;
-    const target = [...pageRoot.querySelectorAll<FocusableElement>("[data-focus-key]")].find(
-      (candidate) => candidate.dataset.focusKey === focusKey,
-    );
+    const target = [
+      ...pageRoot.querySelectorAll<FocusableElement>("[data-focus-key]"),
+    ].find((candidate) => candidate.dataset.focusKey === focusKey);
     target?.focus();
   };
 
@@ -1630,7 +2190,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
    * read and written so the page keeps working when it is mounted into a host
    * that does not scroll.
    */
-  const readScrollTop = (): number => Math.max(pageRoot?.scrollTop ?? 0, container?.scrollTop ?? 0);
+  const readScrollTop = (): number =>
+    Math.max(pageRoot?.scrollTop ?? 0, container?.scrollTop ?? 0);
 
   const writeScrollTop = (value: number): void => {
     if (pageRoot) pageRoot.scrollTop = value;
@@ -1660,7 +2221,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       );
     } else if (!state.detail && state.phase === "error") {
       fragment.append(
-        renderNotice("Game details unavailable", state.errorMessage || "Something went wrong.", true),
+        renderNotice(
+          "Game details unavailable",
+          state.errorMessage || "Something went wrong.",
+          true,
+        ),
       );
     } else if (!state.detail && state.phase === "offline") {
       fragment.append(
@@ -1675,6 +2240,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     } else {
       fragment.append(renderDetail(state.detail));
     }
+    // Only a loaded game gets the fixed frame. Loading, error and not-found are
+    // short, centred states that would look stranded stretched over a viewport.
+    pageRoot.classList.toggle("gd-page--fit", Boolean(state.detail));
     pageRoot.replaceChildren(fragment);
     writeScrollTop(scrollTop);
     focusByKey(restoreFocusKey);
@@ -1688,9 +2256,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
   const onOnline = (): void => {
     dispatch({ type: "connectivity-changed", online: true });
-    if (activation && state.gameId && !state.detail) void loadDetail(activation, state.gameId);
+    if (activation && state.gameId && !state.detail)
+      void loadDetail(activation, state.gameId);
   };
-  const onOffline = (): void => dispatch({ type: "connectivity-changed", online: false });
+  const onOffline = (): void =>
+    dispatch({ type: "connectivity-changed", online: false });
 
   return {
     mount(host) {
@@ -1729,10 +2299,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     deactivate() {
       if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
+      stopEpicProgress();
       stopHeroSlideshow();
       moreMenuCleanup?.();
       moreMenuCleanup = null;
-      const restoreState = toGameDetailRestoreState(state, readScrollTop(), currentFocusKey());
+      const restoreState = toGameDetailRestoreState(
+        state,
+        readScrollTop(),
+        currentFocusKey(),
+      );
       activation = null;
       return restoreState;
     },

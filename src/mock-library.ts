@@ -8,6 +8,8 @@ export interface LibraryGame {
   description: string;
   metadata: string;
   genre: string;
+  /** The game's own wordmark on transparency; empty when no store publishes one. */
+  logoUrl?: string;
   heroUrl: string;
   coverUrl: string;
   landscapeUrl: string;
@@ -20,6 +22,14 @@ export interface LibraryGame {
   compatibleWithHost?: boolean;
   /** Existing local Windows `.exe` that can be deliberately associated with a Wine profile. */
   wineAttachable?: boolean;
+  /**
+   * Whether the store's own client has this game on this machine. `unknown`
+   * is not "not installed": a store with no local client cannot be asked.
+   */
+  installState?: "installed" | "installing" | "not-installed" | "unknown";
+  /** 0-100, present only while a download is running. */
+  installPercent?: number | null;
+  macCompatibility?: "native" | "not-native" | "unknown";
 }
 
 const hero = (name: string) => `/media/igdb/heroes/${name}`;
