@@ -1,6 +1,6 @@
 [package]
 name = "orivo"
-version = "0.3.0"
+version = "0.3.3"
 description = "A focused, local-first game library."
 authors = ["Orivo"]
 edition = "2024"
