@@ -1,0 +1,26 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+# Dependencies first — `pnpm tauri` resolves the CLI out of node_modules, so a
+# fresh worktree cannot build anything until this has run.
+#
+# The debug bundle is macOS-only: `bundle.createUpdaterArtifacts` is on, so the
+# build signs the updater archive and needs the key that with-signing-key.sh
+# exports. Cloud sandboxes have no display, no webkit2gtk and no key, so they
+# stop after the install.
+setup = 'pnpm install && if [ "$CONDUCTOR_IS_LOCAL" = "1" ]; then ./scripts/with-signing-key.sh pnpm tauri build --debug --bundles app; fi'
+
+# `vite.config.ts` pins port 5173 with strictPort, and `build.devUrl` in
+# tauri.conf.json points at it, so two workspaces cannot run the app at once.
+run_mode = "nonconcurrent"
+
+[scripts.run.Run]
+command = "pnpm run tauri dev"
+available_in = [ "local" ]
+default = true
+icon = "play"
+
+[scripts.run.web-only]
+command = "pnpm dev --port $CONDUCTOR_PORT"
+available_in = [ "local" ]
+icon = "globe"

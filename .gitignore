@@ -6,6 +6,7 @@
 .gstack/
 .context/
 e2e/__screenshots__/
+.conductor/settings.local.toml
 
 # Local secrets and the Sentry DSN — see .env.example
 .env

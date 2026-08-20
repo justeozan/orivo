@@ -22,7 +22,10 @@ export default defineConfig(({ mode }) => {
           }
         : undefined,
       watch: {
-        ignored: ["**/src-tauri/**"],
+        // The workspace Cargo.toml puts the build dir at the repo root, not
+        // under src-tauri, so cargo writes during `tauri dev` reach the
+        // watcher and reload the page mid-build.
+        ignored: ["**/src-tauri/**", "**/target/**"],
       },
     },
     envPrefix: ["VITE_", "TAURI_ENV_"],
