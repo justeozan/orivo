@@ -71,10 +71,13 @@ pub const SOURCE_INSTALL_PERCENT_KEY: &str = "orivo_source_install_percent";
 /// latest answer is the whole truth about them, so a value it has stopped
 /// publishing has to disappear. Merging them forwards is how a genre the Epic
 /// connector wrongly filled with a studio name outlived the fix.
-pub const SOURCE_OWNED_EXTRA_KEYS: [&str; 9] = [
-    SOURCE_COVER_URL_KEY,
-    SOURCE_HERO_URL_KEY,
-    SOURCE_LANDSCAPE_URL_KEY,
+///
+/// The three artwork URLs are deliberately absent. Orivo fills them in itself
+/// when a store publishes none — that is what `fill_missing_source_artwork`
+/// does for Xbox and Microsoft Store — so treating the provider as their sole
+/// author let one slow sync, which returns nothing rather than something new,
+/// erase covers Orivo had resolved on an earlier pass.
+pub const SOURCE_OWNED_EXTRA_KEYS: [&str; 6] = [
     SOURCE_GENRE_KEY,
     SOURCE_LOGO_URL_KEY,
     SOURCE_NATIVE_MAC_KEY,

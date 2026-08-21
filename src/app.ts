@@ -878,11 +878,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    */
   const applyBrowseChange = (): void => {
     const games = visibleGames();
-    if (!games.some((game) => game.id === state.selectedId)) {
+    const kept = games.some((game) => game.id === state.selectedId);
+    if (!kept) {
       state.selectedId = games[0]?.id ?? state.selectedId;
     }
     renderSelection();
-    refs.cards.scrollTo?.({ left: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    if (!kept) {
+      refs.cards.scrollTo?.({ left: 0, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+      return;
+    }
+    // The selection survived the change, so the rail must follow it rather than
+    // rewind. Offset 0 is not even the start of the new shelf: the rail renders
+    // a window centred on the selection, so it landed a couple of dozen cards
+    // before the highlighted one, with nothing selected on screen.
+    requestAnimationFrame(() => {
+      Array.from(refs.cards.querySelectorAll<HTMLElement>(".game-card"))
+        .find((card) => card.dataset.gameId === state.selectedId)
+        ?.scrollIntoView({
+          behavior: prefersReducedMotion() ? "auto" : "smooth",
+          block: "nearest",
+          inline: "nearest",
+        });
+    });
   };
 
   const selectSegment = (id: string): void => {

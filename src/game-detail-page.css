@@ -538,10 +538,14 @@
 
 /* ---------------------------------------------------------- status chips */
 
-/* "Not installed" and "Windows only" are the two things the Play button cannot
+/* Its own block, not `gd-status`: that name already belongs to the floating
+   status toast above, and sharing it handed this in-flow row the toast's
+   `position: absolute`, pinning the chips to the hero's top-right corner.
+
+   "Not installed" and "Windows only" are the two things the Play button cannot
    say. They sit on their own row above the actions so a player reads them
    before reaching for the button, not after. */
-.gd-status {
+.gd-chiprow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -549,7 +553,7 @@
   margin-top: 12px;
 }
 
-.gd-status__chip {
+.gd-chiprow__chip {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -565,7 +569,7 @@
   white-space: nowrap;
 }
 
-.gd-status__chip .icon {
+.gd-chiprow__chip .icon {
   width: 15px;
   height: 15px;
   flex: none;
@@ -573,21 +577,21 @@
 
 /* Ready is the only state that earns colour; the rest stay quiet so the row
    never competes with the primary action beside it. */
-.gd-status__chip[data-tone="ready"] {
+.gd-chiprow__chip[data-tone="ready"] {
   border-color: rgba(150, 240, 190, 0.34);
   color: #9df3c4;
 }
 
-.gd-status__chip[data-tone="pending"] {
+.gd-chiprow__chip[data-tone="pending"] {
   color: var(--gd-muted);
 }
 
-.gd-status__chip[data-tone="progress"] {
+.gd-chiprow__chip[data-tone="progress"] {
   border-color: rgba(198, 186, 255, 0.42);
   color: #cdbcff;
 }
 
-.gd-status__chip[data-tone="warn"] {
+.gd-chiprow__chip[data-tone="warn"] {
   border-color: rgba(255, 214, 153, 0.3);
   color: #f2ce9a;
 }

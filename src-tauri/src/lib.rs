@@ -3036,7 +3036,13 @@ async fn import_wine_games(
     })
 }
 
-#[tauri::command]
+// `(async)` rather than a plain command: the body walks the Epic install
+// directory and can persist the catalog, and the detail page polls it every
+// 2.5s while a download runs. Executed inline, that scan and fsync land on the
+// IPC thread for the length of a multi-hour install. The function stays sync so
+// the catalog guard is never held across an await; Tauri just stops running it
+// on the main thread.
+#[tauri::command(async)]
 fn get_library(app: AppHandle, state: State<'_, AppState>) -> Result<LibraryState, String> {
     // A game installed or removed in the Epic launcher has to show up here
     // without waiting for the next account sync, so the manifests are re-read

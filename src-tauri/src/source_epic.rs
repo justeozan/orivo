@@ -231,15 +231,20 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
     // Native-Mac is an enhancement to a library, never a precondition for one:
     // if Epic will not answer for the Mac platform right now, every game simply
     // goes unmarked rather than the sync failing.
+    //
+    // `ok()` rather than `unwrap_or_default()`: an empty set and a refused
+    // request are not the same answer. Collapsing them wrote
+    // `native_mac = false` on every entitlement, so one 503 relabelled a whole
+    // library "Windows only" until the user happened to sync again.
     let native_mac = fetch_assets(&client, &token, MAC_PLATFORM)
         .await
+        .ok()
         .map(|assets| {
             assets
                 .into_iter()
                 .map(|asset| asset.app_name)
                 .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
+        });
     // Locally installed games are joined in by app name, which is exactly the
     // `source_id` the catalog already stores for an Epic entry.
     let installations = crate::epic_install::installations();
@@ -284,7 +289,7 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
                         &namespace,
                         asset,
                         item,
-                        native_mac.contains(&asset.app_name),
+                        native_mac.as_ref().map(|set| set.contains(&asset.app_name)),
                         installations
                             .get(&asset.app_name)
                             .map(crate::epic_install::status_for),
@@ -380,11 +385,11 @@ fn library_game(
     namespace: &str,
     asset: &LauncherAsset,
     item: &CatalogItem,
-    native_mac: bool,
+    native_mac: Option<bool>,
     install: Option<crate::epic_install::EpicInstallStatus>,
 ) -> SourceLibraryGame {
     SourceLibraryGame {
-        native_mac: Some(native_mac),
+        native_mac,
         install: install.map(Into::into),
         source_id: asset.app_name.clone(),
         // The Epic launcher URI needs all three parts, so the launch reference
@@ -517,7 +522,7 @@ mod tests {
             ..CatalogItem::default()
         };
 
-        let game = library_game("d5241c", &asset, &item, false, None);
+        let game = library_game("d5241c", &asset, &item, Some(false), None);
         assert_eq!(game.source_id, "Sugar");
         assert_eq!(game.launch_ref, "d5241c:a1b2c3:Sugar");
         assert_eq!(
@@ -529,6 +534,28 @@ mod tests {
         ));
         assert_eq!(game.native_mac, Some(false));
         assert!(game.install.is_none());
+    }
+
+    /// A refused Mac request is not the same answer as an empty one. Collapsing
+    /// the two wrote `native_mac = false` on every entitlement, so a single 503
+    /// during a sync relabelled a whole library "Windows only" and it stayed
+    /// that way until the user manually synced again.
+    #[test]
+    fn a_failed_mac_lookup_leaves_the_platform_unknown_rather_than_windows_only() {
+        let asset = LauncherAsset {
+            app_name: "Sugar".into(),
+            catalog_item_id: "a1b2c3".into(),
+            namespace: "d5241c".into(),
+        };
+        let item = CatalogItem {
+            categories: vec![CatalogCategory {
+                path: "games".into(),
+            }],
+            ..CatalogItem::default()
+        };
+
+        let game = library_game("d5241c", &asset, &item, None, None);
+        assert_eq!(game.native_mac, None);
     }
 
     #[test]
@@ -554,7 +581,7 @@ mod tests {
             install_path: Some("/Users/Shared/Epic/Fall Guys".into()),
         };
 
-        let game = library_game("d5241c", &asset, &item, true, Some(install));
+        let game = library_game("d5241c", &asset, &item, Some(true), Some(install));
         assert_eq!(game.native_mac, Some(true));
         let install = game.install.unwrap();
         assert!(install.installing);

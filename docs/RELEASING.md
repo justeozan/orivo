@@ -16,21 +16,30 @@ Everything is automated by three workflows:
 
 ## 1. One-time setup: repository secrets
 
-Two secrets must exist under **Settings → Secrets and variables → Actions →
-Repository secrets**. Without them the build still succeeds, but no `.sig` files
-and no `latest.json` are produced, so the in-app updater silently stops working.
+Three secrets live under **Settings → Secrets and variables → Actions →
+Repository secrets**. The first two are required: without them the build still
+succeeds, but no `.sig` files and no `latest.json` are produced, so the in-app
+updater silently stops working. The third is optional.
 
 | Secret | Value |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | The **entire contents** of the minisign private key file `.context/orivo-updater.key`, including the `untrusted comment:` first line and the trailing newline. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | An **empty string**. The key was generated without a password, so the secret exists but has no value. |
+| `VITE_SENTRY_DSN` | Optional. The Sentry DSN from Sentry › Settings › Projects › _project_ › Client Keys (DSN). Vite inlines it at build time, so it has to exist before the build, not after. |
 
 With the GitHub CLI:
 
 ```sh
 gh secret set TAURI_SIGNING_PRIVATE_KEY < .context/orivo-updater.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
+gh secret set VITE_SENTRY_DSN --body "https://…@…ingest.de.sentry.io/…"
 ```
+
+Leave `VITE_SENTRY_DSN` unset and every official build behaves exactly like a
+build from source: the Sentry SDK never initialises, no network call is made,
+and the in-app feedback button beside the profile picture stays hidden. That is
+a legitimate way to ship — but README describes the button as present, so drop
+that claim too if you choose it.
 
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` still has to be created even though it is
 empty: the Tauri bundler prompts interactively for a password when the variable
