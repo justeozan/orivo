@@ -3007,7 +3007,7 @@ dependencies = [
 
 [[package]]
 name = "orivo"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "core-graphics",
  "ed25519-dalek",
