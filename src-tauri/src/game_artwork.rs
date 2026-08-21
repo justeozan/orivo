@@ -91,7 +91,10 @@ impl ArtworkSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cover.is_empty() && self.landscape.is_empty() && self.background.is_empty()
+        self.cover.is_empty()
+            && self.landscape.is_empty()
+            && self.background.is_empty()
+            && self.logo.is_empty()
     }
 
     /// Keep whichever role the better tier already filled. A SteamGridDB hit
@@ -106,6 +109,13 @@ impl ArtworkSet {
         }
         if self.background.is_empty() {
             self.background = other.background;
+        }
+        // Without this the logo tier never reaches a caller: SteamGridDB is the
+        // only source that fills it directly, and a reset with no API key — the
+        // documented default — resolved an empty list and left `logo_path`
+        // unwritten while reporting success.
+        if self.logo.is_empty() {
+            self.logo = other.logo;
         }
     }
 }

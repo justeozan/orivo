@@ -1830,13 +1830,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   ): HTMLElement | null => {
     const chips = statusChips(detail);
     if (chips.length === 0) return null;
-    const row = element("div", "gd-status");
+    const row = element("div", "gd-chiprow");
     for (const chip of chips) {
-      const item = element("span", "gd-status__chip");
+      const item = element("span", "gd-chiprow__chip");
       item.dataset.tone = chip.tone;
       item.dataset.chip = chip.id;
-      item.append(iconElement(chip.icon, "gd-status__icon"));
-      item.append(element("span", "gd-status__label", chip.label));
+      item.append(iconElement(chip.icon, "gd-chiprow__icon"));
+      item.append(element("span", "gd-chiprow__label", chip.label));
       row.append(item);
     }
     return row;

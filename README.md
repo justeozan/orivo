@@ -204,8 +204,12 @@ Copyright © 2026 Ozan Sahin.
 ### Third-party components
 
 Orivo bundles [Tauri](https://tauri.app) and a set of Rust and TypeScript
-dependencies, each under its own permissive licence (MIT, Apache-2.0, BSD, ISC
-or Zlib) — `Cargo.lock` and `pnpm-lock.yaml` are the authoritative list.
+dependencies under their own licences — `Cargo.lock` and `pnpm-lock.yaml` are
+the authoritative list. Nearly all are permissive (MIT, Apache-2.0, BSD, ISC or
+Zlib). One is not: [`option-ext`](https://github.com/soc/option-ext) is
+MPL-2.0, a file-level copyleft, and it is linked into the shipped binaries. Its
+source is available at that link, and its terms cover only its own files — they
+place no condition on Orivo's own code or on the licence above.
 
 Two things are *not* bundled and keep their own terms entirely: **Wine-Staging**,
 which you install yourself and point Orivo at through a native picker, and the
