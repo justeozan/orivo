@@ -310,23 +310,16 @@ pub fn probe_wine_staging(
     Ok(wine_binary)
 }
 
-/// Check whether a selected Wine-Staging engine exposes the macOS driver ABI
-/// required by DXMT to attach a Metal view. A successful `dlopen` of DXMT is
+/// Check whether a Wine-Staging engine exposes the macOS driver ABI required
+/// by DXMT to attach a Metal view. A successful `dlopen` of DXMT is
 /// deliberately insufficient: without these exports DXMT can load but cannot
-/// present a game window. This function reads only the component derived from
-/// the already-validated Wine binary; it does not run a shell, load a dylib,
-/// search `PATH`, or inspect a user-provided component path.
-pub fn probe_dxmt_wine_engine(
-    selected: &Path,
-    cancelled: &AtomicBool,
-) -> Result<DxmtWineEngineSupport, WineRunnerError> {
-    let wine_binary = probe_wine_staging(selected, cancelled)?;
-    probe_dxmt_wine_engine_for_validated_binary(&wine_binary, cancelled)
-}
-
-/// Variant for the profile-creation worker after it has already completed the
-/// fixed `wine --version` validation. Keeping this separate avoids a second
-/// Wine process while preserving the same derived-path and binary checks.
+/// present a game window.
+///
+/// It reads only the component derived from an already-validated Wine binary;
+/// it does not run a shell, load a dylib, search `PATH`, or inspect a
+/// user-provided component path. Callers reach it after their own
+/// `probe_wine_staging`, which is what keeps a profile from paying for a
+/// second `wine --version` process just to ask this question.
 pub(crate) fn probe_dxmt_wine_engine_for_validated_binary(
     wine_binary: &Path,
     cancelled: &AtomicBool,
@@ -852,10 +845,16 @@ pub struct DxvkMacosPackage {
     files: BTreeMap<String, Vec<u8>>,
 }
 
-/// Read a manually selected DXVK-macOS package. This legacy native-host path
-/// accepts no URL, shell fragment, DLL path, or extracted directory supplied
-/// by the WebView. The normal UI flow downloads the same fixed release into
-/// memory and uses `load_dxvk_macos_package_bytes` below.
+/// Read a DXVK-macOS package that was picked out of the filesystem, checking
+/// the archive on disk before any of it is decompressed.
+///
+/// Test-only. Every shipping path downloads the one fixed release into memory
+/// and goes through `load_dxvk_macos_package_bytes` below, so nothing in a
+/// release build can be pointed at a path at all. It stays because it is what
+/// proves the on-disk checks — symlink, size, digest — reject an archive that
+/// is not the allowlisted release, before `load_dxvk_macos_package_reader`
+/// ever sees a byte of it.
+#[cfg(test)]
 pub fn load_dxvk_macos_package(selected: &Path) -> Result<DxvkMacosPackage, WineRunnerError> {
     let selected_metadata =
         fs::symlink_metadata(selected).map_err(|_| WineRunnerError::InvalidDxvkPackage)?;
@@ -1129,6 +1128,10 @@ fn read_limited(reader: &mut impl Read, maximum: usize) -> Result<Vec<u8>, WineR
     Ok(bytes)
 }
 
+/// Digest a bounded file without reading it all into memory. Test-only, along
+/// with its one caller: a shipping build hashes the DXVK release from the
+/// bytes it just downloaded, never from a path.
+#[cfg(test)]
 fn sha256_file(path: &Path, maximum: u64) -> Result<String, WineRunnerError> {
     let metadata = fs::metadata(path).map_err(|_| WineRunnerError::InvalidDxvkPackage)?;
     if metadata.len() > maximum {

@@ -162,6 +162,13 @@ impl StoreProviderId {
         }
     }
 
+    /// The token the frontend builds its filter route from.
+    ///
+    /// Test-only, and deliberately written out by hand rather than derived:
+    /// its whole job is to be compared against what `serde` actually
+    /// serialises, so a rename that changes the wire format and not this list
+    /// fails the test instead of silently breaking every saved Store URL.
+    #[cfg(test)]
     fn slug(self) -> &'static str {
         match self {
             Self::Steam => "steam",

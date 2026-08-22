@@ -279,15 +279,10 @@ fn strip_https_scheme(raw: &str) -> Option<&str> {
 /// Resolve a `Location` header against the hop that produced it. Only absolute
 /// https targets and absolute paths are accepted, and the result goes back
 /// through the full allowlist check.
-pub fn resolve_redirect(
-    base: &RemoteMediaUrl,
-    location: &str,
-) -> Result<RemoteMediaUrl, GameMediaError> {
-    resolve_redirect_with_policy(base, location, DownloadPolicy::Steam)
-}
-
-/// Redirect resolution that honours the policy the download started under, so
-/// a search-result wallpaper is never walked onto a Steam-only validation.
+///
+/// The policy is always passed explicitly: a redirect resolved under a default
+/// is how a search-result wallpaper would get walked onto a Steam-only
+/// validation, which is the one thing this function exists to prevent.
 pub fn resolve_redirect_with_policy(
     base: &RemoteMediaUrl,
     location: &str,
@@ -671,10 +666,6 @@ impl GameMediaService {
         &self.inner.root
     }
 
-    pub fn limits(&self) -> MediaLimits {
-        self.inner.limits
-    }
-
     /// Apply. Downloads only when the chosen media is not already offline, then
     /// commits registration and selection in one validated state mutation.
     pub async fn apply(
@@ -858,12 +849,6 @@ impl GameMediaService {
         };
         self.inner.detail.state().register_media(game_id, asset)?;
         Ok(self.inner.detail.media_views(game_id)?)
-    }
-
-    /// Evict the least recently modified cache files until the quota has room.
-    /// Selected and imported media are never candidates.
-    pub fn prune_cache(&self, needed: u64) -> Result<u64, GameMediaError> {
-        self.inner.prune(needed)
     }
 
     /// User-initiated wallpaper import from a search result. The `url` is

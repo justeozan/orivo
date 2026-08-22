@@ -6882,7 +6882,6 @@ mod tests {
         assert!(set_or_remove_extra(&mut game, "k", None));
         assert!(!set_or_remove_extra(&mut game, "k", None));
     }
-    use super::*;
 
     #[test]
     fn showcase_is_stable_and_never_exposes_a_launch_target() {
