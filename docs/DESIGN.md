@@ -193,6 +193,22 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 - The search keeps its grid cell on every route. A page that cannot search hides it with `visibility: hidden` and disables the input, so the topbar never reflows between pages.
 - `--topbar-height` (92px, declared on `.selector`) is the single source of truth for the vertical space the topbar occupies.
 
+#### Notifications — the one surface that speaks unasked
+
+- The bell sits between the feedback button and the avatar. Everything it carries is optional advice about something optional (an artwork key, a store price feed), so it is the quietest control in the shell: an unread dot, one short shake on arrival, and a card that waits.
+- It is a **disclosure, not a dialog**. The shell has no `role="dialog"` anywhere and no focus trap; `aria-expanded` on the bell plus a named `role="group"` panel say everything a dialog role would. Escape closes it and returns focus to the bell.
+- A notice never fires on arrival — each waits out its own delay of app time. It is delivered once, and never again after it is dismissed. It is also re-checked against the app as it stands on every tick: a key added, or a page visited, retires the notice about it before it is ever shown.
+- No counts, no badges with numbers, no toast, no modal, no sound. If something genuinely needs a response, it belongs on the surface it is about, not here.
+
+#### The Library with nothing in it — the welcome screen
+
+- An empty catalogue is an answer, not a gap. It is never filled in with fixtures: the showcase games exist behind a debug toggle in Settings › Appearance and nowhere else.
+- The welcome screen stands **inside the Library page host**, in front of the same wallpaper, with the Library's own furniture (hero, rail, browse bar, arrows) taken out of the layout rather than merely covered — so nothing behind it is tabbable. Connecting a store dissolves into the library instead of navigating away from it.
+- Nothing is shown until the first library load has answered. A hero with no game in it, and a welcome screen shown to someone whose library is about to arrive, are both a lie told for one frame.
+- The name in the heading is the **brand wordmark** (`/media/orivo-logo.png`), never type the app sets itself. A logo redrawn in the interface font drifts from the logo everywhere else the moment either one changes. Its `alt` completes the heading, so the accessible name stays "Welcome to Orivo" even if the artwork never decodes, and the intrinsic size on the tag holds the box open until it does.
+- Its right-hand panel is a task, not a place: at most three views deep (choice → stores → one store), each one press from the one before it, and no address of its own. It calls the same connectors Settings does — never a second copy of them — so the two surfaces can never disagree about a sign-in.
+- It is the one screen in Orivo staged with motion: a single arrival, `transform` and `opacity` only, and a slow drift on the artwork. Under reduced motion all of it is removed outright rather than shortened, because a staged screen's *delays* are what would otherwise leave it blank.
+
 #### Settings sidebar — the only sidebar
 
 - Settings owns the one vertical sidebar in the application (`nav.settings-sidebar`, `role="tablist"`, `aria-orientation="vertical"`). It is internal to the Settings page: it does not exist on Library, Store, game detail or not-found, and it is not a second level of global navigation.

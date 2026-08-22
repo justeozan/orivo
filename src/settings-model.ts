@@ -146,6 +146,23 @@ export function normaliseWallpaperCredentials(value: unknown): WallpaperCredenti
   };
 }
 
+/**
+ * Whether any artwork source has been given credentials.
+ *
+ * Only the keys count. The four search terms below them are tuning for the
+ * keyword sources, not access to anything — treating a customised term as a
+ * configured key is how the app would stop offering help it has not given yet.
+ */
+export function hasWallpaperKey(credentials: WallpaperCredentials): boolean {
+  return [
+    credentials.igdbClientId,
+    credentials.igdbClientSecret,
+    credentials.googleApiKey,
+    credentials.googleCseId,
+    credentials.steamgriddbApiKey,
+  ].some((value) => value.trim() !== "");
+}
+
 export function normaliseDataUsage(value: unknown): DataUsage {
   const record = asRecord(value);
   const refreshedAt = record.refreshedAt ?? record.refreshed_at;

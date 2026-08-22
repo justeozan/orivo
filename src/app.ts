@@ -21,8 +21,38 @@ import {
   nextBrowseMode,
   resolveSegment,
 } from "./library-browse";
+import {
+  INITIAL_ONBOARDING_VIEW,
+  ONBOARDING_SOURCES,
+  ONBOARDING_STEPS,
+  isOnboardingSource,
+  isSameOnboardingView,
+  onboardingBack,
+  onboardingBackLabel,
+  onboardingSignInLine,
+  onboardingSourceDescriptor,
+  type OnboardingSource,
+  type OnboardingView,
+} from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { fallbackLibrary, formatPlayTime, type LibraryGame } from "./mock-library";
+import {
+  NOTIFICATIONS,
+  defaultNotificationStorage,
+  dismissNotification,
+  dueNotifications,
+  loadNotificationRecord,
+  markAllRead,
+  markDelivered,
+  markLibrarySourcesVisited,
+  notificationsSettled,
+  saveNotificationRecord,
+  unreadNotificationCount,
+  visibleNotifications,
+  type NotificationContext,
+  type NotificationId,
+  type NotificationRecord,
+} from "./notifications";
 import type {
   ConnectedSource,
   SourceAccountStatus,
@@ -55,6 +85,7 @@ import {
   defaultProviderStatuses,
   formatDataSize,
   formatFreshness,
+  hasWallpaperKey,
   normaliseDataUsage,
   normalisePreferences,
   normaliseProviderStatuses,
@@ -91,6 +122,7 @@ import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
 import { attachFeedbackTo, initErrorReporting } from "./sentry";
 import "./game-detail-page.css";
+import "./library-onboarding.css";
 import "./me-page.css";
 import "./store-page.css";
 
@@ -277,12 +309,48 @@ interface BrowseState {
   rage: boolean;
 }
 
+/**
+ * The first-run screen's own state — which is only its navigation.
+ *
+ * Whether a store is connected, busy or complaining is already tracked once,
+ * by `SteamAccountState` and `SourceAccountsState`, because the welcome screen
+ * calls exactly the same connectors Settings does. Copying any of it here is
+ * how the two surfaces would start disagreeing about the same sign-in.
+ */
+interface OnboardingState {
+  view: OnboardingView;
+  /**
+   * The view the panel last painted. A status arriving from a sign-in window
+   * repaints the current view, and a repaint must not replay the slide.
+   */
+  rendered: OnboardingView | null;
+  /**
+   * Everything that panel was drawn from. A repaint that would produce exactly
+   * the same panel is skipped: a sign-in in flight repaints this several times
+   * a second, and rebuilding identical DOM cancels the animation inside it.
+   */
+  signature: string;
+}
+
+interface NotificationsState {
+  open: boolean;
+  record: NotificationRecord;
+  /**
+   * What was unread when the panel was opened. Opening marks everything read,
+   * so without this snapshot the one new notice would lose its highlight in
+   * the same frame the user opened the panel to find it.
+   */
+  highlighted: NotificationId[];
+}
+
 interface State {
   games: LibraryGame[];
   libraryMediaTokens: Map<string, LibraryMediaTokens>;
   selectedId: string;
   query: string;
   browse: BrowseState;
+  onboarding: OnboardingState;
+  notifications: NotificationsState;
   libraryMenuOpen: boolean;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
@@ -330,6 +398,18 @@ const INSTALL_WATCH_MS = 2500;
 const INSTALL_WATCH_GRACE_TICKS = 48;
 /** How long the automatic update check waits for the shell to go quiet. */
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
+/**
+ * How often the shell re-asks whether a notice has come due. Slow on purpose:
+ * every notice is minutes away and conditional on state that barely moves, so
+ * a coarse tick costs nothing and a fine one would only burn wakeups.
+ */
+const NOTIFICATION_TICK_MS = 30_000;
+/**
+ * The artwork the welcome screen stands on. Bundled with the app, and shown as
+ * app chrome rather than as a claim about anyone's library — the only screen
+ * in Orivo whose backdrop is not a game the user owns.
+ */
+const WELCOME_WALLPAPER = "/media/igdb/heroes/elden-ring-wallpaper.png";
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
@@ -341,12 +421,31 @@ const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
+  const notificationStorage = defaultNotificationStorage();
+  /**
+   * Whether the first library load has answered.
+   *
+   * Until it has, the Library page shows its backdrop and nothing else. The
+   * two alternatives are both a lie told for one frame: showing the hero
+   * before there is a game to put in it, or showing the welcome screen to
+   * someone whose library is about to arrive.
+   */
+  let libraryLoaded = false;
   const state: State = {
-    games: fallbackLibrary.map((game) => ({ ...game })),
+    // Deliberately empty until the first load answers. Seeding the showcase
+    // games here meant a real library flashed ten games it does not own, and
+    // an empty one flashed them before admitting it has none.
+    games: [],
     libraryMediaTokens: new Map(),
-    selectedId: fallbackLibrary[0].id,
+    selectedId: "",
     query: "",
     browse: { mode: "activity", segments: {}, rage: false },
+    onboarding: { view: INITIAL_ONBOARDING_VIEW, rendered: null, signature: "" },
+    notifications: {
+      open: false,
+      record: loadNotificationRecord(notificationStorage),
+      highlighted: [],
+    },
     libraryMenuOpen: false,
     steam: {
       open: false,
@@ -472,6 +571,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     wallpaperSearchTermLandscape: get<HTMLInputElement>("#wallpaper-search-term-landscape"),
     wallpaperSearchTermBackground: get<HTMLInputElement>("#wallpaper-search-term-background"),
     wallpaperSearchTermLogo: get<HTMLInputElement>("#wallpaper-search-term-logo"),
+    notificationsControl: get<HTMLElement>(".notifications-control"),
+    notificationsButton: get<HTMLButtonElement>("#notifications-button"),
+    notificationsDot: get<HTMLElement>("#notifications-dot"),
+    notificationsPanel: get<HTMLElement>("#notifications-panel"),
+    notificationsList: get<HTMLElement>("#notifications-list"),
+    onboarding: get<HTMLElement>("#library-onboarding"),
+    onboardingPanel: get<HTMLElement>("#onboarding-panel"),
     libraryPage: get<HTMLElement>("#app-page-library"),
     storePage: get<HTMLElement>("#app-page-store"),
     mePage: get<HTMLElement>("#app-page-me"),
@@ -504,6 +610,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const pendingSteamPreviewMediaIds = new Map<string, number>();
   let steamPreviewMediaRefreshQueued = false;
   let settingsRequest = 0;
+  /**
+   * A plugin detail asked for by a deep link from outside Settings. The route
+   * grammar names a section, not a plugin inside it, so the request is handed
+   * to the page rather than written into the hash — where it would also have
+   * to survive a reload that no longer means anything.
+   */
+  let pendingPluginView: PluginId | null = null;
+  /** When this run of the app started, which is what a notice's delay counts. */
+  const notificationsStartedAt = Date.now();
+  let notificationTimer: number | null = null;
   let currentRoute: AppRoute = { page: "library" };
 
   // A single router owns every route change. Pages never write the hash
@@ -523,6 +639,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   /** The segment on screen: the remembered one while it still exists. */
   const currentSegmentId = (): string =>
     resolveSegment(currentSegments(), state.browse.segments[state.browse.mode]);
+
+  /**
+   * Whether the catalogue holds nothing at all — which is a different question
+   * from whether the current search or segment shows nothing. This one decides
+   * between the Library and its welcome screen; the rail's own empty line
+   * answers the other.
+   */
+  const libraryIsEmpty = (): boolean => state.games.length === 0;
 
   const visibleGames = (): LibraryGame[] => {
     const term = state.query.trim().toLocaleLowerCase();
@@ -1178,6 +1302,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   };
 
   const renderSelection = (immediateHero = false): void => {
+    renderLibraryOnboarding();
+    // With no games there is no selection to render. Everything below reads
+    // `selectedGame()`, which has to answer with something — so letting it run
+    // here is what used to paint a fixture's hero over an empty library.
+    if (!libraryLoaded || libraryIsEmpty()) {
+      return;
+    }
+
     const game = selectedGame();
     const titleChanged = refs.title.textContent !== game.title;
     if (!visibleGames().some((candidate) => candidate.id === state.selectedId)) {
@@ -1430,7 +1562,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // newer one.
     const request = ++libraryRequest;
     const library = await loadLibrary();
-    if (request !== libraryRequest || !library) {
+    if (request !== libraryRequest) {
+      return;
+    }
+    if (!library) {
+      // The catalogue could not be read at all. The page has to stop waiting,
+      // and the failure is said out loud rather than dressed up as an empty
+      // library — the welcome screen's actions are the right ones either way.
+      if (!libraryLoaded) {
+        libraryLoaded = true;
+        renderSelection();
+      }
+      showToast("Your library could not be read.");
       return;
     }
 
@@ -1441,7 +1584,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       ? importedId!
       : library.games.some((game) => game.id === state.selectedId)
         ? state.selectedId
-        : library.games[0]?.id ?? lastUsedFallback.id;
+        : library.games[0]?.id ?? "";
+    // Set before the render: it is what lets the Library commit to showing
+    // either the scene or the welcome screen instead of holding its backdrop.
+    libraryLoaded = true;
     renderSelection();
     // A download started in the Epic launcher is just as real as one started
     // here, so the watch follows the data rather than the click.
@@ -2376,6 +2522,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // The row states what Steam is doing whether or not the panel is expanded,
     // so it is rendered before the early return below.
     renderSteamSourceRow();
+    // The welcome screen runs this very same connector, and it is on screen
+    // exactly when Settings is not. Repainting it here is what lets a sign-in
+    // window opened from the first-run panel report back into that panel.
+    renderOnboardingPanel();
     refs.steamAccountPanel.hidden = !account.open;
     refs.steamAccountPanel.setAttribute(
       "aria-busy",
@@ -2849,6 +2999,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   };
 
   const renderSourceAccountsPanel = (): void => {
+    // The welcome screen offers the same stores through the same commands, and
+    // is on screen exactly when this panel is not. Repainting it here is what
+    // carries a connect, a sync or a failure back to whichever of the two the
+    // user actually started it from.
+    renderOnboardingPanel();
     const body = refs.sourceAccountsBody;
     const restoreFocus = body.contains(document.activeElement);
     const focusedAction = restoreFocus
@@ -3225,6 +3380,627 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     setSourceBusy(provider, false);
     renderSourceAccountsPanel();
+  };
+
+  /* -------------------------------------------------------------------------
+     Notifications.
+
+     The bell is the only place in Orivo that speaks without being asked, so it
+     speaks quietly: a dot, a shake, and a card that waits. Everything it can
+     say is optional advice about an optional key, which is exactly why none of
+     it is allowed to become a modal, a toast or a badge with a number on it.
+     ---------------------------------------------------------------------- */
+
+  const persistNotifications = (): void => {
+    saveNotificationRecord(notificationStorage, state.notifications.record);
+  };
+
+  /** What the app looks like right now, as far as this advice is concerned. */
+  const notificationContext = (): NotificationContext => ({
+    hasGames: !libraryIsEmpty(),
+    hasArtworkKey: hasWallpaperKey(state.wallpaperCredentials),
+    visitedLibrarySources: state.notifications.record.visitedLibrarySources,
+  });
+
+  const renderNotifications = (): void => {
+    const record = state.notifications.record;
+    const items = visibleNotifications(record);
+    const unread = unreadNotificationCount(record);
+    refs.notificationsDot.hidden = unread === 0;
+    // Icon-only controls carry their own name, and this one's name changes.
+    refs.notificationsButton.setAttribute(
+      "aria-label",
+      unread === 0 ? "Notifications" : `Notifications, ${unread} unread`,
+    );
+
+    refs.notificationsList.replaceChildren();
+    if (items.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "notifications-panel__empty";
+      empty.textContent =
+        "Nothing to report. Orivo writes here only when it has something useful to add.";
+      refs.notificationsList.append(empty);
+      return;
+    }
+
+    for (const item of items) {
+      const card = document.createElement("article");
+      card.className = "notification-card";
+      card.classList.toggle("is-unread", state.notifications.highlighted.includes(item.id));
+
+      const mark = document.createElement("span");
+      mark.className = "notification-card__mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.innerHTML = icon(item.icon);
+
+      const copy = document.createElement("div");
+      copy.className = "notification-card__copy";
+      const title = document.createElement("strong");
+      title.textContent = item.title;
+      const body = document.createElement("p");
+      body.textContent = item.body;
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "notification-card__action";
+      action.dataset.notificationAction = "open";
+      action.dataset.notificationId = item.id;
+      action.textContent = item.actionLabel;
+      copy.append(title, body, action);
+
+      const dismiss = document.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "notification-card__dismiss";
+      dismiss.dataset.notificationAction = "dismiss";
+      dismiss.dataset.notificationId = item.id;
+      dismiss.setAttribute("aria-label", `Dismiss: ${item.title}`);
+      dismiss.innerHTML = icon("close");
+
+      card.append(mark, copy, dismiss);
+      refs.notificationsList.append(card);
+    }
+  };
+
+  const setNotificationsOpen = (open: boolean, restoreFocus = false): void => {
+    state.notifications.open = open;
+    refs.notificationsPanel.hidden = !open;
+    refs.notificationsButton.setAttribute("aria-expanded", String(open));
+    refs.topbar.classList.toggle("is-notifications-open", open);
+    if (open) {
+      // Opening is what counts as reading. The dot goes now; the highlight on
+      // the cards themselves survives until the panel closes again.
+      state.notifications.highlighted = visibleNotifications(state.notifications.record)
+        .filter((item) => !state.notifications.record.read.includes(item.id))
+        .map((item) => item.id);
+      state.notifications.record = markAllRead(state.notifications.record);
+      persistNotifications();
+      refs.notificationsButton.classList.remove("is-arriving");
+    } else {
+      state.notifications.highlighted = [];
+    }
+    renderNotifications();
+    if (!open && restoreFocus) refs.notificationsButton.focus();
+  };
+
+  /**
+   * Where a notice's action goes. The artwork keys sit one level inside the
+   * Plugins browser, which the route grammar has no way to name, so the plugin
+   * to open is handed to the Settings page rather than written into the hash.
+   */
+  const openNotificationTarget = (id: NotificationId): void => {
+    const notification = NOTIFICATIONS.find((entry) => entry.id === id);
+    if (!notification) return;
+    if (notification.target === "wallpaper-keys") {
+      pendingPluginView = "wallpaper-searcher";
+      navigate({ page: "settings", section: "plugins", attachGameId: null });
+      return;
+    }
+    navigate({ page: "settings", section: "libraries", attachGameId: null });
+  };
+
+  /**
+   * Deliver whatever has come due.
+   *
+   * Re-checked on a slow tick rather than scheduled once, because every notice
+   * is conditional on the app as it stands: a key added while the timer runs,
+   * or a library that is still empty, changes the answer.
+   */
+  const deliverDueNotifications = (): void => {
+    const due = dueNotifications(
+      Date.now() - notificationsStartedAt,
+      notificationContext(),
+      state.notifications.record,
+    );
+    for (const notification of due) {
+      state.notifications.record = markDelivered(state.notifications.record, notification.id);
+    }
+    if (due.length > 0) {
+      persistNotifications();
+      renderNotifications();
+      // Restarting an animation needs the class off, a reflow, then the class
+      // on: re-adding a class the element already wears animates nothing.
+      refs.notificationsButton.classList.remove("is-arriving");
+      void refs.notificationsButton.offsetWidth;
+      refs.notificationsButton.classList.add("is-arriving");
+    }
+    if (notificationsSettled(state.notifications.record) && notificationTimer !== null) {
+      window.clearInterval(notificationTimer);
+      notificationTimer = null;
+    }
+  };
+
+  /* -------------------------------------------------------------------------
+     The welcome screen: the Library when it holds nothing yet.
+
+     It stands in front of the Library's own wallpaper rather than on a page of
+     its own, so connecting a store dissolves into the library instead of
+     navigating away from it. Its right-hand panel is three views deep at most
+     and runs the very same connectors Settings does.
+     ---------------------------------------------------------------------- */
+
+  /** How deep a view sits, which is what tells a slide which way to go. */
+  const onboardingDepth = (view: OnboardingView): number =>
+    view.step === "choice" ? 0 : view.step === "sources" ? 1 : 2;
+
+  const onboardingConnected = (provider: OnboardingSource): boolean =>
+    provider === "steam" ? steamSourceConnected() : sourceStatus(provider).connected;
+
+  const onboardingBusy = (provider: OnboardingSource): boolean =>
+    provider === "steam"
+      ? state.steamAccount.phase === "connecting" || state.steamAccount.phase === "syncing"
+      : state.sourceAccounts.busy.has(provider);
+
+  /** The last thing this store said, read from whichever state owns it. */
+  const onboardingNotice = (
+    provider: OnboardingSource,
+  ): { message: string; tone: SteamNoticeTone } => {
+    if (provider === "steam") {
+      return { message: state.steamAccount.notice, tone: state.steamAccount.noticeTone };
+    }
+    return state.sourceAccounts.noticeProvider === provider
+      ? { message: state.sourceAccounts.notice, tone: state.sourceAccounts.noticeTone }
+      : { message: "", tone: "info" };
+  };
+
+  /** What the store says it is, falling back to Orivo's own copy for it. */
+  const onboardingSourceDetail = (provider: OnboardingSource): string => {
+    const descriptor = onboardingSourceDescriptor(provider);
+    return provider === "steam"
+      ? descriptor.detail
+      : sourceStatus(provider).description || descriptor.detail;
+  };
+
+  const onboardingSignInDetail = (provider: OnboardingSource): string =>
+    provider === "steam"
+      ? onboardingSourceDescriptor("steam").signIn ?? ""
+      : onboardingSignInLine(sourceStatus(provider).style);
+
+  const onboardingBackButton = (): HTMLButtonElement => {
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "onboarding__back";
+    back.dataset.onboardingAction = "back";
+    back.innerHTML = icon("chevron-left");
+    back.append(document.createTextNode(onboardingBackLabel(state.onboarding.view)));
+    return back;
+  };
+
+  const onboardingHeading = (title: string, lead?: string): DocumentFragment => {
+    const fragment = document.createDocumentFragment();
+    const heading = document.createElement("h2");
+    heading.className = "onboarding__panel-title";
+    heading.textContent = title;
+    fragment.append(heading);
+    if (lead) {
+      const paragraph = document.createElement("p");
+      paragraph.className = "onboarding__panel-lead";
+      paragraph.textContent = lead;
+      fragment.append(paragraph);
+    }
+    return fragment;
+  };
+
+  const onboardingRow = (config: {
+    action: string;
+    provider?: OnboardingSource;
+    mark: string;
+    title: string;
+    detail: string;
+    connected?: boolean;
+    /** A chevron promises another view. An action that opens the system file
+     *  picker is not another view, so it wears none. */
+    chevron?: boolean;
+  }): HTMLButtonElement => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "onboarding__row";
+    row.dataset.onboardingAction = config.action;
+    if (config.provider) row.dataset.onboardingProvider = config.provider;
+
+    const mark = document.createElement("span");
+    mark.className = "onboarding__row-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = config.mark;
+
+    const copy = document.createElement("span");
+    copy.className = "onboarding__row-copy";
+    const title = document.createElement("strong");
+    title.textContent = config.title;
+    const detail = document.createElement("small");
+    detail.textContent = config.detail;
+    copy.append(title, detail);
+
+    row.append(mark, copy);
+    if (config.connected) {
+      const pill = document.createElement("span");
+      pill.className = "onboarding__pill";
+      pill.textContent = "Connected";
+      row.append(pill);
+    } else if (config.chevron !== false) {
+      row.insertAdjacentHTML("beforeend", icon("chevron-right", "onboarding__chevron"));
+    }
+    return row;
+  };
+
+  const onboardingButton = (
+    action: string,
+    label: string,
+    provider: OnboardingSource,
+    primary = false,
+  ): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = primary ? "onboarding__cta onboarding__cta--primary" : "onboarding__cta";
+    button.dataset.onboardingAction = action;
+    button.dataset.onboardingProvider = provider;
+    button.textContent = label;
+    return button;
+  };
+
+  /** Said once, in whichever view is on screen, when there is no backend. */
+  const onboardingDesktopOnlyNote = (): HTMLParagraphElement => {
+    const note = document.createElement("p");
+    note.className = "onboarding__aside";
+    note.textContent = "Connecting a library is available in the Orivo desktop app.";
+    return note;
+  };
+
+  const onboardingChoiceView = (): HTMLElement => {
+    const view = document.createElement("div");
+    view.className = "onboarding__view";
+
+    const mark = document.createElement("span");
+    mark.className = "onboarding__panel-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = icon("folder");
+
+    const rows = document.createElement("div");
+    rows.className = "onboarding__rows";
+    rows.append(
+      onboardingRow({
+        action: "sources",
+        mark: icon("collections"),
+        title: "Connect a library",
+        detail: "Steam, Epic, GOG, Xbox and more",
+      }),
+      onboardingRow({
+        action: "local",
+        mark: icon("folder"),
+        title: "Import a local game",
+        detail: "Pick an app or executable on this Mac",
+        chevron: false,
+      }),
+    );
+
+    const aside = document.createElement("p");
+    aside.className = "onboarding__aside";
+    aside.append(document.createTextNode("Both of these also live in "));
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "onboarding__link";
+    link.dataset.onboardingAction = "settings";
+    link.textContent = "Settings › Libraries & Sources";
+    aside.append(link, document.createTextNode("."));
+
+    view.append(
+      mark,
+      onboardingHeading("Your library is empty", "Connect a platform to see your games here."),
+      rows,
+      aside,
+    );
+    return view;
+  };
+
+  const onboardingSourcesView = (): HTMLElement => {
+    const view = document.createElement("div");
+    view.className = "onboarding__view";
+    view.append(
+      onboardingBackButton(),
+      onboardingHeading(
+        "Connect a library",
+        "Each store signs you in through its own window. Orivo never sees your password.",
+      ),
+    );
+
+    const rows = document.createElement("div");
+    rows.className = "onboarding__rows onboarding__rows--scroll";
+    for (const source of ONBOARDING_SOURCES) {
+      rows.append(
+        onboardingRow({
+          action: "choose-source",
+          provider: source.provider,
+          mark: brandIcon(source.icon),
+          title: source.label,
+          detail: onboardingSourceDetail(source.provider),
+          connected: onboardingConnected(source.provider),
+        }),
+      );
+    }
+    view.append(rows);
+    if (!isTauriRuntime()) view.append(onboardingDesktopOnlyNote());
+    return view;
+  };
+
+  const onboardingConnectView = (provider: OnboardingSource): HTMLElement => {
+    const descriptor = onboardingSourceDescriptor(provider);
+    const connected = onboardingConnected(provider);
+    const busy = onboardingBusy(provider);
+    const notice = onboardingNotice(provider);
+
+    const view = document.createElement("div");
+    view.className = "onboarding__view";
+    view.append(onboardingBackButton());
+
+    const head = document.createElement("div");
+    head.className = "onboarding__connect-head";
+    const mark = document.createElement("span");
+    mark.className = "onboarding__panel-mark onboarding__panel-mark--brand";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = brandIcon(descriptor.icon);
+    head.append(mark, onboardingHeading(descriptor.label));
+
+    const fact = (name: IconName, text: string): HTMLLIElement => {
+      const item = document.createElement("li");
+      item.insertAdjacentHTML("afterbegin", icon(name));
+      const copy = document.createElement("span");
+      copy.textContent = text;
+      item.append(copy);
+      return item;
+    };
+
+    const facts = document.createElement("ul");
+    facts.className = "onboarding__facts";
+    facts.append(
+      fact("collections", onboardingSourceDetail(provider)),
+      fact("cloud", onboardingSignInDetail(provider)),
+    );
+    // A store Orivo can list but not start says so before the sign-in, not
+    // afterwards when the Play button turns out to be missing.
+    if (provider !== "steam" && !sourceStatus(provider).launchable) {
+      facts.append(
+        fact(
+          "alert",
+          `Orivo lists and organises ${descriptor.label} games but cannot launch them yet.`,
+        ),
+      );
+    }
+    view.append(head, facts);
+
+    if (notice.message) {
+      const element = document.createElement("p");
+      element.className = `steam-notice steam-notice--${notice.tone}`;
+      element.setAttribute("role", notice.tone === "error" ? "alert" : "status");
+      element.textContent = notice.message;
+      view.append(element);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "onboarding__actions";
+    if (busy) {
+      const waiting = document.createElement("p");
+      waiting.className = "onboarding__waiting";
+      waiting.setAttribute("role", "status");
+      const spinner = document.createElement("span");
+      spinner.className = "steam-spinner";
+      spinner.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.textContent =
+        provider === "steam" && state.steamAccount.phase === "syncing"
+          ? "Reading your Steam library…"
+          : "Continue in the sign-in window…";
+      waiting.append(spinner, label);
+      actions.append(waiting, onboardingButton("cancel", "Cancel", provider));
+    } else if (connected) {
+      // Connected, and the library is still empty. Asking again is the only
+      // thing left that can change that, so it is the only thing offered.
+      actions.append(
+        onboardingButton("sync", `Sync ${descriptor.label} again`, provider, true),
+      );
+    } else {
+      actions.append(
+        onboardingButton("connect", `Connect ${descriptor.label}`, provider, true),
+      );
+    }
+    if (provider === "steam") {
+      actions.append(
+        onboardingButton("steam-import", "Import installed games instead", provider),
+      );
+    }
+    view.append(actions);
+    if (!isTauriRuntime()) view.append(onboardingDesktopOnlyNote());
+    return view;
+  };
+
+  /**
+   * Everything the panel is drawn from, flattened.
+   *
+   * Loading the account statuses repaints this panel in the same tick the user
+   * pressed a row in it. Without this, that repaint replaced the DOM the slide
+   * had just started on, and the navigation the panel is built around never
+   * animated at all.
+   */
+  const onboardingSignature = (): string => {
+    const view = state.onboarding.view;
+    const store = view.step === "connect" ? view.provider : null;
+    const notice = store ? onboardingNotice(store) : null;
+    return JSON.stringify([
+      view,
+      isTauriRuntime(),
+      store
+        ? [
+            onboardingConnected(store),
+            onboardingBusy(store),
+            onboardingSourceDetail(store),
+            onboardingSignInDetail(store),
+            notice?.message,
+            notice?.tone,
+            store === "steam" ? state.steamAccount.phase : "",
+          ]
+        : null,
+      view.step === "sources"
+        ? ONBOARDING_SOURCES.map((source) => [
+            onboardingConnected(source.provider),
+            onboardingSourceDetail(source.provider),
+          ])
+        : null,
+    ]);
+  };
+
+  const renderOnboardingPanel = (): void => {
+    if (refs.onboarding.hidden) return;
+    const view = state.onboarding.view;
+    const previous = state.onboarding.rendered;
+    const signature = onboardingSignature();
+    if (previous !== null && signature === state.onboarding.signature) return;
+    const navigated = previous !== null && !isSameOnboardingView(previous, view);
+    // WebKit does not focus a button on click, so this is only ever true when
+    // the keyboard drove the change — which is exactly when focus has to move.
+    const hadFocus = refs.onboardingPanel.contains(document.activeElement);
+
+    const element =
+      view.step === "sources"
+        ? onboardingSourcesView()
+        : view.step === "connect"
+          ? onboardingConnectView(view.provider)
+          : onboardingChoiceView();
+
+    if (navigated) {
+      element.classList.add(
+        onboardingDepth(view) >= onboardingDepth(previous)
+          ? "onboarding__view--forward"
+          : "onboarding__view--back",
+      );
+      // The rows arrive just behind the view they sit in.
+      element.querySelectorAll<HTMLElement>(".onboarding__row").forEach((row, index) => {
+        row.style.animationDelay = `${60 + index * 40}ms`;
+      });
+    }
+
+    state.onboarding.rendered = view;
+    state.onboarding.signature = signature;
+    refs.onboardingPanel.replaceChildren(element);
+
+    if (navigated && hadFocus) {
+      const next =
+        element.querySelector<HTMLElement>(".onboarding__row, .onboarding__cta--primary") ??
+        element.querySelector<HTMLElement>("button");
+      next?.focus();
+    }
+  };
+
+  const setOnboardingView = (view: OnboardingView): void => {
+    if (isSameOnboardingView(state.onboarding.view, view)) return;
+    state.onboarding.view = view;
+    renderOnboardingPanel();
+  };
+
+  /** The bundled artwork the welcome screen stands on. */
+  const showWelcomeWallpaper = (): void => {
+    // A library that emptied out may have a hero still decoding. Its `reveal`
+    // checks this counter, so bumping it is what stops the last game's artwork
+    // fading in behind a screen that says there are no games.
+    heroRequest += 1;
+    const layer = refs.heroLayers[activeHero];
+    if (layer.getAttribute("src") === WELCOME_WALLPAPER) return;
+    // Straight onto the active layer: there is no outgoing artwork to cross
+    // fade from, and the entrance animation is already carrying the arrival.
+    layer.src = WELCOME_WALLPAPER;
+    layer.classList.add("is-active");
+    refs.heroLayers[1 - activeHero].classList.remove("is-active");
+  };
+
+  /**
+   * Show or hide the welcome screen, and take the Library's own furniture out
+   * of the layout while it is up.
+   *
+   * Nothing shows at all until the first load has answered: the two
+   * alternatives are both a lie told for one frame — a hero with no game in
+   * it, or a welcome screen shown to someone whose library is about to arrive.
+   */
+  const renderLibraryOnboarding = (): void => {
+    const welcome = libraryLoaded && libraryIsEmpty();
+    refs.libraryPage.classList.toggle("is-empty", !libraryLoaded || libraryIsEmpty());
+
+    if (!welcome) {
+      if (!refs.onboarding.hidden) {
+        refs.onboarding.hidden = true;
+        refs.onboarding.classList.remove("is-entering");
+        // A library that empties again starts the walkthrough from the top
+        // rather than resuming a store page nobody asked for twice.
+        state.onboarding.view = INITIAL_ONBOARDING_VIEW;
+        state.onboarding.rendered = null;
+        state.onboarding.signature = "";
+      }
+      return;
+    }
+
+    if (!refs.onboarding.hidden) return;
+    refs.onboarding.hidden = false;
+    // A library that emptied out leaves its rail behind. CSS takes it out of
+    // the layout, but the cards and their artwork are still in the document.
+    refs.cards.replaceChildren();
+    renderOnboardingPanel();
+    showWelcomeWallpaper();
+    refs.onboarding.classList.remove("is-entering");
+    void refs.onboarding.offsetWidth;
+    refs.onboarding.classList.add("is-entering");
+    // The statuses decide which stores already read as connected, and Settings
+    // has always been the only place that loads them.
+    void refreshOnboardingStatuses();
+  };
+
+  const refreshOnboardingStatuses = async (): Promise<void> => {
+    if (!isTauriRuntime()) return;
+    await Promise.all([refreshSteamAccountStatus(), refreshSourceAccounts()]);
+  };
+
+  const connectFromOnboarding = async (provider: OnboardingSource): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast("Connecting a library is available in the Orivo desktop app.");
+      return;
+    }
+    // Both of these repaint through the state their store already owns, which
+    // is what pulls the welcome panel along with them.
+    if (provider === "steam") await startSteamWebLogin();
+    else await connectSourceAccount(provider);
+  };
+
+  const syncFromOnboarding = async (provider: OnboardingSource): Promise<void> => {
+    if (!isTauriRuntime()) return;
+    if (provider === "steam") await syncSteamAccountLibrary();
+    else await syncSourceLibrary(provider);
+  };
+
+  const cancelFromOnboarding = async (provider: OnboardingSource): Promise<void> => {
+    if (!isTauriRuntime()) return;
+    if (provider !== "steam") {
+      await cancelSourceLogin(provider);
+      return;
+    }
+    try {
+      await invoke("cancel_steam_web_login");
+    } catch {
+      // A window that is already gone is exactly the outcome asked for.
+    }
   };
 
   const hydrateSteamPreviewMedia = async (
@@ -3865,7 +4641,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       : "Save keys";
   };
 
-  const loadWallpaperCredentials = async (request = settingsRequest): Promise<void> => {
+  /**
+   * `quiet` is for the read at startup, which nobody asked for: the notice
+   * about artwork keys has to know whether one is already set before it offers
+   * to help. A failure there is worth nothing to the user, so it says nothing.
+   */
+  const loadWallpaperCredentials = async (
+    request = settingsRequest,
+    quiet = false,
+  ): Promise<void> => {
     if (!isTauriRuntime()) {
       renderWallpaperCredentials();
       return;
@@ -3878,7 +4662,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       state.wallpaperCredentials = credentials;
       renderWallpaperCredentials();
     } catch (error) {
-      if (request === settingsRequest) {
+      if (request === settingsRequest && !quiet) {
         showToast(messageFromError(error, "Wallpaper keys could not be loaded."));
       }
     }
@@ -4642,9 +5426,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (route.page !== "settings") return;
       const request = ++settingsRequest;
       // A deep link that names a game (for example the game detail page's
-      // "Configure Wine" action) opens the Wine runner detail directly;
+      // "Configure Wine" action) opens the Wine runner detail directly, and a
+      // notification can ask for a specific plugin's detail by name;
       // otherwise the Plugins section opens its plugin browser.
-      state.pluginView = route.section === "plugins" && route.attachGameId ? "wine" : "list";
+      state.pluginView =
+        route.section === "plugins"
+          ? route.attachGameId
+            ? "wine"
+            : pendingPluginView ?? "list"
+          : "list";
+      // Consumed whatever the section was: a request that missed its page is
+      // stale, not pending.
+      pendingPluginView = null;
       renderSettingsRoute(route);
       renderPluginList();
       renderWineSettingsPanel();
@@ -4652,6 +5445,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void loadPreferences(request);
 
       if (route.section === "libraries") {
+        // Seeing the provider list is the whole point of the notice about
+        // where prices come from, so arriving here retires it.
+        const record = markLibrarySourcesVisited(state.notifications.record);
+        if (record !== state.notifications.record) {
+          state.notifications.record = record;
+          persistNotifications();
+        }
         // The connect panel stays collapsed — the row is what the page shows —
         // but its status still has to be read, or the row cannot say whether
         // Steam is connected.
@@ -4979,6 +5779,82 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  refs.onboarding.addEventListener("click", (event) => {
+    const trigger = (event.target as Element | null)?.closest<HTMLElement>(
+      "[data-onboarding-action]",
+    );
+    const action = trigger?.dataset.onboardingAction;
+    if (!trigger || !action) {
+      return;
+    }
+    const requested = trigger.dataset.onboardingProvider ?? "";
+    const provider = isOnboardingSource(requested) ? requested : null;
+
+    switch (action) {
+      case "sources":
+        setOnboardingView({ step: "sources" });
+        void refreshOnboardingStatuses();
+        break;
+      case "choose-source":
+        if (provider) setOnboardingView({ step: "connect", provider });
+        break;
+      case "back":
+        setOnboardingView(onboardingBack(state.onboarding.view));
+        break;
+      case "local":
+        void importGame();
+        break;
+      case "connect":
+        if (provider) void connectFromOnboarding(provider);
+        break;
+      case "sync":
+        if (provider) void syncFromOnboarding(provider);
+        break;
+      case "cancel":
+        if (provider) void cancelFromOnboarding(provider);
+        break;
+      case "steam-import":
+        // The installed-games scan is a different job from signing in, and it
+        // already has a home: the Steam row in Settings expands into it.
+        navigate({ page: "settings", section: "libraries", attachGameId: null });
+        setSteamPanelOpen(true);
+        break;
+      case "settings":
+        navigate({ page: "settings", section: "libraries", attachGameId: null });
+        break;
+      default:
+        break;
+    }
+  });
+
+  refs.notificationsButton.addEventListener("click", () => {
+    setNotificationsOpen(!state.notifications.open);
+  });
+
+  refs.notificationsPanel.addEventListener("click", (event) => {
+    const trigger = (event.target as Element | null)?.closest<HTMLElement>(
+      "[data-notification-action]",
+    );
+    const action = trigger?.dataset.notificationAction;
+    const id = trigger?.dataset.notificationId;
+    if (!action || !id) {
+      return;
+    }
+    if (action === "dismiss") {
+      state.notifications.record = dismissNotification(
+        state.notifications.record,
+        id as NotificationId,
+      );
+      persistNotifications();
+      renderNotifications();
+      return;
+    }
+    if (action === "open") {
+      setNotificationsOpen(false);
+      openNotificationTarget(id as NotificationId);
+    }
+  });
+
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Node;
     if (
@@ -4988,6 +5864,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ) {
       closeLibraryMenu();
     }
+    if (state.notifications.open && !refs.notificationsControl.contains(target)) {
+      setNotificationsOpen(false);
+    }
   });
 
   window.addEventListener("keydown", (event) => {
@@ -4996,6 +5875,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // lives in a shadow root.
     const target = composedTarget(event);
     if (refs.libraryMenu.contains(target)) {
+      return;
+    }
+
+    if (state.notifications.open && event.key === "Escape") {
+      event.preventDefault();
+      setNotificationsOpen(false, true);
       return;
     }
 
@@ -5027,6 +5912,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // Everything below belongs to the Library page and must never fire while
     // the Store, a game detail, Settings, or the not-found page is active.
     if (currentRoute.page !== "library") {
+      return;
+    }
+
+    // The welcome screen owns the Library page while the catalogue is empty:
+    // none of the rail's verbs have anything to act on, and Enter or A would
+    // reach for a selection that does not exist. Only the two that still mean
+    // something with no games survive here.
+    if (libraryIsEmpty()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLibraryMenu();
+        setOnboardingView(onboardingBack(state.onboarding.view));
+      } else if (event.key === "i" || event.key === "I") {
+        event.preventDefault();
+        if (event.shiftKey) void importGame();
+        else navigate({ page: "settings", section: "libraries", attachGameId: null });
+      }
       return;
     }
 
@@ -5116,6 +6018,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   renderSteamPanel();
   renderWineSettingsPanel();
   renderPreferenceControls();
+  renderNotifications();
+  // Nothing is due for minutes, and the answer depends on state that keeps
+  // moving, so the shell re-asks on a slow tick and stops once every notice
+  // has either been delivered or dismissed for good.
+  if (!notificationsSettled(state.notifications.record)) {
+    notificationTimer = window.setInterval(deliverDueNotifications, NOTIFICATION_TICK_MS);
+  }
   /**
    * Crash reports and the feedback form.
    *
@@ -5128,7 +6037,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // wrong" is a shrug, the same sentence tagged with a title is a lead.
     const attached = attachFeedbackTo(refs.feedbackButton, () => ({
       page: currentRoute.page,
-      game: selectedGame().title,
+      // An empty library has no selection, and naming a fixture here would tag
+      // the report with a game the reporter has never seen.
+      game: libraryIsEmpty() ? "" : selectedGame().title,
     }));
     refs.feedbackButton.hidden = !attached;
   }
@@ -5138,6 +6049,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     spatialNav.enterPage();
   });
   void refreshLibrary();
+  // Read once at startup, only so the notice about artwork keys can tell
+  // whether there is already one. Settings re-reads it whenever it opens.
+  void loadWallpaperCredentials(settingsRequest, true);
   void (async () => {
     await loadPreferences();
     // Preferences decide which surfaces exist, so the beta gate is applied the
@@ -5184,10 +6098,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   }
 }
 
+/**
+ * A browser build still ships the showcase library: the e2e suite and the
+ * design preview both run there and need a library to render. `?library=empty`
+ * is how the welcome screen is reached without a desktop build.
+ */
+function browserPreviewsEmptyLibrary(): boolean {
+  try {
+    return new URLSearchParams(window.location.search).get("library") === "empty";
+  } catch {
+    return false;
+  }
+}
+
 async function loadLibrary(): Promise<LibraryLoad | null> {
   if (!isTauriRuntime()) {
     return {
-      games: fallbackLibrary.map((game) => ({ ...game })),
+      games: browserPreviewsEmptyLibrary() ? [] : fallbackLibrary.map((game) => ({ ...game })),
       mediaTokens: new Map(),
     };
   }
@@ -5197,14 +6124,11 @@ async function loadLibrary(): Promise<LibraryLoad | null> {
     // already resolvable when the records are normalised and the first paint
     // shows the real covers rather than a placeholder.
     const [result] = await Promise.all([invoke<unknown>("get_library"), primeMediaDirectory()]);
+    // An empty catalogue is an answer, not a gap. It used to be filled in with
+    // the bundled showcase games, which made a fresh install look like a
+    // library of ten titles nobody owns and left the one screen that should be
+    // asking for a connection with nothing to ask for.
     const records = recordsFromResult(result);
-    if (records.length === 0) {
-      return {
-        games: fallbackLibrary.map((game) => ({ ...game })),
-        mediaTokens: new Map(),
-      };
-    }
-
     const normalised = records
       .map(normaliseGame)
       .filter((game): game is NormalisedLibraryGame => game !== null);
@@ -5800,6 +6724,24 @@ function shell(): string {
                until Sentry is configured, so a source build shows no dead
                control. -->
           <button id="feedback-button" class="feedback-button" type="button" aria-label="Send feedback" title="Send feedback" hidden>${icon("feedback")}</button>
+          <!-- The bell. Everything it carries is advice the user can ignore
+               forever, so it never interrupts: a notice lands as a dot here and
+               waits to be opened. -->
+          <div class="notifications-control">
+            <button id="notifications-button" class="notifications-button" type="button" aria-label="Notifications" aria-expanded="false" aria-controls="notifications-panel">
+              ${icon("bell")}
+              <span id="notifications-dot" class="notifications-button__dot" aria-hidden="true" hidden></span>
+            </button>
+            <!-- A disclosure, not a dialog. Nothing in Orivo is modal: the
+                 shell carries no dialog role anywhere, and a bell that opened
+                 one would be the loudest thing on the page for the quietest
+                 content in the app. The button's aria-expanded and a named
+                 group here say everything a dialog role would. -->
+            <div id="notifications-panel" class="notifications-panel" role="group" aria-label="Notifications" hidden>
+              <p class="notifications-panel__title">Notifications</p>
+              <div id="notifications-list"></div>
+            </div>
+          </div>
           <img class="avatar" src="/media/steam-avatar.png" alt="Steam profile" />
         </div>
       </header>
@@ -5827,9 +6769,12 @@ function shell(): string {
              and the title keeps the accessible name either way. The genre pill
              follows the mark rather than leading it — the mark is what the eye
              should land on first. -->
+        <!-- Both start empty. A fixture's title baked into the shell is text
+             the app has not earned yet: an empty library would carry it until
+             a render replaced it, and on the welcome screen nothing ever does. -->
         <img id="hero-logo" class="hero-logo" alt="" hidden />
-        <h1 id="hero-title" class="hero-title">Elden Ring</h1>
-        <span id="hero-genre" class="genre-chip">RPG</span>
+        <h1 id="hero-title" class="hero-title"></h1>
+        <span id="hero-genre" class="genre-chip"></span>
         <div class="hero-meta" aria-label="Game metadata">
           <span>${icon("clock")}<span id="hero-play-time"></span></span>
           <span>${icon("clock")}<span id="hero-last-played"></span></span>
@@ -5879,6 +6824,50 @@ function shell(): string {
           <span id="browse-mode-label">Activity</span>
         </button>
       </footer>
+
+      <!-- The first-run screen. It stands in front of the same wallpaper the
+           Library uses rather than on a page of its own, so connecting a store
+           dissolves into the library instead of navigating away from it. The
+           scene behind it is taken out of the layout entirely while it shows,
+           so nothing under it can be tabbed into. -->
+      <section id="library-onboarding" class="onboarding" aria-label="Welcome to Orivo" hidden>
+        <div class="onboarding__intro">
+          <!-- The wordmark is the brand's own artwork, not type Orivo sets
+               itself: a logo redrawn in the app's font drifts from the logo
+               everywhere else the moment either one changes. Its alt text is
+               what finishes the heading, so the accessible name stays
+               "Welcome to Orivo" whether or not the image ever decodes, and
+               the intrinsic size on the tag holds the box open before it
+               does. -->
+          <h1 class="onboarding__title">
+            <span>Welcome to</span>
+            <img class="onboarding__wordmark" src="/media/orivo-logo.png" width="1396" height="310" alt="Orivo" />
+          </h1>
+          <p class="onboarding__tagline">Your games. <em>Your way.</em></p>
+          <p class="onboarding__lead">Connect your libraries, customise your experience, and play.</p>
+
+          <div class="onboarding__steps">
+            <p class="onboarding__steps-label">Get started in 3 steps</p>
+            <ol class="onboarding__steps-list">
+              ${ONBOARDING_STEPS.map(
+                (step, index) => `
+              <li class="onboarding__step">
+                <span class="onboarding__step-mark" aria-hidden="true">
+                  ${icon(step.icon)}
+                  <span class="onboarding__step-number">${index + 1}</span>
+                </span>
+                <strong>${step.title}</strong>
+                <small>${step.detail}</small>
+              </li>`,
+              ).join("")}
+            </ol>
+          </div>
+        </div>
+
+        <!-- The wizard. Rendered from state, because it is three views deep and
+             every one of them can be waiting on a sign-in window. -->
+        <div id="onboarding-panel" class="onboarding__panel"></div>
+      </section>
       </div>
 
       <div id="app-page-store" class="app-page app-page--store"></div>

@@ -5,6 +5,7 @@ import {
   applyPreferencesUpdate,
   formatDataSize,
   formatFreshness,
+  hasWallpaperKey,
   normaliseDataUsage,
   normalisePreferences,
   normaliseProviderStatuses,
@@ -107,5 +108,21 @@ describe("settings model", () => {
         refreshedAt: null,
       },
     ]);
+  });
+
+  it("counts a wallpaper key only when a key is actually set", () => {
+    expect(hasWallpaperKey(EMPTY_WALLPAPER_CREDENTIALS)).toBe(false);
+    // A customised search term is tuning, not access: treating it as a key
+    // would retire the offer of help before any help was given.
+    expect(
+      hasWallpaperKey({ ...EMPTY_WALLPAPER_CREDENTIALS, searchTermCover: '"{name}" cover' }),
+    ).toBe(false);
+    expect(hasWallpaperKey({ ...EMPTY_WALLPAPER_CREDENTIALS, steamgriddbApiKey: "  " })).toBe(
+      false,
+    );
+    expect(hasWallpaperKey({ ...EMPTY_WALLPAPER_CREDENTIALS, steamgriddbApiKey: "key" })).toBe(
+      true,
+    );
+    expect(hasWallpaperKey({ ...EMPTY_WALLPAPER_CREDENTIALS, igdbClientId: "id" })).toBe(true);
   });
 });
