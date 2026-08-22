@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-23
+
 ### Added
 
 - A welcome screen for a library that holds nothing yet. It stands in front of the same wallpaper the Library uses, introduces Orivo in three steps, and puts the only thing it is asking for on the right: connect a library, or import a game from this Mac. Choosing a library lists every store Orivo can sign into — Steam, Epic Games, GOG, Ubisoft Connect, Xbox, Microsoft Store and Instant Gaming — and each one gets a page that says what connecting brings, how its sign-in works, and whether Orivo can launch what it finds, before anything is started. It runs the same connectors Settings does, so a sign-in begun here reports back here, and the screen dissolves into the library the moment the first game lands.
