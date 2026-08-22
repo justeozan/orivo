@@ -9,9 +9,9 @@ pull request is merged.
 Orivo is written against three specifications, and a pull request that
 contradicts one of them will be sent back with a pointer to the paragraph:
 
-- [`DESIGN.md`](DESIGN.md) — the design system. Spacing, type, motion, and why
+- [`docs/DESIGN.md`](docs/DESIGN.md) — the design system. Spacing, type, motion, and why
   a panel fades at the bottom instead of being cut off.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the boundaries. What the WebView may
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the boundaries. What the WebView may
   know, what only Rust may do, and the performance budget.
 - [`docs/selector-contract.md`](docs/selector-contract.md) — what the selector
   guarantees about focus, and what may never move under a player's thumb.

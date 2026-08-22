@@ -140,9 +140,9 @@ Emulator sources, a richer Store and the **Me** dashboard (already behind
 Orivo is written against these specifications, and they are worth reading before
 a pull request:
 
-- [`DESIGN.md`](DESIGN.md) — the design system, down to why a panel fades at the
+- [`docs/DESIGN.md`](docs/DESIGN.md) — the design system, down to why a panel fades at the
   bottom instead of being cut off.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — the boundaries: what the WebView may
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the boundaries: what the WebView may
   know, what only Rust may do, and the performance budget.
 - [`docs/RELEASING.md`](docs/RELEASING.md) — how a version is cut, signed and
   published.
