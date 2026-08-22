@@ -371,6 +371,11 @@ pub struct RunnerPluginView {
 /// inputs the acquisition service needs and the WebView must never learn.
 #[derive(Debug, Clone)]
 pub struct InstallerPlugin {
+    /// Which plugin this is. Nothing in the acquisition flow branches on it —
+    /// the registry has already picked the one installer surface — but it is
+    /// what the discovery tests assert on, and it is the only field that says
+    /// *which* plugin a `Debug` line is about.
+    #[allow(dead_code)]
     pub id: String,
     pub name: String,
     pub version: String,

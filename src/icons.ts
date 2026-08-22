@@ -7,6 +7,8 @@ export type IconName =
   | "settings"
   | "search"
   | "bell"
+  | "link"
+  | "sliders"
   | "feedback"
   | "clock"
   | "trophy"
@@ -76,6 +78,14 @@ const paths: Record<IconName, string> = {
     '<circle cx="12" cy="12" r="3.5" /><path d="M4 12h2M18 12h2M12 4v2M12 18v2M6.35 6.35l1.4 1.4M16.25 16.25l1.4 1.4M17.65 6.35l-1.4 1.4M7.75 16.25l-1.4 1.4" />',
   search: '<circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" />',
   bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 8-3 10h18c0-2-3-3-3-10M10 22h4" />',
+  // Two half-links, open in the middle: the "connect a library" step reads as a
+  // join rather than as a chain, which is what a store connection actually is.
+  link:
+    '<path d="M10.4 13.6a3.9 3.9 0 0 0 5.6 0l2.6-2.6a3.9 3.9 0 1 0-5.5-5.5l-1.3 1.3" /><path d="M13.6 10.4a3.9 3.9 0 0 0-5.6 0l-2.6 2.6a3.9 3.9 0 1 0 5.5 5.5l1.3-1.3" />',
+  // Mixing-desk sliders for "personalise": two tracks, two handles at
+  // different offsets, so the glyph reads as adjustment and not as settings.
+  sliders:
+    '<path d="M3.6 8.4h8.2M16.6 8.4h3.8M3.6 15.6h3.8M12.2 15.6h8.2" /><circle cx="14.2" cy="8.4" r="2.1" /><circle cx="9.8" cy="15.6" r="2.1" />',
   feedback: '<path d="M4 5.5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8.6L7 21v-4.5H4a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z" />',
   clock: '<circle cx="12" cy="12" r="8" /><path d="M12 7v5l3 2" />',
   trophy:

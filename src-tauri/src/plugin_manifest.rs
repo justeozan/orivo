@@ -100,6 +100,9 @@ impl ValidatedPluginManifest {
         &self.manifest.id
     }
 
+    /// Test-only. The registry reads extensions off the discovery record it
+    /// already built, so nothing in a release build asks a manifest this.
+    #[cfg(test)]
     pub fn has_extension(&self, extension: PluginExtension) -> bool {
         self.manifest.extensions.contains(&extension)
     }
@@ -111,6 +114,14 @@ impl ValidatedPluginManifest {
     /// Grants are persisted by the host, never by a plugin. This check makes
     /// it impossible to grant a capability that was not shown in the install
     /// consent screen or to widen the plugin's declared network allowlist.
+    ///
+    /// Nothing calls it yet, and that is deliberate rather than an oversight:
+    /// `plugin_runtime` currently only preflights a component, and its own
+    /// module note says invocation, host functions, grants and `Store` limits
+    /// arrive together in the runner host slice. A policy that lands after the
+    /// code it is supposed to gate is a policy that never gates anything, so
+    /// this half is written, tested and waiting for that caller.
+    #[allow(dead_code)]
     pub fn validate_grant(&self, grant: &CapabilityGrant) -> Result<(), GrantValidationError> {
         if grant.plugin_id != self.manifest.id {
             return Err(GrantValidationError::PluginMismatch);

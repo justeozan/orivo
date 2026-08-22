@@ -31,7 +31,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 pub const PLUGIN_INSTALL_EVENT: &str = "plugin-install-status";
@@ -532,7 +532,7 @@ fn read_package(bytes: &[u8]) -> Result<PackageFiles, String> {
     let mut files = PackageFiles::new();
     let mut total = 0_u64;
     for entry in entries {
-        let mut entry = entry.map_err(|_| "The package archive is damaged.".to_string())?;
+        let entry = entry.map_err(|_| "The package archive is damaged.".to_string())?;
         if !entry.header().entry_type().is_file() {
             // Directories carry no payload, and a link could point anywhere on
             // the host. Only regular files are ever taken from a package.
@@ -665,11 +665,6 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Er
         ));
     }
     fs::read(path)
-}
-
-pub fn service_for(app: &AppHandle) -> Option<Arc<PluginInstallerService>> {
-    app.try_state::<Arc<PluginInstallerService>>()
-        .map(|state| Arc::clone(&state))
 }
 
 pub fn plugin_root_for(app_data: &Path) -> PathBuf {

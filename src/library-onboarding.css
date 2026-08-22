@@ -1,0 +1,541 @@
+/* ---------------------------------------------------------------------------
+   Library onboarding — the first-run screen.
+
+   It lives inside the Library page host and stands in front of the same
+   wallpaper the Library uses, so arriving in a real library later is a
+   dissolve rather than a scene change. The Library's own furniture (hero,
+   rail, browse bar, arrows) is taken out of the layout by `.is-empty` below
+   rather than merely hidden, so nothing behind this screen is tabbable.
+
+   Motion is deliberate here and only here: this is the one screen in Orivo
+   that is worth staging. Every animation moves `transform` and `opacity`
+   only, and the reduce block at the bottom takes all of it away — including
+   the delays, which the global reduce rules in styles.css do not touch.
+   --------------------------------------------------------------------------- */
+
+.app-page--library.is-empty .hero-content,
+.app-page--library.is-empty .recently-played,
+.app-page--library.is-empty .browse-bar,
+.app-page--library.is-empty .scene-arrow {
+  display: none;
+}
+
+/* A slow drift across the welcome artwork. Tiny on purpose — it should read as
+   the scene breathing, never as a pan. */
+.app-page--library.is-empty .hero-image.is-active {
+  animation: onboarding-drift 34s cubic-bezier(.4, 0, .6, 1) infinite alternate;
+}
+
+/* The Library shows its artwork undimmed because a hero and a rail of covers
+   are most of what is on it. This screen is mostly words, over the brightest
+   part of a sunset, so the two scrims it already owns are turned up: a flat
+   shade over the whole scene, and a deeper one down the side the text sits on. */
+.app-page--library.is-empty .scene-overlay--left {
+  background:
+    linear-gradient(90deg, rgba(8,9,13,.7) 0%, rgba(8,9,13,.44) 27%, rgba(8,9,13,.12) 55%, rgba(8,9,13,0) 78%),
+    linear-gradient(rgba(8,9,13,.2), rgba(8,9,13,.2));
+}
+.app-page--library.is-empty .scene-overlay--bottom {
+  background: linear-gradient(0deg, rgba(8,9,13,.72) 0%, rgba(8,9,13,.36) 24%, rgba(8,9,13,0) 52%);
+}
+
+.onboarding {
+  position: absolute;
+  z-index: 3;
+  top: var(--topbar-height);
+  right: clamp(24px, 3.4vw, 60px);
+  bottom: clamp(24px, 4vh, 56px);
+  left: clamp(32px, 7vw, 132px);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(304px, 366px);
+  align-items: center;
+  gap: clamp(24px, 4vw, 76px);
+}
+/* `display: grid` outranks the UA `[hidden]` rule. */
+.onboarding[hidden] { display: none !important; }
+
+.onboarding__intro { display: grid; justify-items: start; min-width: 0; }
+
+.onboarding__title {
+  display: grid;
+  justify-items: start;
+  margin: 0;
+  color: #f6f4fa;
+  font-weight: 640;
+  letter-spacing: -.035em;
+  line-height: .96;
+  text-shadow: 0 2px 6px rgba(6,6,10,.5), 0 6px 30px rgba(6,6,10,.45);
+}
+.onboarding__title span { font-size: clamp(34px, 4vw, 64px); }
+/* Sized by height, because a wordmark reads against the line above it rather
+   than against a column width: the width follows from the artwork's own ratio,
+   which the intrinsic size on the tag also uses to hold the box open until the
+   image decodes. The shadow is a drop shadow on the painted glyphs rather than
+   a text shadow, so it follows the letterforms instead of a box. */
+.onboarding__wordmark {
+  height: clamp(48px, 6.6vw, 104px);
+  width: auto;
+  margin-top: clamp(2px, .6vh, 8px);
+  object-fit: contain;
+  filter: drop-shadow(0 3px 8px rgba(6,6,10,.45)) drop-shadow(0 10px 36px rgba(6,6,10,.38));
+}
+
+.onboarding__tagline {
+  margin: clamp(14px, 1.8vh, 22px) 0 0;
+  color: #ece9f2;
+  font-size: clamp(16px, 1.35vw, 21px);
+  font-weight: 560;
+  letter-spacing: -.012em;
+  text-shadow: 0 1px 3px rgba(6,6,10,.55);
+}
+.onboarding__tagline em { color: #a78dff; font-style: normal; }
+
+.onboarding__lead {
+  max-width: 34ch;
+  margin: 9px 0 0;
+  color: #b6b1c1;
+  font-size: clamp(13px, 1.02vw, 15px);
+  font-weight: 450;
+  line-height: 1.5;
+  text-shadow: 0 1px 3px rgba(6,6,10,.5);
+}
+
+/* --- the three steps ----------------------------------------------------- */
+
+.onboarding__steps {
+  width: min(534px, 100%);
+  margin-top: clamp(20px, 3.6vh, 44px);
+  padding: 17px 20px 20px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 18px;
+  background: rgba(24,22,28,.42);
+  box-shadow: 0 18px 48px rgba(0,0,0,.32), inset 0 1px rgba(255,255,255,.055);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  backdrop-filter: blur(22px) saturate(130%);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .onboarding__steps { background: rgba(24,22,28,.9); }
+}
+
+.onboarding__steps-label {
+  margin: 0 0 16px;
+  color: #b6b1c1;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.onboarding__steps-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.onboarding__step {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+/* The dashed thread between two circles. It is drawn on the later step so it
+   can measure back to its neighbour, and it scales out of its left edge, which
+   is what makes the row read left to right when it arrives. */
+.onboarding__step + .onboarding__step::before {
+  content: "";
+  position: absolute;
+  top: 26px;
+  right: calc(50% + 36px);
+  left: calc(-50% + 36px);
+  height: 1px;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255,255,255,.32) 0 5px,
+    rgba(255,255,255,0) 5px 11px
+  );
+  transform: scaleX(1);
+  transform-origin: left center;
+}
+
+.onboarding__step-mark {
+  position: relative;
+  display: grid;
+  width: 53px;
+  height: 53px;
+  place-items: center;
+  border: 1px solid rgba(197,183,255,.32);
+  border-radius: 50%;
+  color: #e4dfff;
+  background: rgba(125,84,244,.15);
+}
+.onboarding__step-mark .icon { width: 21px; height: 21px; }
+.onboarding__step-number {
+  position: absolute;
+  bottom: -9px;
+  left: 50%;
+  display: grid;
+  width: 19px;
+  height: 19px;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 50%;
+  color: #efecf7;
+  background: #221f2b;
+  font-size: 10.5px;
+  font-weight: 640;
+  transform: translateX(-50%);
+}
+
+.onboarding__step strong {
+  /* Two lines held open whether or not the title needs both, so the three
+     detail lines under them sit on one baseline instead of stepping. */
+  min-height: 2.5em;
+  max-width: 15ch;
+  color: #ece9f2;
+  font-size: 13.5px;
+  font-weight: 590;
+  letter-spacing: -.01em;
+  line-height: 1.25;
+}
+.onboarding__step small {
+  max-width: 17ch;
+  color: #948fa1;
+  font-size: 11.5px;
+  font-weight: 450;
+  line-height: 1.35;
+}
+
+/* --- the connection panel ------------------------------------------------ */
+
+.onboarding__panel {
+  position: relative;
+  overflow: hidden;
+  min-height: 336px;
+  padding: 24px 22px 22px;
+  border: 1px solid rgba(255,255,255,.13);
+  border-radius: 22px;
+  background: rgba(26,24,30,.44);
+  box-shadow: 0 26px 64px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.065);
+  -webkit-backdrop-filter: blur(26px) saturate(130%);
+  backdrop-filter: blur(26px) saturate(130%);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .onboarding__panel { background: rgba(26,24,30,.9); }
+}
+
+.onboarding__view { display: grid; align-content: start; gap: 14px; }
+
+.onboarding__panel-mark {
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  border: 1px solid rgba(197,183,255,.3);
+  border-radius: 14px;
+  color: #ddd6ff;
+  background: rgba(125,84,244,.15);
+}
+.onboarding__panel-mark .icon { width: 22px; height: 22px; }
+.onboarding__panel-mark--brand { border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.06); }
+.onboarding__panel-mark--brand .icon { width: 26px; height: 26px; }
+
+.onboarding__panel-title {
+  margin: 4px 0 0;
+  color: #f4f2f7;
+  font-size: 21px;
+  font-weight: 620;
+  letter-spacing: -.024em;
+}
+.onboarding__panel-lead {
+  max-width: 31ch;
+  margin: -6px 0 2px;
+  color: #a7a2b3;
+  font-size: 13px;
+  font-weight: 450;
+  line-height: 1.5;
+}
+
+.onboarding__back {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 5px;
+  height: 28px;
+  margin-bottom: 2px;
+  padding: 0 11px 0 7px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 999px;
+  color: #bdb7c8;
+  background: rgba(255,255,255,.05);
+  font-size: 11.5px;
+  font-weight: 540;
+  transition: color 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+.onboarding__back:hover { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(255,255,255,.1); }
+.onboarding__back .icon { width: 14px; height: 14px; }
+
+.onboarding__rows { display: grid; gap: 6px; }
+/* All seven stores fit on a full-height window; a short one scrolls them
+   rather than letting the panel clip. */
+.onboarding__rows--scroll {
+  max-height: min(52svh, 432px);
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+
+.onboarding__row {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 13px;
+  color: #ebe7ee;
+  background: rgba(255,255,255,.035);
+  text-align: left;
+  transition: background 170ms cubic-bezier(.2,.8,.2,1), border-color 170ms ease, transform 170ms cubic-bezier(.2,.8,.2,1);
+}
+.onboarding__row:hover, .onboarding__row:focus-visible {
+  border-color: rgba(203,195,255,.28);
+  background: rgba(125,84,244,.15);
+  transform: translateY(-1px);
+}
+.onboarding__row:active { transform: translateY(0); }
+.onboarding__row:focus-visible { outline-offset: -2px; }
+
+.onboarding__row-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 10px;
+  color: #d9d5df;
+  background: rgba(255,255,255,.05);
+}
+.onboarding__row-mark .icon { width: 19px; height: 19px; }
+
+.onboarding__row-copy { display: grid; min-width: 0; gap: 2px; }
+.onboarding__row-copy strong {
+  overflow: hidden;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 590;
+  letter-spacing: -.008em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.onboarding__row-copy small {
+  overflow: hidden;
+  color: #9c96a8;
+  font-size: 11px;
+  font-weight: 450;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.onboarding__row .icon.onboarding__chevron { width: 16px; height: 16px; color: #bdb6c8; }
+
+.onboarding__pill {
+  padding: 3px 9px;
+  border: 1px solid rgba(100,218,145,.26);
+  border-radius: 999px;
+  color: #bfe9cf;
+  background: rgba(67,214,107,.12);
+  font-size: 10.5px;
+  font-weight: 590;
+  letter-spacing: .01em;
+}
+
+/* --- the connect view ---------------------------------------------------- */
+
+.onboarding__connect-head { display: grid; gap: 10px; }
+.onboarding__facts { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.onboarding__facts li {
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr);
+  gap: 9px;
+  color: #a7a2b3;
+  font-size: 12px;
+  font-weight: 450;
+  line-height: 1.45;
+}
+.onboarding__facts .icon { width: 15px; height: 15px; margin-top: 2px; color: #8d87a0; }
+
+.onboarding__actions { display: grid; gap: 8px; margin-top: 2px; }
+
+.onboarding__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 0 18px;
+  border: 1px solid rgba(255,255,255,.16);
+  border-radius: 12px;
+  color: #f6f4fa;
+  background: rgba(255,255,255,.09);
+  font-size: 13.5px;
+  font-weight: 590;
+  letter-spacing: -.008em;
+  transition: background 170ms ease, border-color 170ms ease, transform 140ms cubic-bezier(.2,.8,.2,1);
+}
+.onboarding__cta:hover { border-color: rgba(255,255,255,.3); background: rgba(255,255,255,.15); }
+.onboarding__cta:active { transform: translateY(1px); }
+.onboarding__cta:disabled { cursor: default; opacity: .55; transform: none; }
+.onboarding__cta .icon { width: 17px; height: 17px; }
+.onboarding__cta--primary {
+  border-color: rgba(152,118,255,.46);
+  background: rgba(125,84,244,.32);
+}
+.onboarding__cta--primary:hover { border-color: rgba(174,146,255,.66); background: rgba(125,84,244,.44); }
+
+.onboarding__waiting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #b6b1c1;
+  font-size: 12px;
+}
+.onboarding__waiting .steam-spinner { width: 17px; height: 17px; flex: none; border-width: 1.5px; }
+
+.onboarding__panel .steam-notice { margin: 0; }
+
+.onboarding__aside {
+  margin: 4px 0 0;
+  color: #8d879a;
+  font-size: 11.5px;
+  font-weight: 450;
+  line-height: 1.45;
+}
+.onboarding__link {
+  padding: 0;
+  color: #b9a7ff;
+  background: none;
+  font-size: inherit;
+  font-weight: 550;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.onboarding__link:hover { color: #d3c6ff; }
+
+/* --- motion -------------------------------------------------------------- */
+
+@keyframes onboarding-drift {
+  from { transform: scale(1); }
+  to { transform: scale(1.055) translate3d(-1.1%, -.7%, 0); }
+}
+@keyframes onboarding-rise {
+  from { opacity: 0; transform: translateY(15px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes onboarding-panel-rise {
+  from { opacity: 0; transform: translateY(22px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes onboarding-mark-pop {
+  from { opacity: 0; transform: scale(.7); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes onboarding-thread {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes onboarding-view-forward {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes onboarding-view-back {
+  from { opacity: 0; transform: translateX(-16px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* The staged arrival. Scoped to `.is-entering` so it can be replayed by
+   removing and re-adding the class, the way the hero title already is. */
+.onboarding.is-entering .onboarding__title span { animation: onboarding-rise 620ms cubic-bezier(.2,.8,.2,1) both; }
+.onboarding.is-entering .onboarding__wordmark { animation: onboarding-rise 700ms cubic-bezier(.2,.8,.2,1) 90ms both; }
+.onboarding.is-entering .onboarding__tagline { animation: onboarding-rise 620ms cubic-bezier(.2,.8,.2,1) 200ms both; }
+.onboarding.is-entering .onboarding__lead { animation: onboarding-rise 620ms cubic-bezier(.2,.8,.2,1) 270ms both; }
+.onboarding.is-entering .onboarding__steps { animation: onboarding-panel-rise 700ms cubic-bezier(.2,.8,.2,1) 350ms both; }
+.onboarding.is-entering .onboarding__step-mark { animation: onboarding-mark-pop 500ms cubic-bezier(.2,.86,.28,1) both; }
+.onboarding.is-entering .onboarding__step:nth-child(1) .onboarding__step-mark { animation-delay: 500ms; }
+.onboarding.is-entering .onboarding__step:nth-child(2) .onboarding__step-mark { animation-delay: 620ms; }
+.onboarding.is-entering .onboarding__step:nth-child(3) .onboarding__step-mark { animation-delay: 740ms; }
+.onboarding.is-entering .onboarding__step + .onboarding__step::before { animation: onboarding-thread 400ms cubic-bezier(.4,0,.2,1) both; }
+.onboarding.is-entering .onboarding__step:nth-child(2)::before { animation-delay: 590ms; }
+.onboarding.is-entering .onboarding__step:nth-child(3)::before { animation-delay: 710ms; }
+.onboarding.is-entering .onboarding__panel { animation: onboarding-panel-rise 760ms cubic-bezier(.2,.8,.2,1) 240ms both; }
+
+/* Panel navigation. The direction says which way the wizard moved, so going
+   back never feels like arriving somewhere new. */
+.onboarding__view--forward { animation: onboarding-view-forward 220ms cubic-bezier(.2,.8,.2,1) both; }
+.onboarding__view--back { animation: onboarding-view-back 220ms cubic-bezier(.2,.8,.2,1) both; }
+.onboarding__view--forward .onboarding__row,
+.onboarding__view--back .onboarding__row { animation: onboarding-rise 260ms cubic-bezier(.2,.8,.2,1) both; }
+
+/* --- narrow windows ------------------------------------------------------ */
+
+/* A shorter or narrower window tightens the same two columns rather than
+   stacking them: stacking puts the one thing this screen is asking for below
+   the fold, which is the only mistake an empty-library screen can really make. */
+@media (max-width: 1200px), (max-height: 780px) {
+  .onboarding {
+    grid-template-columns: minmax(0, 1fr) minmax(286px, 340px);
+    gap: clamp(20px, 3vw, 48px);
+    left: clamp(24px, 4.5vw, 132px);
+  }
+  .onboarding__title span { font-size: clamp(26px, 3.2vw, 42px); }
+  .onboarding__wordmark { height: clamp(38px, 5vw, 66px); }
+  .onboarding__tagline { margin-top: 12px; }
+  .onboarding__steps { margin-top: 18px; padding: 14px 16px 16px; }
+  .onboarding__steps-label { margin-bottom: 12px; }
+  .onboarding__step { gap: 10px; }
+  .onboarding__step-mark { width: 46px; height: 46px; }
+  .onboarding__step-mark .icon { width: 19px; height: 19px; }
+  .onboarding__step + .onboarding__step::before { top: 22px; right: calc(50% + 32px); left: calc(-50% + 32px); }
+  .onboarding__panel { min-height: 0; padding: 20px 18px 18px; }
+  .onboarding__rows--scroll { max-height: min(52svh, 340px); }
+}
+
+/* Below this there is no second column to tighten, so it does stack. */
+@media (max-width: 880px) {
+  .onboarding {
+    overflow: auto;
+    align-items: start;
+    align-content: start;
+    grid-template-columns: minmax(0, 1fr);
+    padding-bottom: 8px;
+    gap: 22px;
+  }
+  .onboarding__panel { width: min(420px, 100%); }
+}
+
+@media (max-width: 620px) {
+  .onboarding__steps-list { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .onboarding__step { grid-template-columns: 53px minmax(0, 1fr); justify-items: start; text-align: left; }
+  .onboarding__step strong, .onboarding__step small { max-width: none; }
+  .onboarding__step + .onboarding__step::before { display: none; }
+}
+
+/* --- reduced motion ------------------------------------------------------
+   The global rules in styles.css collapse durations but leave delays alone,
+   which on a staged screen means a second of blank space. Everything here is
+   removed outright instead, so each element simply starts at its final state. */
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding,
+  .onboarding *,
+  .onboarding *::before,
+  .onboarding *::after,
+  .app-page--library.is-empty .hero-image.is-active { animation: none !important; }
+}
+[data-motion="reduced"] .onboarding,
+[data-motion="reduced"] .onboarding *,
+[data-motion="reduced"] .onboarding *::before,
+[data-motion="reduced"] .onboarding *::after,
+[data-motion="reduced"] .app-page--library.is-empty .hero-image.is-active { animation: none !important; }

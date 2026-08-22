@@ -363,6 +363,8 @@ describe("application shell against the desktop backend", () => {
           return { id: beta.id };
         case "get_preferences":
           return {};
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "" };
         case "get_wine_runner_settings":
           return {
             runner: { state: "ready", available: true, version: "9.0", message: "" },
@@ -813,5 +815,278 @@ describe("application shell against the desktop backend", () => {
     // never discard it.
     await goto("#/library");
     expect(libraryCardIds()).toContain(beta.id);
+  });
+});
+
+/**
+ * The Library when it holds nothing. The bundled showcase games used to stand
+ * in for a real catalogue here, which made a fresh install look like a library
+ * of ten titles nobody owns — and left the one screen whose whole job is to ask
+ * for a connection with nothing to ask for.
+ */
+describe("the library welcome screen", () => {
+  let root: HTMLElement;
+  const backend = {
+    library: [] as Record<string, unknown>[],
+    sources: [] as Record<string, unknown>[],
+  };
+
+  const mount = (): void => {
+    root = document.createElement("div");
+    document.body.append(root);
+    mountApp(root, { storePage: stubPage("Store") });
+  };
+
+  const onboarding = (): HTMLElement => root.querySelector<HTMLElement>("#library-onboarding")!;
+  const panel = (): HTMLElement => root.querySelector<HTMLElement>("#onboarding-panel")!;
+  const rowLabels = (): string[] =>
+    Array.from(panel().querySelectorAll<HTMLElement>(".onboarding__row strong")).map(
+      (label) => label.textContent ?? "",
+    );
+  const press = (selector: string): void => {
+    panel().querySelector<HTMLButtonElement>(selector)!.click();
+  };
+  const commandArgs = (command: string): unknown[] =>
+    tauri.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
+
+  beforeEach(() => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    window.localStorage.clear();
+    backend.library = [];
+    backend.sources = [];
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.invoke.mockReset();
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_library":
+          return backend.library;
+        case "get_source_accounts":
+          return backend.sources;
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "" };
+        case "import_game":
+          return { id: "local:imported" };
+        case "get_preferences":
+          return {};
+        default:
+          return undefined;
+      }
+    });
+  });
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  it("shows the welcome screen rather than the bundled showcase games", async () => {
+    mount();
+    await settle();
+
+    expect(onboarding().hidden).toBe(false);
+    expect(root.querySelector(".app-page--library")?.classList.contains("is-empty")).toBe(true);
+    expect(root.querySelectorAll("#game-cards .game-card")).toHaveLength(0);
+    // Not in the rail, and not in the hero either: the shell used to ship a
+    // fixture's title as the heading's placeholder text.
+    expect(root.querySelector(".app-page--library")?.textContent).not.toContain("Elden Ring");
+    expect(root.querySelector("#hero-title")?.textContent).toBe("");
+    expect(panel().textContent).toContain("Your library is empty");
+  });
+
+  it("plays its arrival once, and never again on a status repaint", async () => {
+    mount();
+    await settle();
+
+    expect(onboarding().classList.contains("is-entering")).toBe(true);
+    // A view that has not changed must not slide: a sign-in window reporting
+    // back repaints the same panel several times in a row.
+    expect(panel().querySelector(".onboarding__view--forward")).toBeNull();
+    expect(panel().querySelector(".onboarding__view--back")).toBeNull();
+  });
+
+  it("walks from the choice to a store's sign-in page and back again", async () => {
+    mount();
+    await settle();
+
+    press("[data-onboarding-action='sources']");
+    expect(rowLabels()).toEqual([
+      "Steam",
+      "Epic Games",
+      "GOG",
+      "Ubisoft Connect",
+      "Xbox",
+      "Microsoft Store",
+      "Instant Gaming",
+    ]);
+    expect(panel().querySelector(".onboarding__view--forward")).not.toBeNull();
+
+    // The account statuses land in the same tick the row was pressed. That
+    // repaint must not replace the DOM the slide has just started on.
+    await settle();
+    expect(panel().querySelector(".onboarding__view--forward")).not.toBeNull();
+    expect(rowLabels()).toHaveLength(7);
+
+    press("[data-onboarding-action='choose-source'][data-onboarding-provider='epic']");
+    expect(panel().textContent).toContain("Connect Epic Games");
+    // Every connect page says how the sign-in will feel before it starts one.
+    expect(panel().querySelector(".onboarding__facts")?.textContent).toMatch(/keychain/i);
+
+    press("[data-onboarding-action='back']");
+    expect(panel().querySelector(".onboarding__view--back")).not.toBeNull();
+    expect(rowLabels()).toHaveLength(7);
+  });
+
+  it("says up front which stores it cannot launch", async () => {
+    mount();
+    await settle();
+
+    press("[data-onboarding-action='sources']");
+    await settle();
+    press("[data-onboarding-action='choose-source'][data-onboarding-provider='xbox']");
+    expect(panel().textContent).toContain("cannot launch them yet");
+  });
+
+  it("connects the store it was pointed at, and leaves as soon as a game lands", async () => {
+    mount();
+    await settle();
+
+    press("[data-onboarding-action='sources']");
+    await settle();
+    press("[data-onboarding-action='choose-source'][data-onboarding-provider='gog']");
+
+    backend.library = [{ id: "gog:one", title: "One", source: "gog", launchable: true }];
+    press("[data-onboarding-action='connect']");
+    await settle();
+
+    expect(commandArgs("connect_source_account")).toEqual([{ provider: "gog" }]);
+    expect(onboarding().hidden).toBe(true);
+    expect(root.querySelector(".app-page--library")?.classList.contains("is-empty")).toBe(false);
+    expect(
+      Array.from(root.querySelectorAll<HTMLElement>("#game-cards .game-card")).map(
+        (card) => card.dataset.gameId,
+      ),
+    ).toEqual(["gog:one"]);
+  });
+
+  it("imports a local game without leaving the welcome screen", async () => {
+    mount();
+    await settle();
+
+    press("[data-onboarding-action='local']");
+    await settle();
+    expect(commandArgs("import_game")).toHaveLength(1);
+  });
+
+  it("gives Escape back to the panel instead of to the rail", async () => {
+    mount();
+    await settle();
+
+    press("[data-onboarding-action='sources']");
+    await settle();
+    expect(rowLabels()).toHaveLength(7);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(panel().textContent).toContain("Your library is empty");
+  });
+
+});
+
+/**
+ * The bell. Everything it carries is optional advice about an optional key, so
+ * the rules that matter are the quiet ones: no dot without something unread,
+ * and no notice ever shown twice.
+ */
+describe("application shell notifications", () => {
+  let root: HTMLElement;
+
+  const mount = (): void => {
+    root = document.createElement("div");
+    document.body.append(root);
+    mountApp(root, { storePage: stubPage("Store") });
+  };
+
+  const bell = (): HTMLButtonElement =>
+    root.querySelector<HTMLButtonElement>("#notifications-button")!;
+  const dot = (): HTMLElement => root.querySelector<HTMLElement>("#notifications-dot")!;
+  const panel = (): HTMLElement => root.querySelector<HTMLElement>("#notifications-panel")!;
+
+  beforeEach(() => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    window.localStorage.clear();
+    tauri.invoke.mockReset();
+    tauri.invoke.mockResolvedValue(undefined);
+  });
+
+  it("stays quiet with nothing to say", async () => {
+    mount();
+    await settle();
+
+    expect(dot().hidden).toBe(true);
+    expect(bell().getAttribute("aria-label")).toBe("Notifications");
+
+    bell().click();
+    expect(panel().hidden).toBe(false);
+    expect(panel().textContent).toContain("Nothing to report");
+  });
+
+  it("carries a delivered notice, clears its dot when read, and forgets it when dismissed", async () => {
+    window.localStorage.setItem(
+      "orivo.notifications.v1",
+      JSON.stringify({ delivered: ["artwork-keys"], read: [], dismissed: [] }),
+    );
+    mount();
+    await settle();
+
+    expect(dot().hidden).toBe(false);
+    expect(bell().getAttribute("aria-label")).toBe("Notifications, 1 unread");
+
+    bell().click();
+    // Opening is what counts as reading — but the card keeps its highlight
+    // until the panel closes, or the new notice loses it on arrival.
+    expect(dot().hidden).toBe(true);
+    expect(panel().querySelector(".notification-card")?.classList.contains("is-unread")).toBe(
+      true,
+    );
+    expect(panel().textContent).toContain("Sharper artwork");
+
+    panel().querySelector<HTMLButtonElement>("[data-notification-action='dismiss']")!.click();
+    expect(panel().querySelector(".notification-card")).toBeNull();
+
+    // Dismissal is final, and it survives a restart.
+    document.body.replaceChildren();
+    mount();
+    await settle();
+    expect(root.querySelector(".notification-card")).toBeNull();
+    expect(dot().hidden).toBe(true);
+  });
+
+  it("takes the artwork notice straight to the keys it is about", async () => {
+    window.localStorage.setItem(
+      "orivo.notifications.v1",
+      JSON.stringify({ delivered: ["artwork-keys"], read: [], dismissed: [] }),
+    );
+    mount();
+    await settle();
+
+    bell().click();
+    panel().querySelector<HTMLButtonElement>("[data-notification-action='open']")!.click();
+    await settle();
+
+    expect(window.location.hash).toBe("#/settings/plugins");
+    // The keys live one level inside the plugin browser, which no route names.
+    expect(root.querySelector<HTMLElement>("#wallpaper-plugin-panel")!.hidden).toBe(false);
+    expect(panel().hidden).toBe(true);
+  });
+
+  it("retires the price notice once the provider list has been seen", async () => {
+    mount();
+    await settle();
+    await goto("#/settings/libraries");
+
+    const stored = JSON.parse(window.localStorage.getItem("orivo.notifications.v1") ?? "{}");
+    expect(stored.visitedLibrarySources).toBe(true);
   });
 });

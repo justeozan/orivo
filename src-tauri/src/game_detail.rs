@@ -388,6 +388,10 @@ impl GameStateStore {
         })
     }
 
+    /// A store with no file behind it. Test-only: every persisted path in this
+    /// module is exercised through `load`, and a store that silently forgets
+    /// its writes has no business existing in a release build.
+    #[cfg(test)]
     pub fn in_memory_for_tests() -> Self {
         Self {
             path: PathBuf::new(),
@@ -395,6 +399,10 @@ impl GameStateStore {
         }
     }
 
+    /// The whole document, copied. Nothing in the app reads state this way —
+    /// the accessors below answer one question each — but the persistence
+    /// tests need to see what actually landed on disk.
+    #[cfg(test)]
     pub fn snapshot(&self) -> Result<GameStateDocument, GameDetailError> {
         Ok(self.lock()?.clone())
     }
@@ -476,6 +484,12 @@ impl GameStateStore {
         })
     }
 
+    /// Select artwork that is already registered. Test-only: the app reaches
+    /// selection through `GameMediaService::apply`, which has to decide whether
+    /// the asset is on disk yet and download it if it is not, and then commits
+    /// through `register_and_select_media` above. Selecting without that check
+    /// is how a game would end up pointing at a file that was never fetched.
+    #[cfg(test)]
     pub fn select_media(&self, game_id: &str, media_id: &str) -> Result<(), GameDetailError> {
         validate_opaque_id("game id", game_id)?;
         validate_opaque_id("media id", media_id)?;
@@ -592,6 +606,10 @@ impl GameDetailService {
         Ok(())
     }
 
+    /// Insert or replace one record. Test-only: the catalog is projected from
+    /// the library in one pass by `replace_all` above, so a single-record write
+    /// has no caller that could keep the rest of the projection consistent.
+    #[cfg(test)]
     pub fn upsert_record(&self, record: GameDetailRecord) -> Result<(), GameDetailError> {
         record.validate()?;
         self.records
@@ -1421,7 +1439,19 @@ impl std::fmt::Display for GameDetailError {
     }
 }
 
-impl std::error::Error for GameDetailError {}
+/// `Display` above deliberately says nothing about the underlying failure: a
+/// path or a serde offset is not something a player can act on. The cause is
+/// still worth keeping, so it is reported here instead, where a log or a
+/// `{:?}` chain can reach it and the message the user sees stays unchanged.
+impl std::error::Error for GameDetailError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Json(error) => Some(error),
+            Self::Invalid(_) | Self::NotFound | Self::Unavailable(_) => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for GameDetailError {
     fn from(error: std::io::Error) -> Self {

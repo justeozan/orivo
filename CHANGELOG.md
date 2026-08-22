@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- A welcome screen for a library that holds nothing yet. It stands in front of the same wallpaper the Library uses, introduces Orivo in three steps, and puts the only thing it is asking for on the right: connect a library, or import a game from this Mac. Choosing a library lists every store Orivo can sign into — Steam, Epic Games, GOG, Ubisoft Connect, Xbox, Microsoft Store and Instant Gaming — and each one gets a page that says what connecting brings, how its sign-in works, and whether Orivo can launch what it finds, before anything is started. It runs the same connectors Settings does, so a sign-in begun here reports back here, and the screen dissolves into the library the moment the first game lands.
+- A notification bell beside your profile picture. It carries advice that is worth giving once and never worth interrupting for: where to add an artwork key so covers come back sharper, and where to see which store price feeds can actually answer. Nothing fires on arrival, nothing is said twice, nothing is said that has stopped being true, and a notice dismissed is gone for good.
+
+### Changed
+
+- An empty library now says so. It used to be filled in with the ten bundled showcase games, which made a fresh install look like a library of titles nobody owns — and left the one screen whose whole job is to ask for a connection with nothing to ask for. The demo games are still one toggle away in Settings › Appearance.
+
 ## [0.3.4] - 2026-08-21
 
 ### Added
