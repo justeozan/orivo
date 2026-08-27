@@ -289,6 +289,29 @@ pub struct SourceLoginFailedEvent {
     pub message: String,
 }
 
+/// A platform a store says one of its games ships a build for. Deliberately
+/// closed and deliberately small: a connector may report only what the library
+/// can actually browse by, and nothing a response says becomes a segment on
+/// its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SourcePlatform {
+    Windows,
+    Macos,
+    Linux,
+}
+
+impl SourcePlatform {
+    /// The same tokens Steam's own platform answer uses, so the catalog holds
+    /// one vocabulary whatever store filled it.
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Windows => "windows",
+            Self::Macos => "macos",
+            Self::Linux => "linux",
+        }
+    }
+}
+
 /// One game as a connector reports it, before the catalog sees it. Every field
 /// is already normalised: ids passed the opaque grammar and artwork URLs
 /// passed the provider's host allowlist.
@@ -314,6 +337,13 @@ pub struct SourceLibraryGame {
     /// macOS. `None` means the connector has no answer, which is not the same
     /// as "no": only a store that publishes per-platform entitlements can tell.
     pub native_mac: Option<bool>,
+    /// Every platform the store says this game ships a build for.
+    ///
+    /// `native_mac` is the answer a store can give when all it publishes is a
+    /// per-platform entitlement list. A store that publishes the whole matrix
+    /// fills this instead, and a connector that knows nothing leaves it empty
+    /// — empty is "unknown", never "runs nowhere".
+    pub platforms: Vec<SourcePlatform>,
     /// What the store's own client reports about this game on this machine.
     /// `None` for a store with no local client to ask.
     pub install: Option<SourceInstallStatus>,
@@ -1077,6 +1107,7 @@ pub fn session_result_from_eval(provider: SourceProvider, result: &str) -> Sessi
                     play_time_seconds: 0,
                     last_played_at: None,
                     native_mac: None,
+                    platforms: Vec::new(),
                     install: None,
                 },
             );
@@ -1203,6 +1234,7 @@ mod tests {
                 play_time_seconds: 0,
                 last_played_at: None,
                 native_mac: None,
+                platforms: Vec::new(),
                 install: None,
             },
         );
@@ -1223,6 +1255,7 @@ mod tests {
                 play_time_seconds: 0,
                 last_played_at: None,
                 native_mac: None,
+                platforms: Vec::new(),
                 install: None,
             },
         );
@@ -1242,6 +1275,7 @@ mod tests {
                 play_time_seconds: 0,
                 last_played_at: None,
                 native_mac: None,
+                platforms: Vec::new(),
                 install: None,
             },
         );
@@ -1271,6 +1305,7 @@ mod tests {
                     play_time_seconds: 0,
                     last_played_at: None,
                     native_mac: None,
+                    platforms: Vec::new(),
                     install: None,
                 },
             );

@@ -286,6 +286,10 @@ struct GameView {
     title: String,
     description: String,
     metadata: String,
+    /// The studio, on its own rather than inside the mixed `metadata` bag, so
+    /// the hero can print a company where a company belongs. Empty when no
+    /// store named one.
+    developer: String,
     genre: String,
     source: String,
     hero_url: Option<String>,
@@ -4910,6 +4914,7 @@ fn source_library_game_to_catalog_game(
         (catalog::SOURCE_HERO_URL_KEY, game.hero_url),
         (catalog::SOURCE_LANDSCAPE_URL_KEY, game.landscape_url),
         (catalog::SOURCE_GENRE_KEY, game.genre),
+        (catalog::SOURCE_DEVELOPER_KEY, game.developer.clone()),
         (catalog::SOURCE_LOGO_URL_KEY, game.logo_url),
     ] {
         if let Some(value) = value {
@@ -4920,6 +4925,19 @@ fn source_library_game_to_catalog_game(
         extra.insert(
             catalog::SOURCE_NATIVE_MAC_KEY.to_string(),
             serde_json::Value::Bool(native_mac),
+        );
+    }
+    // An empty list is the connector saying nothing, so nothing is written:
+    // the key's absence is what the reader treats as "unknown".
+    if !game.platforms.is_empty() {
+        extra.insert(
+            catalog::SOURCE_PLATFORMS_KEY.to_string(),
+            serde_json::Value::Array(
+                game.platforms
+                    .iter()
+                    .map(|platform| serde_json::Value::String(platform.token().to_owned()))
+                    .collect(),
+            ),
         );
     }
     // A download in flight is recorded so the library can paint its progress
@@ -4964,8 +4982,10 @@ fn source_library_game_to_catalog_game(
         working_directory: None,
         arguments: Vec::new(),
         description: game.description,
-        // The studio reads as metadata beside the store badge ("Epic Games ·
-        // Ubisoft Montréal"), which is the one place on the hero it belongs.
+        // Kept for the catalog shape and for search, which still reads
+        // `metadata`. The hero no longer does: the studio has its own
+        // `developer` key, written just above, because this field is a mixed
+        // bag — Steam fills it with install state, Wine with the runner name.
         metadata: game.developer,
         artwork_path: None,
         artwork_source_path: None,
@@ -6267,7 +6287,7 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
     let source_hero = source_asset_url(game, catalog::SOURCE_HERO_URL_KEY);
     let source_landscape = source_asset_url(game, catalog::SOURCE_LANDSCAPE_URL_KEY);
     let host_platform = current_host_platform();
-    let supported_platforms = steam_supported_platforms(game);
+    let supported_platforms = supported_platforms(game);
     let compatible_with_host = steam_compatibility(game, host_platform, &supported_platforms);
     GameView {
         id: game.id.clone(),
@@ -6280,6 +6300,7 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             .metadata
             .clone()
             .unwrap_or_else(|| "Ready to play".into()),
+        developer: developer_of(game),
         genre: genre_for_game(game),
         source: match &game.launch_target {
             LaunchTarget::Runner { runner_id, .. } if runner_id == WINE_STAGING_RUNNER_ID => "wine",
@@ -6382,19 +6403,50 @@ fn current_host_platform() -> &'static str {
     }
 }
 
-fn steam_supported_platforms(game: &Game) -> Vec<String> {
-    if game.source != GameSource::Steam {
-        return Vec::new();
-    }
+/// The studio, if a store named one.
+///
+/// The bare `developer` key is read too, only because the detail page has
+/// always read it. Nothing writes it today — every `extra` key Orivo persists
+/// is namespaced — so it is a courtesy to a hand-edited catalog, not a
+/// migration path.
+fn developer_of(game: &Game) -> String {
     game.extra
-        .get(catalog::STEAM_STORE_PLATFORMS_KEY)
-        .and_then(serde_json::Value::as_array)
+        .get(catalog::SOURCE_DEVELOPER_KEY)
+        .or_else(|| game.extra.get("developer"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|developer| !developer.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Every platform this game is known to ship a build for.
+///
+/// Two stores answer, in their own keys and their own vocabulary-sharing
+/// tokens: Steam through its store metadata, and any connected store that
+/// publishes a platform matrix through the connector. Reading only the Steam
+/// key is what left the library's Platform mode empty for an Epic or GOG
+/// library — the answers were in the catalog, and the view model dropped them.
+fn supported_platforms(game: &Game) -> Vec<String> {
+    let steam = (game.source == GameSource::Steam)
+        .then(|| game.extra.get(catalog::STEAM_STORE_PLATFORMS_KEY))
+        .flatten();
+    let mut platforms = Vec::new();
+    for platform in steam
         .into_iter()
+        .chain(game.extra.get(catalog::SOURCE_PLATFORMS_KEY))
+        .filter_map(serde_json::Value::as_array)
         .flatten()
         .filter_map(serde_json::Value::as_str)
         .filter(|platform| matches!(*platform, "windows" | "macos" | "linux"))
-        .map(str::to_owned)
-        .collect()
+    {
+        // First-seen order, not sorted: `dedup` alone would keep the second
+        // "windows" when both keys answer, and file the same game twice.
+        if !platforms.iter().any(|seen| seen == platform) {
+            platforms.push(platform.to_owned());
+        }
+    }
+    platforms
 }
 
 fn steam_compatibility(game: &Game, host_platform: &str, supported: &[String]) -> Option<bool> {
@@ -7063,6 +7115,40 @@ mod tests {
         assert_eq!(game.metadata.as_deref(), Some("Installed"));
         assert!(view.launchable);
         assert_eq!(game.launch_target, LaunchTarget::Steam { app_id: 480 });
+    }
+
+    #[test]
+    fn a_connected_stores_platform_matrix_reaches_the_library_view() {
+        // The bug this covers: the library view read only Steam's key, so an
+        // Epic or GOG library declared no platforms at all and the Library's
+        // Platform mode had nothing to offer but "All Games".
+        let mut game = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        game.source = catalog::GameSource::Gog;
+        game.extra.insert(
+            catalog::SOURCE_PLATFORMS_KEY.into(),
+            serde_json::json!(["windows", "macos"]),
+        );
+
+        let view = game_view(&game, &Catalog::default(), None);
+
+        assert_eq!(view.supported_platforms, ["windows", "macos"]);
+    }
+
+    #[test]
+    fn a_game_both_stores_answered_for_is_listed_once_per_platform() {
+        let mut game = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
+        game.extra.insert(
+            catalog::STEAM_STORE_PLATFORMS_KEY.into(),
+            serde_json::json!(["windows", "macos"]),
+        );
+        game.extra.insert(
+            catalog::SOURCE_PLATFORMS_KEY.into(),
+            serde_json::json!(["windows", "linux"]),
+        );
+
+        let view = game_view(&game, &Catalog::default(), None);
+
+        assert_eq!(view.supported_platforms, ["windows", "macos", "linux"]);
     }
 
     #[test]

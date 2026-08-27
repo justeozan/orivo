@@ -45,6 +45,14 @@ pub const SOURCE_COVER_URL_KEY: &str = "orivo_source_cover_url";
 pub const SOURCE_HERO_URL_KEY: &str = "orivo_source_hero_url";
 pub const SOURCE_LANDSCAPE_URL_KEY: &str = "orivo_source_landscape_url";
 pub const SOURCE_GENRE_KEY: &str = "orivo_source_genre";
+/// The studio that made the game, as the store named it.
+///
+/// It used to travel in `metadata`, which is a mixed field — a connected store
+/// fills it with the developer, Steam with install state, Wine with the runner
+/// name, the bundled demo with an achievement count. The hero now prints the
+/// studio on its own, and a slot that prints "Achievements 67/82" where a
+/// company belongs is why this has a key of its own.
+pub const SOURCE_DEVELOPER_KEY: &str = "orivo_source_developer";
 /// A provider's transparent wordmark, kept apart from the artwork roles: it is
 /// drawn over the scene, never used as one.
 pub const SOURCE_LOGO_URL_KEY: &str = "orivo_source_logo_url";
@@ -52,6 +60,16 @@ pub const SOURCE_LOGO_URL_KEY: &str = "orivo_source_logo_url";
 /// macOS. Written only by a connector that can actually tell — Epic lists its
 /// entitlements per platform — so an absent key means "unknown", not "no".
 pub const SOURCE_NATIVE_MAC_KEY: &str = "orivo_source_native_mac";
+/// Every platform the store says this game ships a build for, as the same
+/// `windows` / `macos` / `linux` tokens Steam's own answer uses.
+///
+/// `SOURCE_NATIVE_MAC_KEY` answers one question about one platform, which is
+/// all Epic's per-platform entitlement lists can support. A store that
+/// publishes the whole matrix — GOG returns `content_system_compatibility` on
+/// every product it already fetches — writes it here instead, so a
+/// cross-platform title is filed under each platform it actually runs on
+/// rather than only under macOS. An absent key means "unknown", never "none".
+pub const SOURCE_PLATFORMS_KEY: &str = "orivo_source_platforms";
 /// Whether the store's own client reports this game as installed on this
 /// machine. A boolean, deliberately not a path: a connected-source record may
 /// never carry a filesystem location, so "is it installed" is recorded without
@@ -77,10 +95,12 @@ pub const SOURCE_INSTALL_PERCENT_KEY: &str = "orivo_source_install_percent";
 /// does for Xbox and Microsoft Store — so treating the provider as their sole
 /// author let one slow sync, which returns nothing rather than something new,
 /// erase covers Orivo had resolved on an earlier pass.
-pub const SOURCE_OWNED_EXTRA_KEYS: [&str; 6] = [
+pub const SOURCE_OWNED_EXTRA_KEYS: [&str; 8] = [
     SOURCE_GENRE_KEY,
+    SOURCE_DEVELOPER_KEY,
     SOURCE_LOGO_URL_KEY,
     SOURCE_NATIVE_MAC_KEY,
+    SOURCE_PLATFORMS_KEY,
     SOURCE_INSTALLED_KEY,
     SOURCE_INSTALLING_KEY,
     SOURCE_INSTALL_PERCENT_KEY,
