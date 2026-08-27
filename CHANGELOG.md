@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-27
+
 ### Changed
 
 - The hero under a game's wordmark is one line instead of three: the genre, then the studio. The store badge is gone — the rail, the game's page and the Sources menu already say where a game came from — and so are the play time and last session, which belong to the game's own page. The pill carries the genre and nothing else: "Library" is what the backend returns when no store published one, so a game without a genre shows no pill rather than a word that says nothing.
