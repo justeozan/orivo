@@ -36,6 +36,23 @@ export const BROWSE_MODES: ReadonlyArray<{ mode: BrowseMode; label: string }> = 
  */
 export const ALL_GAMES_SEGMENT: BrowseSegment = { id: "all", label: "All Games" };
 
+/**
+ * What the backend returns as a game's genre when no store published one.
+ *
+ * Epic and GOG both hand back entitlements with no genre at all
+ * (`source_epic.rs`, `source_gog.rs`), so this is a common value, not a rare
+ * one — and it is an absence wearing a label. Treating it as a real genre put
+ * a "Library" pill on the hero and a "Library" shelf in the genre row, neither
+ * of which told anyone anything.
+ */
+export const UNKNOWN_GENRE = "Library";
+
+/** The game's genre when it has one, and the empty string when it does not. */
+export function knownGenre(genre: string | undefined): string {
+  const text = (genre ?? "").trim();
+  return text === UNKNOWN_GENRE ? "" : text;
+}
+
 export function browseModeLabel(mode: BrowseMode): string {
   return BROWSE_MODES.find((entry) => entry.mode === mode)?.label ?? "Activity";
 }
@@ -100,39 +117,13 @@ export function lastPlayedTime(value: string | undefined, now = Date.now()): num
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-const plural = (amount: number, unit: string): string =>
-  `${amount} ${unit}${amount === 1 ? "" : "s"} ago`;
-
-/**
- * The hero prints "Last played …", so this returns only the tail. A source that
- * already speaks English keeps its own wording; only a machine timestamp is
- * rewritten, which is what stops Xbox titles reading
- * "Last played 2024-02-26T19:22:09.4406448Z".
- */
-export function formatLastPlayed(value: string | undefined, now = Date.now()): string {
-  const text = (value ?? "").trim();
-  if (!text) return "";
-
-  const at = Date.parse(text);
-  if (Number.isNaN(at)) return text;
-
-  const elapsed = now - at;
-  if (elapsed < HOUR) return "just now";
-  if (elapsed < DAY) return plural(Math.floor(elapsed / HOUR), "hour");
-  if (elapsed < 2 * DAY) return "yesterday";
-  if (elapsed < WEEK) return plural(Math.floor(elapsed / DAY), "day");
-  if (elapsed < MONTH) return plural(Math.floor(elapsed / WEEK), "week");
-  if (elapsed < YEAR) return plural(Math.floor(elapsed / MONTH), "month");
-  return plural(Math.floor(elapsed / YEAR), "year");
-}
-
 type PlatformKey = "macos" | "windows" | "linux" | "other";
 
 /** Native support first: a Mac library is read by what runs on the Mac. */
 const PLATFORM_ORDER: readonly PlatformKey[] = ["macos", "windows", "linux", "other"];
 
 const PLATFORM_LABELS: Record<PlatformKey, string> = {
-  macos: "Apple",
+  macos: "Mac",
   windows: "Windows",
   linux: "Linux",
   other: "Other",
@@ -144,16 +135,36 @@ const PLATFORM_LABELS: Record<PlatformKey, string> = {
  * `hostPlatform` is deliberately not consulted: the backend fills it with the
  * OS of the machine running Orivo, so it is the same value for every game in
  * the library. Reading it here would put the whole library under one segment
- * and label a Windows-only title "Apple" on a Mac.
+ * and label a Windows-only title "Mac" on a Mac.
  *
- * That leaves `supportedPlatforms`, which today only Steam reports, plus the
- * one inference that cannot be wrong: a Wine entry is a Windows build, that
- * being the entire reason it needs Wine. A game with nothing to declare stays
- * out of this mode rather than being guessed into a segment.
+ * Three sources of truth, in the order they can be trusted:
+ *
+ * 1. `supportedPlatforms` — the full matrix, when a store published one. Steam
+ *    reports it through store metadata, GOG through `content_system_
+ *    compatibility`, Epic through its per-platform entitlement lists.
+ * 2. `macCompatibility`, but only as a *fallback* for a game that declared no
+ *    matrix at all. It answers one question about one platform, so it can say
+ *    "there is a macOS build" or "there is not" and nothing else. Reading it
+ *    beside a real matrix is how a Linux-only GOG title — which honestly has
+ *    no macOS build — ended up filed under Windows.
+ * 3. A Wine entry is a Windows build, that being the entire reason it needs
+ *    Wine.
+ *
+ * `unknown` stays out, and a game with nothing to declare stays out of this
+ * mode rather than being guessed into a segment.
  */
 function platformsOf(game: LibraryGame): PlatformKey[] {
-  const keys = new Set<PlatformKey>(game.supportedPlatforms ?? []);
+  const declared = game.supportedPlatforms ?? [];
+  const keys = new Set<PlatformKey>(declared);
   if (game.source === "wine") keys.add("windows");
+  if (declared.length === 0) {
+    // A catalog synced before stores recorded their matrix still carries the
+    // macOS answer, and for those entries it is all there is. Epic's are
+    // Windows entitlements, which is what makes the second line safe here and
+    // unsafe above.
+    if (game.macCompatibility === "native") keys.add("macos");
+    if (game.macCompatibility === "not-native") keys.add("windows");
+  }
   return [...keys];
 }
 
@@ -269,9 +280,10 @@ export function browseSegments(
       ).map((shelf) => ({ id: shelf.id, label: shelf.label }));
       break;
     case "genre":
-      segments = tally(games, (game) =>
-        game.genre.trim() ? [{ id: game.genre.trim(), label: game.genre.trim() }] : [],
-      );
+      segments = tally(games, (game) => {
+        const genre = knownGenre(game.genre);
+        return genre ? [{ id: genre, label: genre }] : [];
+      });
       break;
     case "source":
       segments = tally(games, (game) => {
@@ -312,7 +324,7 @@ export function browseGames(
   }
 
   const matches = (game: LibraryGame): boolean => {
-    if (mode === "genre") return game.genre.trim() === segmentId;
+    if (mode === "genre") return knownGenre(game.genre) === segmentId;
     if (mode === "source") return game.source === segmentId;
     return platformsOf(game).includes(segmentId as PlatformKey);
   };
