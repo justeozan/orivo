@@ -8,7 +8,8 @@
 //! The client credentials below are GOG Galaxy's own public client identifiers.
 
 use crate::sources::{
-    self, SourceError, SourceLibrary, SourceLibraryGame, SourceProvider, StoredSourceCredential,
+    self, SourceError, SourceLibrary, SourceLibraryGame, SourcePlatform, SourceProvider,
+    StoredSourceCredential,
 };
 use futures_util::{StreamExt, stream};
 use serde::Deserialize;
@@ -199,6 +200,42 @@ struct Product {
     game_type: String,
     #[serde(default)]
     images: ProductImages,
+    /// GOG publishes the whole platform matrix on the product record this sync
+    /// already fetches, so knowing what a game runs on costs no extra request.
+    #[serde(default)]
+    content_system_compatibility: ContentSystemCompatibility,
+}
+
+/// GOG's own per-platform build flags. All three false is what a delisted or
+/// undescribed product returns, so it is read as "GOG did not say" rather than
+/// as "this game runs nowhere".
+#[derive(Debug, Default, Deserialize)]
+struct ContentSystemCompatibility {
+    #[serde(default)]
+    windows: bool,
+    #[serde(default)]
+    osx: bool,
+    #[serde(default)]
+    linux: bool,
+}
+
+impl ContentSystemCompatibility {
+    fn platforms(&self) -> Vec<SourcePlatform> {
+        [
+            (SourcePlatform::Windows, self.windows),
+            (SourcePlatform::Macos, self.osx),
+            (SourcePlatform::Linux, self.linux),
+        ]
+        .into_iter()
+        .filter_map(|(platform, supported)| supported.then_some(platform))
+        .collect()
+    }
+
+    /// `None` when GOG described no platform at all: an unanswered product must
+    /// not be filed as "Windows only".
+    fn native_mac(&self) -> Option<bool> {
+        (self.windows || self.osx || self.linux).then_some(self.osx)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -302,7 +339,8 @@ fn library_game(product_id: i64, product: &Product) -> SourceLibraryGame {
         landscape_url: landscape,
         play_time_seconds: 0,
         last_played_at: None,
-        native_mac: None,
+        native_mac: product.content_system_compatibility.native_mac(),
+        platforms: product.content_system_compatibility.platforms(),
         install: None,
     }
 }
@@ -353,6 +391,54 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn files_a_gog_game_under_every_platform_gog_builds_it_for() {
+        let product = Product {
+            title: "The Witcher 3".into(),
+            content_system_compatibility: ContentSystemCompatibility {
+                windows: true,
+                osx: true,
+                linux: false,
+            },
+            ..Product::default()
+        };
+
+        let game = library_game(1_207_658_924, &product);
+        assert_eq!(
+            game.platforms,
+            vec![SourcePlatform::Windows, SourcePlatform::Macos]
+        );
+        assert_eq!(game.native_mac, Some(true));
+    }
+
+    #[test]
+    fn a_windows_only_gog_game_is_not_reported_as_a_mac_one() {
+        let product = Product {
+            title: "Disco Elysium".into(),
+            content_system_compatibility: ContentSystemCompatibility {
+                windows: true,
+                osx: false,
+                linux: false,
+            },
+            ..Product::default()
+        };
+
+        let game = library_game(1_207_658_924, &product);
+        assert_eq!(game.platforms, vec![SourcePlatform::Windows]);
+        assert_eq!(game.native_mac, Some(false));
+    }
+
+    #[test]
+    fn a_product_gog_described_no_platform_for_stays_unanswered() {
+        // All three flags false is a delisted or undescribed product, not a
+        // game that runs nowhere. Reading it as "no Mac build" would file a
+        // whole delisted back catalogue under Windows.
+        let game = library_game(1_207_658_924, &Product::default());
+
+        assert!(game.platforms.is_empty());
+        assert_eq!(game.native_mac, None);
     }
 
     #[test]

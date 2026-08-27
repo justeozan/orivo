@@ -1,3 +1,4 @@
+import { knownGenre } from "./library-browse";
 import type { LibraryGame } from "./mock-library";
 
 /**
@@ -149,7 +150,10 @@ export function computeRegularityScore(games: LibraryGame[]): number {
 export function computeDiversityScore(games: LibraryGame[]): number {
   if (games.length === 0) return 0;
   const distinct = new Set(
-    games.map((game) => game.genre.trim().toLowerCase()).filter((genre) => genre.length > 0),
+    // `knownGenre` drops the backend's "Library" filler: an Epic or GOG library
+    // has no genres at all, and counting the placeholder as one made a
+    // single-genre collection look eclectic.
+    games.map((game) => knownGenre(game.genre).toLowerCase()).filter((genre) => genre.length > 0),
   ).size;
   const expected = Math.max(1, Math.min(games.length, 8));
   return clampScore((distinct / expected) * 100);
@@ -208,9 +212,10 @@ export function computeBalanceScore(games: LibraryGame[]): number {
 export function computeDominantGenre(games: LibraryGame[]): string | null {
   const totals = new Map<string, { label: string; seconds: number }>();
   for (const game of games) {
-    const key = game.genre.trim().toLowerCase();
+    const genre = knownGenre(game.genre);
+    const key = genre.toLowerCase();
     if (!key) continue;
-    const entry = totals.get(key) ?? { label: game.genre.trim(), seconds: 0 };
+    const entry = totals.get(key) ?? { label: genre, seconds: 0 };
     entry.seconds += Math.max(0, game.playTimeSeconds);
     totals.set(key, entry);
   }

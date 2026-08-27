@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The hero under a game's wordmark is one line instead of three: the genre, then the studio. The store badge is gone — the rail, the game's page and the Sources menu already say where a game came from — and so are the play time and last session, which belong to the game's own page. The pill carries the genre and nothing else: "Library" is what the backend returns when no store published one, so a game without a genre shows no pill rather than a word that says nothing.
+- The studio has its own field now instead of riding in `metadata`, which is a mixed bag — a store fills it with the developer, Steam with install state, Wine with the runner name, the bundled demo with an achievement count. The hero used to print whichever of those arrived.
+- "Windows only" is no longer a chip beside the hero. A game with no macOS build says so in the Play button, which greys out: the row used to announce the problem while the button underneath still offered Play or Install as though there were none. Only a store that actually answered decides this, and only on a Mac. The button names what the game does run on rather than assuming Windows, because GOG sells Linux-only titles and those have no macOS build either.
+
+### Fixed
+
+- The Play button moved on every selection. The hero stacked downwards from a fixed top edge, so the one control the whole scene exists for landed in a different place depending on what was above it — 64px between a one- and a two-line title, and far more when a game had a wordmark instead. The scene now reads upwards from the button: it holds still and the wordmark grows into whatever room is left, losing its top on a short window rather than pushing the button out of the frame. The launch status moved above the button, where the block above has room to give it, so a message appearing neither displaces the button that was just pressed nor paints over the rail. The whole block also sits higher: Play cleared the rail beneath it by 18px, and by 10px on a short window, which read as part of the shelf rather than as the scene's own action.
+- A wordmark taller than the room the window leaves now scales down instead of losing its top.
+- Browsing by `Platform` offered nothing but "All Games" for an Epic or GOG library. Every one of those games already knew what it ran on — it is the same answer that greys out the Play button — and the mode ignored it. GOG's platform matrix is now read from the product record the sync already fetches, Epic's Windows and Mac entitlement lists both reach the library, and the segment reads "Mac" rather than "Apple".
+- The Play button's label never changed. It was written into the progress-bar overlay rather than the label beside the icon, so a button that should have read `Install`, `Downloading 37%` or `Unavailable` said `Play` in every state.
+- A game with no genre no longer files itself under a "Library" shelf in the genre row, beside real genres, and the "Moi" page no longer reports "Library" as your dominant genre or counts it toward how eclectic your library is.
+- A window between 801 and 900 pixels tall cropped the game's title: it fell between the tall-desktop layout and the first short-window step, so the whole shortfall was taken out of the title. The short-window step now starts at 900.
+
 ## [0.3.5] - 2026-08-23
 
 ### Added

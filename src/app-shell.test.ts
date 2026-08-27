@@ -709,25 +709,86 @@ describe("application shell against the desktop backend", () => {
     expect(settingsMark?.innerHTML).toContain("#f25022");
 
     await goto("#/library");
-    // The hero badge inherits the near-white text colour, so it must stay
-    // monochrome rather than carrying the brand palette onto the artwork.
-    const heroMark = root.querySelector<HTMLElement>("#hero-source-icon");
-    expect(heroMark?.innerHTML).toContain("currentColor");
-    expect(heroMark?.innerHTML).not.toContain("#f25022");
+    // The store's mark belongs to Settings, the rail and the game's own page.
+    // The hero says what the game is and who made it, and nothing else.
+    expect(root.querySelector("#hero-source-icon")).toBeNull();
+    expect(root.querySelector("#hero-source-label")).toBeNull();
   });
 
-  it("badges a game with the store it came from", async () => {
+  it("keeps the Play button in one place whatever the game above it is", async () => {
+    backend.library = [{ ...alpha, id: "local:aaa", genre: "RPG" }];
+    mount();
+    await settle();
+
+    // jsdom computes no layout, so the guarantee is asserted structurally: the
+    // Play row must be the last thing in the hero, with everything that changes
+    // height between two games — the wordmark, a one- or two-line title, the
+    // meta line — sealed in the block above it. A row added between the two is
+    // exactly what moved the button 64px on every selection.
+    const hero = root.querySelector<HTMLElement>(".hero-content");
+    const identity = hero?.querySelector<HTMLElement>(".hero-identity");
+    const feedback = hero?.querySelector<HTMLElement>("#launch-feedback");
+    const actions = hero?.querySelector<HTMLElement>(".hero-actions");
+    expect(identity).not.toBeNull();
+    expect(actions).not.toBeNull();
+    for (const selector of ["#hero-logo", "#hero-title", ".hero-meta"]) {
+      expect(identity?.querySelector(selector)).not.toBeNull();
+    }
+    // The actions row is LAST. Everything that changes height between two
+    // games — and the launch status, which appears mid-session — sits above it,
+    // where the identity block absorbs the difference.
+    expect(Array.from(hero?.children ?? [])).toEqual([identity, feedback, actions]);
+  });
+
+  it("gives the hero one line: the genre, then the studio", async () => {
     backend.library = [
-      { ...alpha, id: "epic:Sugar", title: "Fall Guys", source: "epic" },
+      {
+        ...alpha,
+        id: "epic:Sugar",
+        title: "Fall Guys",
+        source: "epic",
+        genre: "Party",
+        developer: "E-Line Media",
+      },
     ];
     mount();
     await settle();
 
-    // The badge is the store's own, never the local fallback.
-    expect(root.querySelector("#hero-source-label")?.textContent).toBe("Epic Games");
+    const line = Array.from(
+      root.querySelectorAll<HTMLElement>(".hero-meta > span:not([hidden])"),
+    ).map((entry) => entry.textContent);
+    expect(line).toEqual(["Party", "E-Line Media"]);
   });
 
-  it("says outright that an owned Epic game is not on this machine", async () => {
+  it("leaves the pill off a game whose store published no genre", async () => {
+    backend.library = [
+      // "Library" is what the backend returns when nothing published a genre,
+      // which is every Epic and GOG entitlement. It is an absence, so the pill
+      // goes rather than printing a word that says nothing about the game.
+      { ...alpha, id: "epic:Sugar", source: "epic", genre: "Library", developer: "E-Line Media" },
+    ];
+    mount();
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("#hero-genre")?.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#hero-studio")?.textContent).toBe("E-Line Media");
+  });
+
+  it("keeps runtime state out of the studio", async () => {
+    // `metadata` is a mixed field: Steam fills it with install state, Wine with
+    // the runner name, the bundled demo with an achievement count. None of them
+    // is a company, so the hero reads `developer` and nothing else.
+    backend.library = [
+      { ...alpha, id: "steam:1", source: "steam", metadata: "Not installed" },
+      { ...alpha, id: "showcase:1", source: "showcase", metadata: "Achievements 67/82" },
+    ];
+    mount();
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("#hero-studio")?.hidden).toBe(true);
+  });
+
+  it("says a game has no macOS build in the Play button, and nowhere else", async () => {
     backend.library = [
       {
         ...alpha,
@@ -735,6 +796,7 @@ describe("application shell against the desktop backend", () => {
         title: "Fall Guys",
         source: "epic",
         launchable: false,
+        hostPlatform: "macos",
         installState: "not-installed",
         macCompatibility: "not-native",
       },
@@ -742,16 +804,60 @@ describe("application shell against the desktop backend", () => {
     mount();
     await settle();
 
-    // Only the Mac answer earns a chip: "not installed" is what the button
-    // itself says, and two controls repeating it is noise.
-    const chips = Array.from(
-      root.querySelectorAll("#hero-status .hero-status__chip"),
-    ).map((chip) => chip.textContent);
-    expect(chips).toEqual(["Windows only"]);
-    // And the button offers the install rather than sitting dead.
+    // The chip row is gone: the button is the one control that answers this.
+    expect(root.querySelector("#hero-status")).toBeNull();
+    // Installing it would download a build this machine cannot run, so the
+    // button states the reason and goes quiet instead of offering the download.
     const play = root.querySelector<HTMLButtonElement>("#play-button");
-    expect(play?.disabled).toBe(false);
+    expect(play?.textContent).toContain("Windows only");
+    expect(play?.textContent).not.toContain("Install");
+    expect(play?.disabled).toBe(true);
+    expect(play?.classList.contains("is-blocked")).toBe(true);
+    expect(play?.getAttribute("aria-label")).toBe("Fall Guys has no macOS version");
+  });
+
+  it("names what a blocked game does run on instead of assuming Windows", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "gog:1",
+        title: "Linux Thing",
+        source: "gog",
+        launchable: false,
+        hostPlatform: "macos",
+        supportedPlatforms: ["linux"],
+        macCompatibility: "not-native",
+      },
+    ];
+    mount();
+    await settle();
+
+    // "Windows only" would be a confident lie about a Linux-only GOG title.
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
+    expect(play?.textContent).toContain("Linux only");
+    expect(play?.disabled).toBe(true);
+  });
+
+  it("leaves the Play button alone when the same game is browsed on Windows", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "epic:Sugar",
+        title: "Fall Guys",
+        source: "epic",
+        launchable: false,
+        hostPlatform: "windows",
+        installState: "not-installed",
+        macCompatibility: "not-native",
+      },
+    ];
+    mount();
+    await settle();
+
+    // "No macOS build" is a fact about the game, not about this machine.
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Install");
+    expect(play?.disabled).toBe(false);
   });
 
   it("shows a running Epic download as a percentage instead of a dead button", async () => {
@@ -762,6 +868,7 @@ describe("application shell against the desktop backend", () => {
         title: "Fall Guys",
         source: "epic",
         launchable: false,
+        hostPlatform: "macos",
         installState: "installing",
         installPercent: 37,
         macCompatibility: "native",
@@ -770,26 +877,15 @@ describe("application shell against the desktop backend", () => {
     mount();
     await settle();
 
-    const chips = Array.from(
-      root.querySelectorAll("#hero-status .hero-status__chip"),
-    ).map((chip) => chip.textContent);
-    expect(chips).toEqual(["Mac native"]);
     // The button is the progress bar: it carries the number and fills to it.
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Downloading 37%");
     const fill = play?.querySelector<HTMLElement>(".play-button__fill");
     expect(fill?.hidden).toBe(false);
     expect(fill?.style.width).toBe("37%");
-  });
-
-  it("keeps the status row silent for a game no store client can answer for", async () => {
-    backend.library = [{ ...alpha, id: "local:aaa", source: "local" }];
-    mount();
-    await settle();
-
-    // "unknown" is not "not installed": a local game has no client to ask, so
-    // the row must say nothing rather than claim the game is missing.
-    expect(root.querySelector<HTMLElement>("#hero-status")?.hidden).toBe(true);
+    // The label is its own element: writing it into the fill left every button
+    // reading "Play" whatever state it was in.
+    expect(fill?.textContent).toBe("");
   });
 
   it("applies a library refresh that lands after the user left the Library", async () => {

@@ -452,11 +452,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .scene-arrow--previous { left: 24px; }
 .scene-arrow--next { right: 24px; }
 
+/* Bottom-anchored, not top-anchored. The scene is read from the Play button
+   upwards: the button holds still and the wordmark above it grows into
+   whatever room is left. */
 .hero-content {
   position: absolute;
   z-index: 3;
   top: clamp(196px, 21.6svh, 230px);
-  bottom: 415px;
+  /* The bottom edge is where Play sits, so this number is the only thing that
+     positions the button. It clears the rail by roughly a button's height:
+     closer and the primary action read as part of the shelf under it. */
+  bottom: 443px;
   left: clamp(48px, 10.35vw, 159px);
   display: flex;
   width: min(560px, calc(100vw - 160px));
@@ -465,15 +471,30 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   overflow: hidden;
 }
 
+/* Takes every pixel the actions leave and bottom-aligns its contents, so the
+   distance from the last line of metadata to the Play button is a constant.
+   `min-height: 0` is what lets it be smaller than the wordmark inside it on a
+   short window — the mark shrinks to fit rather than pushing the button off the
+   bottom — and `overflow: hidden` is the backstop for a title that still cannot
+   fit. Either way the button does not move. */
+.hero-identity {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
 /* The pill hugs its label: a long genre keeps one line and truncates rather
-   than wrapping into an uneven shape. */
+   than wrapping into an uneven shape. It shares the meta line with the studio,
+   so it is vertically centred against text rather than parked above it. */
 .genre-chip {
   display: inline-flex;
   max-width: min(320px, 100%);
-  height: 29px;
+  height: 26px;
+  flex: none;
   align-items: center;
-  align-self: flex-start;
-  margin-top: 2px;
   padding: 0 12px;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,.14);
@@ -499,6 +520,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .hero-logo {
   max-width: min(760px, 100%);
   height: clamp(150px, 22svh, 300px);
+  /* Shrinkable, and `object-fit: contain` keeps the aspect: on a window too
+     short for the full mark it scales down instead of being cropped at the top
+     by the identity block's `overflow: hidden`. */
+  min-height: 0;
+  flex: 0 1 auto;
   margin: 0 0 14px;
   object-fit: contain;
   object-position: left center;
@@ -506,39 +532,30 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .hero-content [hidden] { display: none !important; }
 
-.hero-meta { flex-wrap: wrap; row-gap: 8px; gap: 24px; margin-top: 11px; color: #c7c2ca; font-size: 14px; }
+/* One line under the wordmark, and never more: the genre pill and the studio.
+   `nowrap` is the whole point — a second row here is the stack this replaced. */
+.hero-meta { flex-wrap: nowrap; gap: 14px; margin-top: 12px; color: #c7c2ca; font-size: 14px; }
 .hero-meta > span { display: inline-flex; min-width: 0; align-items: center; gap: 8px; white-space: nowrap; }
 /* The meta's flex `display` rules outrank the UA `[hidden]` rule, so restore it
-   explicitly — otherwise a hidden source or platform chip still paints. */
+   explicitly — otherwise a game with no genre still paints an empty pill. */
 .hero-meta [hidden] { display: none !important; }
-.hero-meta .icon { width: 16px; height: 16px; color: #d1cdd5; }
-.hero-source { gap: 9px; color: #e4e1e8; font-weight: 500; }
-.hero-source-icon { display: inline-grid; width: 20px; height: 20px; place-items: center; color: #f2eff5; }
-.hero-source-icon .icon { width: 20px; height: 20px; color: inherit; }
-.hero-source-divider { color: #938d99; font-style: normal; }
-.hero-platform { color: #c7c2ca; }
-.hero-platform.is-compatible { color: #b6dfc1; }
-.hero-platform.is-incompatible { color: #e2b3b6; }
+/* The studio yields first: it truncates so the pill beside it keeps its shape,
+   rather than both being squeezed into ellipses. */
+.hero-studio { overflow: hidden; color: #e4e1e8; font-weight: 500; text-overflow: ellipsis; }
 
-/* The status row: what the Play button cannot say. It sits between the meta
-   line and the actions so a player reads "Not installed" before reaching for
-   the button, not after the Epic launcher has opened on top of Orivo. */
-.hero-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
-.hero-status__chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 12px 5px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(18,16,24,.55); color: #e8e5ec; font-size: 13.5px; font-weight: 550; white-space: nowrap; }
-.hero-status__chip .icon { width: 15px; height: 15px; flex: none; }
-/* Ready is the only state that earns colour; the rest stay quiet so the row
-   never competes with the primary action beside it. */
-.hero-status__chip[data-tone="ready"] { border-color: rgba(150,240,190,.34); color: #9df3c4; }
-.hero-status__chip[data-tone="pending"] { color: #c7c2ca; }
-.hero-status__chip[data-tone="progress"] { border-color: rgba(198,186,255,.42); color: #cdbcff; }
-.hero-status__chip[data-tone="warn"] { border-color: rgba(255,214,153,.3); color: #f2ce9a; }
-
-.hero-actions { gap: 13px; margin-top: 24px; }
+/* `flex: none` and a fixed height: the row is the fixed point of the scene, so
+   nothing inside it may resize it. */
+.hero-actions { height: 50px; flex: none; gap: 13px; margin-top: 24px; }
 .play-button { display: inline-flex; align-items: center; justify-content: center; width: 148px; min-width: 148px; height: 50px; gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 16px; font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
 .play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
 .play-button:active { transform: translateY(1px) scale(.98); }
 .play-button .icon { width: 14px; height: 14px; }
 .play-button:disabled { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
+/* A game with no build for this machine. Grey rather than dimmed-lavender: the
+   button is the only place that fact is stated now, so it has to read as a
+   deliberate answer and not as a Play button that failed to load. */
+.play-button.is-blocked { width: auto; padding: 0 20px; border-color: rgba(255,255,255,.16); background: rgba(26,24,32,.6); color: #b6b0bd; box-shadow: none; opacity: 1; filter: none; }
+.play-button.is-blocked .icon { display: none; }
 /* While Epic transfers, the button *is* the progress bar: a fill behind the
    label, so nothing moves and nothing has to be taken away when it finishes. */
 .play-button { position: relative; overflow: hidden; }
@@ -1178,14 +1195,17 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .wine-danger-button:hover { background: rgba(201,73,80,.25); }
 
+/* In flow, above the actions row, and `flex: none` so the identity block above
+   absorbs its height rather than the button below being pushed anywhere. */
 .launch-feedback {
   display: flex;
   width: fit-content;
   max-width: min(430px, 100%);
   align-items: center;
+  flex: none;
   flex-wrap: wrap;
   gap: 9px;
-  margin-top: 11px;
+  margin-bottom: 11px;
   padding: 7px 9px 7px 11px;
   border: 1px solid rgba(201,190,255,.2);
   border-radius: 10px;
@@ -1459,6 +1479,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   .library-source-menu { top: calc(100% + 65px); left: -5px; width: min(330px, calc(100vw - 40px)); }
   .search-control { position: absolute; top: 54px; left: 0; right: 0; }
   .hero-content { top: 205px; right: auto; bottom: auto; left: 40px; width: min(560px, calc(100vw - 80px)); overflow: visible; }
+  /* The narrow layout drops the fixed bottom edge, so there is no free space
+     for the identity block to absorb. `flex: 1 1 0` would collapse it to
+     nothing; here the stack is content-sized and reads from the top. */
+  .hero-identity { flex: none; overflow: visible; }
   .hero-content h1 { font-size: clamp(48px, 9vw, 66px); }
   .scene-arrow { top: 360px; }
   .recently-played { right: 0; bottom: 82px; left: 32px; }
@@ -1480,8 +1504,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
   }
 }
 
-@media (max-height: 800px) and (min-width: 861px) {
-  .hero-content { top: 19vh; bottom: 358px; }
+@media (max-height: 900px) and (min-width: 861px) {
+  .hero-content { top: 19vh; bottom: 386px; }
   .hero-content h1 { margin: 12px 0 14px; font-size: clamp(44px, 4.2vw, 58px); }
   .hero-meta { margin-top: 9px; }
   .hero-actions { margin-top: 14px; }
@@ -1491,7 +1515,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 
 @media (max-height: 740px) and (min-width: 861px) {
-  .hero-content { top: 17vh; bottom: 358px; }
+  .hero-content { top: 17vh; bottom: 386px; }
   .hero-content h1 { margin: 10px 0 12px; font-size: clamp(40px, 3.9vw, 52px); }
   .hero-meta { display: none; }
   .hero-actions { margin-top: 12px; }

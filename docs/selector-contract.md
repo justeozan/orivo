@@ -71,6 +71,42 @@ Règles importantes :
 - Deux jeux qui pointent vers le même exécutable sont acceptés mais signalés comme doublons avant import.
 - Les fichiers média sont optionnels. L'interface doit rester fonctionnelle avec une image de remplacement.
 
+## Hero de la Bibliothèque
+
+Sous le wordmark, le hero tient sur **une seule ligne** : la pill du genre, puis
+le studio. Rien d'autre.
+
+- La pill ne porte que le genre. `genre_for_game` renvoie `Library` quand aucun
+  store n'en a publié un — c'est une absence, pas un libellé — donc un jeu sans
+  genre n'affiche pas de pill, et « Library » n'est pas non plus une étagère du
+  mode `Genre`.
+- Le studio vient du champ `developer` de la vue, jamais de `metadata`.
+  `metadata` est un champ mixte : un store y écrit le développeur, Steam l'état
+  d'installation, Wine le nom du runner, la démo intégrée un compteur de succès.
+- La source (Steam, Epic, GOG, …) n'est plus écrite sur l'artwork. Le rail, la
+  page du jeu et le menu Sources la nomment déjà.
+- Le temps de jeu et la dernière session appartiennent à la page du jeu.
+- La compatibilité macOS n'a plus de pastille. Un jeu sans build macOS le dit
+  dans le bouton Play, qui passe en grisé (`Windows only`). Seule une réponse
+  réellement publiée par le store décide — `unknown` n'est pas « non » — et
+  seulement sur un Mac : `macCompatibility` décrit le jeu, pas la machine.
+
+## Plateformes d'un jeu
+
+`supported_platforms` agrège deux clés `extra`, dans le même vocabulaire
+(`windows` / `macos` / `linux`) :
+
+- `STEAM_STORE_PLATFORMS_KEY`, rempli par les métadonnées Steam Store ;
+- `SOURCE_PLATFORMS_KEY`, rempli par un connecteur dont le store publie la
+  matrice. GOG la renvoie dans `content_system_compatibility` sur la fiche
+  produit déjà récupérée par la synchronisation ; Epic la déduit de ses deux
+  listes d'entitlements (Windows, plus macOS quand la liste Mac a répondu).
+
+Une clé absente vaut « inconnu », jamais « aucune plateforme ». Le mode
+`Platform` de la Bibliothèque lit cet agrégat, plus `macCompatibility` pour les
+jeux dont le store n'a répondu que sur macOS, plus l'unique déduction sûre
+côté runner : une entrée Wine est un build Windows.
+
 ## Import manuel
 
 Le flux v0.1 est : `Choose executable` → validation du chemin → aperçu des métadonnées → `Add game` → écriture atomique du catalogue. Le dialogue natif est ouvert par une commande Rust Tauri ; le frontend n'obtient pas un accès général au filesystem.

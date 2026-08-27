@@ -17,7 +17,7 @@ import {
   browseGames,
   browseModeLabel,
   browseSegments,
-  formatLastPlayed,
+  knownGenre,
   nextBrowseMode,
   resolveSegment,
 } from "./library-browse";
@@ -35,7 +35,7 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
-import { fallbackLibrary, formatPlayTime, type LibraryGame } from "./mock-library";
+import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
   NOTIFICATIONS,
   defaultNotificationStorage,
@@ -66,7 +66,6 @@ import {
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
-  sourceBadge,
   sourceStatusLine,
   sourceSyncSummary,
 } from "./source-model";
@@ -516,16 +515,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     genre: get<HTMLElement>("#hero-genre"),
     title: get<HTMLElement>("#hero-title"),
     logo: get<HTMLImageElement>("#hero-logo"),
-    playTime: get<HTMLElement>("#hero-play-time"),
-    lastPlayed: get<HTMLElement>("#hero-last-played"),
-    source: get<HTMLElement>("#hero-source"),
-    sourceIcon: get<HTMLElement>("#hero-source-icon"),
-    sourceLabel: get<HTMLElement>("#hero-source-label"),
-    sourceDivider: get<HTMLElement>("#hero-source-divider"),
-    metadata: get<HTMLElement>("#hero-metadata"),
-    platform: get<HTMLElement>("#hero-platform"),
-    status: get<HTMLElement>("#hero-status"),
-    platformLabel: get<HTMLElement>("#hero-platform-label"),
+    studio: get<HTMLElement>("#hero-studio"),
     cards: get<HTMLElement>("#game-cards"),
     railTitle: get<HTMLElement>("#recently-played-title"),
     browseSegments: get<HTMLElement>("#browse-segments"),
@@ -1113,36 +1103,35 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   };
 
   /**
-   * The two facts the Play button cannot carry: whether the game is on this
-   * machine, and whether it runs natively here. The meta row deliberately
-   * strips runtime state, so these get their own row.
+   * Whether this machine has no way to run the game at all, because the store
+   * publishes no build for it.
+   *
+   * This used to be a chip beside the hero ("Windows only"), which said the
+   * same thing twice: the row announced the problem and the button underneath
+   * still offered Play or Install as though there were none. The button is the
+   * one control the answer belongs to, so it carries it alone and greys out.
+   *
+   * Only a store that actually told us decides this — `unknown` is not "no" —
+   * and only on a Mac. `macCompatibility` is a fact about the game's macOS
+   * build, so on Windows and Linux it says nothing about runnability here.
+   *
+   * A Wine game is deliberately untouched: a local `.exe` carries no store
+   * answer, and Wine is precisely how Orivo runs it.
    */
-  const renderHeroStatus = (game: LibraryGame): void => {
-    const chips: Array<{ label: string; icon: IconName; tone: string }> = [];
-    // Only "installed" earns a chip. "Not installed" and "downloading" are
-    // already what the Play button says — the first as its Install label, the
-    // second as the bar filling behind it.
-    if (game.installState === "installed") {
-      chips.push({ label: "Installed", icon: "check", tone: "ready" });
-    }
-    if (game.macCompatibility === "native") {
-      chips.push({ label: "Mac native", icon: "check", tone: "ready" });
-    } else if (game.macCompatibility === "not-native") {
-      chips.push({ label: "Windows only", icon: "windows", tone: "warn" });
-    }
+  const blockedOnThisMachine = (game: LibraryGame): boolean =>
+    game.hostPlatform === "macos" && game.macCompatibility === "not-native";
 
-    refs.status.hidden = chips.length === 0;
-    refs.status.replaceChildren();
-    for (const chip of chips) {
-      const item = document.createElement("span");
-      item.className = "hero-status__chip";
-      item.dataset.tone = chip.tone;
-      item.innerHTML = icon(chip.icon);
-      const label = document.createElement("span");
-      label.textContent = chip.label;
-      item.append(label);
-      refs.status.append(item);
-    }
+  /**
+   * What the button says instead of Play. It names what the game *does* run on
+   * rather than assuming Windows: GOG sells Linux-only titles, and those have
+   * no macOS build either, so "Windows only" would be a confident lie.
+   */
+  const PLATFORM_NAMES: Record<string, string> = { windows: "Windows", linux: "Linux" };
+
+  const blockedLabel = (game: LibraryGame): string => {
+    const elsewhere = (game.supportedPlatforms ?? []).filter((platform) => platform !== "macos");
+    if (elsewhere.length === 0) return "Windows only";
+    return elsewhere.map((platform) => PLATFORM_NAMES[platform] ?? platform).join(" / ") + " only";
   };
 
   const createGameCard = (): HTMLButtonElement => {
@@ -1316,7 +1305,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       state.selectedId = game.id;
     }
 
-    refs.genre.textContent = game.genre || "Library";
+    // The pill is the genre and only the genre. "Library" is what the backend
+    // returns when nothing published one, so it is an absence, not a label:
+    // printing it put a word on the artwork that told the player nothing.
+    refs.genre.textContent = knownGenre(game.genre);
+    refs.genre.hidden = refs.genre.textContent === "";
     refs.title.textContent = game.title;
     updateHeroLogo(game);
     if (titleChanged && !immediateHero && !prefersReducedMotion()) {
@@ -1324,61 +1317,35 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void refs.title.offsetWidth;
       refs.title.classList.add("is-changing");
     }
-    refs.playTime.textContent = formatPlayTime(game.playTimeSeconds);
-    if (refs.playTime.parentElement) refs.playTime.parentElement.hidden = game.playTimeSeconds <= 0;
-    // A game that was never launched shows no "last played" chip at all rather
-    // than a "Not played yet" placeholder. Connectors hand back a raw instant
-    // ("2024-02-26T19:22:09.4406448Z"), which the hero never prints as-is.
-    const lastPlayed = formatLastPlayed(game.lastPlayedAt);
-    refs.lastPlayed.textContent = lastPlayed ? `Last played ${lastPlayed}` : "";
-    if (refs.lastPlayed.parentElement) refs.lastPlayed.parentElement.hidden = !game.lastPlayedAt;
     const isSteamInstallable = game.source === "steam" && !game.launchable;
     // Epic is the one connected store that will accept an install request from
     // Orivo, so it is the one that gets a live Install button here.
     const isEpicInstallable =
       game.source === "epic" && game.installState === "not-installed";
     const isEpicInstalling = game.installState === "installing";
-    renderHeroStatus(game);
-    // Every source the catalog can return has a badge, so a game synced from a
-    // connected store is never mislabelled as a local one.
-    const badge = sourceBadge(game.source);
-    const sourceName = badge?.label ?? "";
-    const hasSource = sourceName !== "";
-    // The Play button already states runnability (Play / Install / Unavailable),
-    // so the meta row never repeats runtime, install or compatibility mentions
-    // ("Wine-Staging", "installed", "incompatible…").
-    const cleanMetadata = (game.metadata || "")
-      .split("·")
-      .map((part) => part.trim())
-      .filter(
-        (part) =>
-          part !== "" &&
-          !/steam|wine|installed|ready to play|incompatible|compatible|macos|windows only/i.test(part),
-      )
-      .join(" · ");
-    // Keep the badge only while it carries something; a lone source glyph with
-    // no label (or an empty metadata run) never appears.
-    refs.source.hidden = !hasSource && !cleanMetadata;
-    refs.sourceIcon.hidden = !hasSource;
-    // A real, legible source logo: Steam's mark, the Windows mark for Wine
-    // titles, a folder for local games, each connected store's own mark.
-    refs.sourceIcon.innerHTML = badge ? icon(badge.icon) : "";
-    refs.sourceLabel.hidden = !hasSource;
-    refs.sourceLabel.textContent = sourceName;
-    refs.metadata.textContent = cleanMetadata;
-    refs.metadata.hidden = !cleanMetadata;
-    refs.sourceDivider.hidden = !(hasSource && cleanMetadata);
-    // Compatibility is conveyed by the Play button, so the platform chip stays
-    // hidden.
-    refs.platform.hidden = true;
-    refs.platformLabel.textContent = "";
+    // Which store a game came from is no longer written on the artwork: the
+    // rail, the game's page and the Sources menu all say it, and repeating it
+    // here cost the hero a whole line to name something the player chose.
+    // The studio is what is left, and it stands on its own beside the genre.
+    //
+    // It reads `developer`, never `metadata`. `metadata` is a mixed field — a
+    // store fills it with the studio, Steam with install state, Wine with the
+    // runner name, the bundled demo with an achievement count — so printing it
+    // here billed "Achievements 67/82" as a company.
+    const studio = (game.developer ?? "").trim();
+    refs.studio.textContent = studio;
+    refs.studio.hidden = studio === "";
+    // A game with no macOS build cannot be played or installed here whatever
+    // its store client would accept, so the button says which and goes quiet.
+    const blocked = blockedOnThisMachine(game);
     // A download already running is not a second install to start, so the
     // button reports it rather than offering to queue another.
     refs.playButton.disabled =
-      !game.launchable &&
-      !isSteamInstallable &&
-      !isEpicInstallable &&
-      !isEpicInstalling;
+      blocked ||
+      (!game.launchable &&
+        !isSteamInstallable &&
+        !isEpicInstallable &&
+        !isEpicInstalling);
     // The button doubles as the progress bar, so it keeps its size and place
     // rather than being swapped for a separate control mid-download.
     const fill = refs.playButton.querySelector<HTMLElement>(".play-button__fill");
@@ -1391,29 +1358,36 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       fill.style.width = percent === null ? "0%" : `${percent}%`;
       refs.playButton.classList.toggle("is-downloading", percent !== null);
     }
+    // Greyed rather than merely disabled: a dead Play button reads as a bug,
+    // and this one is reporting a fact about the game.
+    refs.playButton.classList.toggle("is-blocked", blocked);
     refs.playButton.setAttribute(
       "aria-label",
-      game.launchable
-        ? "Play " + game.title
-        : isSteamInstallable
-          ? "Install " + game.title + " in Steam"
-          : isEpicInstallable
-            ? "Install " + game.title + " from Epic Games"
-            : isEpicInstalling
-              ? "Downloading " + game.title
-              : game.title + " is unavailable",
+      blocked
+        ? game.title + " has no macOS version"
+        : game.launchable
+          ? "Play " + game.title
+          : isSteamInstallable
+            ? "Install " + game.title + " in Steam"
+            : isEpicInstallable
+              ? "Install " + game.title + " from Epic Games"
+              : isEpicInstalling
+                ? "Downloading " + game.title
+                : game.title + " is unavailable",
     );
-    const playLabel = refs.playButton.querySelector<HTMLElement>("span");
+    const playLabel = refs.playButton.querySelector<HTMLElement>("span:not(.play-button__fill)");
     if (playLabel) {
-      playLabel.textContent = game.launchable
-        ? "Play"
-        : isSteamInstallable || isEpicInstallable
-          ? "Install"
-          : isEpicInstalling
-            ? typeof game.installPercent === "number"
-              ? `Downloading ${game.installPercent}%`
-              : "Downloading"
-            : "Unavailable";
+      playLabel.textContent = blocked
+        ? blockedLabel(game)
+        : game.launchable
+          ? "Play"
+          : isSteamInstallable || isEpicInstallable
+            ? "Install"
+            : isEpicInstalling
+              ? typeof game.installPercent === "number"
+                ? `Downloading ${game.installPercent}%`
+                : "Downloading"
+              : "Unavailable";
     }
     updateHeroImage(game, immediateHero);
     primeNeighbourLogos();
@@ -6207,6 +6181,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       source,
       description: readString(record, "description") || fallback.description,
       metadata: readString(record, "metadata") || fallback.metadata,
+      developer: readString(record, "developer"),
       genre: readString(record, "genre") || fallback.genre,
       heroUrl: immediateMediaUrl(heroToken) || artworkFallback?.heroUrl || "",
       coverUrl: immediateMediaUrl(coverToken) || artworkFallback?.coverUrl || "",
@@ -6766,38 +6741,43 @@ function shell(): string {
       <section class="hero-content" aria-live="polite">
         <!-- The wordmark when a store published one, the title text when it did
              not. Both live in the markup: the logo is a swap, not a rebuild,
-             and the title keeps the accessible name either way. The genre pill
-             follows the mark rather than leading it — the mark is what the eye
-             should land on first. -->
+             and the title keeps the accessible name either way. -->
         <!-- Both start empty. A fixture's title baked into the shell is text
              the app has not earned yet: an empty library would carry it until
              a render replaced it, and on the welcome screen nothing ever does. -->
-        <img id="hero-logo" class="hero-logo" alt="" hidden />
-        <h1 id="hero-title" class="hero-title"></h1>
-        <span id="hero-genre" class="genre-chip"></span>
-        <div class="hero-meta" aria-label="Game metadata">
-          <span>${icon("clock")}<span id="hero-play-time"></span></span>
-          <span>${icon("clock")}<span id="hero-last-played"></span></span>
-          <span id="hero-source" class="hero-source">
-            <span id="hero-source-icon" class="hero-source-icon" aria-hidden="true"></span>
-            <span id="hero-source-label">Steam</span>
-            <i id="hero-source-divider" class="hero-source-divider" aria-hidden="true">·</i>
-            <span id="hero-metadata"></span>
-          </span>
-          <span id="hero-platform" class="hero-platform" hidden>
-            ${icon("monitor")}<span id="hero-platform-label"></span>
-          </span>
+        <!-- Everything that changes size between two games lives in here, and
+             it is anchored to its own bottom edge. A wordmark is three times
+             the height of a one-line title and a two-line title is twice a
+             one-line one, so a stack that grew downwards moved Play 64px or
+             more on every selection — the one control the whole scene exists
+             for, never twice in the same place. It grows upwards instead. -->
+        <div class="hero-identity">
+          <img id="hero-logo" class="hero-logo" alt="" hidden />
+          <h1 id="hero-title" class="hero-title"></h1>
+          <!-- One line, two facts: what kind of game it is, and who made it.
+               Everything else the hero used to stack here now lives where it
+               belongs — the store badge and the session numbers on the game's
+               own page, runnability in the Play button. Three rows under the
+               wordmark turned the one screen built around artwork into a
+               form. -->
+          <div class="hero-meta" aria-label="Game metadata">
+            <span id="hero-genre" class="genre-chip"></span>
+            <span id="hero-studio" class="hero-studio"></span>
+          </div>
         </div>
-        <!-- What the Play button cannot say: whether the game is actually on
-             this machine, and whether it runs natively here. -->
-        <div id="hero-status" class="hero-status" hidden></div>
+        <!-- The launch status sits above the button, not below it. Below, it
+             either shoved Play down the moment it appeared — the button moving
+             out from under the cursor that just pressed it — or, floated out of
+             flow, painted straight over the rail heading and the first row of
+             cards. Above, it takes its room from the identity block, which has
+             room to give, and Play does not move either way. -->
+        <div id="launch-feedback" class="launch-feedback" role="status" aria-live="polite" hidden></div>
         <!-- Play stands alone. A card opens its own page on a second click and
              the detail route is a link away, so a chevron beside Play was one
              affordance too many for the one thing this scene is for. -->
         <div class="hero-actions">
           <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
         </div>
-        <div id="launch-feedback" class="launch-feedback" role="status" aria-live="polite" hidden></div>
       </section>
 
       <section class="recently-played" aria-label="Library games">

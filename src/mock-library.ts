@@ -7,6 +7,8 @@ export interface LibraryGame {
   source?: "steam" | "wine" | "local" | "showcase" | ConnectedSource;
   description: string;
   metadata: string;
+  /** The studio, as the store named it. Empty when no store named one. */
+  developer?: string;
   genre: string;
   /** The game's own wordmark on transparency; empty when no store publishes one. */
   logoUrl?: string;

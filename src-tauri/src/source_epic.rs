@@ -10,7 +10,8 @@
 //! presents; they identify the application, not the user, and are public.
 
 use crate::sources::{
-    self, SourceError, SourceLibrary, SourceLibraryGame, SourceProvider, StoredSourceCredential,
+    self, SourceError, SourceLibrary, SourceLibraryGame, SourcePlatform, SourceProvider,
+    StoredSourceCredential,
 };
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -390,6 +391,14 @@ fn library_game(
 ) -> SourceLibraryGame {
     SourceLibraryGame {
         native_mac,
+        // Every entitlement in this library came out of Epic's *Windows* asset
+        // list, so the Windows build is not an inference — it is where the game
+        // was found. The Mac list adds the second row when it answered.
+        platforms: if native_mac == Some(true) {
+            vec![SourcePlatform::Windows, SourcePlatform::Macos]
+        } else {
+            vec![SourcePlatform::Windows]
+        },
         install: install.map(Into::into),
         source_id: asset.app_name.clone(),
         // The Epic launcher URI needs all three parts, so the launch reference

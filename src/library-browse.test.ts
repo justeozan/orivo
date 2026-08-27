@@ -5,7 +5,6 @@ import {
   MAX_BROWSE_SEGMENTS,
   browseGames,
   browseSegments,
-  formatLastPlayed,
   lastPlayedTime,
   nextBrowseMode,
   resolveSegment,
@@ -44,29 +43,6 @@ describe("lastPlayedTime", () => {
     expect(lastPlayedTime("", NOW)).toBeNull();
     expect(lastPlayedTime(undefined, NOW)).toBeNull();
     expect(lastPlayedTime("whenever", NOW)).toBeNull();
-  });
-});
-
-describe("formatLastPlayed", () => {
-  it("rewrites the raw instant Xbox hands back", () => {
-    // The regression this exists for: the hero printed the timestamp verbatim.
-    expect(formatLastPlayed("2024-02-26T19:22:09.4406448Z", NOW)).toBe("2 years ago");
-    expect(formatLastPlayed("2026-08-06T11:10:00Z", NOW)).toBe("just now");
-    expect(formatLastPlayed("2026-08-06T04:00:00Z", NOW)).toBe("8 hours ago");
-    expect(formatLastPlayed("2026-08-05T04:00:00Z", NOW)).toBe("yesterday");
-    expect(formatLastPlayed("2026-08-02T12:00:00Z", NOW)).toBe("4 days ago");
-    expect(formatLastPlayed("2026-07-20T12:00:00Z", NOW)).toBe("2 weeks ago");
-    expect(formatLastPlayed("2026-04-06T12:00:00Z", NOW)).toBe("4 months ago");
-  });
-
-  it("leaves a value that already reads as English alone", () => {
-    expect(formatLastPlayed("2 days ago", NOW)).toBe("2 days ago");
-    expect(formatLastPlayed("1 week ago", NOW)).toBe("1 week ago");
-  });
-
-  it("says nothing at all for a game that was never launched", () => {
-    expect(formatLastPlayed("", NOW)).toBe("");
-    expect(formatLastPlayed(undefined, NOW)).toBe("");
   });
 });
 
@@ -121,9 +97,73 @@ describe("browseSegments", () => {
 
   it("keeps platforms in their own order, native first", () => {
     expect(browseSegments(library, "platform", NOW)).toEqual([
-      { id: "macos", label: "Apple" },
+      { id: "macos", label: "Mac" },
       { id: "windows", label: "Windows" },
     ]);
+  });
+
+  it("files a game by the macOS answer its store gave", () => {
+    // The bug this covers: an Epic or GOG library declares no
+    // `supportedPlatforms`, so Platform mode offered nothing but "All Games"
+    // even though every one of those games already carried a per-game answer
+    // about its macOS build — the same one that greys out the Play button.
+    const connected = [
+      game({ id: "windows-only", source: "epic", macCompatibility: "not-native" }),
+      game({ id: "mac-native", source: "epic", macCompatibility: "native" }),
+    ];
+    expect(browseSegments(connected, "platform", NOW)).toEqual([
+      { id: "macos", label: "Mac" },
+      { id: "windows", label: "Windows" },
+    ]);
+    expect(browseGames(connected, "platform", "windows", NOW).map((entry) => entry.id)).toEqual([
+      "windows-only",
+    ]);
+    expect(browseGames(connected, "platform", "macos", NOW).map((entry) => entry.id)).toEqual([
+      "mac-native",
+    ]);
+  });
+
+  it("does not file a Linux-only game under Windows", () => {
+    // GOG sells Linux-only titles. Those honestly have no macOS build, so the
+    // macOS answer is "not-native" — but reading that beside a real platform
+    // matrix invented a Windows build that does not exist.
+    const linuxOnly = [
+      game({
+        id: "linux-only",
+        source: "gog",
+        supportedPlatforms: ["linux"],
+        macCompatibility: "not-native",
+      }),
+    ];
+    expect(browseSegments(linuxOnly, "platform", NOW)).toEqual([{ id: "linux", label: "Linux" }]);
+    expect(browseGames(linuxOnly, "platform", "windows", NOW)).toEqual([]);
+  });
+
+  it("still reads the macOS answer for a catalog synced before stores recorded a matrix", () => {
+    // An entry from an older sync carries the macOS answer and nothing else.
+    // Dropping the fallback would empty Platform mode again for those users
+    // until they happened to re-sync.
+    const legacy = [game({ id: "legacy-epic", source: "epic", macCompatibility: "not-native" })];
+    expect(browseSegments(legacy, "platform", NOW)).toEqual([{ id: "windows", label: "Windows" }]);
+  });
+
+  it("leaves a game out of Platform when no store ever answered", () => {
+    // "unknown" is an absent answer, not a "no". Guessing here would file
+    // every unanswered game under Windows and make the mode a lie.
+    const silent = [game({ id: "quiet", source: "gog", macCompatibility: "unknown" })];
+    expect(browseSegments(silent, "platform", NOW)).toEqual([{ id: "all", label: "All Games" }]);
+  });
+
+  it("treats the backend's unknown-genre filler as no genre at all", () => {
+    // `genre_for_game` in lib.rs returns "Library" when nothing published one,
+    // which is every Epic and GOG entitlement. A "Library" shelf beside "RPG"
+    // reads as a real category and is not one.
+    const unlabelled = [
+      game({ id: "known", genre: "RPG" }),
+      game({ id: "filler", genre: "Library" }),
+    ];
+    expect(browseSegments(unlabelled, "genre", NOW)).toEqual([{ id: "RPG", label: "RPG" }]);
+    expect(browseGames(unlabelled, "genre", "RPG", NOW).map((entry) => entry.id)).toEqual(["known"]);
   });
 
   it("ignores the host OS, which the backend stamps on every game alike", () => {

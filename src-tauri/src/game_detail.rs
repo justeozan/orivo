@@ -8,7 +8,8 @@
 use crate::catalog::{
     Catalog, Game, GameSource as CatalogGameSource, LaunchTarget, SOURCE_COVER_URL_KEY,
     SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_INSTALL_PERCENT_KEY, SOURCE_INSTALLED_KEY,
-    SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY, STEAM_STORE_GENRE_KEY,
+    SOURCE_DEVELOPER_KEY, SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY,
+    SOURCE_PLATFORMS_KEY, STEAM_STORE_GENRE_KEY,
     STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
 };
 use serde::{Deserialize, Serialize};
@@ -877,11 +878,15 @@ fn project_catalog_game(
         .filter(|genre| !genre.trim().is_empty())
         .map(|genre| vec![genre.to_owned()])
         .unwrap_or_default();
-    let supported_platforms = game
+    // Two stores answer this, each in its own key: Steam through its store
+    // metadata, and a connected store through the platform matrix its
+    // connector recorded. Both speak the same tokens, so both are read.
+    let mut supported_platforms = game
         .extra
         .get(STEAM_STORE_PLATFORMS_KEY)
-        .and_then(serde_json::Value::as_array)
         .into_iter()
+        .chain(game.extra.get(SOURCE_PLATFORMS_KEY))
+        .filter_map(serde_json::Value::as_array)
         .flatten()
         .filter_map(serde_json::Value::as_str)
         .filter_map(|platform| match platform {
@@ -890,11 +895,15 @@ fn project_catalog_game(
             "linux" => Some(PlatformView::Linux),
             _ => None,
         })
-        .collect::<Vec<_>>();
+        .fold(Vec::new(), |mut platforms, platform| {
+            if !platforms.contains(&platform) {
+                platforms.push(platform);
+            }
+            platforms
+        });
     // Epic lists its entitlements per platform, so a game present in its Mac
     // list has a real native macOS build. That is a fact about the game, not
     // about this machine, so it belongs beside the Steam platform badges.
-    let mut supported_platforms = supported_platforms;
     if game
         .extra
         .get(SOURCE_NATIVE_MAC_KEY)
@@ -944,10 +953,16 @@ fn project_catalog_game(
             offers: Vec::new(),
         },
         about: description,
+        // The connector's key first, then the bare one an earlier catalog may
+        // hold, so a game synced before the studio had a key of its own keeps
+        // the answer the store gave.
         developer: game
             .extra
-            .get("developer")
+            .get(SOURCE_DEVELOPER_KEY)
+            .or_else(|| game.extra.get("developer"))
             .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|developer| !developer.is_empty())
             .map(str::to_owned),
         publisher: game
             .extra

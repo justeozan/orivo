@@ -461,6 +461,7 @@ fn library_game(provider: SourceProvider, title: &TitleEntry) -> SourceLibraryGa
             .as_ref()
             .and_then(|history| normalize_timestamp(&history.last_time_played)),
         native_mac: None,
+        platforms: Vec::new(),
         install: None,
     }
 }
