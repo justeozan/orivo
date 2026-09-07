@@ -528,11 +528,11 @@
    removed outright instead, so each element simply starts at its final state. */
 
 @media (prefers-reduced-motion: reduce) {
-  .onboarding,
-  .onboarding *,
-  .onboarding *::before,
-  .onboarding *::after,
-  .app-page--library.is-empty .hero-image.is-active { animation: none !important; }
+  html:not([data-motion="full"]) .onboarding,
+  html:not([data-motion="full"]) .onboarding *,
+  html:not([data-motion="full"]) .onboarding *::before,
+  html:not([data-motion="full"]) .onboarding *::after,
+  html:not([data-motion="full"]) .app-page--library.is-empty .hero-image.is-active { animation: none !important; }
 }
 [data-motion="reduced"] .onboarding,
 [data-motion="reduced"] .onboarding *,

@@ -24,3 +24,17 @@ icon = "play"
 command = "pnpm dev --port $CONDUCTOR_PORT"
 available_in = [ "local" ]
 icon = "globe"
+
+# Test the Windows (x86_64) build on this Mac: cross-compile with cargo-xwin
+# then launch the exe under Wine Staging. See scripts/run-windows-wine.sh.
+[scripts.run.windows-wine]
+command = "./scripts/run-windows-wine.sh"
+available_in = [ "local" ]
+icon = "app-window"
+
+# Test the Linux (arm64) build on this Mac: compile inside a Docker container
+# then display through XQuartz. See scripts/run-linux-docker.sh.
+[scripts.run.linux-docker]
+command = "./scripts/run-linux-docker.sh"
+available_in = [ "local" ]
+icon = "container"

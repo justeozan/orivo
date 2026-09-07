@@ -9,6 +9,8 @@
  * tagging an element with `data-nav-open` / `data-nav-launch`.
  */
 
+import { prefersReducedMotion } from "./motion";
+
 export type NavDirection = "up" | "down" | "left" | "right";
 
 export type NavInputMode = "pointer" | "keyboard" | "gamepad";
@@ -202,8 +204,7 @@ export function createSpatialNav(hooks: SpatialNavHooks): SpatialNav {
       (page) => !page.hidden && !page.inert,
     ) ?? null;
 
-  const reducedMotion = (): boolean =>
-    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  const reducedMotion = (): boolean => prefersReducedMotion();
 
   const focusElement = (element: HTMLElement): void => {
     element.focus({ preventScroll: true });

@@ -1,0 +1,18 @@
+# Keep the Docker build context (scripts/orivo-linux-test.Dockerfile) small.
+# These are all recreated inside the container or not needed at runtime.
+.git
+.gitignore
+.github
+.context
+.conductor
+node_modules
+target
+dist
+src-tauri/gen
+src-tauri/target
+e2e
+docs
+*.local
+.env
+.env.local
+.DS_Store

@@ -52,6 +52,7 @@ pub enum StoreRegion {
 pub enum MotionPreference {
     #[default]
     System,
+    Full,
     Reduced,
 }
 
