@@ -2311,9 +2311,9 @@
 /* ---------------------------------------------------------- reduced motion */
 
 @media (prefers-reduced-motion: reduce) {
-  .gd-page *,
-  .gd-page *::before,
-  .gd-page *::after {
+  html:not([data-motion="full"]) .gd-page *,
+  html:not([data-motion="full"]) .gd-page *::before,
+  html:not([data-motion="full"]) .gd-page *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;

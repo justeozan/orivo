@@ -2,6 +2,7 @@ import type { PageRestoreState } from "./contracts";
 import type { LibraryGame } from "./mock-library";
 import { fallbackLibrary } from "./mock-library";
 import { computeCognitiveProfile, type CognitiveProfile } from "./me-model";
+import { prefersReducedMotion } from "./motion";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 
 export interface MePageOptions {
@@ -46,14 +47,6 @@ function svg<K extends keyof SVGElementTagNameMap>(
 
 /** Décélération franche : rapide au départ, posée à l'arrivée. */
 const easeOut = (t: number): number => 1 - Math.pow(1 - t, 3);
-
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
 
 /** Longueur d'une polyligne, pour un tracé progressif sans mesurer le DOM. */
 function polylineLength(points: ReadonlyArray<readonly [number, number]>): number {

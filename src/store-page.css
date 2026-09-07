@@ -1051,9 +1051,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .store-backdrop__layer,
-  .store-card__fill,
-  .store-card__art { transition: none; }
-  .store-rail__track { scroll-behavior: auto; }
-  .store-why { animation: none; }
+  html:not([data-motion="full"]) .store-backdrop__layer,
+  html:not([data-motion="full"]) .store-card__fill,
+  html:not([data-motion="full"]) .store-card__art { transition: none; }
+  html:not([data-motion="full"]) .store-rail__track { scroll-behavior: auto; }
+  html:not([data-motion="full"]) .store-why { animation: none; }
 }

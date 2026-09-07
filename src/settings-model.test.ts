@@ -34,6 +34,10 @@ describe("settings model", () => {
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
     );
+    expect(normalisePreferences({ motion: "full" })).toEqual({
+      ...DEFAULT_PREFERENCES,
+      motion: "full",
+    });
   });
 
   it("resets preferences without carrying unrelated update fields", () => {

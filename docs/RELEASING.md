@@ -236,6 +236,41 @@ until the app is signed.
 
 No warning. The AppImage may need `chmod +x Orivo_*.AppImage`.
 
+### Testing the Windows and Linux builds on a Mac
+
+You do not need a VM or GitHub Actions to sanity-check the other targets from an
+Apple Silicon Mac. Two Conductor run scripts wrap the whole flow:
+
+```sh
+./scripts/run-windows-wine.sh   # or Run → "windows-wine"
+./scripts/run-linux-docker.sh   # or Run → "linux-docker"
+```
+
+- **Windows (`run-windows-wine.sh`)** cross-compiles the `x86_64-pc-windows-msvc`
+  binary with `cargo-xwin`, then launches it under **Wine Staging**
+  (`brew install --cask wine-staging`). The script auto-installs the remaining
+  toolchain the first time: `cargo-xwin`, plus a complete LLVM toolchain
+  (`brew install llvm lld`) that provides the `clang-cl`, `llvm-lib`, `llvm-rc`
+  and `lld-link` that cc-rs and the MSVC cross-link step need (rustup's
+  `llvm-tools-preview` alone lacks `llvm-lib`/`llvm-rc`). On the first run the
+  script also provisions the **WebView2 Evergreen runtime** into the Wine prefix
+  (official Standalone Installer, since winetricks dropped its `webview2` verb),
+  and runs the browser with `--disable-gpu` software compositing to dodge a
+  sporadic Wine `ole32` crash. WebView2 under Wine is still experimental — the
+  run exercises the real Windows code paths below the UI, but treat the window
+  as a smoke test, not the visual source of truth.
+- **Linux (`run-linux-docker.sh`)** builds the Linux arm64 binary in a Docker
+  container (`scripts/orivo-linux-test.Dockerfile`, including
+  `libwebkit2gtk-4.1`/`gtk3`) and displays it through **XQuartz**
+  (`brew install --cask xquartz`). The first container build compiles the whole
+  workspace and takes ~15–20 min; subsequent runs reuse the image so only the
+  changed crate rebuilds.
+
+These only test the target's native behaviour — signing, installers, and the
+WebView2/WebKit analogues are exercised by real CI on native runners. Wine
+builds also skip the Windows/MSI signing step, so they are never release
+artifacts.
+
 ### The path to signed builds
 
 Nothing in the workflow has to be restructured; signing is turned on with

@@ -52,6 +52,7 @@ describe("me page", () => {
     host?.deactivate();
     host = null;
     vi.restoreAllMocks();
+    delete document.documentElement.dataset.motion;
   });
 
   const mount = async (): Promise<void> => {
@@ -168,6 +169,36 @@ describe("me page", () => {
     await mount();
 
     // Aucune montée : la valeur finale est peinte d'emblée.
+    expect(container.querySelector(".me-objective__percent")?.textContent).toBe("68%");
+    expect(container.querySelectorAll(".me-daily__value")[2]?.textContent).toBe("2");
+  });
+
+  it("runs the intro even when the OS asks for reduced motion once motion is set to full", async () => {
+    // « Full » (Always animate) override la préférence système : un Windows avec
+    // « Effets d'animation » désactivé passe prefers-reduced-motion à true, mais
+    // l'utilisateur qui choisit Full revoit les animations d'Orivo.
+    document.documentElement.dataset.motion = "full";
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("reduced-motion"),
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    })) as unknown as typeof window.matchMedia;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", () => {});
+    const now = vi.spyOn(performance, "now");
+    now.mockReturnValue(0);
+
+    await mount();
+
+    // La montée part de zéro puis atteint la valeur finale malgré le système.
+    expect(container.querySelector(".me-objective__percent")?.textContent).toBe("0%");
+    now.mockReturnValue(5_000);
+    while (frames.length > 0) frames.shift()?.(5_000);
     expect(container.querySelector(".me-objective__percent")?.textContent).toBe("68%");
     expect(container.querySelectorAll(".me-daily__value")[2]?.textContent).toBe("2");
   });

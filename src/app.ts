@@ -35,6 +35,7 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
+import { prefersReducedMotion } from "./motion";
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
   NOTIFICATIONS,
@@ -4350,7 +4351,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   };
 
   const applyMotionPreference = (): void => {
-    root.dataset.motion = state.preferences.motion;
+    const value = state.preferences.motion;
+    root.dataset.motion = value;
+    // Mirrored onto <html> so the CSS guards that cut motion (
+    // `html:not([data-motion="full"])` under prefers-reduced-motion) can see
+    // the per-app choice and stay out of the way for "full" motion.
+    document.documentElement.dataset.motion = value;
   };
 
   const renderPreferenceControls = (): void => {
@@ -6637,15 +6643,6 @@ function messageFromError(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function prefersReducedMotion(): boolean {
-  // The Appearance preference wins over the system setting; "system" falls back
-  // to the media query so the default still honours macOS accessibility.
-  if (document.querySelector('[data-motion="reduced"]')) {
-    return true;
-  }
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
 function shell(): string {
   return `
       <!-- The topbar is the document banner, so it sits outside the page
@@ -7103,13 +7100,17 @@ function shell(): string {
                   <span class="settings-card__mark" aria-hidden="true">${icon("navigate")}</span>
                   <div class="settings-card__copy">
                     <strong id="motion-preference-title">Motion</strong>
-                    <small>Reduced motion turns off hero cross-fades, card transitions, and panel animations.</small>
+                    <small>Motion controls the hero cross-fades, card transitions, and panel animations. "System" follows the OS, which on Windows means the "Animation effects" accessibility/performance setting.</small>
                   </div>
                 </header>
                 <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
                   <label class="settings-choice">
+                    <input type="radio" name="motion-preference" value="full" />
+                    <span><strong>Full</strong><small>Always animate, even when the OS asks for less motion.</small></span>
+                  </label>
+                  <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="system" />
-                    <span><strong>System</strong><small>Follow the macOS reduced-motion setting.</small></span>
+                    <span><strong>System</strong><small>Follow the system's reduced-motion setting.</small></span>
                   </label>
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="reduced" />

@@ -8,7 +8,7 @@ import type {
 
 export const START_PAGES = ["library", "store"] as const;
 export const STORE_REGIONS = ["automatic", "us", "ca", "gb", "fr", "de", "jp", "au"] as const;
-export const MOTION_PREFERENCES = ["system", "reduced"] as const;
+export const MOTION_PREFERENCES = ["full", "system", "reduced"] as const;
 
 export type StartPage = (typeof START_PAGES)[number];
 export type StoreRegion = (typeof STORE_REGIONS)[number];

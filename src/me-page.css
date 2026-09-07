@@ -1148,7 +1148,7 @@
 /* La dérive du fond est décorative : elle s'arrête net si l'utilisateur a
    demandé moins d'animations (la montée des compteurs se coupe côté script). */
 @media (prefers-reduced-motion: reduce) {
-  .me-aurora__orb {
+  html:not([data-motion="full"]) .me-aurora__orb {
     animation: none;
   }
 }
