@@ -23,14 +23,14 @@ updater silently stops working. The third is optional.
 
 | Secret | Value |
 | --- | --- |
-| `TAURI_SIGNING_PRIVATE_KEY` | The **entire contents** of the minisign private key file `.context/orivo-updater.key`, including the `untrusted comment:` first line and the trailing newline. |
+| `TAURI_SIGNING_PRIVATE_KEY` | The **entire contents** of the minisign private key file `~/.orivo/orivo-updater.key`, including the `untrusted comment:` first line and the trailing newline. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | An **empty string**. The key was generated without a password, so the secret exists but has no value. |
 | `VITE_SENTRY_DSN` | Optional. The Sentry DSN from Sentry › Settings › Projects › _project_ › Client Keys (DSN). Vite inlines it at build time, so it has to exist before the build, not after. |
 
 With the GitHub CLI:
 
 ```sh
-gh secret set TAURI_SIGNING_PRIVATE_KEY < .context/orivo-updater.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.orivo/orivo-updater.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
 gh secret set VITE_SENTRY_DSN --body "https://…@…ingest.de.sentry.io/…"
 ```
@@ -47,25 +47,43 @@ is unset, which hangs the CI job.
 
 ### Where the private key lives
 
-- Private key: `.context/orivo-updater.key` — **gitignored**, never committed.
-- Public key: `.context/orivo-updater.key.pub`, and the same value is baked into
+- Private key: `~/.orivo/orivo-updater.key` — outside every checkout, so it
+  survives a workspace being archived.
+- Public key: `~/.orivo/orivo-updater.key.pub`, and the same value is baked into
   `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`:
 
   ```
   dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI0NzlBNjdCQjI4OUJBOTgKUldTWXVvbXllNlo1dEhXcC9ZL2ZUQzV4L1g5MWNyUHFJbDA1dkttWXh5clpxcmJhbk1FVG5rZkgK
   ```
 
+`.context/orivo-updater.key` is also read as a fallback, but `.context/` is
+per-workspace and gitignored: the key was originally kept only there and went
+missing the moment that workspace was archived, which breaks every local
+`tauri build` with *"A public key has been found, but no private key"*.
+`~/.orivo/` is the copy to keep.
+
 **Put the private key in a password manager today.** It is the only thing that
 lets you ship an update that already-installed copies of Orivo will accept. If
 it is lost, every existing install is permanently orphaned: you would have to
 generate a new key pair, ship a new `pubkey`, and ask every user to download and
-reinstall the app by hand. `.context/` is local-only — a fresh clone does not
-have it.
+reinstall the app by hand. A fresh clone never has it.
+
+### Building locally
+
+`bundle.createUpdaterArtifacts` is on, so any `tauri build` signs the updater
+archive and fails when the key is missing. Wrap bundling commands so the key is
+picked up from either location:
+
+```sh
+./scripts/with-signing-key.sh pnpm tauri build --debug --bundles app
+```
+
+`tauri dev`, `pnpm test` and anything that does not bundle need no key.
 
 To regenerate a key pair (only if the current one leaks or is lost):
 
 ```sh
-pnpm tauri signer generate -w .context/orivo-updater.key
+pnpm tauri signer generate -w ~/.orivo/orivo-updater.key
 ```
 
 Then update `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` and reset
