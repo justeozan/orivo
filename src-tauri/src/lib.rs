@@ -7566,6 +7566,8 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
     // without projecting a path across IPC.
     presentation.wine_profiles = stored_catalog.wine_profiles.clone();
     presentation.wine_inventory = stored_catalog.wine_inventory.clone();
+    presentation.winlator_profiles = stored_catalog.winlator_profiles.clone();
+    presentation.winlator_inventory = stored_catalog.winlator_inventory.clone();
 
     // An explicit Direct → Wine association keeps the original local record
     // for a reversible fallback, but the library should surface one card.
@@ -8106,6 +8108,66 @@ mod tests {
         assert_eq!(refreshed, cached);
         assert_eq!(fs::read(&refreshed).unwrap(), b"updated");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// `presentation_catalog` starts from a fresh catalog and copies across only
+    /// what a card needs to derive its state without projecting a path. Forget
+    /// one of the Winlator arrays and the launch gate reads an empty catalog, so
+    /// every Winlator card silently turns into "Unavailable" — which is exactly
+    /// what the emulator showed.
+    #[test]
+    fn the_presentation_catalog_carries_the_records_a_winlator_card_needs() {
+        let mut stored = Catalog::default();
+        stored
+            .upsert_winlator_profile(WinlatorProfile {
+                id: AUTO_WINLATOR_PROFILE_ID.into(),
+                display_name: AUTO_WINLATOR_PROFILE_NAME.into(),
+                distribution: WinlatorDistribution::Cmod,
+                container_id: None,
+                shortcut_directories: vec![PathBuf::from(
+                    "/storage/emulated/0/Download/Winlator/Frontend",
+                )],
+                enabled: true,
+                last_imported_at: None,
+            })
+            .unwrap();
+        stored
+            .upsert_winlator_inventory(WinlatorShortcutInventoryEntry {
+                profile_id: AUTO_WINLATOR_PROFILE_ID.into(),
+                game_ref: "shortcut:abc".into(),
+                title: "Celeste".into(),
+                shortcut_path: PathBuf::from(
+                    "/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop",
+                ),
+                fingerprint: "sha256:abc".into(),
+                container_id: Some(2),
+                imported_at: None,
+            })
+            .unwrap();
+        stored
+            .upsert_runner(winlator_catalog_game(
+                AUTO_WINLATOR_PROFILE_ID,
+                &winlator_runner::ScannedWinlatorShortcut {
+                    game_ref: "shortcut:abc".into(),
+                    title: "Celeste".into(),
+                    directory_label: "Frontend".into(),
+                    shortcut_path: PathBuf::from(
+                        "/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop",
+                    ),
+                    fingerprint: "sha256:abc".into(),
+                    container_id: Some(2),
+                },
+            ))
+            .unwrap();
+
+        let presentation = presentation_catalog(&stored, false);
+        assert_eq!(presentation.winlator_profiles, stored.winlator_profiles);
+        assert_eq!(presentation.winlator_inventory, stored.winlator_inventory);
+        assert!(game_detail::winlator_game_launchable(
+            &presentation,
+            AUTO_WINLATOR_PROFILE_ID,
+            "shortcut:abc"
+        ));
     }
 
     #[test]
