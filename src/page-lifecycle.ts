@@ -28,14 +28,18 @@ export class PageLifecycleHost {
   }
 
   async activate(route: AppRoute, restoreState: PageRestoreState | null = null): Promise<void> {
-    if (!this.#mounted) {
-      await this.#page.mount(this.#container);
-      this.#mounted = true;
-    }
     this.#controller?.abort();
     const controller = new AbortController();
     const generation = ++this.#generation;
     this.#controller = controller;
+    if (!this.#mounted) {
+      await this.#page.mount(this.#container);
+      this.#mounted = true;
+    }
+    // A deactivate() that lands while mount() is pending — the beta gate walking
+    // a deep link to #/me back to the Library, say — has to win: unhiding now
+    // would stack a stale page over the one that replaced it.
+    if (generation !== this.#generation) return;
     this.#container.hidden = false;
     this.#container.inert = false;
     await this.#page.activate({

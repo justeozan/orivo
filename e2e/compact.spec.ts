@@ -184,6 +184,16 @@ test.describe("every route", () => {
 });
 
 test.describe("the other pages", () => {
+  test("a deep link to #/me with the beta off lands on the Library alone", async ({ page }) => {
+    await page.goto("/#/me");
+    // Me is a beta surface: the gate walks the deep link back to the Library,
+    // and Me's own mount must not put it back on top once it finishes.
+    await expect(page).toHaveURL(/#\/library$/);
+    await expect(page.locator("#app-page-me .me-page")).toBeAttached();
+    await expect(page.locator("#app-page-me")).toBeHidden();
+    await expect(page.locator("#app-page-library")).toBeVisible();
+  });
+
   test("the Store shows portrait cards that start on screen", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     const card = await rectOf(page, ".store-card");

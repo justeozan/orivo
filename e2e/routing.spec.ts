@@ -190,6 +190,16 @@ test.describe("hash router", () => {
       await expect(page.locator("[aria-current]")).toHaveCount(1);
     }
   });
+
+  test("a deep link to #/me with the beta off lands on the Library alone", async ({ page }) => {
+    await page.goto("/#/me");
+    // Me is a beta surface: the gate walks the deep link back to the Library,
+    // and Me's own mount must not put it back on top once it finishes.
+    await expect(page).toHaveURL(/#\/library$/);
+    await expect(page.locator("#app-page-me .me-page")).toBeAttached();
+    await expect(page.locator("#app-page-me")).toBeHidden();
+    await expect(page.locator("#app-page-library")).toBeVisible();
+  });
 });
 
 test.describe("library keyboard shortcuts are scoped to the Library page", () => {
