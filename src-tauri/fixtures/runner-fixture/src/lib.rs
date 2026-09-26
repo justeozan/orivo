@@ -10,11 +10,15 @@
 //! | `fixture:ok`         | returns the launch intent the host asked for      |
 //! | `fixture:spin`       | never returns — fuel, deadline and cancellation   |
 //! | `fixture:grow`       | allocates until the memory ceiling refuses it     |
+//! | `fixture:recurse`    | recurses until a stack ceiling refuses it         |
 //! | `fixture:bad-mode`   | returns a launch mode the host does not recognise |
 //! | `fixture:bad-target` | answers about a different profile and game        |
+//! | `fixture:bad-runner` | claims to be preparing another runner's launch     |
+//! | `fixture:chatty`     | floods the host journal after earning a refusal    |
 //! | `fixture:bad-id`     | returns a reference that is really a path         |
 //! | `fixture:deny`       | reads a directory grant it was never given        |
 //! | `fixture:escape`     | reads `../` out of the folder it *was* given      |
+//! | `fixture:read-NAME`  | reads `NAME.rom` by name, whatever the host put there |
 //! | `fixture:fail`       | returns a plain WIT error                         |
 //!
 //! It reads nothing but the one directory grant named `fixture-games`, and it
@@ -42,6 +46,10 @@ const PLUGIN_VERSION: &str = "1.0.0";
 /// is the host's business to refuse.
 const GAMES_GRANT: &str = "fixture-games";
 const ROM_SUFFIX: &str = ".rom";
+/// Reads one named entry instead of whatever the listing offered. It is how a
+/// host test points the component at something it planted — a symbolic link, a
+/// FIFO, a file that outgrew its own metadata.
+const READ_PREFIX: &str = "fixture:read-";
 
 struct Fixture;
 
@@ -132,14 +140,26 @@ impl RunnerGuest for Fixture {
         misbehave(&game_reference)?;
         // The controlled intent: opaque ids only, echoed back exactly as the
         // host passed them, and the one launch mode the contract declares.
-        let (profile_id, game_reference, mode) = match game_reference.as_str() {
-            "fixture:bad-target" => ("some-other-profile".into(), "fixture:ok".into(), "default"),
-            "fixture:bad-id" => (profile_id, "../../etc/passwd".into(), "default"),
-            "fixture:bad-mode" => (profile_id, game_reference, "shell"),
-            _ => (profile_id, game_reference, "default"),
+        let (runner_id, profile_id, game_reference, mode) = match game_reference.as_str() {
+            "fixture:bad-target" => (
+                PLUGIN_ID,
+                "some-other-profile".into(),
+                "fixture:ok".into(),
+                "default",
+            ),
+            "fixture:bad-id" => (PLUGIN_ID, profile_id, "../../etc/passwd".into(), "default"),
+            "fixture:bad-mode" => (PLUGIN_ID, profile_id, game_reference, "shell"),
+            // Names a runner it is not. The host owns which plugin it called.
+            "fixture:bad-runner" => (
+                "com.orivo.some-other-runner",
+                profile_id,
+                game_reference,
+                "default",
+            ),
+            _ => (PLUGIN_ID, profile_id, game_reference, "default"),
         };
         Ok(LaunchIntent {
-            runner_id: PLUGIN_ID.into(),
+            runner_id: runner_id.into(),
             profile_id,
             game_reference,
             mode: mode.into(),
@@ -163,6 +183,26 @@ fn misbehave(selector: &str) -> Result<(), PluginError> {
                 }
             }
         }
+        // Deep, non-tail recursion with a real frame. Wasm frames live on the
+        // native stack, so this is the one misbehaviour that reaches past the
+        // host's own limits and into the thread it was called on.
+        "fixture:recurse" => {
+            // `black_box` and an observed result keep this a real recursion:
+            // with the frame unused and the answer discarded, LLVM deletes the
+            // whole descent and the component returns in 2,307 fuel.
+            fn descend(depth: u32) -> u64 {
+                let mut scratch = [0u64; 64];
+                scratch[(depth % 64) as usize] = u64::from(depth);
+                let deeper = if depth == 0 { 0 } else { descend(depth - 1) };
+                core::hint::black_box(scratch)
+                    .iter()
+                    .fold(deeper, |total, value| total.wrapping_add(*value))
+            }
+            host_journal::log(JournalLevel::Warning, "fixture is about to recurse");
+            if descend(u32::MAX) == u64::MAX {
+                host_journal::log(JournalLevel::Debug, "unreachable");
+            }
+        }
         "fixture:grow" => {
             let mut blocks: Vec<Vec<u8>> = Vec::new();
             loop {
@@ -179,6 +219,20 @@ fn misbehave(selector: &str) -> Result<(), PluginError> {
         }
         "fixture:escape" => {
             host_files::read_file(GAMES_GRANT, "../secret.txt")?;
+        }
+        // Earns a refusal, swallows it, then floods the journal. The host's record
+        // of the refusal has to survive the flood.
+        "fixture:chatty" => {
+            let _ = host_files::list_directory("fixture-other");
+            let mut sent = 0u32;
+            while sent < 1000 {
+                host_journal::log(JournalLevel::Info, "chatter");
+                sent += 1;
+            }
+        }
+        other if other.starts_with(READ_PREFIX) => {
+            let entry = format!("{}{ROM_SUFFIX}", &other[READ_PREFIX.len()..]);
+            host_files::read_file(GAMES_GRANT, &entry)?;
         }
         "fixture:fail" => {
             return Err(PluginError {

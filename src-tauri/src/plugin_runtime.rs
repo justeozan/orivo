@@ -34,17 +34,17 @@
 //! host is the point: a limit or a refusal that arrives after the code it is
 //! meant to gate is one that never gated anything.
 
-use crate::plugin_scheduler::{
-    JobError, JobHandle, PluginScheduler, SchedulerLimits, SubmitError,
-};
 use crate::plugin_manifest::{
     CapabilityGrant, CapabilityScope, GrantValidationError, PluginCapability, PluginExtension,
     ValidatedPluginManifest, valid_opaque_id,
 };
+use crate::plugin_scheduler::{JobError, JobHandle, PluginScheduler, SchedulerLimits, SubmitError};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs,
-    path::{Path, PathBuf},
+    ffi::OsStr,
+    fs::{self, File},
+    io::{Read, Write},
+    path::{Component as PathComponent, Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -77,6 +77,24 @@ use bindings::{
 
 pub const PLUGIN_WASM_STACK_BYTES: usize = 2 * 1024 * 1024;
 
+/// Room for host frames on top of the wasm stack, on every thread that runs
+/// guest code.
+///
+/// `max_wasm_stack` is not a limit on its own. Wasmtime sets the trap threshold
+/// to `stack_pointer - max_wasm_stack` and does not clamp it to the thread it is
+/// running on (`wasmtime/src/runtime/func.rs`), and it does not count host frames
+/// at all. A thread smaller than the sum therefore overflows *below* wasmtime's
+/// check — and an overflow taken in host code, whether in one of our host
+/// functions or in a trampoline copying a result out, is an abort rather than a
+/// trap. A thread stack is lazily-committed address space, so being far past the
+/// deepest frame the host can reach costs nothing.
+pub const PLUGIN_HOST_STACK_HEADROOM_BYTES: usize = 6 * 1024 * 1024;
+
+/// The stack every thread that enters Wasmtime must have. Guest code runs on
+/// scheduler workers and nowhere else, which is what makes this enforceable.
+pub const PLUGIN_THREAD_STACK_BYTES: usize =
+    PLUGIN_WASM_STACK_BYTES + PLUGIN_HOST_STACK_HEADROOM_BYTES;
+
 /// How often the host advances Wasmtime's epoch. Every deadline below is a
 /// whole number of these ticks, so 10 ms is also the resolution at which a
 /// runaway component — or a cancellation — is noticed.
@@ -93,6 +111,10 @@ pub const INTERACTIVE_DISPLAY_BUDGET: Duration = Duration::from_millis(150);
 /// per entry; 256 is past any bounded page and far short of a loop.
 const MAX_HOST_CALLS_PER_INVOCATION: u32 = 256;
 const MAX_DIRECTORY_ENTRIES: usize = 256;
+/// How many entries the host will look at before it stops. Larger than the
+/// listing it returns so the returned page is the first 256 *by name* rather
+/// than whichever 256 the filesystem happened to hand over first.
+const MAX_DIRECTORY_SCAN: usize = 4096;
 const MAX_HOST_FILE_BYTES: u64 = 1024 * 1024;
 /// Total bytes one invocation may read through `host-files`. Without it a
 /// plugin could stream a granted directory into its own linear memory until it
@@ -230,18 +252,51 @@ pub struct JournalEntry {
     pub detail: String,
 }
 
-/// A bounded ring of host decisions. It is deliberately in memory and capped:
-/// the journal exists to explain the last failure to a user and to let a test
-/// assert that a refusal was recorded, not to become a log file a plugin can
-/// grow. Settings → Plugins reads it in a later slice.
+/// Two bounded rings, and the split matters: a plugin can call `host-journal`
+/// as often as it likes, and sharing one ring would let it evict the host's
+/// record of the refusals it just earned. Decisions are the host's; messages are
+/// the plugin's, and only the plugin's own ring can be flooded.
+///
+/// Both are deliberately in memory and capped: the journal exists to explain the
+/// last failure to a user and to let a test assert that a refusal was recorded,
+/// not to become a log file a plugin can grow.
 #[derive(Debug, Default)]
 pub struct PluginJournal {
-    entries: Mutex<VecDeque<JournalEntry>>,
+    decisions: Mutex<VecDeque<JournalEntry>>,
+    messages: Mutex<VecDeque<JournalEntry>>,
 }
 
 impl PluginJournal {
     pub fn record(
         &self,
+        correlation_id: CorrelationId,
+        plugin_id: &str,
+        decision: &'static str,
+        detail: impl Into<String>,
+    ) {
+        self.push(&self.decisions, correlation_id, plugin_id, decision, detail);
+    }
+
+    /// Text a plugin chose. Kept apart from the host's decisions so a chatty
+    /// component cannot push them out of the ring.
+    fn record_plugin_message(
+        &self,
+        correlation_id: CorrelationId,
+        plugin_id: &str,
+        detail: impl Into<String>,
+    ) {
+        self.push(
+            &self.messages,
+            correlation_id,
+            plugin_id,
+            "plugin-log",
+            detail,
+        );
+    }
+
+    fn push(
+        &self,
+        ring: &Mutex<VecDeque<JournalEntry>>,
         correlation_id: CorrelationId,
         plugin_id: &str,
         decision: &'static str,
@@ -253,23 +308,37 @@ impl PluginJournal {
             decision,
             detail: detail.into(),
         };
-        eprintln!(
+        // `eprintln!` panics when stderr is gone, and this is called from inside
+        // the scheduler. A journal line is not worth poisoning a lock over.
+        let _ = writeln!(
+            std::io::stderr(),
             "orivo plugin [{}] {} {}: {}",
-            entry.correlation_id, entry.plugin_id, entry.decision, entry.detail
+            entry.correlation_id,
+            entry.plugin_id,
+            entry.decision,
+            entry.detail
         );
-        if let Ok(mut entries) = self.entries.lock() {
-            if entries.len() == MAX_JOURNAL_ENTRIES {
-                entries.pop_front();
+        if let Ok(mut ring) = ring.lock() {
+            if ring.len() == MAX_JOURNAL_ENTRIES {
+                ring.pop_front();
             }
-            entries.push_back(entry);
+            ring.push_back(entry);
         }
     }
 
     #[allow(dead_code)]
     pub fn entries(&self) -> Vec<JournalEntry> {
-        self.entries
-            .lock()
-            .map(|entries| entries.iter().cloned().collect())
+        Self::snapshot(&self.decisions)
+    }
+
+    #[allow(dead_code)]
+    pub fn plugin_messages(&self) -> Vec<JournalEntry> {
+        Self::snapshot(&self.messages)
+    }
+
+    fn snapshot(ring: &Mutex<VecDeque<JournalEntry>>) -> Vec<JournalEntry> {
+        ring.lock()
+            .map(|ring| ring.iter().cloned().collect())
             .unwrap_or_default()
     }
 }
@@ -392,6 +461,16 @@ impl MemoryBudget {
     }
 }
 
+/// Which ceiling a store ran into. The difference is whose fault it is: a
+/// component that asked for more than one instance may have is misbehaving, but
+/// one refused because *other* plugins had already filled the global budget is
+/// an innocent bystander and must not be marked degraded for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryLimitKind {
+    Instance,
+    Host,
+}
+
 /// The `ResourceLimiter` for one store. It refuses growth rather than trapping
 /// so a well-written guest can fail its own allocation gracefully; `hit_limit`
 /// is what lets the host report the resulting abort as a memory limit instead
@@ -400,8 +479,12 @@ impl MemoryBudget {
 struct StoreMemoryGuard {
     limits: PluginLimits,
     budget: Arc<MemoryBudget>,
+    /// Bytes this store currently holds against the global budget.
     charged: usize,
-    hit_limit: bool,
+    /// The charge for the growth Wasmtime is in the middle of, so it can be
+    /// given back if that growth then fails.
+    pending: usize,
+    hit_limit: Option<MemoryLimitKind>,
 }
 
 impl ResourceLimiter for StoreMemoryGuard {
@@ -411,20 +494,34 @@ impl ResourceLimiter for StoreMemoryGuard {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        if desired > self.limits.instance_memory_bytes {
-            self.hit_limit = true;
+        self.pending = 0;
+        let extra = desired.saturating_sub(current);
+        // The ceiling is the store's whole footprint, not one memory's. A
+        // component may define several — `memories_per_store` allows four — and
+        // four memories of the per-instance size are not a per-instance limit.
+        if self.charged.saturating_add(extra) > self.limits.instance_memory_bytes {
+            self.hit_limit = Some(MemoryLimitKind::Instance);
             return Ok(false);
         }
-        let extra = desired.saturating_sub(current);
-        if !self
-            .budget
-            .charge(extra, self.limits.total_memory_bytes)
-        {
-            self.hit_limit = true;
+        if !self.budget.charge(extra, self.limits.total_memory_bytes) {
+            self.hit_limit = Some(MemoryLimitKind::Host);
             return Ok(false);
         }
         self.charged = self.charged.saturating_add(extra);
+        self.pending = extra;
         Ok(true)
+    }
+
+    /// Wasmtime asks the limiter *before* it checks a memory's own declared
+    /// maximum, so a growth this guard permitted can still fail. Without the
+    /// refund, a component whose memory is declared `(memory 1 1)` bills the
+    /// global budget for every `memory.grow` it makes and never grows a page —
+    /// which would starve every other plugin out of the ceiling for free.
+    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.budget.release(self.pending);
+        self.charged = self.charged.saturating_sub(self.pending);
+        self.pending = 0;
+        Ok(())
     }
 
     fn table_growing(
@@ -434,7 +531,7 @@ impl ResourceLimiter for StoreMemoryGuard {
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
         if desired > self.limits.table_elements {
-            self.hit_limit = true;
+            self.hit_limit = Some(MemoryLimitKind::Instance);
             return Ok(false);
         }
         Ok(true)
@@ -607,20 +704,31 @@ struct HostState {
     memory: StoreMemoryGuard,
     cancel: Arc<AtomicBool>,
     ticks_remaining: u64,
+    /// The wall-clock end of the call. Ticks alone undercount: `Continue(1)`
+    /// re-arms the deadline relative to the *current* epoch, so every tick that
+    /// passed while the guest sat inside a host call collapses into one.
+    deadline_at: Instant,
     interruption: Option<Interruption>,
     host_calls: u32,
+    /// Whether the exhausted host-call budget has already been journalled. Every
+    /// further call is refused in silence: a component that keeps asking would
+    /// otherwise push the host's own decisions out of the ring by being refused.
+    host_call_budget_reported: bool,
     bytes_read: u64,
 }
 
 impl HostState {
     fn spend_host_call(&mut self) -> Result<(), wit_types::PluginError> {
         if self.host_calls >= MAX_HOST_CALLS_PER_INVOCATION {
-            self.journal.record(
-                self.correlation_id,
-                &self.plugin_id,
-                "host-call-budget",
-                "refused: the invocation exhausted its host-call budget",
-            );
+            if !self.host_call_budget_reported {
+                self.host_call_budget_reported = true;
+                self.journal.record(
+                    self.correlation_id,
+                    &self.plugin_id,
+                    "host-call-budget",
+                    "refused: the invocation exhausted its host-call budget",
+                );
+            }
             return Err(plugin_error(
                 wit_types::PluginErrorCode::RateLimited,
                 "This plugin made too many host requests in one call.",
@@ -664,10 +772,7 @@ impl HostState {
     }
 }
 
-fn plugin_error(
-    code: wit_types::PluginErrorCode,
-    message: &str,
-) -> wit_types::PluginError {
+fn plugin_error(code: wit_types::PluginErrorCode, message: &str) -> wit_types::PluginError {
     wit_types::PluginError {
         code,
         message: message.to_owned(),
@@ -677,6 +782,13 @@ fn plugin_error(
 
 impl host_journal::Host for HostState {
     fn log(&mut self, level: host_journal::JournalLevel, message: String) {
+        // Metered like any other host call. It has no error channel, so an
+        // exhausted budget drops the line — but it must not be the one host
+        // import a component can call without limit, because each call costs the
+        // host a string copy out of guest memory.
+        if self.spend_host_call().is_err() {
+            return;
+        }
         let level = match level {
             host_journal::JournalLevel::Debug => "debug",
             host_journal::JournalLevel::Info => "info",
@@ -689,14 +801,23 @@ impl host_journal::Host for HostState {
         let mut detail = String::with_capacity(MAX_JOURNAL_MESSAGE_BYTES);
         detail.push_str(level);
         detail.push_str(": ");
-        for character in message.chars().filter(|c| !c.is_control()) {
-            if detail.len() + character.len_utf8() > MAX_JOURNAL_MESSAGE_BYTES {
+        // Bound the *input*, not just the output. Filtering the whole string
+        // first would make a 64 MiB message of control bytes cost a full scan to
+        // produce 512 bytes, and that scan is time the deadline pays for.
+        let mut scanned = 0;
+        for character in message.chars() {
+            scanned += character.len_utf8();
+            if scanned > MAX_JOURNAL_MESSAGE_BYTES
+                || detail.len() + character.len_utf8() > MAX_JOURNAL_MESSAGE_BYTES
+            {
                 break;
             }
-            detail.push(character);
+            if !character.is_control() {
+                detail.push(character);
+            }
         }
         self.journal
-            .record(self.correlation_id, &self.plugin_id, "plugin-log", detail);
+            .record_plugin_message(self.correlation_id, &self.plugin_id, detail);
     }
 }
 
@@ -714,10 +835,11 @@ impl host_files::Host for HostState {
             ));
         };
         let mut listing = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
-            if listing.len() == MAX_DIRECTORY_ENTRIES {
-                break;
-            }
+        // Two bounds, because they answer different questions: how much of a
+        // directory the host is willing to walk, and how much of it a plugin is
+        // allowed to hear about. Sorting before the second one is what makes the
+        // answer the same on every run — `read_dir` order is not.
+        for entry in entries.filter_map(Result::ok).take(MAX_DIRECTORY_SCAN) {
             let Ok(metadata) = entry.metadata() else {
                 continue;
             };
@@ -736,11 +858,16 @@ impl host_files::Host for HostState {
             }
             listing.push(host_files::DirectoryEntry {
                 name,
-                byte_size: if metadata.is_file() { metadata.len() } else { 0 },
+                byte_size: if metadata.is_file() {
+                    metadata.len()
+                } else {
+                    0
+                },
                 directory: metadata.is_dir(),
             });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
+        listing.truncate(MAX_DIRECTORY_ENTRIES);
         self.journal.record(
             self.correlation_id,
             &self.plugin_id,
@@ -763,14 +890,31 @@ impl host_files::Host for HostState {
                 "That is not a name inside the allowed folder.",
             ));
         }
+        // Open once, then judge the handle. Checking the path and reading it
+        // again are two different objects if anything can write to the granted
+        // folder in between: a symbolic link reads outside the grant, a FIFO
+        // blocks this worker forever — neither the epoch nor a cancellation can
+        // reach a thread parked in `read` — and a character device has no size to
+        // bound. `O_NOFOLLOW` and `O_NONBLOCK` refuse the first two at `open`,
+        // and the size and kind below are asked of the descriptor, not the name.
+        //
+        // A hard link inside the folder stays readable, and that is not a gap:
+        // creating one needs write access to a directory the user granted, and
+        // anything holding that could copy the file in instead.
         let path = root.join(&name);
-        let Ok(metadata) = path.symlink_metadata() else {
+        let Ok(file) = open_without_following(&path) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That file is no longer available.",
             ));
         };
-        if !metadata.file_type().is_file() || metadata.len() > MAX_HOST_FILE_BYTES {
+        let Ok(metadata) = file.metadata() else {
+            return Err(plugin_error(
+                wit_types::PluginErrorCode::Unavailable,
+                "That file is no longer available.",
+            ));
+        };
+        if !metadata.is_file() || metadata.len() > MAX_HOST_FILE_BYTES {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
                 "That entry is not a readable file of an allowed size.",
@@ -782,26 +926,79 @@ impl host_files::Host for HostState {
                 "This plugin read too much in one call.",
             ));
         }
-        let Ok(bytes) = fs::read(&path) else {
+        // The descriptor's reported length is a hint, not a contract: a file that
+        // grows between `metadata` and the read must not become an unbounded
+        // allocation, so the reader carries the ceiling itself.
+        let ceiling = MAX_HOST_FILE_BYTES.min(MAX_HOST_READ_BYTES.saturating_sub(self.bytes_read));
+        let mut bytes = Vec::new();
+        if file
+            .take(ceiling.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That file could not be read.",
             ));
-        };
+        }
+        if bytes.len() as u64 > ceiling {
+            return Err(plugin_error(
+                wit_types::PluginErrorCode::PermissionDenied,
+                "That entry is not a readable file of an allowed size.",
+            ));
+        }
         self.bytes_read = self.bytes_read.saturating_add(bytes.len() as u64);
         Ok(bytes)
     }
 }
 
-/// One path component, and nothing that could leave the granted directory.
+/// Opens a file in the granted directory without following a link into one that
+/// is not, and without blocking on something that is not a file at all.
+///
+/// The flags are the whole point of the function. On Unix `O_NOFOLLOW` fails on a
+/// symbolic link instead of resolving it, and `O_NONBLOCK` means a FIFO does not
+/// park this worker where neither the epoch nor a cancellation can reach it. On
+/// Windows `FILE_FLAG_OPEN_REPARSE_POINT` opens the link itself, so the caller's
+/// `is_file` check on the handle refuses it.
+fn open_without_following(path: &Path) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    options.open(path)
+}
+
+/// Exactly one ordinary path component, and nothing that could leave the
+/// granted directory on any platform this ships to.
+///
+/// The colon is the one that is easy to miss. `Path::join` replaces the whole
+/// path when what it is given carries a prefix, so on Windows a grant rooted at
+/// `C:\games` joined with `D:secrets.txt` becomes `D:secrets.txt` — the grant is
+/// gone — and `C:x` resolves against that drive's current directory. Rejecting
+/// `:` outright is what makes this checkable on a Unix CI, where `:` is an
+/// ordinary character and `components()` would happily call it `Normal`.
 fn valid_entry_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
-        && !name.chars().any(char::is_control)
+    if name.is_empty()
+        || name.len() > MAX_ENTRY_NAME_BYTES
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.contains('\0')
+        || name.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let mut components = Path::new(name).components();
+    let single = matches!(components.next(), Some(PathComponent::Normal(first)) if first == OsStr::new(name));
+    single && components.next().is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -837,6 +1034,9 @@ pub enum PluginRuntimeError {
     DeadlineExceeded,
     Cancelled,
     MemoryLimit,
+    /// Refused because Orivo's global plugin memory ceiling was already full.
+    /// The plugin asked for something reasonable at a bad moment.
+    HostMemoryExhausted,
     Trapped,
     /// The component returned a WIT error. The message is presentation-safe.
     Plugin {
@@ -868,6 +1068,7 @@ impl PluginRuntimeError {
             Self::Cancelled
                 | Self::CapabilityUndeclared(_)
                 | Self::EngineUnavailable
+                | Self::HostMemoryExhausted
                 | Self::Paused
                 | Self::Busy
         )
@@ -920,12 +1121,22 @@ impl std::fmt::Display for PluginRuntimeError {
             }
             Self::Cancelled => write!(formatter, "The plugin call was cancelled."),
             Self::MemoryLimit => {
-                write!(formatter, "The plugin asked for more memory than it may use.")
+                write!(
+                    formatter,
+                    "The plugin asked for more memory than it may use."
+                )
             }
+            Self::HostMemoryExhausted => write!(
+                formatter,
+                "Orivo's plugins are already using all the memory it sets aside for them."
+            ),
             Self::Trapped => write!(formatter, "The plugin stopped unexpectedly."),
             Self::Plugin { message, .. } => write!(formatter, "{message}"),
             Self::InvalidResult(reason) => {
-                write!(formatter, "The plugin returned an unusable result ({reason}).")
+                write!(
+                    formatter,
+                    "The plugin returned an unusable result ({reason})."
+                )
             }
         }
     }
@@ -1243,6 +1454,15 @@ impl PluginRuntime {
     }
 
     #[allow(dead_code)]
+    /// Bytes currently held against the global ceiling. A leak here is
+    /// invisible from the outside until the ceiling stops working, so a test
+    /// reads it directly.
+    #[cfg(test)]
+    fn committed_memory(&self) -> usize {
+        self.inner.budget.committed.load(Ordering::Acquire)
+    }
+
+    #[allow(dead_code)]
     pub fn journal(&self) -> &Arc<PluginJournal> {
         &self.inner.journal
     }
@@ -1377,6 +1597,7 @@ impl PluginRuntime {
             Ok(Err(JobError::Cancelled)) => Err(PluginRuntimeError::Cancelled),
             Ok(Err(JobError::Runtime(error))) => Err(error),
             Ok(Err(JobError::Abandoned)) => Err(PluginRuntimeError::EngineUnavailable),
+            Ok(Err(JobError::Panicked)) => Err(PluginRuntimeError::Trapped),
             Err(handle) => {
                 handle.cancel();
                 Err(PluginRuntimeError::DeadlineExceeded)
@@ -1422,7 +1643,11 @@ impl PluginRuntime {
     /// nothing between calls — no cached handle, no open directory, no linear
     /// memory — which is what makes a per-invocation fuel and memory budget
     /// meaningful instead of cumulative.
-    pub fn invoke(
+    ///
+    /// Private, and it has to stay private: this runs guest code, and guest code
+    /// may only run on a thread with [`PLUGIN_THREAD_STACK_BYTES`] of stack.
+    /// `submit` is the door, because the scheduler is what guarantees that.
+    fn invoke(
         &self,
         prepared: &PreparedComponent,
         plugin_id: &str,
@@ -1445,12 +1670,15 @@ impl PluginRuntime {
                     limits: self.inner.limits,
                     budget: Arc::clone(&self.inner.budget),
                     charged: 0,
-                    hit_limit: false,
+                    pending: 0,
+                    hit_limit: None,
                 },
                 cancel: Arc::clone(cancel),
                 ticks_remaining: ticks,
+                deadline_at: Instant::now() + deadline,
                 interruption: None,
                 host_calls: 0,
+                host_call_budget_reported: false,
                 bytes_read: 0,
             },
         );
@@ -1468,7 +1696,11 @@ impl PluginRuntime {
                 state.interruption = Some(Interruption::Cancelled);
                 return Ok(UpdateDeadline::Interrupt);
             }
-            if state.ticks_remaining == 0 {
+            // Whichever of the two runs out first. The tick count is the
+            // deterministic one — a test can drive it by hand — and the clock is
+            // the honest one, because time spent in a host call advances it and
+            // does not advance the count.
+            if state.ticks_remaining == 0 || Instant::now() >= state.deadline_at {
                 state.interruption = Some(Interruption::Deadline);
                 return Ok(UpdateDeadline::Interrupt);
             }
@@ -1697,7 +1929,7 @@ impl PluginRuntime {
                     .orivo_plugin_runner()
                     .call_prepare_launch(&mut *store, profile_id, game_reference)
                     .map_err(|error| self.classify(store, error))??;
-                validate_launch_intent(intent, profile_id, game_reference)
+                validate_launch_intent(intent, &store.data().plugin_id, profile_id, game_reference)
                     .map(PluginResponse::LaunchIntent)
             }
         }
@@ -1716,8 +1948,12 @@ impl PluginRuntime {
                 Interruption::Deadline => PluginRuntimeError::DeadlineExceeded,
             };
         }
-        if state.memory.hit_limit {
-            return PluginRuntimeError::MemoryLimit;
+        match state.memory.hit_limit {
+            Some(MemoryLimitKind::Instance) => return PluginRuntimeError::MemoryLimit,
+            // Refused because every other live instance had already filled the
+            // ceiling. Not this plugin's doing, so it must not be its failure.
+            Some(MemoryLimitKind::Host) => return PluginRuntimeError::HostMemoryExhausted,
+            None => {}
         }
         match error.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => PluginRuntimeError::FuelExhausted,
@@ -1774,9 +2010,7 @@ fn optional_text(
     }
 }
 
-fn validate_identity(
-    identity: wit_core::Identity,
-) -> Result<PluginIdentity, PluginRuntimeError> {
+fn validate_identity(identity: wit_core::Identity) -> Result<PluginIdentity, PluginRuntimeError> {
     if !valid_opaque_id(&identity.id, MAX_RESULT_ID_BYTES) {
         return Err(PluginRuntimeError::InvalidResult("identity id"));
     }
@@ -1802,9 +2036,7 @@ fn validate_identity(
     })
 }
 
-fn validate_health(
-    health: wit_core::Health,
-) -> Result<PluginHealth, PluginRuntimeError> {
+fn validate_health(health: wit_core::Health) -> Result<PluginHealth, PluginRuntimeError> {
     Ok(PluginHealth {
         ready: health.ready,
         message: optional_text(health.message, MAX_RESULT_TEXT_BYTES, "health message")?,
@@ -1885,6 +2117,7 @@ fn validate_discovery_page(
 /// proposing one, and the host does not accept proposals here.
 fn validate_launch_intent(
     intent: wit_runner::LaunchIntent,
+    plugin_id: &str,
     profile_id: &str,
     game_reference: &str,
 ) -> Result<PluginLaunchIntent, PluginRuntimeError> {
@@ -1894,7 +2127,10 @@ fn validate_launch_intent(
     if intent.game_reference != game_reference {
         return Err(PluginRuntimeError::InvalidResult("intent game reference"));
     }
-    if !valid_opaque_id(&intent.runner_id, MAX_RESULT_ID_BYTES) {
+    // A plugin prepares launches for itself and for nothing else. Leaving this
+    // to the opaque-id grammar alone would let one installed runner hand back
+    // another's id, and whatever resolves a runner id later would believe it.
+    if intent.runner_id != plugin_id || !valid_opaque_id(&intent.runner_id, MAX_RESULT_ID_BYTES) {
         return Err(PluginRuntimeError::InvalidResult("intent runner"));
     }
     let mode = match intent.mode.as_str() {
@@ -1912,9 +2148,8 @@ fn validate_launch_intent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin_manifest::{
-        ArtifactDescriptor, ArtifactKind, PLUGIN_SDK_V1, PluginManifest,
-    };
+    use crate::plugin_manifest::{ArtifactDescriptor, ArtifactKind, PLUGIN_SDK_V1, PluginManifest};
+    use crate::plugin_scheduler::JobError;
     use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1928,8 +2163,7 @@ mod tests {
     /// target and no component tool; `build.sh` beside it is how it changes.
     const FIXTURE: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
     /// Regenerated by `build.sh`, which prints this digest.
-    const FIXTURE_SHA256: &str =
-        "3244b7304cf85d8e8a52151174d9116011f51154c586350e0f80c70e252608a8";
+    const FIXTURE_SHA256: &str = "b8e096ae4bc61c7c8d04d775740bce97c39736aba0268657a3994a547ebf90ad";
     /// A component whose only import is WASI. Also built by `build.sh`, from
     /// hand-written component text rather than a second Rust guest.
     const WASI_IMPORT: &[u8] = include_bytes!("../fixtures/wasi-import.wasm");
@@ -1939,6 +2173,20 @@ mod tests {
     const FIXTURE_PLUGIN_ID: &str = "com.orivo.fixture-runner";
     const FIXTURE_PROFILE: &str = "fixture-profile-1";
     const GAMES_GRANT: &str = "fixture-games";
+
+    /// Guest code only ever runs on a thread with the host's stack. The tests
+    /// hold themselves to the scheduler's rule rather than trusting whatever
+    /// stack libtest happened to give them.
+    fn on_a_host_sized_thread<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+        thread::scope(|scope| {
+            thread::Builder::new()
+                .stack_size(PLUGIN_THREAD_STACK_BYTES)
+                .spawn_scoped(scope, work)
+                .expect("a worker-sized thread")
+                .join()
+                .expect("the invocation did not unwind")
+        })
+    }
 
     fn temporary_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -2054,14 +2302,16 @@ mod tests {
             request: PluginRequest,
             cancel: &Arc<AtomicBool>,
         ) -> Result<PluginInvocation, PluginRuntimeError> {
-            self.runtime.invoke(
-                &self.prepared,
-                FIXTURE_PLUGIN_ID,
-                &self.grants,
-                next_correlation_id(),
-                cancel,
-                &request,
-            )
+            on_a_host_sized_thread(|| {
+                self.runtime.invoke(
+                    &self.prepared,
+                    FIXTURE_PLUGIN_ID,
+                    &self.grants,
+                    next_correlation_id(),
+                    cancel,
+                    &request,
+                )
+            })
         }
 
         fn prepare(&self, game_reference: &str) -> Result<PluginResponse, PluginRuntimeError> {
@@ -2104,9 +2354,11 @@ mod tests {
     #[test]
     fn a_component_without_the_runner_world_is_not_invoked() {
         let runtime = PluginRuntime::new().unwrap();
-        let prepared = runtime.prepare_component(EMPTY_COMPONENT, "0".repeat(64).as_str()).unwrap();
-        let error = runtime
-            .invoke(
+        let prepared = runtime
+            .prepare_component(EMPTY_COMPONENT, "0".repeat(64).as_str())
+            .unwrap();
+        let error = on_a_host_sized_thread(|| {
+            runtime.invoke(
                 &prepared,
                 FIXTURE_PLUGIN_ID,
                 &PluginGrants::none(),
@@ -2114,7 +2366,8 @@ mod tests {
                 &Arc::new(AtomicBool::new(false)),
                 &PluginRequest::Identity,
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error, PluginRuntimeError::MissingWorld);
     }
 
@@ -2215,8 +2468,8 @@ mod tests {
             PluginRuntimeError::UnknownImport
         );
         assert_eq!(
-            runtime
-                .invoke(
+            on_a_host_sized_thread(|| {
+                runtime.invoke(
                     &prepared,
                     FIXTURE_PLUGIN_ID,
                     &PluginGrants::none(),
@@ -2224,7 +2477,8 @@ mod tests {
                     &Arc::new(AtomicBool::new(false)),
                     &PluginRequest::Identity,
                 )
-                .unwrap_err(),
+            })
+            .unwrap_err(),
             PluginRuntimeError::UnknownImport
         );
     }
@@ -2371,8 +2625,8 @@ mod tests {
         let grants = PluginGrants::declared_only(&manifest);
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let PluginResponse::Identity(identity) = runtime
-            .invoke(
+        let PluginResponse::Identity(identity) = on_a_host_sized_thread(|| {
+            runtime.invoke(
                 &prepared,
                 FIXTURE_PLUGIN_ID,
                 &grants,
@@ -2380,15 +2634,16 @@ mod tests {
                 &cancel,
                 &PluginRequest::Identity,
             )
-            .unwrap()
-            .response
+        })
+        .unwrap()
+        .response
         else {
             panic!("expected an identity");
         };
         assert_eq!(identity.id, FIXTURE_PLUGIN_ID);
 
-        let error = runtime
-            .invoke(
+        let error = on_a_host_sized_thread(|| {
+            runtime.invoke(
                 &prepared,
                 FIXTURE_PLUGIN_ID,
                 &grants,
@@ -2400,7 +2655,8 @@ mod tests {
                     limit: 4,
                 },
             )
-            .unwrap_err();
+        })
+        .unwrap_err();
         assert!(matches!(
             error,
             PluginRuntimeError::Plugin {
@@ -2444,14 +2700,143 @@ mod tests {
                 ..
             }
         ));
+
+        // Every shape of escape the grammar has to refuse, through the component
+        // rather than through `valid_entry_name` directly: a name is only safe if
+        // it is still refused after crossing the ABI.
+        for escape in [
+            "fixture:read-../secret",
+            "fixture:read-/etc/passwd",
+            "fixture:read-D:secret",
+            "fixture:read-..\\..\\secret",
+        ] {
+            let error = harness.prepare(escape).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    PluginRuntimeError::Plugin {
+                        code: PluginErrorCode::InvalidInput,
+                        ..
+                    }
+                ),
+                "{escape} was answered with {error:?}"
+            );
+        }
+        // And nothing outside the grant was ever handed over.
+        assert!(
+            harness
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .all(|entry| !entry.detail.contains("keychain token"))
+        );
+    }
+
+    /// The listing skips symbolic links, but a plugin can name an entry the
+    /// listing never offered. Checking the path and then reading it again are two
+    /// different objects, so the read has to refuse the link itself.
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_symlink_by_name_never_leaves_the_grant() {
+        let library = FixtureLibrary::new("read-symlink");
+        std::os::unix::fs::symlink(
+            library.root.join("secret.txt"),
+            library.games.join("link.rom"),
+        )
+        .unwrap();
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let error = harness.prepare("fixture:read-link").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "reading a symlink out of the grant returned {error:?}"
+        );
+    }
+
+    /// A FIFO is the one substitution that does not merely read the wrong file:
+    /// a worker parked in `read` is a worker neither the epoch deadline nor a
+    /// cancellation can reach, and there are only two of them.
+    #[cfg(unix)]
+    #[test]
+    fn reading_a_fifo_by_name_does_not_park_a_worker() {
+        let library = FixtureLibrary::new("read-fifo");
+        let path = library.games.join("pipe.rom");
+        let raw = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // Safety: a path this process owns, in a directory it just created.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
+
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let handle = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:read-pipe".into(),
+                },
+            )
+            .unwrap();
+        match handle.wait_for(Duration::from_secs(10)) {
+            Ok(outcome) => {
+                let JobError::Runtime(error) = outcome.unwrap_err() else {
+                    panic!("expected the host's refusal");
+                };
+                assert!(
+                    matches!(
+                        error,
+                        PluginRuntimeError::Plugin {
+                            code: PluginErrorCode::PermissionDenied,
+                            ..
+                        }
+                    ),
+                    "reading a FIFO returned {error:?}"
+                );
+            }
+            Err(handle) => {
+                handle.cancel();
+                panic!("a FIFO parked the worker");
+            }
+        }
     }
 
     #[test]
+    fn a_file_larger_than_the_host_will_read_is_refused() {
+        let library = FixtureLibrary::new("read-big");
+        fs::write(
+            library.games.join("big.rom"),
+            vec![b'x'; MAX_HOST_FILE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(matches!(
+            harness.prepare("fixture:read-big").unwrap_err(),
+            PluginRuntimeError::Plugin {
+                code: PluginErrorCode::PermissionDenied,
+                ..
+            }
+        ));
+    }
+
+    /// Unix only, and deliberately: creating the link is half of what this
+    /// exercises, and a `cfg`-ed-out body would have reported a pass on Windows
+    /// without testing anything at all.
+    #[cfg(unix)]
+    #[test]
     fn a_symlink_inside_a_granted_directory_is_not_listed() {
         let library = FixtureLibrary::new("symlink");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(library.root.join("secret.txt"), library.games.join("zeta.rom"))
-            .unwrap();
+        std::os::unix::fs::symlink(
+            library.root.join("secret.txt"),
+            library.games.join("zeta.rom"),
+        )
+        .unwrap();
         let harness = Harness::new(PluginLimits::default(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
             .call(PluginRequest::DiscoverPage {
@@ -2464,9 +2849,7 @@ mod tests {
             panic!("expected a page");
         };
         assert!(
-            page.games
-                .iter()
-                .all(|game| game.external_id != "zeta"),
+            page.games.iter().all(|game| game.external_id != "zeta"),
             "a symlink out of the grant was listed"
         );
     }
@@ -2573,30 +2956,85 @@ mod tests {
         )
         .unwrap();
 
-        let ticker = runtime.clone();
-        let ticking = thread::spawn(move || {
-            // Three ticks is the budget; the fourth is what the host answers
-            // with an interrupt. Nothing else moves the epoch.
-            for _ in 0..4 {
-                thread::sleep(Duration::from_millis(5));
-                ticker.tick_epoch();
-            }
-        });
-        let error = runtime
-            .invoke(
+        let handle = runtime
+            .submit(
                 &prepared,
                 FIXTURE_PLUGIN_ID,
                 &grants,
-                next_correlation_id(),
-                &Arc::new(AtomicBool::new(false)),
-                &PluginRequest::PrepareLaunch {
+                PluginRequest::PrepareLaunch {
                     profile_id: FIXTURE_PROFILE.into(),
                     game_reference: "fixture:spin".into(),
                 },
             )
-            .unwrap_err();
+            .unwrap();
+        let ticker = runtime.clone();
+        let ticking = thread::spawn(move || {
+            // Three ticks is the budget; the fourth is what the host answers with
+            // an interrupt. Nothing else moves the epoch, and a few spare ticks
+            // are harmless — without the bounded wait below, a broken deadline
+            // would hang on 2^42 fuel instead of failing.
+            for _ in 0..16 {
+                thread::sleep(Duration::from_millis(5));
+                ticker.tick_epoch();
+            }
+        });
+        let outcome = match handle.wait_for(Duration::from_secs(10)) {
+            Ok(outcome) => outcome,
+            Err(handle) => {
+                handle.cancel();
+                ticking.join().unwrap();
+                panic!("the epoch deadline never fired");
+            }
+        };
         ticking.join().unwrap();
-        assert_eq!(error, PluginRuntimeError::DeadlineExceeded);
+        assert_eq!(
+            outcome.unwrap_err(),
+            JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
+        );
+    }
+
+    /// Wasm frames live on the native stack, so `max_wasm_stack` is only a limit
+    /// if the thread underneath it is bigger. Wasmtime's own documentation says
+    /// exhausting the *thread* stack aborts the process, which would take Orivo
+    /// down every time Settings → Plugins probed a package like this one — and
+    /// uninstalling a plugin lives in that panel.
+    ///
+    /// The job runs on a scheduler worker, which is the only place guest code is
+    /// allowed to run, so this test exercises the thread the host actually sizes.
+    #[test]
+    fn a_recursing_component_traps_instead_of_aborting_the_process() {
+        let library = FixtureLibrary::new("recurse");
+        let harness = Harness::new(
+            PluginLimits {
+                // Generous on both other axes: the stack has to be what stops it.
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let handle = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:recurse".into(),
+                },
+            )
+            .unwrap();
+        match handle.wait_for(Duration::from_secs(20)) {
+            Ok(outcome) => assert_eq!(
+                outcome.unwrap_err(),
+                JobError::Runtime(PluginRuntimeError::Trapped)
+            ),
+            Err(handle) => {
+                handle.cancel();
+                panic!("the recursing component never came back");
+            }
+        }
     }
 
     #[test]
@@ -2617,6 +3055,16 @@ mod tests {
         );
     }
 
+    fn guard(runtime: &PluginRuntime) -> StoreMemoryGuard {
+        StoreMemoryGuard {
+            limits: runtime.limits(),
+            budget: Arc::clone(&runtime.inner.budget),
+            charged: 0,
+            pending: 0,
+            hit_limit: None,
+        }
+    }
+
     /// The per-instance ceiling would be meaningless if a second store could
     /// claim the same bytes again.
     #[test]
@@ -2626,6 +3074,103 @@ mod tests {
         assert!(!budget.charge(6 * 1024 * 1024, 8 * 1024 * 1024));
         budget.release(6 * 1024 * 1024);
         assert!(budget.charge(6 * 1024 * 1024, 8 * 1024 * 1024));
+    }
+
+    /// `memories_per_store` allows four memories, so a limit that looks at one
+    /// growth at a time is not a limit on an instance. The guard has to bill the
+    /// store's whole footprint.
+    #[test]
+    fn the_per_instance_ceiling_counts_every_memory_in_the_store() {
+        let runtime = PluginRuntime::with_limits(
+            PluginLimits {
+                instance_memory_bytes: 64 * 1024 * 1024,
+                total_memory_bytes: 256 * 1024 * 1024,
+                ..PluginLimits::default()
+            },
+            EpochMode::Manual,
+        )
+        .unwrap();
+        let mut guard = guard(&runtime);
+
+        assert!(guard.memory_growing(0, 40 * 1024 * 1024, None).unwrap());
+        // A second memory in the same store, each under the ceiling on its own.
+        assert!(!guard.memory_growing(0, 40 * 1024 * 1024, None).unwrap());
+        assert_eq!(guard.hit_limit, Some(MemoryLimitKind::Instance));
+        assert_eq!(runtime.committed_memory(), 40 * 1024 * 1024);
+    }
+
+    /// Wasmtime asks the limiter before it checks the memory's own declared
+    /// maximum, so a growth this guard allowed can still fail. Without the
+    /// refund, a component whose memory is `(memory 1 1)` bills the global
+    /// ceiling on every `memory.grow` and never grows a page — which would let
+    /// one plugin starve every other out of the budget for free.
+    #[test]
+    fn a_growth_that_fails_after_the_limiter_allowed_it_is_refunded() {
+        let runtime =
+            PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Manual).unwrap();
+        let mut guard = guard(&runtime);
+
+        for _ in 0..8 {
+            assert!(
+                guard
+                    .memory_growing(64 * 1024, 32 * 1024 * 1024, Some(64 * 1024))
+                    .unwrap()
+            );
+            guard
+                .memory_grow_failed(wasmtime::Error::msg("maximum size exceeded"))
+                .unwrap();
+        }
+        assert_eq!(runtime.committed_memory(), 0);
+        assert_eq!(guard.charged, 0);
+        // And the store can still grow for real afterwards.
+        assert!(guard.memory_growing(0, 8 * 1024 * 1024, None).unwrap());
+        assert_eq!(runtime.committed_memory(), 8 * 1024 * 1024);
+    }
+
+    /// A store that hit the ceiling must give its bytes back when it is dropped,
+    /// or the second plugin to run inherits the first one's ceiling.
+    #[test]
+    fn a_store_that_exhausted_the_ceiling_returns_it_on_the_next_call() {
+        let library = FixtureLibrary::new("memory-release");
+        let harness = Harness::new(
+            PluginLimits {
+                instance_memory_bytes: 8 * 1024 * 1024,
+                total_memory_bytes: 8 * 1024 * 1024,
+                interactive_deadline: Duration::from_secs(30),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        assert_eq!(
+            harness.prepare("fixture:grow").unwrap_err(),
+            PluginRuntimeError::MemoryLimit
+        );
+        assert_eq!(harness.runtime.committed_memory(), 0);
+        // The ceiling is available again, so an ordinary call still works.
+        assert!(harness.prepare("fixture:ok").is_ok());
+        assert_eq!(harness.runtime.committed_memory(), 0);
+    }
+
+    /// Being refused because *other* plugins had already filled the global
+    /// ceiling is not misbehaviour, and must not push an innocent plugin towards
+    /// `degraded`.
+    #[test]
+    fn a_full_host_ceiling_is_not_the_plugins_failure() {
+        assert!(!PluginRuntimeError::HostMemoryExhausted.counts_as_plugin_failure());
+        assert!(PluginRuntimeError::MemoryLimit.counts_as_plugin_failure());
+
+        let runtime = PluginRuntime::with_limits(
+            PluginLimits {
+                instance_memory_bytes: 8 * 1024 * 1024,
+                total_memory_bytes: 4 * 1024 * 1024,
+                ..PluginLimits::default()
+            },
+            EpochMode::Manual,
+        )
+        .unwrap();
+        let mut guard = guard(&runtime);
+        assert!(!guard.memory_growing(0, 6 * 1024 * 1024, None).unwrap());
+        assert_eq!(guard.hit_limit, Some(MemoryLimitKind::Host));
     }
 
     #[test]
@@ -2721,6 +3266,54 @@ mod tests {
     }
 
     #[test]
+    fn the_host_refuses_an_intent_that_names_another_runner() {
+        let library = FixtureLibrary::new("bad-runner");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert_eq!(
+            harness.prepare("fixture:bad-runner").unwrap_err(),
+            PluginRuntimeError::InvalidResult("intent runner")
+        );
+    }
+
+    /// `host-journal` is free of charge in the sense that matters — a plugin may
+    /// always explain itself — but not free of accounting. Sharing one ring with
+    /// the host's decisions would let a component bury the refusal it just earned
+    /// under its own chatter, and leaving the call unmetered would make it the one
+    /// import a component can call without limit.
+    #[test]
+    fn a_plugins_chatter_cannot_bury_the_hosts_decisions() {
+        let library = FixtureLibrary::new("chatty");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:chatty").is_ok());
+
+        let decisions = harness.runtime.journal().entries();
+        assert!(
+            decisions
+                .iter()
+                .any(|entry| entry.decision == "scope-refused"),
+            "the refusal the plugin earned was evicted by its own logging"
+        );
+
+        let messages = harness.runtime.journal().plugin_messages();
+        assert!(!messages.is_empty());
+        assert!(messages.len() <= MAX_JOURNAL_ENTRIES);
+        // The fixture asks a thousand times; the budget is what stops it.
+        assert!(
+            messages.len() < 1000,
+            "host-journal was not metered: {} messages got through",
+            messages.len()
+        );
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|entry| entry.decision == "host-call-budget")
+                .count(),
+            1,
+            "the exhausted budget was reported more than once"
+        );
+    }
+
+    #[test]
     fn a_plugin_error_reaches_the_host_as_bounded_text() {
         let library = FixtureLibrary::new("fail");
         let harness = Harness::new(PluginLimits::default(), Some(&library));
@@ -2770,7 +3363,10 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(
-                    vec![candidate("prov", "one", "One"), candidate("prov", "two", "Two")],
+                    vec![
+                        candidate("prov", "one", "One"),
+                        candidate("prov", "two", "Two")
+                    ],
                     None,
                     true,
                 ),
@@ -2782,7 +3378,10 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(
-                    vec![candidate("prov", "one", "One"), candidate("prov", "one", "Again")],
+                    vec![
+                        candidate("prov", "one", "One"),
+                        candidate("prov", "one", "Again")
+                    ],
                     None,
                     true,
                 ),
@@ -2801,7 +3400,11 @@ mod tests {
         );
         assert_eq!(
             validate_discovery_page(
-                page(vec![candidate("prov", "one", "One")], Some("../escape"), false),
+                page(
+                    vec![candidate("prov", "one", "One")],
+                    Some("../escape"),
+                    false
+                ),
                 4,
             )
             .unwrap_err(),
@@ -2825,15 +3428,33 @@ mod tests {
         );
     }
 
+    /// The grammar is checked here rather than through the filesystem because
+    /// the names that matter most are the ones that only escape on Windows, and
+    /// CI runs `cargo check` there, not `cargo test`. A drive prefix makes
+    /// `Path::join` throw the grant away entirely.
     #[test]
-    fn an_entry_name_is_one_component_or_nothing() {
+    fn an_entry_name_is_one_ordinary_component_or_nothing() {
         assert!(valid_entry_name("alpha.rom"));
+        assert!(valid_entry_name("Alpha Quest (1994).rom"));
+
         assert!(!valid_entry_name(""));
+        assert!(!valid_entry_name("."));
         assert!(!valid_entry_name(".."));
         assert!(!valid_entry_name("../secret.txt"));
         assert!(!valid_entry_name("nested/alpha.rom"));
+        assert!(!valid_entry_name("/etc/passwd"));
         assert!(!valid_entry_name("alpha\\beta"));
+        assert!(!valid_entry_name("\\\\server\\share\\secret.txt"));
         assert!(!valid_entry_name("alpha\u{0}.rom"));
+        assert!(!valid_entry_name("alpha\u{7}.rom"));
+        assert!(!valid_entry_name(&"a".repeat(MAX_ENTRY_NAME_BYTES + 1)));
+
+        // A Windows drive prefix: `root.join("D:secrets.txt")` is
+        // `D:secrets.txt`, and `C:x` resolves against that drive's own current
+        // directory. Neither is inside the grant.
+        assert!(!valid_entry_name("D:secrets.txt"));
+        assert!(!valid_entry_name("C:x"));
+        assert!(!valid_entry_name("C:\\Windows\\System32\\config\\SAM"));
     }
 
     // -----------------------------------------------------------------------
@@ -2879,13 +3500,32 @@ mod tests {
         let started = Instant::now();
         assert_eq!(handle.wait().unwrap_err(), JobError::Cancelled);
         assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(
-            !harness
+
+        // Past the failure threshold, so this distinguishes "a cancellation does
+        // not count" from "it counts, and three have not happened yet".
+        for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
+            let handle = harness
                 .runtime
-                .scheduler()
-                .health(FIXTURE_PLUGIN_ID)
-                .degraded
-        );
+                .submit(
+                    &harness.prepared,
+                    FIXTURE_PLUGIN_ID,
+                    &harness.grants,
+                    PluginRequest::PrepareLaunch {
+                        profile_id: FIXTURE_PROFILE.into(),
+                        game_reference: "fixture:spin".into(),
+                    },
+                )
+                .expect("a cancelled plugin is still accepted");
+            let handle = handle
+                .wait_for(Duration::from_millis(30))
+                .err()
+                .expect("an endless component is still running after 30ms");
+            handle.cancel();
+            assert_eq!(handle.wait().unwrap_err(), JobError::Cancelled);
+        }
+        let health = harness.runtime.scheduler().health(FIXTURE_PLUGIN_ID);
+        assert!(!health.degraded, "cancellations were blamed on the plugin");
+        assert_eq!(health.consecutive_failures, 0);
     }
 
     #[test]
@@ -3007,14 +3647,14 @@ mod tests {
             .unwrap();
         let compile = compile_started.elapsed();
 
-        let prepared_launch = harness.call_with(launch.clone(), &Arc::new(AtomicBool::new(false)))
+        let prepared_launch = harness
+            .call_with(launch.clone(), &Arc::new(AtomicBool::new(false)))
             .unwrap();
         let prepared_discover = harness
             .call_with(discover, &Arc::new(AtomicBool::new(false)))
             .unwrap();
-        let first_launch = harness
-            .runtime
-            .invoke(
+        let first_launch = on_a_host_sized_thread(|| {
+            harness.runtime.invoke(
                 &cold,
                 FIXTURE_PLUGIN_ID,
                 &harness.grants,
@@ -3022,7 +3662,8 @@ mod tests {
                 &Arc::new(AtomicBool::new(false)),
                 &launch,
             )
-            .unwrap();
+        })
+        .unwrap();
 
         println!(
             "fixture {} bytes\n  compile            {:?}\n  prepare-launch     instantiate {:?} call {:?} fuel {}\n  discover-page      instantiate {:?} call {:?} fuel {}\n  cold prepare-launch (compile + instantiate + call) {:?}",

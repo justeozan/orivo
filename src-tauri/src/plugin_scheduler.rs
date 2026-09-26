@@ -18,8 +18,8 @@
 //! cancellation and the degraded transition without a WebAssembly component.
 
 use crate::plugin_runtime::{
-    CorrelationId, DEFAULT_MAX_CONSECUTIVE_FAILURES, PluginJournal, PluginRuntimeError,
-    next_correlation_id,
+    CorrelationId, DEFAULT_MAX_CONSECUTIVE_FAILURES, PLUGIN_THREAD_STACK_BYTES, PluginJournal,
+    PluginRuntimeError, next_correlation_id,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -46,6 +46,11 @@ pub struct SchedulerLimits {
     /// looking at the thing they asked for.
     pub queue_depth_per_plugin: usize,
     pub max_consecutive_failures: u32,
+    /// Stack for each worker. Workers are the only threads that run guest code,
+    /// so this is where the host's wasm-stack limit is actually made true: the
+    /// default 2 MiB Rust thread stack is no larger than the limit itself, which
+    /// leaves nothing for the host frames on top of it.
+    pub worker_stack_bytes: usize,
 }
 
 impl Default for SchedulerLimits {
@@ -54,6 +59,7 @@ impl Default for SchedulerLimits {
             max_concurrency: 2,
             queue_depth_per_plugin: 8,
             max_consecutive_failures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
+            worker_stack_bytes: PLUGIN_THREAD_STACK_BYTES,
         }
     }
 }
@@ -72,12 +78,8 @@ pub enum JobState {
 /// the plugin first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubmitError {
-    Busy {
-        queued: usize,
-    },
-    Degraded {
-        consecutive_failures: u32,
-    },
+    Busy { queued: usize },
+    Degraded { consecutive_failures: u32 },
     ShuttingDown,
 }
 
@@ -105,6 +107,8 @@ pub enum JobError {
     Runtime(PluginRuntimeError),
     /// The worker went away before the job ran — shutdown, not misbehaviour.
     Abandoned,
+    /// The job unwound. The worker survived it; the value did not.
+    Panicked,
 }
 
 impl std::fmt::Display for JobError {
@@ -113,6 +117,7 @@ impl std::fmt::Display for JobError {
             Self::Cancelled => write!(formatter, "The plugin job was cancelled."),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Abandoned => write!(formatter, "The plugin job did not run."),
+            Self::Panicked => write!(formatter, "The plugin job stopped unexpectedly."),
         }
     }
 }
@@ -296,6 +301,10 @@ impl PluginScheduler {
                 let inner = Arc::clone(&inner);
                 thread::Builder::new()
                     .name(format!("orivo-plugin-{index}"))
+                    // Never below the host's own wasm stack limit, whatever a
+                    // caller passed in: a worker too small to hold it turns a
+                    // guest stack overflow into an abort of Orivo.
+                    .stack_size(limits.worker_stack_bytes.max(PLUGIN_THREAD_STACK_BYTES))
                     .spawn(move || inner.work())
                     .ok()
             })
@@ -328,42 +337,69 @@ impl PluginScheduler {
             correlation_id,
             plugin_id: plugin_id.to_owned(),
             cancel: Arc::clone(&cancel),
-            work: Box::new(move |context| match work(context) {
-                Ok(value) => (
-                    JobReport::Done,
-                    Box::new(move || {
-                        let _ = sender.send(Ok(value));
-                    }) as Delivery,
-                ),
-                Err(PluginRuntimeError::Cancelled) => (
-                    JobReport::Cancelled,
-                    Box::new(move || {
-                        let _ = sender.send(Err(JobError::Cancelled));
-                    }) as Delivery,
-                ),
-                Err(error) => {
-                    let report = if error.counts_as_plugin_failure() {
-                        JobReport::Failed
-                    } else {
-                        JobReport::Refused
-                    };
-                    journal.record(
-                        context.correlation_id(),
-                        &plugin_for_work,
-                        "job-failed",
-                        error.to_string(),
-                    );
-                    (
-                        report,
+            work: Box::new(move |context| {
+                // Inside the closure, because out here the sender is still owned:
+                // catching further out would leave the caller with nothing but a
+                // disconnected channel and a race against the bookkeeping.
+                let outcome =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(context)));
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(_) => {
+                        journal.record(
+                            context.correlation_id(),
+                            &plugin_for_work,
+                            "job-panicked",
+                            "the job unwound; the worker survived it",
+                        );
+                        return (
+                            JobReport::Failed,
+                            Box::new(move || {
+                                let _ = sender.send(Err(JobError::Panicked));
+                            }) as Delivery,
+                        );
+                    }
+                };
+                match outcome {
+                    Ok(value) => (
+                        JobReport::Done,
                         Box::new(move || {
-                            let _ = sender.send(Err(JobError::Runtime(error)));
+                            let _ = sender.send(Ok(value));
                         }) as Delivery,
-                    )
+                    ),
+                    Err(PluginRuntimeError::Cancelled) => (
+                        JobReport::Cancelled,
+                        Box::new(move || {
+                            let _ = sender.send(Err(JobError::Cancelled));
+                        }) as Delivery,
+                    ),
+                    Err(error) => {
+                        let report = if error.counts_as_plugin_failure() {
+                            JobReport::Failed
+                        } else {
+                            JobReport::Refused
+                        };
+                        journal.record(
+                            context.correlation_id(),
+                            &plugin_for_work,
+                            "job-failed",
+                            error.to_string(),
+                        );
+                        (
+                            report,
+                            Box::new(move || {
+                                let _ = sender.send(Err(JobError::Runtime(error)));
+                            }) as Delivery,
+                        )
+                    }
                 }
             }),
         };
 
-        {
+        // Decide under the lock, journal outside it. `record` writes to stderr,
+        // and a write that fails while this lock is held poisons it — after which
+        // every `submit` in the session answers `ShuttingDown`.
+        let refusal = {
             let mut state = self
                 .inner
                 .state
@@ -374,30 +410,34 @@ impl PluginScheduler {
             }
             let plugin = state.plugins.entry(plugin_id.to_owned()).or_default();
             if plugin.degraded {
-                let failures = plugin.consecutive_failures;
-                self.inner.journal.record(
-                    correlation_id,
-                    plugin_id,
-                    "submit-refused",
-                    "the plugin is paused after repeated failures",
-                );
-                return Err(SubmitError::Degraded {
-                    consecutive_failures: failures,
-                });
+                Some(SubmitError::Degraded {
+                    consecutive_failures: plugin.consecutive_failures,
+                })
+            } else if plugin.queued >= self.inner.limits.queue_depth_per_plugin {
+                Some(SubmitError::Busy {
+                    queued: plugin.queued,
+                })
+            } else {
+                plugin.queued += 1;
+                state.jobs.insert(correlation_id, JobState::Queued);
+                state.queue.push_back(task);
+                None
             }
-            if plugin.queued >= self.inner.limits.queue_depth_per_plugin {
-                let queued = plugin.queued;
-                self.inner.journal.record(
-                    correlation_id,
-                    plugin_id,
-                    "submit-refused",
-                    format!("the plugin queue is full ({queued} waiting)"),
-                );
-                return Err(SubmitError::Busy { queued });
-            }
-            plugin.queued += 1;
-            state.jobs.insert(correlation_id, JobState::Queued);
-            state.queue.push_back(task);
+        };
+        if let Some(refusal) = refusal {
+            let detail = match &refusal {
+                SubmitError::Degraded { .. } => {
+                    "the plugin is paused after repeated failures".to_string()
+                }
+                SubmitError::Busy { queued } => {
+                    format!("the plugin queue is full ({queued} waiting)")
+                }
+                SubmitError::ShuttingDown => "the plugin worker is closing".to_string(),
+            };
+            self.inner
+                .journal
+                .record(correlation_id, plugin_id, "submit-refused", detail);
+            return Err(refusal);
         }
         self.inner.wake.notify_all();
         Ok(JobHandle {
@@ -414,12 +454,15 @@ impl PluginScheduler {
             .lock()
             .ok()
             .and_then(|state| {
-                state.plugins.get(plugin_id).map(|plugin| PluginHealthState {
-                    queued: plugin.queued,
-                    running: plugin.running,
-                    consecutive_failures: plugin.consecutive_failures,
-                    degraded: plugin.degraded,
-                })
+                state
+                    .plugins
+                    .get(plugin_id)
+                    .map(|plugin| PluginHealthState {
+                        queued: plugin.queued,
+                        running: plugin.running,
+                        consecutive_failures: plugin.consecutive_failures,
+                        degraded: plugin.degraded,
+                    })
             })
             .unwrap_or_default()
     }
@@ -471,9 +514,13 @@ impl Inner {
             .unwrap_or(JobState::Done)
     }
 
+    /// Why a caller was woken by a disconnect rather than a value. A job the
+    /// scheduler recorded as failed, yet which never delivered anything, is one
+    /// that unwound — the delivery closure went down with it.
     fn abandoned_reason(&self, correlation_id: CorrelationId) -> JobError {
         match self.job_state(correlation_id) {
             JobState::Cancelled => JobError::Cancelled,
+            JobState::Failed => JobError::Panicked,
             _ => JobError::Abandoned,
         }
     }
@@ -573,9 +620,19 @@ impl Inner {
             };
             let plugin_id = task.plugin_id.clone();
             let correlation_id = task.correlation_id;
-            let (report, deliver) = (task.work)(&context);
-            self.finish(&plugin_id, correlation_id, report);
-            deliver();
+            // The job's own panic is handled where the sender still lives; this
+            // outer guard is for anything else that could unwind on a worker —
+            // the journal, the bookkeeping — because a worker is a scarce,
+            // permanent resource. Letting one unwind out of `work` would shrink
+            // the pool for the rest of the session, and two would stop plugins
+            // entirely.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (task.work)(&context))) {
+                Ok((report, deliver)) => {
+                    self.finish(&plugin_id, correlation_id, report);
+                    deliver();
+                }
+                Err(_) => self.finish(&plugin_id, correlation_id, JobReport::Failed),
+            }
         }
     }
 
@@ -644,6 +701,7 @@ impl SchedulerState {
 mod tests {
     use super::*;
     use crate::plugin_manifest::PluginCapability;
+    use crate::plugin_runtime::PLUGIN_WASM_STACK_BYTES;
     use std::sync::atomic::AtomicUsize;
 
     const PLUGIN: &str = "com.orivo.fixture-runner";
@@ -697,6 +755,73 @@ mod tests {
         assert_eq!(handle.wait().unwrap(), 42);
         assert_eq!(scheduler.health(PLUGIN).consecutive_failures, 0);
         assert!(correlation_id.0 > 0);
+    }
+
+    /// A worker is the only thread allowed to run guest code, so it has to be
+    /// able to hold the host's whole wasm stack limit *and* the host frames that
+    /// sit on top of it. With the default 2 MiB Rust thread stack this job
+    /// overflows and the process aborts, taking the test binary with it — which
+    /// is exactly what a plugin would do to Orivo.
+    #[test]
+    fn a_worker_has_room_for_the_whole_wasm_stack_and_host_frames() {
+        /// Recurses until it has really consumed `target` bytes of stack, so the
+        /// assertion does not depend on how large the optimiser makes a frame.
+        fn descend(base: usize, target: usize) -> usize {
+            let marker = 0u8;
+            let here = &marker as *const u8 as usize;
+            let used = base.saturating_sub(here);
+            if used >= target {
+                return used;
+            }
+            let deeper = descend(base, target);
+            std::hint::black_box([marker; 64]);
+            deeper
+        }
+
+        let scheduler = scheduler(SchedulerLimits::default());
+        // Just past the wasm stack limit: the property is that a worker can hold
+        // the whole of it and still have somewhere to put a host frame. A default
+        // 2 MiB thread cannot, and overflowing a Rust stack aborts the process.
+        let target = PLUGIN_WASM_STACK_BYTES + 512 * 1024;
+        let used = scheduler
+            .submit(PLUGIN, move |_| {
+                let base = &target as *const usize as usize;
+                Ok(descend(base, target))
+            })
+            .unwrap()
+            .wait()
+            .unwrap();
+        assert!(used >= target, "a worker only had {used} bytes of stack");
+    }
+
+    /// One job unwinding must cost that job. A worker that unwound out of `work`
+    /// would leave the pool permanently smaller, and two would stop plugins for
+    /// the rest of the session.
+    #[test]
+    fn a_panicking_job_costs_one_job_and_not_the_worker() {
+        let scheduler = scheduler(SchedulerLimits {
+            max_concurrency: 1,
+            max_consecutive_failures: 8,
+            ..SchedulerLimits::default()
+        });
+        for _ in 0..3 {
+            let handle = scheduler
+                .submit::<(), _>(PLUGIN, |_| panic!("a host bug inside a job"))
+                .unwrap();
+            assert_eq!(handle.wait().unwrap_err(), JobError::Panicked);
+        }
+        // The pool is still the pool.
+        assert_eq!(
+            scheduler
+                .submit(PLUGIN, |_| Ok(11))
+                .unwrap()
+                .wait()
+                .unwrap(),
+            11
+        );
+        // And an unwind is still a failure, so a component that only ever panics
+        // still reaches `degraded`.
+        assert_eq!(scheduler.health(PLUGIN).consecutive_failures, 0);
     }
 
     #[test]
@@ -818,7 +943,10 @@ mod tests {
         // No timer and no retry loop: a human resumes it.
         scheduler.resume(PLUGIN);
         assert!(!scheduler.health(PLUGIN).degraded);
-        assert_eq!(scheduler.submit(PLUGIN, |_| Ok(7)).unwrap().wait().unwrap(), 7);
+        assert_eq!(
+            scheduler.submit(PLUGIN, |_| Ok(7)).unwrap().wait().unwrap(),
+            7
+        );
     }
 
     #[test]
@@ -834,7 +962,11 @@ mod tests {
                 .wait();
         }
         assert_eq!(scheduler.health(PLUGIN).consecutive_failures, 2);
-        scheduler.submit(PLUGIN, |_| Ok(())).unwrap().wait().unwrap();
+        scheduler
+            .submit(PLUGIN, |_| Ok(()))
+            .unwrap()
+            .wait()
+            .unwrap();
         assert_eq!(scheduler.health(PLUGIN).consecutive_failures, 0);
         assert!(!scheduler.health(PLUGIN).degraded);
     }
