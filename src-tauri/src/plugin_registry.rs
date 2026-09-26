@@ -99,7 +99,11 @@ impl PluginRegistry {
             })
             .map(|(directory, mut plugin)| {
                 if plugin.record.state == PluginState::Ready {
-                    match plugin.preflight(runtime, RunnerCheck::ContractAndHealth) {
+                    // The Store resolves this surface every time it opens, and a
+                    // manifest may declare `installer` *and* `runner`. Probing
+                    // here would run guest code on that path; the installer's own
+                    // contract is not this host slice's to judge either way.
+                    match plugin.preflight(runtime, RunnerCheck::ContractOnly) {
                         Ok(()) => {}
                         Err(message) => {
                             plugin.record.state = PluginState::Invalid;
