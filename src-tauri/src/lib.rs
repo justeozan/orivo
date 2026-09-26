@@ -8,6 +8,7 @@ mod plugin_installer;
 mod plugin_manifest;
 mod plugin_registry;
 mod plugin_runtime;
+mod plugin_scheduler;
 mod preferences;
 mod quiky_installer;
 mod source_epic;
