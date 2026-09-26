@@ -23,7 +23,16 @@ const SCHEMA_VERSION_V6: u32 = 6;
 /// opaque runner identifier, never a Wine executable path or command.
 pub const WINE_STAGING_RUNNER_ID: &str = "com.orivo.wine-staging";
 
+/// The stable identity for Orivo's Winlator runner on Android. Like every
+/// runner id it is opaque: never an Android package name, an activity class,
+/// or an intent.
+pub const WINLATOR_RUNNER_ID: &str = "com.orivo.winlator";
+
 fn default_wine_profile_enabled() -> bool {
+    true
+}
+
+fn default_winlator_profile_enabled() -> bool {
     true
 }
 
@@ -199,6 +208,14 @@ pub struct Catalog {
     /// executable. A library `Game` deliberately holds only `game_ref`.
     #[serde(default)]
     pub wine_inventory: Vec<WineGameInventoryEntry>,
+    /// Host-private Winlator references. Unlike Wine these carry no prefix and
+    /// no engine binary: Winlator owns both, inside its own app storage.
+    #[serde(default)]
+    pub winlator_profiles: Vec<WinlatorProfile>,
+    /// Host-private mapping from opaque Winlator game references to the
+    /// exported shortcut file Orivo hands back to Winlator at launch.
+    #[serde(default)]
+    pub winlator_inventory: Vec<WinlatorShortcutInventoryEntry>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -476,6 +493,79 @@ pub enum WinePrefixLayout {
     LegacySharedProfile,
 }
 
+/// Which Winlator build a profile points at. This is closed because each entry
+/// is a different Android package whose *exported* launch surface differs, as
+/// read from that project's own `AndroidManifest.xml`. A distribution can never
+/// be a package name supplied by the WebView.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum WinlatorDistribution {
+    /// The `com.winlator.cmod` lineage (Winlator Cmod and the forks that took
+    /// its code), the only published Winlator family whose display activity is
+    /// exported and therefore reachable from another app.
+    #[default]
+    Cmod,
+    /// brunodev85's official `com.winlator` build. A profile may name it so
+    /// Orivo can say *why* it cannot start a game there instead of failing
+    /// silently: its display activity is not exported.
+    Official,
+}
+
+/// A Winlator installation Orivo may hand a game to.
+///
+/// This is deliberately a reference and not a prefix. A Winlator Wine prefix
+/// lives inside a *container*, in Winlator's private app storage, which Orivo
+/// can neither create, read, nor validate. What Orivo does own is the granted
+/// directory holding the shortcuts Winlator exported for a frontend, and the
+/// decision to send an intent at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WinlatorProfile {
+    /// Opaque, stable Orivo profile identifier.
+    pub id: String,
+    /// User-facing label, distinct from any filesystem component.
+    pub display_name: String,
+    #[serde(default)]
+    pub distribution: WinlatorDistribution,
+    /// The Winlator container to activate for shortcuts that do not name one.
+    /// Winlator numbers its own containers and Orivo cannot enumerate them, so
+    /// this is an unverifiable hint bounded to a small integer.
+    #[serde(default)]
+    pub container_id: Option<u32>,
+    /// Directories explicitly granted to this profile, where Winlator wrote
+    /// its exported frontend shortcuts. No implicit device-wide fallback.
+    #[serde(default)]
+    pub shortcut_directories: Vec<PathBuf>,
+    /// Disabled profiles and their games stay persisted and visible, but
+    /// cannot be launched until the user enables them again.
+    #[serde(default = "default_winlator_profile_enabled")]
+    pub enabled: bool,
+    /// Unix milliseconds of the last completed import, if one has completed.
+    #[serde(default)]
+    pub last_imported_at: Option<u64>,
+}
+
+/// The private shortcut inventory behind a Winlator runner game. `game_ref` is
+/// the sole value copied into `LaunchTarget::Runner`; `shortcut_path` never
+/// crosses the WebView boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WinlatorShortcutInventoryEntry {
+    pub profile_id: String,
+    pub game_ref: String,
+    pub title: String,
+    /// The `.desktop` file Winlator exported into a granted directory. Orivo
+    /// reads and hashes this file; it never reads the container behind it.
+    pub shortcut_path: PathBuf,
+    /// A namespaced content hash of the shortcut file, so a rewritten shortcut
+    /// is refused until a deliberate reimport has updated this inventory.
+    pub fingerprint: String,
+    /// The container id Winlator wrote into the exported shortcut, when it
+    /// wrote one. Absent means Winlator resolves the container itself.
+    #[serde(default)]
+    pub container_id: Option<u32>,
+    #[serde(default)]
+    pub imported_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Game {
     pub id: String,
@@ -584,6 +674,8 @@ impl Default for Catalog {
             games: Vec::new(),
             wine_profiles: Vec::new(),
             wine_inventory: Vec::new(),
+            winlator_profiles: Vec::new(),
+            winlator_inventory: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -674,6 +766,9 @@ impl Catalog {
         if let Some((runner_id, profile_id, game_ref)) = runner_target_key(&game) {
             if runner_id == WINE_STAGING_RUNNER_ID {
                 self.validate_wine_runner_reference(profile_id, game_ref)?;
+            }
+            if runner_id == WINLATOR_RUNNER_ID {
+                self.validate_winlator_runner_reference(profile_id, game_ref)?;
             }
             if self.games.iter().any(|existing| {
                 runner_target_key(existing)
@@ -896,6 +991,9 @@ impl Catalog {
         if runner_id == WINE_STAGING_RUNNER_ID {
             self.validate_wine_runner_reference(profile_id, game_ref)?;
         }
+        if runner_id == WINLATOR_RUNNER_ID {
+            self.validate_winlator_runner_reference(profile_id, game_ref)?;
+        }
 
         if let Some(index) = self.games.iter().position(|existing| {
             runner_target_key(existing)
@@ -999,6 +1097,83 @@ impl Catalog {
         }
 
         self.wine_inventory.push(entry);
+        Ok(true)
+    }
+
+    /// Return a Winlator profile by its opaque host identifier. Callers must
+    /// not project this value or any of its paths into a WebView response.
+    pub fn winlator_profile(&self, profile_id: &str) -> Option<&WinlatorProfile> {
+        self.winlator_profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+    }
+
+    /// Return the private inventory entry for a typed Winlator runner
+    /// reference.
+    pub fn winlator_inventory_entry(
+        &self,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Option<&WinlatorShortcutInventoryEntry> {
+        self.winlator_inventory
+            .iter()
+            .find(|entry| entry.profile_id == profile_id && entry.game_ref == game_ref)
+    }
+
+    /// Insert or replace a Winlator profile after structural validation.
+    /// Narrowing a profile's grant cannot leave an inventory entry outside it:
+    /// the full candidate catalog is validated before it is adopted.
+    pub fn upsert_winlator_profile(
+        &mut self,
+        mut profile: WinlatorProfile,
+    ) -> Result<bool, CatalogError> {
+        profile.validate()?;
+        if let Some(index) = self
+            .winlator_profiles
+            .iter()
+            .position(|existing| existing.id == profile.id)
+        {
+            if profile.last_imported_at.is_none() {
+                profile.last_imported_at = self.winlator_profiles[index].last_imported_at;
+            }
+            let mut candidate = self.clone();
+            candidate.winlator_profiles[index] = profile;
+            candidate.validate()?;
+            *self = candidate;
+            return Ok(false);
+        }
+
+        let mut candidate = self.clone();
+        candidate.winlator_profiles.push(profile);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
+    /// Insert or refresh a private Winlator inventory entry. The entry is
+    /// scoped to an existing profile and its shortcut must remain inside one of
+    /// that profile's granted directories.
+    pub fn upsert_winlator_inventory(
+        &mut self,
+        mut entry: WinlatorShortcutInventoryEntry,
+    ) -> Result<bool, CatalogError> {
+        entry.validate()?;
+        let profile = self.winlator_profile(&entry.profile_id).ok_or_else(|| {
+            CatalogError::Invalid("Winlator inventory entry references an unknown profile".into())
+        })?;
+        validate_winlator_inventory_scope(&entry, profile)?;
+
+        if let Some(index) = self.winlator_inventory.iter().position(|existing| {
+            existing.profile_id == entry.profile_id && existing.game_ref == entry.game_ref
+        }) {
+            if entry.imported_at.is_none() {
+                entry.imported_at = self.winlator_inventory[index].imported_at;
+            }
+            self.winlator_inventory[index] = entry;
+            return Ok(false);
+        }
+
+        self.winlator_inventory.push(entry);
         Ok(true)
     }
 
@@ -1146,6 +1321,37 @@ impl Catalog {
             }
         }
 
+        let mut winlator_profiles = BTreeMap::new();
+        for profile in &self.winlator_profiles {
+            profile.validate()?;
+            if winlator_profiles
+                .insert(profile.id.as_str(), profile)
+                .is_some()
+            {
+                return Err(CatalogError::Invalid(
+                    "duplicate Winlator profile id".into(),
+                ));
+            }
+        }
+
+        let mut winlator_inventory = BTreeSet::new();
+        for entry in &self.winlator_inventory {
+            entry.validate()?;
+            let profile = winlator_profiles
+                .get(entry.profile_id.as_str())
+                .ok_or_else(|| {
+                    CatalogError::Invalid(
+                        "Winlator inventory entry references an unknown profile".into(),
+                    )
+                })?;
+            validate_winlator_inventory_scope(entry, profile)?;
+            if !winlator_inventory.insert((entry.profile_id.as_str(), entry.game_ref.as_str())) {
+                return Err(CatalogError::Invalid(
+                    "duplicate Winlator inventory game reference for profile".into(),
+                ));
+            }
+        }
+
         let mut ids = BTreeSet::new();
         let mut source_ids = BTreeSet::new();
         let mut runner_targets = BTreeSet::new();
@@ -1185,6 +1391,17 @@ impl Catalog {
                     // to inventory validation cannot weaken runner targets.
                     profile.validate()?;
                 }
+                if runner_id == WINLATOR_RUNNER_ID {
+                    let profile = winlator_profiles.get(profile_id).ok_or_else(|| {
+                        CatalogError::Invalid("Winlator game references an unknown profile".into())
+                    })?;
+                    if !winlator_inventory.contains(&(profile_id, game_ref)) {
+                        return Err(CatalogError::Invalid(
+                            "Winlator game is missing its private inventory entry".into(),
+                        ));
+                    }
+                    profile.validate()?;
+                }
             }
             if matches!(&game.launch_target, LaunchTarget::Direct) {
                 direct_games.insert(game.id.as_str(), game);
@@ -1213,6 +1430,25 @@ impl Catalog {
         if self.wine_inventory_entry(profile_id, game_ref).is_none() {
             return Err(CatalogError::Invalid(
                 "Wine game is missing its private inventory entry".into(),
+            ));
+        }
+        profile.validate()
+    }
+
+    fn validate_winlator_runner_reference(
+        &self,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Result<(), CatalogError> {
+        let profile = self.winlator_profile(profile_id).ok_or_else(|| {
+            CatalogError::Invalid("Winlator game references an unknown profile".into())
+        })?;
+        if self
+            .winlator_inventory_entry(profile_id, game_ref)
+            .is_none()
+        {
+            return Err(CatalogError::Invalid(
+                "Winlator game is missing its private inventory entry".into(),
             ));
         }
         profile.validate()
@@ -1317,6 +1553,103 @@ impl WineGameInventoryEntry {
             validate_direct_game_id(direct_game_id)?;
         }
         Ok(())
+    }
+}
+
+const MAX_WINLATOR_PROFILE_NAME_LENGTH: usize = 120;
+const MAX_WINLATOR_GAME_TITLE_LENGTH: usize = 512;
+const MAX_WINLATOR_FINGERPRINT_LENGTH: usize = 256;
+/// Winlator numbers containers from 1 upwards as the user creates them. The
+/// ceiling is not Winlator's — it is Orivo refusing to persist an integer wide
+/// enough to be something other than a container number.
+const MAX_WINLATOR_CONTAINER_ID: u32 = 9_999;
+
+impl WinlatorProfile {
+    /// Validate only the stable on-disk shape of a profile. There is no engine
+    /// binary and no prefix to check here, and deliberately no attempt to
+    /// verify the container: it lives in Winlator's private storage. The host
+    /// rechecks the granted directories and the shortcut file immediately
+    /// before an import or a launch.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.id, MAX_PROFILE_ID_LENGTH)?;
+        validate_display_text(
+            "Winlator profile name",
+            &self.display_name,
+            MAX_WINLATOR_PROFILE_NAME_LENGTH,
+        )?;
+        validate_winlator_container_id(self.container_id)?;
+        if self.shortcut_directories.is_empty() {
+            return Err(CatalogError::Invalid(
+                "Winlator profile needs at least one granted shortcut directory".into(),
+            ));
+        }
+        let mut shortcut_directories = BTreeSet::new();
+        for directory in &self.shortcut_directories {
+            validate_private_absolute_path("Winlator shortcut directory", directory)?;
+            if !shortcut_directories.insert(directory) {
+                return Err(CatalogError::Invalid(
+                    "Winlator profile has duplicate granted shortcut directories".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl WinlatorShortcutInventoryEntry {
+    /// The path here is private host data. This verifies its durable shape;
+    /// the host canonicalises it and rechecks it against a live grant before it
+    /// reads the shortcut or sends an intent.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.profile_id, MAX_PROFILE_ID_LENGTH)?;
+        validate_opaque_runner_token("game reference", &self.game_ref, MAX_GAME_REF_LENGTH)?;
+        validate_display_text(
+            "Winlator game title",
+            &self.title,
+            MAX_WINLATOR_GAME_TITLE_LENGTH,
+        )?;
+        validate_private_absolute_path("Winlator shortcut", &self.shortcut_path)?;
+        if !self
+            .shortcut_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+        {
+            return Err(CatalogError::Invalid(
+                "Winlator inventory shortcut must be a .desktop file".into(),
+            ));
+        }
+        validate_opaque_runner_token(
+            "Winlator game fingerprint",
+            &self.fingerprint,
+            MAX_WINLATOR_FINGERPRINT_LENGTH,
+        )?;
+        validate_winlator_container_id(self.container_id)
+    }
+}
+
+fn validate_winlator_container_id(container_id: Option<u32>) -> Result<(), CatalogError> {
+    match container_id {
+        Some(id) if id == 0 || id > MAX_WINLATOR_CONTAINER_ID => Err(CatalogError::Invalid(
+            format!("Winlator container id must be between 1 and {MAX_WINLATOR_CONTAINER_ID}"),
+        )),
+        Some(_) | None => Ok(()),
+    }
+}
+
+fn validate_winlator_inventory_scope(
+    entry: &WinlatorShortcutInventoryEntry,
+    profile: &WinlatorProfile,
+) -> Result<(), CatalogError> {
+    if profile.shortcut_directories.iter().any(|directory| {
+        entry.shortcut_path.as_path() != directory.as_path()
+            && entry.shortcut_path.starts_with(directory)
+    }) {
+        Ok(())
+    } else {
+        Err(CatalogError::Invalid(
+            "Winlator shortcut is outside the profile's granted directories".into(),
+        ))
     }
 }
 
@@ -3333,6 +3666,201 @@ mod tests {
             play_time_seconds: 0,
             extra: BTreeMap::new(),
         }
+    }
+
+    fn winlator_reference_profile() -> WinlatorProfile {
+        WinlatorProfile {
+            id: "winlator-profile-1".into(),
+            display_name: "Winlator".into(),
+            distribution: WinlatorDistribution::Cmod,
+            container_id: None,
+            shortcut_directories: vec![PathBuf::from(
+                "/storage/emulated/0/Download/Winlator/Frontend",
+            )],
+            enabled: true,
+            last_imported_at: Some(1_721_553_600_000),
+        }
+    }
+
+    fn winlator_shortcut_entry(game_ref: &str) -> WinlatorShortcutInventoryEntry {
+        WinlatorShortcutInventoryEntry {
+            profile_id: "winlator-profile-1".into(),
+            game_ref: game_ref.into(),
+            title: "Windows Example".into(),
+            shortcut_path: PathBuf::from(
+                "/storage/emulated/0/Download/Winlator/Frontend/Example.desktop",
+            ),
+            fingerprint: "sha256:abc123".into(),
+            container_id: Some(2),
+            imported_at: Some(1_721_553_600_000),
+        }
+    }
+
+    fn winlator_runner_game(game_ref: &str, title: &str) -> Game {
+        Game {
+            id: format!("runner:winlator:{game_ref}"),
+            title: title.into(),
+            executable_path: None,
+            source: GameSource::Local,
+            source_id: None,
+            launch_target: LaunchTarget::Runner {
+                runner_id: WINLATOR_RUNNER_ID.into(),
+                game_ref: game_ref.into(),
+                profile_id: "winlator-profile-1".into(),
+            },
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: None,
+            metadata: None,
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
+            logo_path: None,
+            hidden: false,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn persists_a_winlator_profile_inventory_and_runner_card() {
+        let mut catalog = Catalog::default();
+        assert!(
+            catalog
+                .upsert_winlator_profile(winlator_reference_profile())
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .upsert_winlator_inventory(winlator_shortcut_entry("shortcut:abc"))
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .upsert_runner(winlator_runner_game("shortcut:abc", "Windows Example"))
+                .unwrap()
+        );
+        catalog.validate().unwrap();
+
+        let card = &catalog.games[0];
+        // The card is the only thing a view model is built from, so the shortcut
+        // path must not be reachable through it.
+        assert!(card.executable_path.is_none());
+        assert!(card.installation_path.is_none());
+        assert!(card.arguments.is_empty());
+        assert_eq!(
+            catalog
+                .winlator_inventory_entry("winlator-profile-1", "shortcut:abc")
+                .map(|entry| entry.container_id),
+            Some(Some(2))
+        );
+    }
+
+    #[test]
+    fn refuses_a_winlator_shortcut_outside_the_profile_grant() {
+        let mut catalog = Catalog::default();
+        catalog
+            .upsert_winlator_profile(winlator_reference_profile())
+            .unwrap();
+        let mut entry = winlator_shortcut_entry("shortcut:abc");
+        entry.shortcut_path = PathBuf::from("/storage/emulated/0/Download/Elsewhere.desktop");
+        assert!(catalog.upsert_winlator_inventory(entry).is_err());
+        assert!(catalog.winlator_inventory.is_empty());
+    }
+
+    /// A Winlator inventory entry points at a shortcut Winlator wrote, never at
+    /// an executable Orivo could be tricked into treating as one.
+    #[test]
+    fn refuses_a_winlator_inventory_entry_that_is_not_a_desktop_file() {
+        let mut catalog = Catalog::default();
+        catalog
+            .upsert_winlator_profile(winlator_reference_profile())
+            .unwrap();
+        let mut entry = winlator_shortcut_entry("shortcut:abc");
+        entry.shortcut_path =
+            PathBuf::from("/storage/emulated/0/Download/Winlator/Frontend/Example.exe");
+        assert!(catalog.upsert_winlator_inventory(entry).is_err());
+    }
+
+    #[test]
+    fn refuses_a_container_id_that_is_not_a_container_number() {
+        let mut catalog = Catalog::default();
+        for container_id in [Some(0), Some(10_000)] {
+            let mut profile = winlator_reference_profile();
+            profile.container_id = container_id;
+            assert!(
+                catalog.upsert_winlator_profile(profile).is_err(),
+                "accepted container id {container_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_a_winlator_profile_without_a_granted_shortcut_directory() {
+        let mut catalog = Catalog::default();
+        let mut profile = winlator_reference_profile();
+        profile.shortcut_directories.clear();
+        assert!(catalog.upsert_winlator_profile(profile).is_err());
+    }
+
+    /// A Winlator card without its private inventory entry would be a launch
+    /// target the host cannot resolve, so the catalog refuses to hold one.
+    #[test]
+    fn refuses_a_winlator_card_without_its_private_inventory_entry() {
+        let mut catalog = Catalog::default();
+        catalog
+            .upsert_winlator_profile(winlator_reference_profile())
+            .unwrap();
+        assert!(
+            catalog
+                .upsert_runner(winlator_runner_game("shortcut:abc", "Windows Example"))
+                .is_err()
+        );
+        assert!(
+            catalog
+                .add(winlator_runner_game("shortcut:abc", "Windows Example"))
+                .is_err()
+        );
+    }
+
+    /// Winlator support adds two optional arrays rather than a schema version:
+    /// a v7 file written before this change stays readable, and reading then
+    /// writing it must not disturb anything a user already had.
+    #[test]
+    fn a_v7_catalog_written_without_winlator_fields_still_loads_and_round_trips() {
+        let path = temporary_catalog_path("winlator-round-trip");
+        fs::write(
+            &path,
+            format!(
+                r#"{{"schema_version":{CURRENT_SCHEMA_VERSION},"games":[],"wine_profiles":[],"wine_inventory":[]}}"#
+            ),
+        )
+        .unwrap();
+
+        let loaded = Catalog::load_with_migration(&path).unwrap();
+        assert_eq!(loaded.migrated_from, None);
+        assert!(loaded.catalog.winlator_profiles.is_empty());
+        assert!(loaded.catalog.winlator_inventory.is_empty());
+
+        let mut catalog = loaded.catalog;
+        catalog
+            .upsert_winlator_profile(winlator_reference_profile())
+            .unwrap();
+        catalog
+            .upsert_winlator_inventory(winlator_shortcut_entry("shortcut:abc"))
+            .unwrap();
+        catalog.save_atomically(&path).unwrap();
+
+        let reloaded = Catalog::load(&path).unwrap();
+        assert_eq!(reloaded, catalog);
+        assert_eq!(reloaded.schema_version, CURRENT_SCHEMA_VERSION);
+        fs::remove_file(&path).ok();
     }
 
     fn wine_profile() -> WineProfile {
