@@ -32,6 +32,17 @@ défaut sur Apple Silicon (détecté via `hw.optional.arm64`) : archive épingl�
 allowlistée, téléchargée puis hachée par le host, DLL copiées dans le seul
 préfixe Orivo et override hôte fixe, sans GPTK ni CrossOver.
 
+Un second adapter natif existe désormais : le runner **Winlator** pour Android.
+Winlator étant une application Android et non une bibliothèque, ce runner est un
+passage de relais et non un processus possédé : le profil Orivo n’est qu’une
+référence (distribution, container, dossiers accordés), parce que le préfixe Wine
+vit dans un container du stockage privé de Winlator qu’Orivo ne peut ni créer ni
+lire. Le lancement est une Intent Android explicite émise en JNI, construite par
+une fonction pure dont les clés d’extra sont des constantes de compilation — donc
+jamais une commande, jamais un shell, et testable sur l’hôte. Ce que Winlator
+expose réellement, quelles distributions sont lançables et pourquoi, est consigné
+dans [`docs/winlator-runner.md`](winlator-runner.md).
+
 L’installateur de packages est désormais implémenté. Un plugin arrive sous
 forme d’archive `.orivo-plugin` (tar gzippé) contenant `manifest.json`,
 `component.wasm`, ses assets déclarés et une signature Ed25519 optionnelle. Le
