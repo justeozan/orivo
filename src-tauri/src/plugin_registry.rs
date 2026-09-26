@@ -767,6 +767,65 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A manifest may declare `installer` *and* `runner`, and the Store resolves
+    /// the installer surface every time it opens. That path must not run guest
+    /// code, so it asks for the contract only — while the surface that actually
+    /// chooses a runner still probes.
+    ///
+    /// The package here passes the contract and fails the probe, so the two
+    /// surfaces have to disagree about it. If `installer_plugin` asked for
+    /// `ContractAndHealth`, its row would be `Invalid` and this fails.
+    #[test]
+    fn the_installer_surface_grades_a_runner_without_calling_it() {
+        let root = temporary_root();
+        let directory = root.join("com.orivo.impostor");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("component.wasm"), RUNNER_COMPONENT).unwrap();
+        let manifest = PluginManifest {
+            // Not the identity the component reports, so the probe refuses it.
+            id: "com.orivo.impostor".into(),
+            name: "Impostor Acquirer".into(),
+            version: "1.0.0".into(),
+            sdk: PLUGIN_SDK_V1.into(),
+            min_orivo_version: Some("0.3.0".into()),
+            extensions: vec![PluginExtension::Installer, PluginExtension::Runner],
+            capabilities: vec![
+                PluginCapability::NetworkFetch,
+                PluginCapability::RunnerPrepare,
+                PluginCapability::FilesRead,
+            ],
+            network_domains: vec!["example.com".into()],
+            artifacts: vec![ArtifactDescriptor {
+                path: "component.wasm".into(),
+                kind: ArtifactKind::Component,
+                sha256: sha256_of(RUNNER_COMPONENT),
+                byte_size: RUNNER_COMPONENT.len() as u64,
+            }],
+        };
+        fs::write(
+            directory.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::new().unwrap();
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+
+        let installer = registry
+            .installer_plugin(&runtime)
+            .expect("the installer surface is resolved");
+        assert_eq!(installer.state, PluginState::Ready);
+
+        let runner = registry
+            .runner_plugins(&runtime)
+            .into_iter()
+            .find(|plugin| plugin.id == "com.orivo.impostor")
+            .expect("the same package is listed as a runner");
+        assert_eq!(runner.state, PluginState::Invalid);
+        assert!(runner.message.contains("does not match the package"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn directory_grants_stay_opaque_in_a_runner_view() {
         let view = RunnerPluginView {

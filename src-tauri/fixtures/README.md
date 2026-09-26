@@ -82,9 +82,10 @@ These exist so a suite can be adversarial without reaching into private state.
 - **Cost.** A successful `invoke` returns `InvocationCost`: instantiation, call
   and fuel actually burned.
 - **Journal, in two halves.** `entries()` is the host's decisions and
-  `plugin_messages()` is the plugin's own text. They are separate rings so a
-  component cannot bury a refusal under its own logging, and a test can assert on
-  either without the other interfering.
+  `plugin_messages()` is the plugin's own text. They are separate rings, so
+  logging cannot push a refusal out of the host's — though the host's ring is
+  bounded as well, and enough refusals in one session will scroll the earlier ones
+  out of it.
 - **Worker stacks.** Guest code runs on scheduler workers and nowhere else, sized
   from `PLUGIN_THREAD_STACK_BYTES`. `PluginRuntime::invoke` is private for that
   reason: a thread smaller than `max_wasm_stack` plus host headroom turns a guest

@@ -141,8 +141,10 @@ interface host-files {
 /// attempt is recorded beside it.
 ///
 /// It is still metered like every other host call, and messages are truncated.
-/// They are kept apart from the host's own record of its decisions, so however
-/// much a plugin logs it cannot bury the refusals it earned. Nothing here
+/// They are kept in their own ring, apart from the host's record of its
+/// decisions, so logging cannot push those decisions out. Note what that does
+/// *not* promise: the host's ring is bounded too, and a plugin that earns enough
+/// refusals in one session will scroll the earlier ones out of it. Nothing here
 /// reaches the WebView as-is.
 interface host-journal {
   enum journal-level {

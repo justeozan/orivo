@@ -804,13 +804,21 @@ mod tests {
             max_consecutive_failures: 8,
             ..SchedulerLimits::default()
         });
-        for _ in 0..3 {
+        for expected in 1..=3 {
             let handle = scheduler
                 .submit::<(), _>(PLUGIN, |_| panic!("a host bug inside a job"))
                 .unwrap();
             assert_eq!(handle.wait().unwrap_err(), JobError::Panicked);
+            // Asserted here rather than at the end: after a success the counter
+            // is zero either way, which is how the first version of this test
+            // passed without an unwind ever counting for anything.
+            assert_eq!(
+                scheduler.health(PLUGIN).consecutive_failures,
+                expected,
+                "an unwind was not counted as a failure"
+            );
         }
-        // The pool is still the pool.
+        // The pool is still the pool: three panics cost three jobs and no worker.
         assert_eq!(
             scheduler
                 .submit(PLUGIN, |_| Ok(11))
@@ -819,8 +827,6 @@ mod tests {
                 .unwrap(),
             11
         );
-        // And an unwind is still a failure, so a component that only ever panics
-        // still reaches `degraded`.
         assert_eq!(scheduler.health(PLUGIN).consecutive_failures, 0);
     }
 
