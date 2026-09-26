@@ -42,8 +42,10 @@ wasm-tools validate --features component-model "$OUT"
 # toolchain at all, only the same encoder.
 wasm-tools parse "$FIXTURES/wasi-import.wat" -o "$FIXTURES/wasi-import.wasm"
 wasm-tools parse "$FIXTURES/memory64.wat" -o "$FIXTURES/memory64.wasm"
+wasm-tools parse "$FIXTURES/composed-memories.wat" -o "$FIXTURES/composed-memories.wasm"
 
-for artefact in "$OUT" "$FIXTURES/wasi-import.wasm" "$FIXTURES/memory64.wasm"; do
+for artefact in "$OUT" "$FIXTURES/wasi-import.wasm" "$FIXTURES/memory64.wasm" \
+  "$FIXTURES/composed-memories.wasm"; do
   printf '%s  %s  %s bytes\n' \
     "$(shasum -a 256 "$artefact" | cut -d' ' -f1)" \
     "$(basename "$artefact")" \

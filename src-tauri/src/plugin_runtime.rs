@@ -950,6 +950,18 @@ impl host_files::Host for HostState {
     }
 }
 
+/// Turns an unwind into a typed refusal. Generic over the work so the catching
+/// itself is testable: the production caller hands it a compilation, and a test
+/// hands it a panic.
+fn without_unwinding<T>(
+    work: impl FnOnce() -> Result<T, PluginRuntimeError>,
+) -> Result<T, PluginRuntimeError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)) {
+        Ok(outcome) => outcome,
+        Err(_) => Err(PluginRuntimeError::InvalidComponent),
+    }
+}
+
 /// Reads at most `ceiling` bytes, and refuses rather than quietly truncating.
 ///
 /// Split out from `read_file` because the bound is otherwise only reachable by
@@ -970,6 +982,11 @@ fn read_at_most(reader: impl Read, ceiling: u64) -> Option<Vec<u8>> {
 /// serial port. Win32 also ignores everything from the first dot, so `NUL.rom` is
 /// still `NUL`. They are refused on every platform because this validator is a
 /// pure function and Orivo's CI runs `cargo test` on macOS, not on Windows.
+/// Superscript digits Win32 folds onto their ASCII counterparts, so `COM¹` is
+/// `COM1`. An ASCII-only comparison does not see them.
+const WINDOWS_SUPERSCRIPT_DIGITS: [(char, char); 3] =
+    [('\u{b9}', '1'), ('\u{b2}', '2'), ('\u{b3}', '3')];
+
 const WINDOWS_DEVICE_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
     "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
@@ -977,10 +994,25 @@ const WINDOWS_DEVICE_NAMES: &[&str] = &[
 ];
 
 fn is_windows_device_name(resolved: &str) -> bool {
-    let stem = resolved.split('.').next().unwrap_or(resolved);
+    // The stem gets the same treatment as the whole name: Win32 trims the spaces
+    // before the dot too, so `NUL .rom` is `NUL`.
+    let stem = resolved
+        .split('.')
+        .next()
+        .unwrap_or(resolved)
+        .trim_end_matches(' ');
+    let folded = stem
+        .chars()
+        .map(|character| {
+            WINDOWS_SUPERSCRIPT_DIGITS
+                .iter()
+                .find_map(|(superscript, digit)| (*superscript == character).then_some(*digit))
+                .unwrap_or(character)
+        })
+        .collect::<String>();
     WINDOWS_DEVICE_NAMES
         .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
+        .any(|device| folded.eq_ignore_ascii_case(device))
 }
 
 /// Opens a file in the granted directory without following a link into one that
@@ -1459,14 +1491,17 @@ impl PluginRuntime {
             .wasm_component_model(true)
             .consume_fuel(true)
             .epoch_interruption(true)
-            // The canonical ABI needs one ordinary 32-bit memory per core
-            // module. Wasmtime enables both of these by default, and a plugin has
-            // no use for either: a second private memory is only extra surface,
-            // and a 64-bit one reaches the "growth exceeds address space" path,
-            // which is the one place Wasmtime tells a `ResourceLimiter` a growth
-            // failed without having asked it first.
+            // A 64-bit memory is the one way a guest reaches Wasmtime's "growth
+            // exceeds address space" path, which is the only place it tells a
+            // `ResourceLimiter` that a growth failed *without having asked it
+            // first*. The canonical ABI has no use for one.
+            //
+            // Multi-memory stays on, and must: Wasmtime synthesises its own
+            // adapter modules for values crossing between composed components,
+            // those adapters import both memories, and it validates them with
+            // the engine's features behind an `expect`. Turning it off does not
+            // refuse such a component — it panics.
             .wasm_memory64(false)
-            .wasm_multi_memory(false)
             .max_wasm_stack(PLUGIN_WASM_STACK_BYTES)
             .cranelift_opt_level(OptLevel::SpeedAndSize);
         let engine = Engine::new(&config).map_err(|_| PluginRuntimeError::EngineUnavailable)?;
@@ -1661,9 +1696,7 @@ impl PluginRuntime {
     /// Compilation validates every nested core module in a component. No guest
     /// code runs here, so fuel is not consumed and no grant is needed.
     pub fn preflight_component(&self, bytes: &[u8]) -> Result<(), PluginRuntimeError> {
-        Component::new(&self.inner.engine, bytes)
-            .map(|_| ())
-            .map_err(|_| PluginRuntimeError::InvalidComponent)
+        self.compile(bytes).map(|_| ())
     }
 
     /// Compiles once and keeps the result. Preparing ahead of a first call is
@@ -1674,12 +1707,28 @@ impl PluginRuntime {
         bytes: &[u8],
         sha256: &str,
     ) -> Result<PreparedComponent, PluginRuntimeError> {
-        Component::new(&self.inner.engine, bytes)
-            .map(|component| PreparedComponent {
-                component,
-                sha256: sha256.to_owned(),
-            })
-            .map_err(|_| PluginRuntimeError::InvalidComponent)
+        self.compile(bytes).map(|component| PreparedComponent {
+            component,
+            sha256: sha256.to_owned(),
+        })
+    }
+
+    /// Compiling untrusted bytes must produce a component or a typed error, and
+    /// never an unwind.
+    ///
+    /// Wasmtime's component translator asserts on its own invariants — it
+    /// `expect`s that the adapter modules it generates validate, for one — and
+    /// the caller here is `install_plugin_from_file`, which runs on the main
+    /// thread. A panic there is an aborted app rather than a refused package, so
+    /// the guard is worth having even though every panic behind it is a bug
+    /// somewhere: a bug that refuses a plugin is a support question, and a bug
+    /// that closes Orivo is an outage. Nothing is installed into the engine until
+    /// compilation returns, so there is no half-registered module to inherit.
+    fn compile(&self, bytes: &[u8]) -> Result<Component, PluginRuntimeError> {
+        without_unwinding(|| {
+            Component::new(&self.inner.engine, bytes)
+                .map_err(|_| PluginRuntimeError::InvalidComponent)
+        })
     }
 
     /// One call into a component, under grants and limits, from start to
@@ -2219,6 +2268,12 @@ mod tests {
     const MEMORY64: &[u8] = include_bytes!("../fixtures/memory64.wasm");
     const MEMORY64_SHA256: &str =
         "864557361c1ee165e36a852e29c7ad04ae387811096e63adb349bea7d213b614";
+    /// Two composed components, each with its own memory, and a string crossing
+    /// between them — the shape that makes Wasmtime synthesise an adapter module
+    /// importing both memories.
+    const COMPOSED_MEMORIES: &[u8] = include_bytes!("../fixtures/composed-memories.wasm");
+    const COMPOSED_MEMORIES_SHA256: &str =
+        "db7ab4e72cadfabed845032b85baf0f9ff884e8cca50fa8ef18e305846b40d82";
 
     const FIXTURE_PLUGIN_ID: &str = "com.orivo.fixture-runner";
     const FIXTURE_PROFILE: &str = "fixture-profile-1";
@@ -3059,6 +3114,56 @@ mod tests {
         }
     }
 
+    /// Wasm frames live on the native stack, so `max_wasm_stack` is only a limit
+    /// if the thread underneath it is bigger. Wasmtime's documentation says
+    /// exhausting the *thread* stack aborts the process, which would take Orivo
+    /// down every time Settings → Plugins probed a package like this — and
+    /// uninstalling a plugin lives in that panel.
+    ///
+    /// Read the result honestly: this passes with the worker stack at its default
+    /// too, because an overflow taken *inside wasm* hits Wasmtime's guard page and
+    /// becomes a trap. The stack size is what protects the case this cannot reach
+    /// — an overflow taken in host code, in a host function or a trampoline — and
+    /// `a_worker_has_room_for_the_whole_wasm_stack_and_host_frames` is the test
+    /// that fails without it. This one is the guest-side regression guard: a
+    /// future change that made deep guest recursion abort instead of trap would
+    /// fail here.
+    #[test]
+    fn a_recursing_component_traps_instead_of_aborting_the_process() {
+        let library = FixtureLibrary::new("recurse");
+        let harness = Harness::new(
+            PluginLimits {
+                // Generous on both other axes: the stack has to be what stops it.
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let handle = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:recurse".into(),
+                },
+            )
+            .unwrap();
+        match handle.wait_for(Duration::from_secs(20)) {
+            Ok(outcome) => assert_eq!(
+                outcome.unwrap_err(),
+                JobError::Runtime(PluginRuntimeError::Trapped)
+            ),
+            Err(handle) => {
+                handle.cancel();
+                panic!("the recursing component never came back");
+            }
+        }
+    }
+
     /// Isolates the tick half. The epoch tick is a whole second, so the wall
     /// clock cannot have run out in the few milliseconds this takes: only the
     /// count of observed ticks can end the call.
@@ -3238,6 +3343,37 @@ mod tests {
     /// The ABI needs one ordinary 32-bit memory per core module. A 64-bit one is
     /// how a component reaches the address-space overflow path above, so it is
     /// refused before it is ever compiled.
+    /// Wasmtime's own adapter modules import two memories when a value crosses
+    /// between composed components, and it validates them with the engine's
+    /// features and an `expect`. Turning multi-memory off therefore does not
+    /// refuse such a component — it *panics*, inside a command that runs on the
+    /// main thread. Compiling untrusted bytes must only ever produce a value or a
+    /// typed error.
+    #[test]
+    fn an_unwind_while_compiling_becomes_a_refusal() {
+        assert_eq!(without_unwinding(|| Ok(7)), Ok(7));
+        assert_eq!(
+            without_unwinding::<()>(|| panic!("wasmtime asserted on its own invariant")),
+            Err(PluginRuntimeError::InvalidComponent)
+        );
+    }
+
+    #[test]
+    fn a_composed_component_with_two_memories_does_not_panic_the_host() {
+        let mut digest = Sha256::new();
+        digest.update(COMPOSED_MEMORIES);
+        assert_eq!(format!("{:x}", digest.finalize()), COMPOSED_MEMORIES_SHA256);
+
+        let runtime = PluginRuntime::new().unwrap();
+        // Either outcome is acceptable; an unwind is not, and is what this
+        // catches. A panic here fails the test rather than aborting, because
+        // compilation is guarded.
+        match runtime.prepare_component(COMPOSED_MEMORIES, COMPOSED_MEMORIES_SHA256) {
+            Ok(_) => {}
+            Err(error) => assert_eq!(error, PluginRuntimeError::InvalidComponent),
+        }
+    }
+
     #[test]
     fn a_component_with_a_64_bit_memory_is_refused() {
         let mut digest = Sha256::new();
@@ -3605,6 +3741,13 @@ mod tests {
         assert!(!valid_entry_name("CON."));
         assert!(!valid_entry_name("com1 "));
         assert!(!valid_entry_name("..."));
+        // Win32 trims the spaces before the dot as well as at the end.
+        assert!(!valid_entry_name("NUL .rom"));
+        assert!(!valid_entry_name("CON   .txt"));
+        // And it folds the superscript digits onto ASCII ones.
+        assert!(!valid_entry_name("COM\u{b9}"));
+        assert!(!valid_entry_name("COM\u{b2}.rom"));
+        assert!(!valid_entry_name("lpt\u{b3}"));
 
         // And names that merely start the same way are ordinary files.
         assert!(valid_entry_name("console.rom"));

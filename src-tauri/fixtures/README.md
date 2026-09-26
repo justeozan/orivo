@@ -1,6 +1,6 @@
 # Plugin host fixtures
 
-Two committed WebAssembly components, and the seams the host exposes for testing
+Four committed WebAssembly components, and the seams the host exposes for testing
 against them. `cargo test` reads the `.wasm` files and checks their SHA-256; it
 never builds them, so a fresh clone needs no WebAssembly target and no component
 tool.
@@ -9,6 +9,8 @@ tool.
 | --- | --- | --- |
 | `orivo-runner-fixture.wasm` | `runner-fixture/` (Rust + `wit-bindgen`) | The reference third-party runner. Implements `runner-plugin` properly, and misbehaves on request. |
 | `wasi-import.wasm` | `wasi-import.wat` (component text) | The smallest package that must be refused: its only import is WASI. |
+| `memory64.wasm` | `memory64.wat` (component text) | A core module with a 64-bit linear memory. The engine turns that feature off, so this must be refused. |
+| `composed-memories.wasm` | `composed-memories.wat` (component text) | Two composed components, each with its own memory, and a string crossing between them. Makes Wasmtime synthesise an adapter module importing both. |
 
 ## Rebuilding
 
@@ -18,10 +20,10 @@ cargo install wasm-tools --locked --version 1.246.2
 src-tauri/fixtures/runner-fixture/build.sh
 ```
 
-The script prints each artefact's digest and size. Paste the digests into the
-`FIXTURE_SHA256` and `WASI_IMPORT_SHA256` constants in
-`src-tauri/src/plugin_runtime.rs`, and the runner digest into the registry tests
-that build a package around it. A stale digest fails its own test first, which is
+The script prints each artefact's digest and size. Paste them into the
+`FIXTURE_SHA256`, `WASI_IMPORT_SHA256`, `MEMORY64_SHA256` and
+`COMPOSED_MEMORIES_SHA256` constants in `src-tauri/src/plugin_runtime.rs`; the
+registry tests compute the runner digest themselves. A stale digest fails its own test first, which is
 the point: every other sandbox assertion is only meaningful if the artefact under
 test is the one the source describes.
 
@@ -90,3 +92,13 @@ These exist so a suite can be adversarial without reaching into private state.
   from `PLUGIN_THREAD_STACK_BYTES`. `PluginRuntime::invoke` is private for that
   reason: a thread smaller than `max_wasm_stack` plus host headroom turns a guest
   stack overflow into an abort, so the only public door is `submit`.
+- **Compilation cannot unwind.** `without_unwinding` turns a panic inside
+  Wasmtime's translator — it `expect`s its own invariants — into
+  `PluginRuntimeError::InvalidComponent`. It is generic over the work, so a test
+  can hand it a panic instead of a component.
+
+Two of the refusal fixtures are there because of limits the host got wrong once:
+`memory64.wasm` for the feature that reaches Wasmtime's one
+`memory_grow_failed`-without-`memory_growing` path, and `composed-memories.wasm`
+for the adapter modules that made turning multi-memory off a panic rather than a
+refusal.
