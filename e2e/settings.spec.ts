@@ -65,7 +65,8 @@ test.describe("Settings is a page, not a modal", () => {
 
     await page.locator("[data-nav-page='store']").click();
     await waitForPage(page, "store");
-    expect(await currentHash(page)).toBe("#/store");
+    // The Store nav link always requests the PC platform by default.
+    expect(await currentHash(page)).toBe("#/store?platform=pc");
   });
 });
 
@@ -160,21 +161,24 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#wine-settings-panel")).toBeHidden();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
 
-    const installed = page.locator(".plugin-row");
+    // Four "coming soon" rows (Spotify, Moonlight/Sunshine, Playnite,
+    // Ludusavi) now sit alongside the two installed plugins — real, working
+    // teasers, not installable from here — so only the installed ones count.
+    const installed = page.locator(".plugin-row:not(.plugin-row--soon)");
     await expect(installed).toHaveCount(2);
     await expect(installed.nth(0)).toContainText("Wine");
     await expect(installed.nth(1)).toContainText("Wallpaper Searcher");
+    await expect(page.locator(".plugin-row--soon")).toHaveCount(4);
     await expect(page.locator("[data-plugin-open='wine']")).toBeVisible();
     await expect(page.locator("[data-plugin-open='wallpaper-searcher']")).toBeVisible();
 
-    // The catalogue is the host's now. This suite runs in a plain browser with
-    // no Tauri, so the registry answers nothing and the group says so instead
-    // of listing plugins that could never be installed from here.
+    // This suite runs in a plain browser with no Tauri, so the live registry
+    // answers nothing and no real catalogue row is ever rendered — but the
+    // "coming soon" teasers above fill the panel, so the empty-registry
+    // notice (`refs.pluginsCatalogEmpty`, gated on `matches.length +
+    // soon.length`) has nothing to say and stays hidden.
     await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
-    await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
-    await expect(page.locator("#plugins-catalog-empty")).toHaveText(
-      "Aucun plugin à installer pour le moment.",
-    );
+    await expect(page.locator("#plugins-catalog-empty")).toBeHidden();
     await expect(page.locator("[data-plugin-install-file]")).toBeVisible();
   });
 
@@ -290,7 +294,9 @@ test.describe("Settings ships no fake controls", () => {
     await expect(page.locator("#reset-preferences")).toBeVisible();
 
     await openRoute(page, "#/settings/appearance", "settings");
-    await expect(page.locator("input[name='motion-preference']")).toHaveCount(2);
+    // "full" joined "system"/"reduced" when the Windows animation fix landed
+    // (`b5809d2`), letting a player opt back into motion its OS says to skip.
+    await expect(page.locator("input[name='motion-preference']")).toHaveCount(3);
     await expect(page.locator("input[name='motion-preference'][value='system']")).toBeChecked();
 
     await openRoute(page, "#/settings/data", "settings");
