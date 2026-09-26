@@ -820,7 +820,7 @@ fn flag(game: &Game, key: &str) -> bool {
 /// Everything Orivo can check about a Winlator card without leaving the
 /// catalog. The platform test stays at the call site, because the answer here
 /// is the same on every host and is therefore what a unit test can pin down.
-fn winlator_game_launchable(catalog: &Catalog, profile_id: &str, game_ref: &str) -> bool {
+pub fn winlator_game_launchable(catalog: &Catalog, profile_id: &str, game_ref: &str) -> bool {
     catalog
         .winlator_profile(profile_id)
         .is_some_and(|profile| profile.enabled)

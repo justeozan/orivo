@@ -7390,6 +7390,16 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
                     && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
                     && cfg!(target_os = "macos")
             }
+            // Winlator is the Android answer to the same question Wine answers
+            // on macOS, and the same two host-private records have to be there.
+            LaunchTarget::Runner {
+                runner_id,
+                profile_id,
+                game_ref,
+            } if runner_id == WINLATOR_RUNNER_ID => {
+                cfg!(target_os = "android")
+                    && game_detail::winlator_game_launchable(catalog, profile_id, game_ref)
+            }
             // Third-party runner execution is still deliberately unavailable
             // until its WIT host can resolve a typed intent and grants.
             LaunchTarget::Runner { .. } => false,
