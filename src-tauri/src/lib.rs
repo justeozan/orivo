@@ -1227,7 +1227,7 @@ async fn get_runner_plugins(state: State<'_, AppState>) -> Result<Vec<RunnerPlug
     let root = state.plugin_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = PluginDiscoveryLease(lease_flag);
-        let runtime = PluginRuntime::new().map_err(|error| error.to_string())?;
+        let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
         Ok::<_, String>(
             PluginRegistry::new(root, HostCompatibility::v1(env!("CARGO_PKG_VERSION")))
                 .runner_plugins(&runtime),
