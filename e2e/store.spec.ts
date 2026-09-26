@@ -183,12 +183,17 @@ test.describe("Store return state", () => {
 
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");
-    await page.waitForTimeout(200);
 
-    const focusKey = await page.evaluate(
-      () => (document.activeElement as HTMLElement | null)?.dataset?.focusKey ?? null,
-    );
-    expect(focusKey).toBe(`game-${STORE_SECOND_GAME_ID}`);
+    // `activate()` schedules `restorePageState()` inside a `requestAnimationFrame`
+    // (store-page.ts), one tick the click handler and `waitForPage` do not wait
+    // out on their own, so the focus read polls rather than trusting a fixed
+    // pause — the same race as the compact form-factor's `matchMedia` listener
+    // (81ea15d) and the onboarding wordmark's image decode.
+    await expect
+      .poll(() =>
+        page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset?.focusKey ?? null),
+      )
+      .toBe(`game-${STORE_SECOND_GAME_ID}`);
   });
 
   test("the topbar search is wired to the Store while the Store is open", async ({ page }) => {

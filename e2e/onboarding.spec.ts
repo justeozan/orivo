@@ -43,11 +43,17 @@ test.describe("the library welcome screen", () => {
     // A missing file leaves an <img> that is still "visible" and completely
     // blank, so the decode is what gets asserted: this is the brand, and
     // either it arrives or the screen has a hole where the name should be.
+    // `toBeVisible()` only means the element has a box — an <img> reports
+    // that before its bytes have decoded — so `naturalWidth` is polled rather
+    // than read once, the same race as the compact form-factor's `matchMedia`
+    // listener (81ea15d).
     await expect(wordmark).toBeVisible();
-    expect(
-      await wordmark.evaluate((image: HTMLImageElement) => image.naturalWidth),
-      "the wordmark did not decode — check /media/orivo-logo.png is served",
-    ).toBeGreaterThan(0);
+    await expect
+      .poll(
+        () => wordmark.evaluate((image: HTMLImageElement) => image.naturalWidth),
+        { message: "the wordmark did not decode — check /media/orivo-logo.png is served" },
+      )
+      .toBeGreaterThan(0);
 
     // The alt text finishes the sentence the heading starts, so the accessible
     // name holds up whether or not the artwork ever loaded.
