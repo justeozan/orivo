@@ -133,6 +133,38 @@ shortcut whenever the user re-exports it, and the new file can point at a
 different executable or container, so a changed shortcut is refused until a
 deliberate reimport has updated Orivo's private inventory.
 
+## The one thing that is not resolved: reading the export folder
+
+Sending the intent needs no permission. *Finding* the shortcut does, and Orivo
+does not currently have it.
+
+Measured on the emulator (Pixel 8, Android 17 / API 37), as Orivo's own uid:
+
+```
+$ adb shell run-as io.orivo.desktop ls /storage/emulated/0/Download/Winlator/Frontend
+ls: /storage/emulated/0/Download/Winlator/Frontend: Permission denied
+```
+
+That is scoped storage doing its job: a `.desktop` file is not media, so on
+API 30+ an app opens it by path only with `MANAGE_EXTERNAL_STORAGE`. Orivo's
+manifest asks for `INTERNET` and nothing else. The app-specific external
+directory would be readable without a permission, but nothing can write a file
+there — not Winlator, not a file manager — so it is not a handover point.
+
+Three ways out, none of which this change picks:
+
+1. **`MANAGE_EXTERNAL_STORAGE`** in the manifest. Works today, costs one
+   special-access screen, and is the permission Play scrutinises hardest.
+2. **`ACTION_OPEN_DOCUMENT_TREE`** — no manifest change at all: the user picks
+   the folder once and Orivo holds a persistable grant. The cost is that SAF
+   reads through `ContentResolver`, not the filesystem, so the scanner and the
+   fingerprint would both read a stream rather than a path. The folder picker
+   itself is the "Add an emulator" flow.
+3. **Ask Winlator to export somewhere permission-free** — not Orivo's call.
+
+Until one is chosen, the adoption pass below finds nothing on a real device and
+costs nothing, and the launch path is reached by a card created any other way.
+
 ## How a Winlator game gets into the library
 
 On Android, startup adopts whatever Winlator has already exported: if the default
@@ -145,6 +177,30 @@ managed default Wine profile. A pass that finds nothing new does not rewrite
 Nothing is added to the catalog schema version: `winlator_profiles` and
 `winlator_inventory` are optional arrays, so a `catalog.json` written before this
 change loads unchanged.
+
+## What was verified on a device
+
+On the Pixel 8 emulator, with a profile and a shortcut placed where Orivo can
+read them, pressing Play produced this — the component, the flags and the
+sender are all Orivo's:
+
+```
+ActivityTaskManager: START u0 {flg=0x14008000 xflg=0x4
+  cmp=com.winlator.cmod/.XServerDisplayActivity (has extras)}
+  with LAUNCH_MULTIPLE from uid 10230 (io.orivo.desktop)
+System.err: android.content.ActivityNotFoundException: Unable to find explicit
+  activity class {com.winlator.cmod/com.winlator.cmod.XServerDisplayActivity}
+```
+
+`0x14008000` is exactly `NEW_TASK | CLEAR_TASK | CLEAR_TOP`. The exception is
+Winlator not being installed, and it reached the player as a sentence:
+*"Winlator is not installed on this device. Install it, export a shortcut from
+it, and try again."*
+
+Winlator Cmod itself could not be installed: its APK is 667 MB and the AVD's
+`/data` had 552 MB free. So the last unverified link is that Winlator *reads*
+the extras it was sent — their exact keys and values are pinned by a host test
+instead.
 
 ## Seams left for the “Add an emulator” flow
 
