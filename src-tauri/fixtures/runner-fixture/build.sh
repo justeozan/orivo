@@ -41,8 +41,9 @@ wasm-tools validate --features component-model "$OUT"
 # The refusal fixtures are hand-written component text; they need no guest
 # toolchain at all, only the same encoder.
 wasm-tools parse "$FIXTURES/wasi-import.wat" -o "$FIXTURES/wasi-import.wasm"
+wasm-tools parse "$FIXTURES/memory64.wat" -o "$FIXTURES/memory64.wasm"
 
-for artefact in "$OUT" "$FIXTURES/wasi-import.wasm"; do
+for artefact in "$OUT" "$FIXTURES/wasi-import.wasm" "$FIXTURES/memory64.wasm"; do
   printf '%s  %s  %s bytes\n' \
     "$(shasum -a 256 "$artefact" | cut -d' ' -f1)" \
     "$(basename "$artefact")" \

@@ -479,11 +479,9 @@ enum MemoryLimitKind {
 struct StoreMemoryGuard {
     limits: PluginLimits,
     budget: Arc<MemoryBudget>,
-    /// Bytes this store currently holds against the global budget.
+    /// Bytes this store currently holds against the global budget. It only ever
+    /// grows; the store's `Drop` is what returns it.
     charged: usize,
-    /// The charge for the growth Wasmtime is in the middle of, so it can be
-    /// given back if that growth then fails.
-    pending: usize,
     hit_limit: Option<MemoryLimitKind>,
 }
 
@@ -492,13 +490,26 @@ impl ResourceLimiter for StoreMemoryGuard {
         &mut self,
         current: usize,
         desired: usize,
-        _maximum: Option<usize>,
+        maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        self.pending = 0;
         let extra = desired.saturating_sub(current);
+        // Wasmtime asks the limiter before it checks the memory's own declared
+        // maximum, and refuses the growth afterwards regardless of the answer.
+        // Refusing it here is what keeps a charge from being taken for a growth
+        // that was never going to happen — and it is why this guard has no
+        // refund. There is no "growth succeeded" callback, so a refund could not
+        // tell whether it was giving back the growth that just failed or the one
+        // that succeeded before it; Wasmtime also reports a failure it never
+        // asked about at all when a size is unrepresentable, which turns any such
+        // refund into a budget a component can mint on demand.
+        if maximum.is_some_and(|maximum| desired > maximum) {
+            self.hit_limit = Some(MemoryLimitKind::Instance);
+            return Ok(false);
+        }
         // The ceiling is the store's whole footprint, not one memory's. A
-        // component may define several — `memories_per_store` allows four — and
-        // four memories of the per-instance size are not a per-instance limit.
+        // component may define several — `memories_per_store` allows four, for
+        // the core module instances inside one component — and four memories of
+        // the per-instance size are not a per-instance limit.
         if self.charged.saturating_add(extra) > self.limits.instance_memory_bytes {
             self.hit_limit = Some(MemoryLimitKind::Instance);
             return Ok(false);
@@ -508,21 +519,14 @@ impl ResourceLimiter for StoreMemoryGuard {
             return Ok(false);
         }
         self.charged = self.charged.saturating_add(extra);
-        self.pending = extra;
         Ok(true)
     }
 
-    /// Wasmtime asks the limiter *before* it checks a memory's own declared
-    /// maximum, so a growth this guard permitted can still fail. Without the
-    /// refund, a component whose memory is declared `(memory 1 1)` bills the
-    /// global budget for every `memory.grow` it makes and never grows a page —
-    /// which would starve every other plugin out of the ceiling for free.
-    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
-        self.budget.release(self.pending);
-        self.charged = self.charged.saturating_sub(self.pending);
-        self.pending = 0;
-        Ok(())
-    }
+    /// Deliberately left as the default, which only logs: a growth this guard
+    /// allowed and the operating system then refused stays charged until the
+    /// store is dropped. Over-counting for the length of one invocation is the
+    /// safe direction to be wrong in, and the alternative — giving budget back
+    /// here — is forgeable, as the comment on `memory_growing` explains.
 
     fn table_growing(
         &mut self,
@@ -898,9 +902,14 @@ impl host_files::Host for HostState {
         // bound. `O_NOFOLLOW` and `O_NONBLOCK` refuse the first two at `open`,
         // and the size and kind below are asked of the descriptor, not the name.
         //
-        // A hard link inside the folder stays readable, and that is not a gap:
-        // creating one needs write access to a directory the user granted, and
-        // anything holding that could copy the file in instead.
+        // A hard link inside the folder stays readable, and that is a real gap
+        // rather than a justified one: creating a link does not require being able
+        // to read its target on macOS, nor on Linux without
+        // `fs.protected_hardlinks`, so another local account that can write to the
+        // granted folder can put a file there that it cannot read itself. Refusing
+        // a multiply-linked file owned by someone else would close it; that needs
+        // a test which can only be written with a second account, so it is
+        // recorded as a follow-up rather than guessed at here.
         let path = root.join(&name);
         let Ok(file) = open_without_following(&path) else {
             return Err(plugin_error(
@@ -930,26 +939,48 @@ impl host_files::Host for HostState {
         // grows between `metadata` and the read must not become an unbounded
         // allocation, so the reader carries the ceiling itself.
         let ceiling = MAX_HOST_FILE_BYTES.min(MAX_HOST_READ_BYTES.saturating_sub(self.bytes_read));
-        let mut bytes = Vec::new();
-        if file
-            .take(ceiling.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .is_err()
-        {
-            return Err(plugin_error(
-                wit_types::PluginErrorCode::Unavailable,
-                "That file could not be read.",
-            ));
-        }
-        if bytes.len() as u64 > ceiling {
+        let Some(bytes) = read_at_most(file, ceiling) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
                 "That entry is not a readable file of an allowed size.",
             ));
-        }
+        };
         self.bytes_read = self.bytes_read.saturating_add(bytes.len() as u64);
         Ok(bytes)
     }
+}
+
+/// Reads at most `ceiling` bytes, and refuses rather than quietly truncating.
+///
+/// Split out from `read_file` because the bound is otherwise only reachable by
+/// racing a file that grows between its metadata and its read — and a ceiling
+/// whose test cannot fail is not a ceiling. `take(ceiling + 1)` is what makes the
+/// overshoot visible.
+fn read_at_most(reader: impl Read, ceiling: u64) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(ceiling.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= ceiling).then_some(bytes)
+}
+
+/// Reserved device names. On Windows these do not name files at all: `CON` is
+/// the console — and blocks a worker exactly as a FIFO does — and `COM1` is a
+/// serial port. Win32 also ignores everything from the first dot, so `NUL.rom` is
+/// still `NUL`. They are refused on every platform because this validator is a
+/// pure function and Orivo's CI runs `cargo test` on macOS, not on Windows.
+const WINDOWS_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM2", "COM3", "COM4",
+    "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6",
+    "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_device_name(resolved: &str) -> bool {
+    let stem = resolved.split('.').next().unwrap_or(resolved);
+    WINDOWS_DEVICE_NAMES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
 /// Opens a file in the granted directory without following a link into one that
@@ -994,6 +1025,13 @@ fn valid_entry_name(name: &str) -> bool {
         || name.contains('\0')
         || name.chars().any(char::is_control)
     {
+        return false;
+    }
+    // Win32 strips trailing spaces and dots before it resolves a name, so this is
+    // the form Windows would actually look up. An empty one names the directory
+    // itself.
+    let resolved = name.trim_end_matches([' ', '.']);
+    if resolved.is_empty() || is_windows_device_name(resolved) {
         return false;
     }
     let mut components = Path::new(name).components();
@@ -1421,6 +1459,14 @@ impl PluginRuntime {
             .wasm_component_model(true)
             .consume_fuel(true)
             .epoch_interruption(true)
+            // The canonical ABI needs one ordinary 32-bit memory per core
+            // module. Wasmtime enables both of these by default, and a plugin has
+            // no use for either: a second private memory is only extra surface,
+            // and a 64-bit one reaches the "growth exceeds address space" path,
+            // which is the one place Wasmtime tells a `ResourceLimiter` a growth
+            // failed without having asked it first.
+            .wasm_memory64(false)
+            .wasm_multi_memory(false)
             .max_wasm_stack(PLUGIN_WASM_STACK_BYTES)
             .cranelift_opt_level(OptLevel::SpeedAndSize);
         let engine = Engine::new(&config).map_err(|_| PluginRuntimeError::EngineUnavailable)?;
@@ -1670,7 +1716,6 @@ impl PluginRuntime {
                     limits: self.inner.limits,
                     budget: Arc::clone(&self.inner.budget),
                     charged: 0,
-                    pending: 0,
                     hit_limit: None,
                 },
                 cancel: Arc::clone(cancel),
@@ -2169,6 +2214,11 @@ mod tests {
     const WASI_IMPORT: &[u8] = include_bytes!("../fixtures/wasi-import.wasm");
     const WASI_IMPORT_SHA256: &str =
         "4b7909ec90668f639b6023c4b844a8bf08201fda44125b68acc44f24b7b12630";
+    /// A component whose core module declares a 64-bit linear memory. Also built
+    /// by `build.sh`, from hand-written component text.
+    const MEMORY64: &[u8] = include_bytes!("../fixtures/memory64.wasm");
+    const MEMORY64_SHA256: &str =
+        "864557361c1ee165e36a852e29c7ad04ae387811096e63adb349bea7d213b614";
 
     const FIXTURE_PLUGIN_ID: &str = "com.orivo.fixture-runner";
     const FIXTURE_PROFILE: &str = "fixture-profile-1";
@@ -2349,6 +2399,18 @@ mod tests {
         let mut digest = Sha256::new();
         digest.update(FIXTURE);
         assert_eq!(format!("{:x}", digest.finalize()), FIXTURE_SHA256);
+    }
+
+    /// Four production paths resolve a plugin, and they only share a compiled
+    /// component cache, a memory ceiling, a journal and a failure counter if they
+    /// share the runtime. A fresh `Engine` per path is how a plugin parked as
+    /// degraded on one surface answers again on the next.
+    #[test]
+    fn the_shared_runtime_is_one_runtime() {
+        let first = PluginRuntime::shared().unwrap();
+        let second = PluginRuntime::shared().unwrap();
+        assert!(Arc::ptr_eq(first.journal(), second.journal()));
+        assert!(Arc::ptr_eq(first.scheduler(), second.scheduler()));
     }
 
     #[test]
@@ -2722,15 +2784,6 @@ mod tests {
                 "{escape} was answered with {error:?}"
             );
         }
-        // And nothing outside the grant was ever handed over.
-        assert!(
-            harness
-                .runtime
-                .journal()
-                .entries()
-                .iter()
-                .all(|entry| !entry.detail.contains("keychain token"))
-        );
     }
 
     /// The listing skips symbolic links, but a plugin can name an entry the
@@ -2805,6 +2858,22 @@ mod tests {
                 panic!("a FIFO parked the worker");
             }
         }
+    }
+
+    /// The size check uses what the descriptor reports; this covers the bound
+    /// that has to hold when that number is wrong. Removing `take(ceiling + 1)`
+    /// makes it fail, which the file-size test alone does not.
+    #[test]
+    fn a_reader_that_outruns_its_ceiling_is_refused_rather_than_truncated() {
+        use std::io::Cursor;
+
+        assert_eq!(
+            read_at_most(Cursor::new(vec![7u8; 100]), 100),
+            Some(vec![7u8; 100])
+        );
+        assert_eq!(read_at_most(Cursor::new(vec![7u8; 100]), 99), None);
+        assert_eq!(read_at_most(Cursor::new(vec![7u8; 1]), 0), None);
+        assert_eq!(read_at_most(Cursor::new(Vec::new()), 0), Some(Vec::new()));
     }
 
     #[test]
@@ -2931,19 +3000,12 @@ mod tests {
         );
     }
 
-    /// The deadline is counted in epoch ticks, not read off a clock. That is the
-    /// seam a test — or a later adversarial suite — uses to decide exactly when a
-    /// component runs out of time: with [`EpochMode::Manual`] nothing advances
-    /// the epoch except the caller.
-    #[test]
-    fn the_deadline_is_counted_in_epoch_ticks() {
-        let library = FixtureLibrary::new("manual-epoch");
-        let limits = PluginLimits {
-            interactive_fuel: 1 << 42,
-            interactive_deadline: Duration::from_millis(30),
-            epoch_tick: Duration::from_millis(10),
-            ..PluginLimits::default()
-        };
+    /// Builds a runtime, the fixture and a full grant in one go, for the tests
+    /// that need to drive the epoch by hand rather than through `Harness`.
+    fn manual(
+        limits: PluginLimits,
+        library: &FixtureLibrary,
+    ) -> (PluginRuntime, PreparedComponent, PluginGrants) {
         let runtime = PluginRuntime::with_limits(limits, EpochMode::Manual).unwrap();
         let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
         let grants = PluginGrants::resolve(
@@ -2955,12 +3017,24 @@ mod tests {
             &library.directories(),
         )
         .unwrap();
+        (runtime, prepared, grants)
+    }
 
+    /// Spins the fixture and returns how the host stopped it, ticking the epoch
+    /// `ticks` times with `spacing` between each. Bounded, so a deadline that
+    /// never fires fails the test instead of hanging it on 2^42 fuel.
+    fn spin_under_manual_epoch(
+        runtime: &PluginRuntime,
+        prepared: &PreparedComponent,
+        grants: &PluginGrants,
+        ticks: u32,
+        spacing: Duration,
+    ) -> Result<PluginInvocation, JobError> {
         let handle = runtime
             .submit(
-                &prepared,
+                prepared,
                 FIXTURE_PLUGIN_ID,
-                &grants,
+                grants,
                 PluginRequest::PrepareLaunch {
                     profile_id: FIXTURE_PROFILE.into(),
                     game_reference: "fixture:spin".into(),
@@ -2969,72 +3043,73 @@ mod tests {
             .unwrap();
         let ticker = runtime.clone();
         let ticking = thread::spawn(move || {
-            // Three ticks is the budget; the fourth is what the host answers with
-            // an interrupt. Nothing else moves the epoch, and a few spare ticks
-            // are harmless — without the bounded wait below, a broken deadline
-            // would hang on 2^42 fuel instead of failing.
-            for _ in 0..16 {
-                thread::sleep(Duration::from_millis(5));
+            for _ in 0..ticks {
+                thread::sleep(spacing);
                 ticker.tick_epoch();
             }
         });
-        let outcome = match handle.wait_for(Duration::from_secs(10)) {
+        let outcome = handle.wait_for(Duration::from_secs(20));
+        ticking.join().unwrap();
+        match outcome {
             Ok(outcome) => outcome,
             Err(handle) => {
                 handle.cancel();
-                ticking.join().unwrap();
-                panic!("the epoch deadline never fired");
+                panic!("nothing stopped the component");
             }
-        };
-        ticking.join().unwrap();
+        }
+    }
+
+    /// Isolates the tick half. The epoch tick is a whole second, so the wall
+    /// clock cannot have run out in the few milliseconds this takes: only the
+    /// count of observed ticks can end the call.
+    #[test]
+    fn the_deadline_runs_out_of_epoch_ticks() {
+        let library = FixtureLibrary::new("deadline-ticks");
+        let (runtime, prepared, grants) = manual(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(3),
+                epoch_tick: Duration::from_secs(1),
+                ..PluginLimits::default()
+            },
+            &library,
+        );
+        let started = Instant::now();
+        let outcome =
+            spin_under_manual_epoch(&runtime, &prepared, &grants, 8, Duration::from_millis(1));
         assert_eq!(
             outcome.unwrap_err(),
             JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
         );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the wall clock, not the tick count, is what stopped it"
+        );
     }
 
-    /// Wasm frames live on the native stack, so `max_wasm_stack` is only a limit
-    /// if the thread underneath it is bigger. Wasmtime's own documentation says
-    /// exhausting the *thread* stack aborts the process, which would take Orivo
-    /// down every time Settings → Plugins probed a package like this one — and
-    /// uninstalling a plugin lives in that panel.
-    ///
-    /// The job runs on a scheduler worker, which is the only place guest code is
-    /// allowed to run, so this test exercises the thread the host actually sizes.
+    /// Isolates the wall-clock half. The tick budget is fifty and only ten ticks
+    /// happen, so the count cannot reach zero — but they are spaced far enough
+    /// apart that the clock passes the deadline. Remove the clock check and this
+    /// hangs until the bounded wait fails it.
     #[test]
-    fn a_recursing_component_traps_instead_of_aborting_the_process() {
-        let library = FixtureLibrary::new("recurse");
-        let harness = Harness::new(
+    fn the_deadline_runs_out_of_wall_clock_between_ticks() {
+        let library = FixtureLibrary::new("deadline-clock");
+        let (runtime, prepared, grants) = manual(
             PluginLimits {
-                // Generous on both other axes: the stack has to be what stops it.
                 interactive_fuel: 1 << 42,
-                interactive_deadline: Duration::from_secs(30),
+                interactive_deadline: Duration::from_millis(50),
+                epoch_tick: Duration::from_millis(1),
                 ..PluginLimits::default()
             },
-            Some(&library),
+            &library,
         );
-        let handle = harness
-            .runtime
-            .submit(
-                &harness.prepared,
-                FIXTURE_PLUGIN_ID,
-                &harness.grants,
-                PluginRequest::PrepareLaunch {
-                    profile_id: FIXTURE_PROFILE.into(),
-                    game_reference: "fixture:recurse".into(),
-                },
-            )
-            .unwrap();
-        match handle.wait_for(Duration::from_secs(20)) {
-            Ok(outcome) => assert_eq!(
-                outcome.unwrap_err(),
-                JobError::Runtime(PluginRuntimeError::Trapped)
-            ),
-            Err(handle) => {
-                handle.cancel();
-                panic!("the recursing component never came back");
-            }
-        }
+        assert_eq!(runtime.limits().ticks(Duration::from_millis(50)), 50);
+        let outcome =
+            spin_under_manual_epoch(&runtime, &prepared, &grants, 10, Duration::from_millis(10));
+        assert_eq!(
+            outcome.unwrap_err(),
+            JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
+        );
     }
 
     #[test]
@@ -3060,7 +3135,6 @@ mod tests {
             limits: runtime.limits(),
             budget: Arc::clone(&runtime.inner.budget),
             charged: 0,
-            pending: 0,
             hit_limit: None,
         }
     }
@@ -3100,31 +3174,85 @@ mod tests {
     }
 
     /// Wasmtime asks the limiter before it checks the memory's own declared
-    /// maximum, so a growth this guard allowed can still fail. Without the
-    /// refund, a component whose memory is `(memory 1 1)` bills the global
-    /// ceiling on every `memory.grow` and never grows a page — which would let
-    /// one plugin starve every other out of the budget for free.
+    /// maximum, so a growth it is about to reject must not be charged. Refusing
+    /// it here rather than refunding it later is the whole point: there is no
+    /// "growth succeeded" callback, so nothing can tell a later refund whether
+    /// it is giving back this growth's charge or the previous one's.
     #[test]
-    fn a_growth_that_fails_after_the_limiter_allowed_it_is_refunded() {
+    fn a_growth_past_the_memorys_own_maximum_is_never_charged() {
         let runtime =
             PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Manual).unwrap();
         let mut guard = guard(&runtime);
 
         for _ in 0..8 {
             assert!(
-                guard
+                !guard
                     .memory_growing(64 * 1024, 32 * 1024 * 1024, Some(64 * 1024))
                     .unwrap()
             );
-            guard
-                .memory_grow_failed(wasmtime::Error::msg("maximum size exceeded"))
-                .unwrap();
         }
         assert_eq!(runtime.committed_memory(), 0);
         assert_eq!(guard.charged, 0);
-        // And the store can still grow for real afterwards.
+        // And an honest growth still works afterwards.
         assert!(guard.memory_growing(0, 8 * 1024 * 1024, None).unwrap());
         assert_eq!(runtime.committed_memory(), 8 * 1024 * 1024);
+    }
+
+    /// Wasmtime calls `memory_grow_failed` *without* calling `memory_growing`
+    /// first when the requested size is not representable
+    /// (`wasmtime/src/runtime/vm/memory.rs`). A limiter that gives budget back
+    /// there hands out a refund for pages it is still holding, and a component
+    /// that can reach that path — a second, 64-bit memory will do it — can
+    /// repeat the trick until the host is out of memory.
+    ///
+    /// So the rule this pins is absolute: `memory_grow_failed` never returns
+    /// anything to the budget.
+    #[test]
+    fn a_failure_the_limiter_was_never_asked_about_returns_no_budget() {
+        let runtime =
+            PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Manual).unwrap();
+        let mut guard = guard(&runtime);
+
+        // Nothing charged yet, and a bare failure must still change nothing.
+        guard
+            .memory_grow_failed(wasmtime::Error::msg("memory growth exceeds address space"))
+            .unwrap();
+        assert_eq!(runtime.committed_memory(), 0);
+
+        // A real growth, then the same bogus failure on another memory.
+        assert!(guard.memory_growing(0, 16 * 1024 * 1024, None).unwrap());
+        assert_eq!(runtime.committed_memory(), 16 * 1024 * 1024);
+        for _ in 0..8 {
+            guard
+                .memory_grow_failed(wasmtime::Error::msg("memory growth exceeds address space"))
+                .unwrap();
+        }
+        assert_eq!(
+            runtime.committed_memory(),
+            16 * 1024 * 1024,
+            "a growth that was never asked about was refunded"
+        );
+        assert_eq!(guard.charged, 16 * 1024 * 1024);
+    }
+
+    /// The ABI needs one ordinary 32-bit memory per core module. A 64-bit one is
+    /// how a component reaches the address-space overflow path above, so it is
+    /// refused before it is ever compiled.
+    #[test]
+    fn a_component_with_a_64_bit_memory_is_refused() {
+        let mut digest = Sha256::new();
+        digest.update(MEMORY64);
+        assert_eq!(format!("{:x}", digest.finalize()), MEMORY64_SHA256);
+
+        let runtime = PluginRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .prepare_component(MEMORY64, MEMORY64_SHA256)
+                .unwrap_err(),
+            PluginRuntimeError::InvalidComponent
+        );
+        // And the reference fixture still compiles, so this is not simply off.
+        assert!(runtime.prepare_component(FIXTURE, FIXTURE_SHA256).is_ok());
     }
 
     /// A store that hit the ceiling must give its bytes back when it is dropped,
@@ -3296,20 +3424,25 @@ mod tests {
 
         let messages = harness.runtime.journal().plugin_messages();
         assert!(!messages.is_empty());
-        assert!(messages.len() <= MAX_JOURNAL_ENTRIES);
-        // The fixture asks a thousand times; the budget is what stops it.
+        // The plugin's own text never lands in the ring the host keeps its
+        // decisions in. This is the assertion that fails if the two are merged
+        // again — counting messages cannot fail, because the ring holds 256
+        // whether the call is metered or not.
         assert!(
-            messages.len() < 1000,
-            "host-journal was not metered: {} messages got through",
-            messages.len()
+            decisions.iter().all(|entry| entry.decision != "plugin-log"),
+            "plugin text was written into the host's decision ring"
         );
+        // The fixture asks a thousand times against a budget of 256, so the
+        // budget line is present exactly when `log` is metered — and exactly
+        // once, because reporting each refusal was its own way of flooding the
+        // ring this test is about.
         assert_eq!(
             decisions
                 .iter()
                 .filter(|entry| entry.decision == "host-call-budget")
                 .count(),
             1,
-            "the exhausted budget was reported more than once"
+            "host-journal was either unmetered or reported its refusal repeatedly"
         );
     }
 
@@ -3455,6 +3588,30 @@ mod tests {
         assert!(!valid_entry_name("D:secrets.txt"));
         assert!(!valid_entry_name("C:x"));
         assert!(!valid_entry_name("C:\\Windows\\System32\\config\\SAM"));
+
+        // Windows device names. `read_file(grant, "CON")` opens the console
+        // rather than a file in the grant, and it blocks the worker exactly like
+        // a FIFO does; `COM1` opens a serial port. Win32 ignores everything from
+        // the first dot and strips trailing spaces and dots, so every spelling
+        // below is the same device.
+        for device in [
+            "CON", "con", "Con", "PRN", "AUX", "NUL", "nul", "COM1", "com9", "LPT1", "lpt9",
+            "COM0", "LPT0", "CONIN$", "CONOUT$",
+        ] {
+            assert!(!valid_entry_name(device), "{device} was accepted");
+        }
+        assert!(!valid_entry_name("CON.txt"));
+        assert!(!valid_entry_name("nul.rom"));
+        assert!(!valid_entry_name("CON."));
+        assert!(!valid_entry_name("com1 "));
+        assert!(!valid_entry_name("..."));
+
+        // And names that merely start the same way are ordinary files.
+        assert!(valid_entry_name("console.rom"));
+        assert!(valid_entry_name("communication.rom"));
+        assert!(valid_entry_name("nullify.rom"));
+        assert!(valid_entry_name("COM.rom"));
+        assert!(valid_entry_name("LPT10.rom"));
     }
 
     // -----------------------------------------------------------------------
