@@ -11,6 +11,7 @@
  * else: no DOM, no backend calls. `app.ts` renders it and runs the connectors.
  */
 import type { ConnectedSource, SourceConnectStyle } from "./contracts";
+import { hostDeviceLabel } from "./host-device";
 import type { IconName } from "./icons";
 import { CONNECTED_SOURCES } from "./source-model";
 
@@ -75,7 +76,7 @@ export interface OnboardingSourceDescriptor {
  */
 const SOURCE_COPY: Record<OnboardingSource, { detail: string; signIn?: string }> = {
   steam: {
-    detail: "Owned games, plus installs on this Mac",
+    detail: `Owned games, plus installs on ${hostDeviceLabel()}`,
     signIn: "Signs in through Steam's own web login.",
   },
   epic: { detail: "Your Epic library and its installs" },

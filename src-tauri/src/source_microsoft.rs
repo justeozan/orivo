@@ -92,6 +92,39 @@ pub fn token_from_eval(result: &str) -> Option<ImplicitToken> {
     })
 }
 
+/// Parse tokens from a URL pasted by the user on mobile. The redirect URL
+/// contains tokens in the fragment: `#access_token=...&refresh_token=...&expires_in=...`
+pub fn token_from_pasted_url(url: &str) -> Option<ImplicitToken> {
+    // The user might paste the full URL or just the fragment
+    let fragment = if let Some(pos) = url.find('#') {
+        &url[pos + 1..]
+    } else {
+        // Maybe they pasted just the fragment without the '#'
+        url
+    };
+    let parameters = url::Url::parse(&format!("http://x?{fragment}"))
+        .ok()?
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<String, String>>();
+
+    let access_token = validate_token(parameters.get("access_token")?)?;
+    Some(ImplicitToken {
+        access_token,
+        refresh_token: validate_token(
+            parameters
+                .get("refresh_token")
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+        )
+        .unwrap_or_default(),
+        expires_in: parameters
+            .get("expires_in")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0),
+    })
+}
+
 fn validate_token(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()

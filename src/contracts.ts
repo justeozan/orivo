@@ -270,6 +270,9 @@ export interface GameDetailView extends GameSummary {
   installPercent: number | null;
   /** Whether the game ships a build that runs natively on macOS. */
   macCompatibility: "native" | "not-native" | "unknown";
+  /** The OS this copy of Orivo runs on, stamped by the backend so fit is
+   *  judged against this machine rather than against macOS. */
+  hostPlatform: "windows" | "macos" | "linux" | "other";
   primaryAction:
     | "play"
     | "install-steam"

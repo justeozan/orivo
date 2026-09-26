@@ -860,6 +860,51 @@ describe("application shell against the desktop backend", () => {
     expect(play?.disabled).toBe(false);
   });
 
+  it("blocks a game on Windows when the store says it has no Windows build", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "steam:9",
+        title: "Mac Thing",
+        source: "steam",
+        launchable: false,
+        hostPlatform: "windows",
+        supportedPlatforms: ["macos"],
+        installState: "not-installed",
+      },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
+    expect(play?.textContent).toContain("macOS only");
+    expect(play?.disabled).toBe(true);
+    expect(play?.getAttribute("aria-label")).toBe(
+      "Mac Thing has no Windows version",
+    );
+  });
+
+  it("keeps the button live on Windows when the matrix includes Windows", async () => {
+    backend.library = [
+      {
+        ...alpha,
+        id: "epic:Sugar",
+        title: "Fall Guys",
+        source: "epic",
+        launchable: false,
+        hostPlatform: "windows",
+        supportedPlatforms: ["windows", "macos"],
+        installState: "not-installed",
+      },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button");
+    expect(play?.textContent).toContain("Install");
+    expect(play?.disabled).toBe(false);
+  });
+
   it("shows a running Epic download as a percentage instead of a dead button", async () => {
     backend.library = [
       {
