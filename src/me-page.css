@@ -1152,3 +1152,15 @@
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Compact — see the block at the end of styles.css.
+
+   This page already gives up its single-screen frame below 620px of height, so
+   all that is left is the width of a column: three tracks with 880px of
+   minimums do not fit in 914px minus the gutters.
+   --------------------------------------------------------------------------- */
+html[data-form-factor="compact"] .me-page { padding-inline: var(--edge-left); }
+html[data-form-factor="compact"] .me-grid { grid-template-columns: minmax(0, 1fr); }
+html[data-form-factor="compact"] .me-radar__label-copy,
+html[data-form-factor="compact"] .me-objective__hint { display: none; }

@@ -18,6 +18,41 @@
   --topbar-inset-left: 32px;
   --topbar-inset-right: 34px;
   --topbar-height: 76px;
+  --topbar-bar-h: 40px;
+  --search-h: 40px;
+  --search-r: 22px;
+  --avatar-size: 40px;
+  --brand-mark-size: 40px;
+  /* Pointer-sized on desktop; a finger needs 44px, which is what the compact
+     block below hands them. */
+  --tap-min: 34px;
+  --tap-round: 36px;
+  --tap-icon: 15px;
+  /* The Library scene. `--hero-bottom` is where Play sits, so it alone decides
+     whether the hero resolves to a positive height. */
+  --hero-top: clamp(196px, 21.6svh, 230px);
+  --hero-bottom: 443px;
+  --hero-left: clamp(48px, 10.35vw, 159px);
+  --hero-width: min(560px, calc(100vw - 160px));
+  --fs-hero-title: clamp(48px, 4.3vw, 66px);
+  --play-w: 148px;
+  --play-h: 50px;
+  --fs-play: 16px;
+  --arrow-top: 36.3svh;
+  --arrow-size: 50px;
+  --rail-card-height: 222px;
+  --rail-card-width: 148px;
+  --rail-focus-bleed: 16px;
+  --rail-header-h: 36px;
+  --rail-header-gutter: 78px;
+  --rail-bottom: 115px;
+  --fs-rail-title: 15px;
+  /* The scene's outer margins. The rail sits 5px further in than the bar under
+     it, to pay for its own focus bleed. */
+  --edge-left: 67px;
+  --edge-right: 40px;
+  --edge-bottom: 45px;
+  --fs-bar: 13px;
 }
 
 @property --cover-glint-angle {
@@ -123,7 +158,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   grid-template-columns: minmax(0, 1fr) minmax(180px, min(352px, 31vw)) minmax(0, 1fr);
   align-items: center;
   gap: 12px;
-  min-height: 40px;
+  min-height: var(--topbar-bar-h);
   color: var(--text);
 }
 .topbar.is-library-menu-open, .topbar.is-notifications-open { z-index: 25; }
@@ -155,8 +190,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .library-menu-control { position: relative; flex: none; }
 .brand-mark-button {
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: var(--brand-mark-size);
+  height: var(--brand-mark-size);
   margin: -5px;
   padding: 5px;
   place-items: center;
@@ -237,7 +272,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 .nav-link {
   gap: 8px;
-  min-height: 34px;
+  min-height: var(--tap-min);
   padding: 0 11px;
   border-radius: 8px;
   color: #d5d2d8;
@@ -250,18 +285,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 /* The shared `display: flex` above outranks the UA `[hidden]` rule, so a nav
    link hidden behind a preference would still paint. */
 .nav-link[hidden] { display: none !important; }
-.nav-link .icon { width: 15px; height: 15px; }
+.nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
 .nav-link:hover { color: #fff; background: rgba(255,255,255,.08); }
 .nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
 .search-control {
   width: 100%;
   min-width: 0;
-  height: 40px;
+  height: var(--search-h);
   gap: 11px;
   padding: 0 12px 0 16px;
   border: 1px solid rgba(255,255,255,.15);
-  border-radius: 22px;
+  border-radius: var(--search-r);
   color: #ede6e2;
   background: rgba(22,20,23,.31);
   box-shadow: 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
@@ -286,12 +321,12 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
 
 .profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
-.avatar { width: 40px; height: 40px; border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
+.avatar { width: var(--avatar-size); height: var(--avatar-size); border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
 
 .feedback-button {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: var(--tap-round);
+  height: var(--tap-round);
   padding: 0;
   place-items: center;
   border: 1px solid rgba(255,255,255,.14);
@@ -312,8 +347,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .notifications-button {
   position: relative;
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: var(--tap-round);
+  height: var(--tap-round);
   padding: 0;
   place-items: center;
   border: 1px solid rgba(255,255,255,.14);
@@ -432,10 +467,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .scene-arrow {
   position: absolute;
   z-index: 4;
-  top: 36.3svh;
+  top: var(--arrow-top);
   display: grid;
-  width: 50px;
-  height: 50px;
+  width: var(--arrow-size);
+  height: var(--arrow-size);
   padding: 0;
   place-items: center;
   border: 1px solid rgba(255,255,255,.18);
@@ -458,14 +493,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .hero-content {
   position: absolute;
   z-index: 3;
-  top: clamp(196px, 21.6svh, 230px);
+  top: var(--hero-top);
   /* The bottom edge is where Play sits, so this number is the only thing that
      positions the button. It clears the rail by roughly a button's height:
      closer and the primary action read as part of the shelf under it. */
-  bottom: 443px;
-  left: clamp(48px, 10.35vw, 159px);
+  bottom: var(--hero-bottom);
+  left: var(--hero-left);
   display: flex;
-  width: min(560px, calc(100vw - 160px));
+  width: var(--hero-width);
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
@@ -510,7 +545,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 
 /* Long titles wrap between words and are clamped, never broken mid-word. */
-.hero-content h1 { display: -webkit-box; overflow: hidden; max-width: 560px; max-height: 1.96em; margin: 14px 0 18px; color: #f4f2f7; font-size: clamp(48px, 4.3vw, 66px); font-weight: 460; hyphens: none; letter-spacing: -.046em; line-height: .98; overflow-wrap: normal; word-break: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.hero-content h1 { display: -webkit-box; overflow: hidden; max-width: 560px; max-height: 1.96em; margin: 14px 0 18px; color: #f4f2f7; font-size: var(--fs-hero-title); font-weight: 460; hyphens: none; letter-spacing: -.046em; line-height: .98; overflow-wrap: normal; word-break: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .hero-content h1.is-changing { animation: hero-title-arrive 420ms cubic-bezier(.16, .8, .2, 1) both; }
 
 /* The wordmark stands where the title would, at the title's own weight in the
@@ -545,8 +580,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 
 /* `flex: none` and a fixed height: the row is the fixed point of the scene, so
    nothing inside it may resize it. */
-.hero-actions { height: 50px; flex: none; gap: 13px; margin-top: 24px; }
-.play-button { display: inline-flex; align-items: center; justify-content: center; width: 148px; min-width: 148px; height: 50px; gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 16px; font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
+.hero-actions { height: var(--play-h); flex: none; gap: 13px; margin-top: 24px; }
+.play-button { display: inline-flex; align-items: center; justify-content: center; width: var(--play-w); min-width: var(--play-w); height: var(--play-h); gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: var(--fs-play); font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
 .play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
 .play-button:active { transform: translateY(1px) scale(.98); }
 .play-button .icon { width: 14px; height: 14px; }
@@ -1244,17 +1279,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 
 .recently-played {
-  --rail-card-height: 222px;
-  --rail-focus-bleed: 16px;
-
   position: absolute;
   z-index: 3;
   right: 0;
-  bottom: 115px;
-  left: 72px;
+  bottom: var(--rail-bottom);
+  left: calc(var(--edge-left) + 5px);
 }
-.rail-header { height: 36px; justify-content: space-between; padding-right: 78px; }
-.rail-header h2 { margin: 0; color: #f1eef3; font-size: 15px; font-weight: 600; transform: translateY(-6px); }
+.rail-header { height: var(--rail-header-h); justify-content: space-between; padding-right: var(--rail-header-gutter); }
+.rail-header h2 { margin: 0; color: #f1eef3; font-size: var(--fs-rail-title); font-weight: 600; transform: translateY(-6px); }
 
 .game-cards {
   display: flex;
@@ -1282,8 +1314,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   position: relative;
   isolation: isolate;
   align-self: flex-start;
-  flex: 0 0 148px;
-  width: 148px;
+  flex: 0 0 var(--rail-card-width);
+  width: var(--rail-card-width);
   height: var(--rail-card-height);
   padding: 0;
   overflow: visible;
@@ -1380,7 +1412,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 /* The browse bar: mood on the left, the mode's segments across the middle, the
    mode button on the right. It keeps the footprint of the controller hint bar
    it replaced, because that line is exactly where the eye already rests. */
-.browse-bar { position: absolute; z-index: 3; right: 40px; bottom: 45px; left: 67px; gap: 28px; color: #c8c4cb; font-size: 13px; }
+.browse-bar { position: absolute; z-index: 3; right: var(--edge-right); bottom: var(--edge-bottom); left: var(--edge-left); gap: 28px; color: #c8c4cb; font-size: var(--fs-bar); }
 
 .browse-bar__mood { flex: none; gap: 10px; padding: 0; color: #cfcad6; background: none; font-size: inherit; transition: color 200ms ease; }
 .browse-bar__mood[aria-checked="true"] { color: #f4f2f7; }
@@ -2125,4 +2157,131 @@ main[data-nav-focus] {
 }
 body[data-input-mode="pointer"] [data-nav-focus] {
   outline: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Compact — a phone held sideways (914x411 on a Pixel 8)
+
+   Wide enough to read as a desktop window, short enough that the desktop scene
+   resolves to a negative height. `src/form-factor.ts` puts the attribute on
+   `<html>` rather than leaving this a media query: `styles.css` is imported
+   before the four page sheets, so a `@media` block here would lose to
+   `.store-page` and `.gd-body` on source order alone.
+
+   Everything below is a token reassignment where it can be. The scene then
+   reads top to bottom: topbar to 52, hero 62 to 187, rail 203 to 371, browse
+   bar above the fold.
+   --------------------------------------------------------------------------- */
+html[data-form-factor="compact"] {
+  /* `env()` is 0 wherever there is no cutout, so every `max()` below resolves
+     to the plain number on a desktop window and on the emulator. */
+  --topbar-inset-top: max(8px, env(safe-area-inset-top));
+  --topbar-inset-left: max(12px, env(safe-area-inset-left));
+  --topbar-inset-right: max(12px, env(safe-area-inset-right));
+  --topbar-bar-h: 44px;
+  --topbar-height: calc(var(--topbar-inset-top) + 48px);
+  --search-h: 36px;
+  --search-r: 18px;
+  --avatar-size: 32px;
+  /* A finger, not a cursor. */
+  --tap-min: 44px;
+  --tap-round: 44px;
+  --tap-icon: 20px;
+  --brand-mark-size: 44px;
+  --hero-top: calc(var(--topbar-height) + 6px);
+  --hero-bottom: 224px;
+  --hero-left: max(20px, calc(env(safe-area-inset-left) + 8px));
+  --hero-width: min(430px, calc(100vw - 40px));
+  --fs-hero-title: clamp(22px, 7.5svh, 34px);
+  --play-w: 120px;
+  --play-h: 44px;
+  --fs-play: 14px;
+  --arrow-size: 44px;
+  --rail-card-height: 128px;
+  --rail-card-width: 86px;
+  --rail-focus-bleed: 8px;
+  --rail-header-h: 24px;
+  /* The desktop gutter reserves room for rail arrows this layout drops. */
+  --rail-header-gutter: 12px;
+  --rail-bottom: 40px;
+  --fs-rail-title: 12px;
+  --edge-left: max(16px, env(safe-area-inset-left));
+  --edge-right: max(16px, env(safe-area-inset-right));
+  --edge-bottom: max(8px, env(safe-area-inset-bottom));
+  --fs-bar: 11px;
+}
+
+/* Icons carry the nav: four labelled pills do not fit beside the search field
+   once the bar is 44px tall. The buttons keep their selectors, so gamepad
+   cycling and the shell tests are untouched. */
+html[data-form-factor="compact"] .nav-link {
+  width: var(--tap-min);
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+}
+html[data-form-factor="compact"] .nav-link span { display: none; }
+/* There is no ⌘K on a phone. */
+html[data-form-factor="compact"] .search-shortcut { display: none; }
+html[data-form-factor="compact"] .nav-cluster { gap: 8px; }
+html[data-form-factor="compact"] .profile-cluster { gap: 8px; }
+
+/* The scene. The short-window media queries above write `top` and `bottom` as
+   literals, so the tokens alone would never reach the hero — the attribute
+   outranks them, which is the whole reason it exists. `--hero-bottom` is what
+   brings Play back: the desktop value resolves to a negative height here. */
+html[data-form-factor="compact"] .hero-content {
+  top: var(--hero-top);
+  bottom: var(--hero-bottom);
+  left: var(--hero-left);
+  width: var(--hero-width);
+}
+html[data-form-factor="compact"] .hero-meta { display: none; }
+html[data-form-factor="compact"] .hero-content h1 { margin: 6px 0 8px; font-size: var(--fs-hero-title); }
+html[data-form-factor="compact"] .hero-actions { margin-top: 10px; gap: 10px; }
+html[data-form-factor="compact"] .hero-logo { height: clamp(52px, 18svh, 86px); }
+html[data-form-factor="compact"] .recently-played { bottom: var(--rail-bottom); left: calc(var(--edge-left) + 5px); }
+html[data-form-factor="compact"] .rail-header { padding-right: var(--rail-header-gutter); }
+html[data-form-factor="compact"] .browse-bar { right: var(--edge-right); bottom: var(--edge-bottom); left: var(--edge-left); }
+
+/* An optical nudge that costs 6px of a 24px header. */
+html[data-form-factor="compact"] .rail-header h2 { transform: none; }
+
+/* At 36.3svh the arrows would land on the title, which now starts 20px from the
+   left edge. They pair up under the topbar instead. */
+html[data-form-factor="compact"] .scene-arrow { top: calc(var(--topbar-height) + 8px); }
+html[data-form-factor="compact"] .scene-arrow--previous { right: calc(var(--edge-right) + var(--arrow-size) + 8px); left: auto; }
+html[data-form-factor="compact"] .scene-arrow--next { right: var(--edge-right); }
+
+html[data-form-factor="compact"] .browse-bar { gap: 12px; font-size: var(--fs-bar); }
+html[data-form-factor="compact"] .browse-bar__mood { display: none; }
+html[data-form-factor="compact"] .browse-bar__mode { min-height: 32px; }
+html[data-form-factor="compact"] .toast { bottom: calc(var(--edge-bottom) + 34px); }
+
+/* Floating surfaces measure themselves against a 1024px-tall window. Each one
+   is capped against the viewport instead, and given somewhere to scroll. */
+html[data-form-factor="compact"] .library-source-menu,
+html[data-form-factor="compact"] .notifications-panel {
+  max-height: calc(100svh - var(--topbar-height) - 16px);
+  overflow-y: auto;
+}
+/* Settings already reflows to a single column below 940px. What is left is the
+   vertical budget: a 27px heading and 76px of tail padding are a quarter of the
+   screen spent before the first row. */
+html[data-form-factor="compact"] .settings-layout { padding: 4px var(--edge-left) 16px; gap: 14px; }
+html[data-form-factor="compact"] .settings-header { margin-bottom: 12px; }
+html[data-form-factor="compact"] .settings-header h1 { font-size: 20px; }
+html[data-form-factor="compact"] .settings-sidebar__title { margin-bottom: 8px; }
+
+html[data-form-factor="compact"] .wine-panel {
+  top: calc(var(--topbar-height) + 4px);
+  right: 8px;
+  bottom: 8px;
+  left: 8px;
+  width: auto;
+  min-height: 0;
+  /* Legibility over the desktop glass, as the narrow layout already does. */
+  background: #17171d;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
