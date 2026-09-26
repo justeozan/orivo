@@ -273,6 +273,35 @@ pub fn web_login_from_eval(result: &str) -> Option<(String, String)> {
     Some((steam_id, access_token))
 }
 
+/// Android's WebView answers neither `WebviewWindow::url` nor an eval callback
+/// once the sign-in window has navigated, so the Store page hands the login
+/// back through a navigation to a host that resolves nowhere. The navigation
+/// handler reads it and blocks the load, so nothing leaves the device.
+pub const ANDROID_RELAY_HOST: &str = "orivo.invalid";
+pub const ANDROID_RELAY_PATH: &str = "/steam-login";
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn web_login_from_relay_url(url: &reqwest::Url) -> Option<(String, String)> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(ANDROID_RELAY_HOST)
+        || url.path() != ANDROID_RELAY_PATH
+    {
+        return None;
+    }
+    let mut steam_id = String::new();
+    let mut access_token = String::new();
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "steamid" => steam_id = value.into_owned(),
+            "token" => access_token = value.into_owned(),
+            _ => {}
+        }
+    }
+    let steam_id = validate_steam_id(&steam_id).ok()?;
+    let access_token = validate_web_token(&access_token).ok()?;
+    Some((steam_id, access_token))
+}
+
 pub fn save_web_login(steam_id: String, access_token: String) -> Result<(), SteamAccountError> {
     let steam_id = validate_steam_id(&steam_id)?;
     let access_token = validate_web_token(&access_token)?;
@@ -693,6 +722,31 @@ mod tests {
         assert_eq!(
             web_login_from_eval(&wrapped),
             Some(("76561198000000000".into(), "token-value".into()))
+        );
+    }
+
+    #[test]
+    fn a_web_login_is_read_only_from_the_relay_navigation_orivo_owns() {
+        let relay = reqwest::Url::parse(
+            "https://orivo.invalid/steam-login?steamid=76561198000000000&token=token-value",
+        )
+        .unwrap();
+        let elsewhere = reqwest::Url::parse(
+            "https://evil.example/steam-login?steamid=76561198000000000&token=token-value",
+        )
+        .unwrap();
+
+        assert_eq!(
+            web_login_from_relay_url(&relay),
+            Some(("76561198000000000".into(), "token-value".into()))
+        );
+        assert!(web_login_from_relay_url(&elsewhere).is_none());
+        assert!(
+            web_login_from_relay_url(
+                &reqwest::Url::parse("https://orivo.invalid/steam-login?steamid=nope&token=t")
+                    .unwrap()
+            )
+            .is_none()
         );
     }
 

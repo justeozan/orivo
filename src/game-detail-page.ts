@@ -41,6 +41,7 @@ import {
   type GameDetailPageAction,
   type GameDetailViewModel,
 } from "./game-detail-model";
+import { hostDeviceLabel } from "./host-device";
 
 export interface GameDetailPageClient {
   getDetail(gameId: string, signal: AbortSignal): Promise<GameDetailView>;
@@ -1927,7 +1928,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     // provider publishes no developer, publisher, date, genre or platform —
     // which is most of a Microsoft Store or local library.
     const rows: Array<[string, string | null]> = [
-      ["Store", sourceBadge(detail.source)?.label ?? "This Mac"],
+      [
+        "Store",
+        sourceBadge(detail.source)?.label ??
+          hostDeviceLabel().replace(/^this/, "This"),
+      ],
       ["Developer", detail.developer],
       ["Publisher", detail.publisher],
       [

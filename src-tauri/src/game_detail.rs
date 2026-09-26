@@ -7,10 +7,9 @@
 
 use crate::catalog::{
     Catalog, Game, GameSource as CatalogGameSource, LaunchTarget, SOURCE_COVER_URL_KEY,
-    SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_INSTALL_PERCENT_KEY, SOURCE_INSTALLED_KEY,
-    SOURCE_DEVELOPER_KEY, SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY,
-    SOURCE_PLATFORMS_KEY, STEAM_STORE_GENRE_KEY,
-    STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
+    SOURCE_DEVELOPER_KEY, SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_INSTALL_PERCENT_KEY,
+    SOURCE_INSTALLED_KEY, SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY,
+    SOURCE_PLATFORMS_KEY, STEAM_STORE_GENRE_KEY, STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -296,6 +295,10 @@ pub struct GameDetailView {
     /// the store's client actually is.
     pub install_percent: Option<u8>,
     pub mac_compatibility: MacCompatibilityView,
+    /// The OS this copy of Orivo is running on, stamped here at read time so
+    /// the UI judges fit against this machine instead of against macOS.
+    #[serde(default)]
+    pub host_platform: String,
 }
 
 /// Normalised provider/library record accepted by the detail service. Store
@@ -714,6 +717,7 @@ impl GameDetailService {
             install_state: record.install_state,
             install_percent: record.install_percent,
             mac_compatibility: record.mac_compatibility,
+            host_platform: crate::current_host_platform().to_string(),
         }))
     }
 }

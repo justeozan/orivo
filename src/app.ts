@@ -9,7 +9,13 @@ import type {
   WallpaperCredentials,
   WallpaperCredentialsUpdate,
 } from "./contracts";
+import {
+  HOST_NAMES,
+  blockedRunsOnLabel,
+  isBlockedForHost,
+} from "./game-detail-model";
 import { createGameDetailPage } from "./game-detail-page";
+import { hostDeviceLabel } from "./host-device";
 import { brandIcon, icon, type IconName } from "./icons";
 import {
   type BrowseMode,
@@ -36,6 +42,7 @@ import {
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { prefersReducedMotion } from "./motion";
+
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
   NOTIFICATIONS,
@@ -1112,28 +1119,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * still offered Play or Install as though there were none. The button is the
    * one control the answer belongs to, so it carries it alone and greys out.
    *
-   * Only a store that actually told us decides this — `unknown` is not "no" —
-   * and only on a Mac. `macCompatibility` is a fact about the game's macOS
-   * build, so on Windows and Linux it says nothing about runnability here.
-   *
-   * A Wine game is deliberately untouched: a local `.exe` carries no store
-   * answer, and Wine is precisely how Orivo runs it.
+   * The judgement itself lives in `game-detail-model` — against this host's
+   * OS, from the store's platform matrix, with the macOS answer only as a
+   * fallback on a Mac — so the hero and the detail page can never disagree.
    */
   const blockedOnThisMachine = (game: LibraryGame): boolean =>
-    game.hostPlatform === "macos" && game.macCompatibility === "not-native";
+    isBlockedForHost(game);
 
   /**
    * What the button says instead of Play. It names what the game *does* run on
    * rather than assuming Windows: GOG sells Linux-only titles, and those have
    * no macOS build either, so "Windows only" would be a confident lie.
    */
-  const PLATFORM_NAMES: Record<string, string> = { windows: "Windows", linux: "Linux" };
-
-  const blockedLabel = (game: LibraryGame): string => {
-    const elsewhere = (game.supportedPlatforms ?? []).filter((platform) => platform !== "macos");
-    if (elsewhere.length === 0) return "Windows only";
-    return elsewhere.map((platform) => PLATFORM_NAMES[platform] ?? platform).join(" / ") + " only";
-  };
+  const blockedLabel = (game: LibraryGame): string =>
+    blockedRunsOnLabel(game);
 
   const createGameCard = (): HTMLButtonElement => {
     const card = document.createElement("button");
@@ -1336,8 +1335,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const studio = (game.developer ?? "").trim();
     refs.studio.textContent = studio;
     refs.studio.hidden = studio === "";
-    // A game with no macOS build cannot be played or installed here whatever
-    // its store client would accept, so the button says which and goes quiet.
+    // A game with no build for this machine's OS cannot be played or installed
+    // here whatever its store client would accept, so the button says which
+    // and goes quiet.
     const blocked = blockedOnThisMachine(game);
     // A download already running is not a second install to start, so the
     // button reports it rather than offering to queue another.
@@ -1365,7 +1365,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.playButton.setAttribute(
       "aria-label",
       blocked
-        ? game.title + " has no macOS version"
+        ? game.title +
+          " has no " +
+          (HOST_NAMES[game.hostPlatform ?? "macos"] ?? "macOS") +
+          " version"
         : game.launchable
           ? "Play " + game.title
           : isSteamInstallable
@@ -2103,7 +2106,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         state: "unavailable",
         available: false,
         version: "",
-        message: "Wine-Staging settings are available in the Orivo desktop app for macOS.",
+        message: "Wine-Staging settings are available in the Orivo desktop app.",
       };
       settings.profiles = [];
       settings.notice = "";
@@ -2534,7 +2537,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const heading = document.createElement("h2");
       heading.textContent = "Checking your Steam connection";
       const message = document.createElement("p");
-      message.textContent = "Your account details stay on this Mac.";
+      message.textContent = `Your account details stay on ${hostDeviceLabel()}.`;
       loading.append(spinner, heading, message);
       body.append(loading);
       if (restoreFocus) {
@@ -2659,7 +2662,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const suffix = connectedStatus.steamId.length > 4 ? "••••" + connectedStatus.steamId.slice(-4) : connectedStatus.steamId;
       message.textContent = "Steam account " + suffix + " · " + (connectedStatus.method === "api_key" ? "API key" : "Web login");
     } else {
-      message.textContent = "See the games you own, even before they are installed on this Mac.";
+      message.textContent = `See the games you own, even before they are installed on ${hostDeviceLabel()}.`;
     }
     copy.append(heading, message);
     overview.append(badge, copy);
@@ -2670,7 +2673,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const summary = document.createElement("p");
       summary.className = "steam-account-sync-summary";
       const installed = account.lastSync.installedGames;
-      summary.textContent = account.lastSync.totalGames.toLocaleString() + " owned games · " + installed.toLocaleString() + " installed on this Mac";
+      summary.textContent = account.lastSync.totalGames.toLocaleString() + " owned games · " + installed.toLocaleString() + " installed on " + hostDeviceLabel();
       body.append(summary);
     }
 
@@ -2759,7 +2762,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       ? account.status?.steamId
         ? `Connected as ${account.status.steamId}`
         : "Connected"
-      : "See the games you own, and import the ones installed on this Mac.";
+      : `See the games you own, and import the ones installed on ${hostDeviceLabel()}.`;
     copy.append(name, detail);
 
     // Steam's price-data health rides on its row, the same way every other
@@ -3661,7 +3664,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         action: "local",
         mark: icon("folder"),
         title: "Import a local game",
-        detail: "Pick an app or executable on this Mac",
+        detail: `Pick an app or executable on ${hostDeviceLabel()}`,
         chevron: false,
       }),
     );
@@ -3770,6 +3773,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     const actions = document.createElement("div");
     actions.className = "onboarding__actions";
+
     if (busy) {
       const waiting = document.createElement("p");
       waiting.className = "onboarding__waiting";
@@ -6521,7 +6525,9 @@ function steamAccountSyncSummary(result: SteamAccountSyncResult): string {
     result.totalGames.toLocaleString() +
     " owned games synced · " +
     result.installedGames.toLocaleString() +
-    " installed on this Mac."
+    " installed on " +
+    hostDeviceLabel() +
+    "."
   );
 }
 
@@ -6667,19 +6673,22 @@ function shell(): string {
                 <span class="library-source-action__copy"><strong>Add a new source</strong><small>Connect another library to Orivo</small></span>
                 ${icon("chevron-right", "library-source-action__chevron")}
               </button>
-              <p class="library-source-menu__label">This Mac</p>
+              <p class="library-source-menu__label">${hostDeviceLabel().replace(/^this/, "This")}</p>
               <button type="button" class="library-source-action" role="menuitem" data-library-action="local">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on this Mac</small></span>
+                <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
               </button>
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
           <nav class="primary-nav" aria-label="Orivo navigation">
-            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page">${icon("library")}<span>Library</span></button>
-            <button type="button" class="nav-link" data-nav-page="store">${icon("store")}<span>Store</span></button>
-            <button type="button" class="nav-link" data-nav-page="me">${icon("user")}<span>Me</span></button>
-            <button type="button" class="nav-link" data-nav-page="settings">${icon("settings")}<span>Settings</span></button>
+            <!-- The labels are the accessible name on desktop and are hidden
+                 on a short screen, so each button carries the name itself
+                 rather than losing it along with the text. -->
+            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="Library">${icon("library")}<span>Library</span></button>
+            <button type="button" class="nav-link" data-nav-page="store" aria-label="Store">${icon("store")}<span>Store</span></button>
+            <button type="button" class="nav-link" data-nav-page="me" aria-label="Me">${icon("user")}<span>Me</span></button>
+            <button type="button" class="nav-link" data-nav-page="settings" aria-label="Settings">${icon("settings")}<span>Settings</span></button>
           </nav>
         </div>
 
@@ -7178,7 +7187,7 @@ function shell(): string {
                   <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">Refresh now</button>
                   <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">Clear derived cache</button>
                 </div>
-                <p class="settings-hint">Clearing removes only recomputed store and media data. Your library, Wine profiles, Steam connection, wishlist, and downloaded media stay on this Mac.</p>
+                <p class="settings-hint">Clearing removes only recomputed store and media data. Your library, Wine profiles, Steam connection, wishlist, and downloaded media stay on ${hostDeviceLabel()}.</p>
               </div>
             </section>
 

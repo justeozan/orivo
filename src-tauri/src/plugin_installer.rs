@@ -265,18 +265,25 @@ pub async fn install_plugin_from_registry(
 pub fn install_plugin_from_file(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<Option<String>, String> {
-    let Some(selected) = rfd::FileDialog::new()
-        .set_title("Choose an Orivo plugin package")
-        .add_filter("Orivo plugin", &["orivo-plugin"])
-        .pick_file()
-    else {
+    #[cfg(target_os = "android")]
+    {
         return Ok(None);
-    };
-    let bytes = read_bounded_file(&selected, MAX_PACKAGE_BYTES)
-        .map_err(|_| "This package could not be read.".to_string())?;
-    // A package the user picked by hand may be unsigned. It installs as a
-    // development build and every surface that lists it says so.
-    install_package(&service, &bytes, SignaturePolicy::AllowUnsigned).map(Some)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let Some(selected) = rfd::FileDialog::new()
+            .set_title("Choose an Orivo plugin package")
+            .add_filter("Orivo plugin", &["orivo-plugin"])
+            .pick_file()
+        else {
+            return Ok(None);
+        };
+        let bytes = read_bounded_file(&selected, MAX_PACKAGE_BYTES)
+            .map_err(|_| "This package could not be read.".to_string())?;
+        // A package the user picked by hand may be unsigned. It installs as a
+        // development build and every surface that lists it says so.
+        install_package(&service, &bytes, SignaturePolicy::AllowUnsigned).map(Some)
+    }
 }
 
 #[tauri::command]

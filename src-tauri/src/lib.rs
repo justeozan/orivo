@@ -97,6 +97,7 @@ const STEAM_EXPLORE_URL: &str = "https://store.steampowered.com/explore/";
 const STEAM_ACCOUNT_CONNECTED_EVENT: &str = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT: &str = "steam-account-login-failed";
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const STEAM_ACCOUNT_LOGIN_PENDING_EVENT: &str = "steam-account-login-pending";
 const SOURCE_ACCOUNT_CONNECTED_EVENT: &str = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "source-account-login-cancelled";
@@ -120,6 +121,12 @@ const MAX_CONCURRENT_SOURCE_ARTWORK_LOOKUPS: usize = 4;
 const MAX_SOURCE_SESSION_FAILURES: u32 = 3;
 /// How long the in-page library request may take once it has started.
 const SOURCE_SESSION_SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Delay between `eval_with_callback` retries on mobile where the WebView
+/// may need extra time to finish rendering after a redirect.
+#[cfg(target_os = "android")]
+const MOBILE_EVAL_RETRY_INTERVAL: Duration = Duration::from_millis(800);
+#[cfg(target_os = "android")]
+const MOBILE_EVAL_MAX_RETRIES: u32 = 8;
 const SOURCE_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 const SOURCE_EVAL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WINE_LAUNCH_STATUS_EVENT: &str = "wine-launch-status";
@@ -149,6 +156,51 @@ const STEAM_LOGIN_EXTRACTION_SCRIPT: &str = r#"
     accessToken = accessToken || read('webapi_token');
   }
   return JSON.stringify({ steamId, accessToken });
+})()
+"#;
+
+/// The Android counterpart of the script above. It cannot answer an eval
+/// callback, so it hands the login to the navigation handler instead. Kept
+/// beside its sibling because both read the exact same two Store values.
+#[cfg(target_os = "android")]
+const STEAM_ANDROID_RELAY_SCRIPT: &str = r#"
+(() => {
+  if (window.__orivoSteamRelay) {
+    return;
+  }
+  window.__orivoSteamRelay = true;
+  const relay = () => {
+    const context = window.g_rgAppContextData || {};
+    let steamId = typeof context.steamid === 'string' ? context.steamid : '';
+    let accessToken = typeof context.webapi_token === 'string' ? context.webapi_token : '';
+    if (!steamId || !accessToken) {
+      const html = document.documentElement ? document.documentElement.innerHTML : '';
+      const read = (name) => {
+        const expression = new RegExp('(?:&quot;|\\")' + name + '(?:&quot;|\\")\\s*:\\s*(?:&quot;|\\")([^&\\"<]+)');
+        const match = expression.exec(html);
+        return match ? match[1] : '';
+      };
+      steamId = steamId || read('steamid');
+      accessToken = accessToken || read('webapi_token');
+    }
+    if (!steamId || !accessToken) {
+      return false;
+    }
+    location.replace(
+      'https://orivo.invalid/steam-login?steamid=' +
+        encodeURIComponent(steamId) +
+        '&token=' +
+        encodeURIComponent(accessToken)
+    );
+    return true;
+  };
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts += 1;
+    if (relay() || attempts >= 40) {
+      clearInterval(timer);
+    }
+  }, 250);
 })()
 "#;
 
@@ -551,8 +603,140 @@ impl AppState {
     }
 }
 
+/// Android has no ambient credential store: `keyring` resolves to whatever
+/// `keyring-core` was told to use, and without this the first save fails with
+/// "No default store has been set". The store needs the app's JNI context, so
+/// it is built on the Android main thread once the activity exists.
+#[cfg(target_os = "android")]
+fn set_android_credential_store() {
+    use jni::objects::GlobalRef;
+
+    tauri::wry::prelude::dispatch(|env, activity, _webview| {
+        // The NDK context owns the global ref for the whole process, so the
+        // reference must outlive this closure and may only be handed over once.
+        static CONTEXT: OnceLock<GlobalRef> = OnceLock::new();
+        if CONTEXT.get().is_none() {
+            let (Ok(context), Ok(vm)) = (env.new_global_ref(activity), env.get_java_vm()) else {
+                eprintln!("android credential store: no JNI context");
+                return;
+            };
+            let raw_context = context.as_obj().as_raw().cast();
+            if CONTEXT.set(context).is_ok() {
+                unsafe {
+                    ndk_context::initialize_android_context(
+                        vm.get_java_vm_pointer().cast(),
+                        raw_context,
+                    );
+                }
+            }
+        }
+        match android_native_keyring_store::Store::new() {
+            Ok(store) => {
+                keyring_core::set_default_store(store);
+                eprintln!("[android] credential store ready");
+            }
+            Err(error) => eprintln!("[android] credential store unavailable: {error}"),
+        }
+    });
+}
+
+/// Android gives an activity one content view. The sign-in webview is stacked
+/// on top of the main one, so keeping a reference to the webview that was
+/// showing first is what lets Orivo hand control back to it.
+#[cfg(target_os = "android")]
+static MAIN_ANDROID_WEBVIEW: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+fn remember_android_main_webview() {
+    if MAIN_ANDROID_WEBVIEW.get().is_some() {
+        return;
+    }
+    tauri::wry::prelude::dispatch(|env, _activity, webview| {
+        if webview.is_null() || MAIN_ANDROID_WEBVIEW.get().is_some() {
+            return;
+        }
+        match env.new_global_ref(webview) {
+            Ok(reference) => {
+                let _ = MAIN_ANDROID_WEBVIEW.set(reference);
+            }
+            Err(error) => eprintln!("[android] could not hold on to the main webview: {error}"),
+        }
+    });
+}
+
+/// Take the sign-in webview off screen. Closing the window is not enough: the
+/// runtime has no way to remove a webview from an Android activity, so the view
+/// itself has to go, and the one underneath becomes current again.
+#[cfg(target_os = "android")]
+fn restore_android_main_webview() {
+    let Some(main_webview) = MAIN_ANDROID_WEBVIEW.get().cloned() else {
+        return;
+    };
+    tauri::wry::prelude::dispatch(move |env, _activity, sign_in_webview| {
+        if sign_in_webview.is_null()
+            || env
+                .is_same_object(sign_in_webview, &main_webview)
+                .unwrap_or(false)
+        {
+            return;
+        }
+        let parent = env
+            .call_method(
+                sign_in_webview,
+                "getParent",
+                "()Landroid/view/ViewParent;",
+                &[],
+            )
+            .and_then(|parent| parent.l());
+        match parent {
+            Ok(parent) if !parent.is_null() => {
+                if let Err(error) = env.call_method(
+                    &parent,
+                    "removeView",
+                    "(Landroid/view/View;)V",
+                    &[sign_in_webview.into()],
+                ) {
+                    eprintln!("[android] could not take the sign-in webview off screen: {error}");
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("[android] could not reach the sign-in webview: {error}");
+                return;
+            }
+        }
+        // wry routes eval and url reads to whichever webview was created last,
+        // so the one left on screen has to be named as the current one.
+        tauri::wry::prelude::set_current_webview(main_webview.clone());
+    });
+}
+
+/// Orivo is a wide, rail-based library: portrait leaves every row too narrow to
+/// read. The lock lives here rather than in the manifest because `gen/android`
+/// is regenerated from Tauri's templates and is not tracked.
+#[cfg(target_os = "android")]
+fn lock_android_landscape() {
+    /// `ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE`: landscape only, but
+    /// both ways up, so the device can still be held either way round.
+    const SCREEN_ORIENTATION_SENSOR_LANDSCAPE: i32 = 6;
+
+    tauri::wry::prelude::dispatch(|env, activity, _webview| {
+        if let Err(error) = env.call_method(
+            activity,
+            "setRequestedOrientation",
+            "(I)V",
+            &[SCREEN_ORIENTATION_SENSOR_LANDSCAPE.into()],
+        ) {
+            eprintln!("[android] could not lock landscape: {error}");
+        }
+    });
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         // The updater downloads and verifies signed releases; `process` is what
         // lets the frontend relaunch into the version it just installed.
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -604,6 +788,14 @@ pub fn run() {
             // keychain item and macOS would ask for the keychain password once
             // per store, every time.
             sources::set_connections_path(app_data.join(sources::CONNECTIONS_FILE));
+            // Android is the only platform whose URL hand-off runs through a
+            // Tauri plugin, so it needs the handle the `UrlOpener` seam omits.
+            #[cfg(target_os = "android")]
+            {
+                store::set_android_app(app.handle().clone());
+                set_android_credential_store();
+                lock_android_landscape();
+            }
             // The same credential store backs both the Settings commands and
             // the wallpaper search, so a saved key is used without a restart.
             let wallpaper_credentials =
@@ -661,6 +853,11 @@ pub fn run() {
             connect_steam_with_api_key,
             sync_steam_account_library,
             disconnect_steam_account,
+            open_auth_in_browser,
+            submit_steam_mobile_auth,
+            submit_epic_mobile_auth,
+            submit_gog_mobile_auth,
+            submit_microsoft_mobile_auth,
             get_source_accounts,
             connect_source_account,
             cancel_source_login,
@@ -1458,47 +1655,52 @@ fn choose_wine_game_directory(
     setup_id: String,
     state: State<'_, AppState>,
 ) -> Result<WineSetupView, String> {
-    require_wine_runner_platform()?;
-    if !valid_wine_opaque_id(&setup_id) {
-        return Err("This Wine setup is no longer available. Start again.".into());
-    }
-    let Some(selected) = rfd::FileDialog::new()
-        .set_title("Choose a Windows games folder for this Wine profile")
-        .pick_folder()
-    else {
-        let setups = state
+    #[cfg(target_os = "android")]
+    return Err("Wine is not available on Android.".into());
+    #[cfg(not(target_os = "android"))]
+    {
+        require_wine_runner_platform()?;
+        if !valid_wine_opaque_id(&setup_id) {
+            return Err("This Wine setup is no longer available. Start again.".into());
+        }
+        let Some(selected) = rfd::FileDialog::new()
+            .set_title("Choose a Windows games folder for this Wine profile")
+            .pick_folder()
+        else {
+            let setups = state
+                .wine_setups
+                .lock()
+                .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
+            let setup = setups.get(&setup_id).ok_or_else(|| {
+                "This Wine setup is no longer available. Start again.".to_string()
+            })?;
+            return Ok(wine_setup_view(setup_id, setup));
+        };
+
+        let directory = fs::canonicalize(selected).map_err(|_| {
+            "Orivo could not access that folder. Choose a readable games folder.".to_string()
+        })?;
+        if !directory.is_dir() {
+            return Err("Choose a folder containing your Windows games.".into());
+        }
+
+        let mut setups = state
             .wine_setups
             .lock()
             .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
         let setup = setups
-            .get(&setup_id)
+            .get_mut(&setup_id)
             .ok_or_else(|| "This Wine setup is no longer available. Start again.".to_string())?;
-        return Ok(wine_setup_view(setup_id, setup));
-    };
-
-    let directory = fs::canonicalize(selected).map_err(|_| {
-        "Orivo could not access that folder. Choose a readable games folder.".to_string()
-    })?;
-    if !directory.is_dir() {
-        return Err("Choose a folder containing your Windows games.".into());
+        if !setup
+            .game_directories
+            .values()
+            .any(|existing| existing == &directory)
+        {
+            let directory_id = next_wine_opaque_id(&state, "wine-directory");
+            setup.game_directories.insert(directory_id, directory);
+        }
+        Ok(wine_setup_view(setup_id, setup))
     }
-
-    let mut setups = state
-        .wine_setups
-        .lock()
-        .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
-    let setup = setups
-        .get_mut(&setup_id)
-        .ok_or_else(|| "This Wine setup is no longer available. Start again.".to_string())?;
-    if !setup
-        .game_directories
-        .values()
-        .any(|existing| existing == &directory)
-    {
-        let directory_id = next_wine_opaque_id(&state, "wine-directory");
-        setup.game_directories.insert(directory_id, directory);
-    }
-    Ok(wine_setup_view(setup_id, setup))
 }
 
 #[tauri::command]
@@ -1632,63 +1834,68 @@ async fn select_wine_staging(
     setup_id: String,
     state: State<'_, AppState>,
 ) -> Result<WineSetupView, String> {
-    require_wine_runner_platform()?;
-    if !valid_wine_opaque_id(&setup_id) {
-        return Err("This Wine setup is no longer available. Start again.".into());
-    }
-    // A manual picker supersedes discovery. This prevents a late background
-    // candidate from overwriting the binary the user explicitly chose.
+    #[cfg(target_os = "android")]
+    return Err("Wine is not available on Android.".into());
+    #[cfg(not(target_os = "android"))]
     {
-        let setups = state
-            .wine_setups
-            .lock()
-            .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
-        let setup = setups
-            .get(&setup_id)
-            .ok_or_else(|| "This Wine setup is no longer available. Start again.".to_string())?;
-        setup.detection.cancelled.store(true, Ordering::Release);
-        if let Ok(mut detection) = setup.detection.state.lock() {
-            detection.phase = WineDetectionPhase::Cancelled;
-            detection.message = "Automatic Wine-Staging detection was cancelled.".into();
+        require_wine_runner_platform()?;
+        if !valid_wine_opaque_id(&setup_id) {
+            return Err("This Wine setup is no longer available. Start again.".into());
         }
-    }
-    let Some(selected) = rfd::FileDialog::new()
-        .set_title("Select the Wine-Staging wine binary")
-        .pick_file()
-    else {
-        let setups = state
+        // A manual picker supersedes discovery. This prevents a late background
+        // candidate from overwriting the binary the user explicitly chose.
+        {
+            let setups = state
+                .wine_setups
+                .lock()
+                .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
+            let setup = setups.get(&setup_id).ok_or_else(|| {
+                "This Wine setup is no longer available. Start again.".to_string()
+            })?;
+            setup.detection.cancelled.store(true, Ordering::Release);
+            if let Ok(mut detection) = setup.detection.state.lock() {
+                detection.phase = WineDetectionPhase::Cancelled;
+                detection.message = "Automatic Wine-Staging detection was cancelled.".into();
+            }
+        }
+        let Some(selected) = rfd::FileDialog::new()
+            .set_title("Select the Wine-Staging wine binary")
+            .pick_file()
+        else {
+            let setups = state
+                .wine_setups
+                .lock()
+                .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
+            let setup = setups.get(&setup_id).ok_or_else(|| {
+                "This Wine setup is no longer available. Start again.".to_string()
+            })?;
+            return Ok(wine_setup_view(setup_id, setup));
+        };
+
+        // Version probing can start a native binary, so it stays off the UI
+        // executor and only receives a fixed `--version` argument.
+        let wine_binary = tauri::async_runtime::spawn_blocking(move || {
+            wine_runner::probe_wine_staging(&selected, &AtomicBool::new(false))
+        })
+        .await
+        .map_err(|_| "Wine-Staging validation did not finish. Try again.".to_string())?
+        .map_err(|error| error.to_string())?;
+
+        let mut setups = state
             .wine_setups
             .lock()
             .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
         let setup = setups
-            .get(&setup_id)
+            .get_mut(&setup_id)
             .ok_or_else(|| "This Wine setup is no longer available. Start again.".to_string())?;
-        return Ok(wine_setup_view(setup_id, setup));
-    };
-
-    // Version probing can start a native binary, so it stays off the UI
-    // executor and only receives a fixed `--version` argument.
-    let wine_binary = tauri::async_runtime::spawn_blocking(move || {
-        wine_runner::probe_wine_staging(&selected, &AtomicBool::new(false))
-    })
-    .await
-    .map_err(|_| "Wine-Staging validation did not finish. Try again.".to_string())?
-    .map_err(|error| error.to_string())?;
-
-    let mut setups = state
-        .wine_setups
-        .lock()
-        .map_err(|_| "Wine setup is temporarily unavailable.".to_string())?;
-    let setup = setups
-        .get_mut(&setup_id)
-        .ok_or_else(|| "This Wine setup is no longer available. Start again.".to_string())?;
-    setup.wine_binary = Some(wine_binary);
-    setup.detected_wine_binary = None;
-    if let Ok(mut detection) = setup.detection.state.lock() {
-        detection.phase = WineDetectionPhase::Ready;
-        detection.message = "Wine-Staging was validated for this profile.".into();
+        setup.wine_binary = Some(wine_binary);
+        setup.detected_wine_binary = None;
+        if let Ok(mut detection) = setup.detection.state.lock() {
+            detection.phase = WineDetectionPhase::Ready;
+            detection.message = "Wine-Staging was validated for this profile.".into();
+        }
+        Ok(wine_setup_view(setup_id, setup))
     }
-    Ok(wine_setup_view(setup_id, setup))
 }
 
 #[tauri::command]
@@ -3217,10 +3424,8 @@ pub(crate) fn register_installed_game(
 
 #[tauri::command]
 fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportResponse, String> {
-    let Some(executable) = rfd::FileDialog::new()
-        .set_title("Import a local game executable")
-        .pick_file()
-    else {
+    #[cfg(target_os = "android")]
+    {
         let catalog = state
             .catalog
             .read()
@@ -3229,57 +3434,74 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             games: library_state(&app, &catalog).games,
             imported_id: None,
         });
-    };
-
-    let mut game = Game::from_executable(executable).map_err(|error| error.to_string())?;
-    // Media is optional; a damaged image must not prevent a valid executable
-    // from entering the library.
-    let _ = cache_game_media(&app, &mut game);
-    let direct_id = game.id.clone();
-
-    let (response, imported_id) = {
-        let _mutation = state
-            .catalog_mutation
-            .lock()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        let mut next_catalog = state
-            .catalog
-            .read()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
-            .clone();
-        next_catalog.add(game).map_err(|error| error.to_string())?;
-        // A newly imported Windows .exe becomes a Wine-Staging card in the same
-        // transaction, so the returned library already shows it as launchable
-        // without the user opening any Wine setup.
-        auto_apply_wine_to_direct_games(&mut next_catalog, &state.wine_prefix_root);
-        // When the .exe was auto-associated, its Direct card is hidden behind a
-        // managed Wine runner card with a different id. Surface that runner id so
-        // the UI selects the card it can actually see and launch.
-        let imported_id = next_catalog
-            .wine_inventory
-            .iter()
-            .find(|entry| entry.origin_direct_game_id.as_deref() == Some(direct_id.as_str()))
-            .map(|entry| wine_game_id(&entry.profile_id, &entry.game_ref))
-            .unwrap_or_else(|| direct_id.clone());
-        persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
-        {
-            let mut catalog = state
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let Some(executable) = rfd::FileDialog::new()
+            .set_title("Import a local game executable")
+            .pick_file()
+        else {
+            let catalog = state
                 .catalog
-                .write()
+                .read()
                 .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-            *catalog = next_catalog;
-        }
-        let catalog = state
-            .catalog
-            .read()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        (library_state(&app, &catalog), imported_id)
-    };
-    debug_assert!(response.games.iter().any(|game| game.id == imported_id));
-    Ok(ImportResponse {
-        games: response.games,
-        imported_id: Some(imported_id),
-    })
+            return Ok(ImportResponse {
+                games: library_state(&app, &catalog).games,
+                imported_id: None,
+            });
+        };
+
+        let mut game = Game::from_executable(executable).map_err(|error| error.to_string())?;
+        // Media is optional; a damaged image must not prevent a valid executable
+        // from entering the library.
+        let _ = cache_game_media(&app, &mut game);
+        let direct_id = game.id.clone();
+
+        let (response, imported_id) = {
+            let _mutation = state
+                .catalog_mutation
+                .lock()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            let mut next_catalog = state
+                .catalog
+                .read()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+                .clone();
+            next_catalog.add(game).map_err(|error| error.to_string())?;
+            // A newly imported Windows .exe becomes a Wine-Staging card in the same
+            // transaction, so the returned library already shows it as launchable
+            // without the user opening any Wine setup.
+            auto_apply_wine_to_direct_games(&mut next_catalog, &state.wine_prefix_root);
+            // When the .exe was auto-associated, its Direct card is hidden behind a
+            // managed Wine runner card with a different id. Surface that runner id so
+            // the UI selects the card it can actually see and launch.
+            let imported_id = next_catalog
+                .wine_inventory
+                .iter()
+                .find(|entry| entry.origin_direct_game_id.as_deref() == Some(direct_id.as_str()))
+                .map(|entry| wine_game_id(&entry.profile_id, &entry.game_ref))
+                .unwrap_or_else(|| direct_id.clone());
+            persist_catalog(&next_catalog, &state.catalog_path)
+                .map_err(|error| error.to_string())?;
+            {
+                let mut catalog = state
+                    .catalog
+                    .write()
+                    .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+                *catalog = next_catalog;
+            }
+            let catalog = state
+                .catalog
+                .read()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            (library_state(&app, &catalog), imported_id)
+        };
+        debug_assert!(response.games.iter().any(|game| game.id == imported_id));
+        Ok(ImportResponse {
+            games: response.games,
+            imported_id: Some(imported_id),
+        })
+    }
 }
 
 /// Download best-effort cover/hero art for a game via the keyless Steam Store
@@ -3902,9 +4124,15 @@ async fn get_steam_account_status() -> Result<steam_account::SteamAccountStatus,
 /// Open the same local-first Steam sign-in pattern used by desktop launchers:
 /// a dedicated Steam-only WebView, then a direct local sync. There is no
 /// Orivo server, callback URL, password collection, or token IPC channel.
+///
+/// Async on purpose: like the source sign-in window, `build()` must not run
+/// on the main thread. A sync command executes there on Windows, and WebView2
+/// window creation blocks until the very message pump that call occupies —
+/// the app froze on `connecting` with a white window every time.
 #[tauri::command]
-fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+async fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(STEAM_AUTH_WINDOW_LABEL) {
+        eprintln!("[steam] focusing existing sign-in window");
         window
             .show()
             .and_then(|_| window.set_focus())
@@ -3914,6 +4142,7 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
 
     let initial_url =
         Url::parse(STEAM_EXPLORE_URL).map_err(|_| "Steam sign-in URL is invalid".to_string())?;
+    eprintln!("[steam] opening sign-in window: {initial_url}");
     let settled = Arc::new(AtomicBool::new(false));
     let settled_for_page_load = Arc::clone(&settled);
     let app_for_page_load = app.clone();
@@ -3923,7 +4152,16 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
     // the exact Steam Store host below, so permitting HTTPS navigation keeps
     // the auth flow functional without granting the page any Orivo access.
 
-    let window = WebviewWindowBuilder::new(
+    eprintln!("[steam] building sign-in window");
+    // Must run before the sign-in webview exists: it is the one that ends up on
+    // top of it.
+    #[cfg(target_os = "android")]
+    remember_android_main_webview();
+    #[cfg(target_os = "android")]
+    let settled_for_navigation = Arc::clone(&settled);
+    #[cfg(target_os = "android")]
+    let app_for_navigation = app.clone();
+    let builder = WebviewWindowBuilder::new(
         &app,
         STEAM_AUTH_WINDOW_LABEL,
         WebviewUrl::External(initial_url),
@@ -3931,13 +4169,38 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
     .title("Connect Steam to Orivo")
     .inner_size(640.0, 760.0)
     .min_inner_size(460.0, 580.0)
-    .center()
     // The credential lives in Keychain instead. A non-persistent WebView
     // avoids leaving a browser session behind in Orivo's app data.
     .incognito(true)
-    .on_navigation(is_allowed_steam_auth_navigation)
+    .on_navigation(move |url| {
+        // The relay is never loaded: the login it carries is read here and the
+        // navigation is denied, so the code stays inside the process.
+        #[cfg(target_os = "android")]
+        if let Some((steam_id, access_token)) = steam_account::web_login_from_relay_url(url) {
+            eprintln!("[steam] relay navigation carried a web login");
+            finish_steam_web_login(
+                &app_for_navigation,
+                Arc::clone(&settled_for_navigation),
+                steam_id,
+                access_token,
+            );
+            return false;
+        }
+        let allowed = is_allowed_steam_auth_navigation(url);
+        eprintln!(
+            "[steam] navigate {} -> {}",
+            url.as_str(),
+            if allowed { "allow" } else { "deny" }
+        );
+        allowed
+    })
     .on_new_window(|_, _| NewWindowResponse::Deny)
     .on_page_load(move |window, payload| {
+        eprintln!(
+            "[steam] page load {:?}: {}",
+            payload.event(),
+            payload.url().as_str()
+        );
         if payload.event() != PageLoadEvent::Finished
             || !is_steam_store_page(payload.url())
             || settled_for_page_load.load(Ordering::Acquire)
@@ -3950,19 +4213,32 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
             Arc::clone(&settled_for_page_load),
             false,
         );
-    })
-    .build()
-    .map_err(|error| format!("Steam sign-in window could not open: {error}"))?;
+    });
+
+    #[cfg(target_os = "android")]
+    let builder = builder.initialization_script(STEAM_ANDROID_RELAY_SCRIPT);
+
+    let window = builder.build().map_err(|error| {
+        eprintln!("[steam] window build failed: {error}");
+        format!("Steam sign-in window could not open: {error}")
+    })?;
+    eprintln!("[steam] window built");
 
     *state
         .steam_auth_settled
         .lock()
         .map_err(|_| "Steam sign-in state is temporarily unavailable".to_string())? =
         Some(Arc::clone(&settled));
+    eprintln!("[steam] settled slot stored");
 
     let settled_for_close = Arc::clone(&settled);
     let app_for_close = app.clone();
+    let window_for_close = window.clone();
     window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::CloseRequested { .. }) {
+            close_login_window(&window_for_close);
+            return;
+        }
         if matches!(event, WindowEvent::Destroyed)
             && settled_for_close
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -3972,7 +4248,76 @@ fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Result<(
                 app_for_close.emit_to(MAIN_WINDOW_LABEL, STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT, ());
         }
     });
+    eprintln!("[steam] close handler attached");
 
+    // On Windows, on_page_load may not fire reliably after post-login
+    // redirects. Spawn a polling fallback that periodically checks the URL
+    // and runs extraction scripts.
+    {
+        let settled_for_poll = Arc::clone(&settled);
+        let app_for_poll = app.clone();
+        let window_for_poll = window.clone();
+        // This command is sync, so there is no Tokio runtime context here:
+        // `tokio::spawn` would panic. Tauri's own runtime handle works from
+        // any thread.
+        tauri::async_runtime::spawn(async move {
+            eprintln!("[steam] poll task started");
+            let deadline = Instant::now() + SOURCE_CONNECT_TIMEOUT;
+            let mut last_logged_url: Option<String> = None;
+            loop {
+                if settled_for_poll.load(Ordering::Acquire) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // A window nobody settles would leave the panel waiting on
+                    // "connecting" forever: fail loudly and close it.
+                    eprintln!("[steam] sign-in timed out; closing window");
+                    if settled_for_poll
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        close_login_window(&window_for_poll);
+                        let _ = app_for_poll.emit_to(
+                            MAIN_WINDOW_LABEL,
+                            STEAM_ACCOUNT_LOGIN_FAILED_EVENT,
+                            "Steam sign-in did not finish in time.".to_string(),
+                        );
+                    }
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                match window_for_poll.url() {
+                    Ok(url) => {
+                        if last_logged_url.as_deref() != Some(url.as_str()) {
+                            eprintln!("[steam] poll url: {}", url.as_str());
+                            last_logged_url = Some(url.as_str().to_string());
+                        }
+                        if is_steam_store_page(&url) {
+                            eprintln!(
+                                "[poll] Steam login poll detected store page: {}",
+                                url.as_str()
+                            );
+                            let _ = attempt_steam_web_login(
+                                &app_for_poll,
+                                &window_for_poll,
+                                Arc::clone(&settled_for_poll),
+                                false,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if last_logged_url.as_deref() != Some("url-error") {
+                            eprintln!("[steam] poll could not read url: {error}");
+                            last_logged_url = Some("url-error".to_string());
+                        }
+                    }
+                }
+            }
+        });
+    }
+    eprintln!("[steam] poll spawned");
+
+    eprintln!("[steam] begin completed; sign-in window ready");
     Ok(())
 }
 
@@ -4009,19 +4354,94 @@ fn cancel_steam_web_login(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Persist a Steam web login and tell the main window how it went. Both the
+/// eval callback and the Android relay navigation land here, so a login is
+/// saved exactly once whichever channel reported it first.
+fn save_steam_web_login(app: &AppHandle, steam_id: String, access_token: String) {
+    match steam_account::save_web_login(steam_id.clone(), access_token) {
+        Ok(()) => {
+            // Close before emitting: on Android events reach whichever webview
+            // is on screen, so the main one has to be back first.
+            if let Some(window) = app.get_webview_window(STEAM_AUTH_WINDOW_LABEL) {
+                close_login_window(&window);
+            }
+            let _ = app.emit_to(
+                MAIN_WINDOW_LABEL,
+                STEAM_ACCOUNT_CONNECTED_EVENT,
+                steam_account::SteamAccountConnectedEvent { steam_id },
+            );
+        }
+        Err(error) => {
+            // `settled` stays true: reopening the poll would restart the eval
+            // retries against a window that is already closing, and a failing
+            // credential store fails again every time.
+            if let Some(window) = app.get_webview_window(STEAM_AUTH_WINDOW_LABEL) {
+                close_login_window(&window);
+            }
+            let _ = app.emit_to(
+                MAIN_WINDOW_LABEL,
+                STEAM_ACCOUNT_LOGIN_FAILED_EVENT,
+                error.to_string(),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn finish_steam_web_login(
+    app: &AppHandle,
+    settled: Arc<AtomicBool>,
+    steam_id: String,
+    access_token: String,
+) {
+    if settled
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    save_steam_web_login(app, steam_id, access_token);
+}
+
 fn attempt_steam_web_login(
     app: &AppHandle,
     window: &WebviewWindow,
     settled: Arc<AtomicBool>,
     notify_if_pending: bool,
 ) -> Result<(), String> {
+    attempt_steam_web_login_inner(app, window, settled, notify_if_pending, 0)
+}
+
+fn attempt_steam_web_login_inner(
+    app: &AppHandle,
+    window: &WebviewWindow,
+    settled: Arc<AtomicBool>,
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))] notify_if_pending: bool,
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))] attempt: u32,
+) -> Result<(), String> {
     let app_for_callback = app.clone();
+    #[cfg(target_os = "android")]
+    let app_for_retry = app.clone();
+    #[cfg(target_os = "android")]
     let login_window = window.clone();
     window
         .eval_with_callback(STEAM_LOGIN_EXTRACTION_SCRIPT, move |raw_result| {
             let Some((steam_id, access_token)) = steam_account::web_login_from_eval(&raw_result)
             else {
-                if notify_if_pending {
+                // On mobile the WebView may not have finished rendering the
+                // Steam Store page yet. Retry a few times before giving up.
+                #[cfg(target_os = "android")]
+                if !settled.load(Ordering::Acquire) && attempt < MOBILE_EVAL_MAX_RETRIES {
+                    let app = app_for_retry.clone();
+                    let window = login_window.clone();
+                    let settled = Arc::clone(&settled);
+                    let attempt = attempt + 1;
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(MOBILE_EVAL_RETRY_INTERVAL).await;
+                        let _ =
+                            attempt_steam_web_login_inner(&app, &window, settled, false, attempt);
+                    });
+                } else if notify_if_pending {
                     let _ = app_for_callback.emit_to(
                         MAIN_WINDOW_LABEL,
                         STEAM_ACCOUNT_LOGIN_PENDING_EVENT,
@@ -4037,27 +4457,7 @@ fn attempt_steam_web_login(
                 return;
             }
 
-            match steam_account::save_web_login(steam_id.clone(), access_token) {
-                Ok(()) => {
-                    let _ = app_for_callback.emit_to(
-                        MAIN_WINDOW_LABEL,
-                        STEAM_ACCOUNT_CONNECTED_EVENT,
-                        steam_account::SteamAccountConnectedEvent { steam_id },
-                    );
-                    let _ = login_window.close();
-                }
-                Err(error) => {
-                    // Saving failed, so keep the sign-in window available and
-                    // allow a later page load to retry without exposing a
-                    // secret or an OS error string to the WebView.
-                    settled.store(false, Ordering::Release);
-                    let _ = app_for_callback.emit_to(
-                        MAIN_WINDOW_LABEL,
-                        STEAM_ACCOUNT_LOGIN_FAILED_EVENT,
-                        error.to_string(),
-                    );
-                }
-            }
+            save_steam_web_login(&app_for_callback, steam_id, access_token);
         })
         .map_err(|_| "Steam sign-in could not be checked. Try again in the Steam window.".into())
 }
@@ -4070,6 +4470,110 @@ async fn connect_steam_with_api_key(
     steam_account::connect_api_key(steam_id, api_key)
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Open the provider's auth URL in the system browser (Chrome on mobile).
+/// Used on mobile where the WebView flow doesn't work reliably.
+#[tauri::command]
+fn open_auth_in_browser(provider: String) -> Result<(), String> {
+    use store::UrlOpener;
+    let url = match provider.as_str() {
+        "steam" => "https://steamcommunity.com/dev/apikey".to_string(),
+        "epic" => source_epic::login_url(),
+        "gog" => source_gog::login_url(),
+        "xbox" | "microsoft" | "microsoft-store" => source_microsoft::login_url(),
+        _ => return Err("Unsupported provider".to_string()),
+    };
+    store::SystemUrlOpener.open(&url)
+}
+
+/// Accept a Steam ID + API key pasted by the user from Chrome (mobile flow).
+#[tauri::command]
+async fn submit_steam_mobile_auth(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+    steam_id: String,
+    api_key: String,
+) -> Result<steam_account::SteamAccountStatus, String> {
+    let status = steam_account::connect_api_key(steam_id, api_key)
+        .await
+        .map_err(|error| error.to_string())?;
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, STEAM_ACCOUNT_CONNECTED_EVENT, ());
+    Ok(status)
+}
+
+/// Accept an Epic authorization code pasted by the user from Chrome (mobile flow).
+#[tauri::command]
+async fn submit_epic_mobile_auth(
+    app: AppHandle,
+    code: String,
+) -> Result<sources::SourceAccountStatus, String> {
+    let credential = source_epic::connect(code)
+        .await
+        .map_err(|error| error.to_string())?;
+    let account_label = credential.account_label().to_string();
+    let _ = app.emit_to(
+        MAIN_WINDOW_LABEL,
+        SOURCE_ACCOUNT_CONNECTED_EVENT,
+        sources::SourceAccountEvent {
+            provider: "epic".to_string(),
+            account_label,
+        },
+    );
+    let provider = sources::SourceProvider::Epic;
+    sources::status(provider).map_err(|error| error.to_string())
+}
+
+/// Accept a GOG auth code pasted by the user from Chrome (mobile flow).
+#[tauri::command]
+async fn submit_gog_mobile_auth(
+    app: AppHandle,
+    code: String,
+) -> Result<sources::SourceAccountStatus, String> {
+    let credential = source_gog::connect(code)
+        .await
+        .map_err(|error| error.to_string())?;
+    let account_label = credential.account_label().to_string();
+    let _ = app.emit_to(
+        MAIN_WINDOW_LABEL,
+        SOURCE_ACCOUNT_CONNECTED_EVENT,
+        sources::SourceAccountEvent {
+            provider: "gog".to_string(),
+            account_label,
+        },
+    );
+    let provider = sources::SourceProvider::Gog;
+    sources::status(provider).map_err(|error| error.to_string())
+}
+
+/// Accept a Microsoft redirect URL pasted by the user from Chrome (mobile flow).
+/// The URL fragment contains access_token, refresh_token, and expires_in.
+#[tauri::command]
+async fn submit_microsoft_mobile_auth(
+    app: AppHandle,
+    url: String,
+    provider: String,
+) -> Result<sources::SourceAccountStatus, String> {
+    let token = source_microsoft::token_from_pasted_url(&url)
+        .ok_or_else(|| "Could not parse tokens from the pasted URL.".to_string())?;
+    let source_provider = match provider.as_str() {
+        "xbox" => sources::SourceProvider::Xbox,
+        "microsoft" | "microsoft-store" => sources::SourceProvider::MicrosoftStore,
+        _ => return Err("Invalid Microsoft provider".to_string()),
+    };
+    let credential = source_microsoft::connect(token)
+        .await
+        .map_err(|error| error.to_string())?;
+    let account_label = credential.account_label().to_string();
+    let _ = app.emit_to(
+        MAIN_WINDOW_LABEL,
+        SOURCE_ACCOUNT_CONNECTED_EVENT,
+        sources::SourceAccountEvent {
+            provider: source_provider.token().to_string(),
+            account_label,
+        },
+    );
+    sources::status(source_provider).map_err(|error| error.to_string())
 }
 
 /// Pull all owned games directly from Steam, then join their AppIDs with the
@@ -4176,6 +4680,13 @@ async fn disconnect_steam_account() -> Result<(), String> {
 struct SourceLoginSession {
     outcome: Mutex<Option<Result<sources::SourceAccountStatus, String>>>,
     settled: AtomicBool,
+    /// At most one token exchange runs per sign-in. The page-load callback and
+    /// the Windows polling fallback both see the redirect page and would
+    /// otherwise race the *same* one-time code twice: Epic rejects the loser
+    /// with a 400 that settled as "rejected the connection" while the winner's
+    /// credential still landed in the keychain — a connection that worked
+    /// reading as a failure until the next sync.
+    exchange_started: AtomicBool,
 }
 
 impl SourceLoginSession {
@@ -4183,7 +4694,14 @@ impl SourceLoginSession {
         Self {
             outcome: Mutex::new(None),
             settled: AtomicBool::new(false),
+            exchange_started: AtomicBool::new(false),
         }
+    }
+
+    /// Claim the one allowed token exchange for this sign-in. The first caller
+    /// wins; every later extraction of the same redirect is a duplicate.
+    fn begin_exchange(&self) -> bool {
+        !self.exchange_started.swap(true, Ordering::AcqRel)
     }
 
     /// Record the first outcome and ignore every later one. A page load, a
@@ -4366,15 +4884,33 @@ async fn connect_token_source(
     let session_for_page_load = Arc::clone(&session);
     let app_for_page_load = app.clone();
 
-    let window = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url))
+    // Must run before the sign-in webview exists: it is the one that ends up on
+    // top of it.
+    #[cfg(target_os = "android")]
+    remember_android_main_webview();
+
+    let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url))
         .title(format!("Connect {} to Orivo", provider.label()))
         .inner_size(640.0, 760.0)
         .min_inner_size(460.0, 580.0)
-        .center()
         // A token-style sign-in leaves nothing behind: the credential belongs in
         // the keychain, not in a browser session inside Orivo's app data.
         .incognito(true)
         .on_navigation(move |url| {
+            // The relay is never loaded: the code it carries is read here and the
+            // navigation is denied, so it stays inside the process.
+            #[cfg(target_os = "android")]
+            if provider == sources::SourceProvider::Epic
+                && let Some(code) = source_epic::authorization_code_from_relay_url(url)
+            {
+                eprintln!("[epic] relay navigation carried an authorization code");
+                finish_epic_login(
+                    &app_for_navigation,
+                    Arc::clone(&session_for_navigation),
+                    code,
+                );
+                return false;
+            }
             // GOG returns its authorization code in the redirect URL itself, so it
             // is read here — no script ever runs inside the sign-in page.
             if provider == sources::SourceProvider::Gog
@@ -4423,18 +4959,30 @@ async fn connect_token_source(
                 }
                 _ => {}
             }
-        })
-        .build()
-        .map_err(|error| {
-            format!(
-                "The {} sign-in window could not open: {error}",
-                provider.label()
-            )
-        })?;
+        });
+
+    #[cfg(target_os = "android")]
+    let builder = if provider == sources::SourceProvider::Epic {
+        builder.initialization_script(source_epic::ANDROID_RELAY_SCRIPT)
+    } else {
+        builder
+    };
+
+    let window = builder.build().map_err(|error| {
+        format!(
+            "The {} sign-in window could not open: {error}",
+            provider.label()
+        )
+    })?;
 
     let session_for_close = Arc::clone(&session);
     let app_for_close = app.clone();
+    let window_for_close = window.clone();
     window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::CloseRequested { .. }) {
+            close_login_window(&window_for_close);
+            return;
+        }
         if matches!(event, WindowEvent::Destroyed)
             && session_for_close.settle(Err(format!(
                 "The {} sign-in window was closed before the account was connected.",
@@ -4451,6 +4999,73 @@ async fn connect_token_source(
             );
         }
     });
+
+    // On Windows, on_page_load may not fire reliably after post-login
+    // redirects. Spawn a polling fallback that periodically checks the URL
+    // and runs extraction scripts.
+    {
+        let session_for_poll = Arc::clone(&session);
+        let app_for_poll = app.clone();
+        let window_for_poll = window.clone();
+        let provider_for_poll = provider;
+        tokio::spawn(async move {
+            let deadline = Instant::now() + SOURCE_CONNECT_TIMEOUT;
+            loop {
+                if session_for_poll.settled.load(Ordering::Acquire) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Ok(url) = window_for_poll.url() {
+                    match provider_for_poll {
+                        sources::SourceProvider::Epic
+                            if source_epic::is_authorization_page(&url) =>
+                        {
+                            eprintln!(
+                                "[poll] Epic login poll detected auth page: {}",
+                                url.as_str()
+                            );
+                            extract_epic_login(
+                                &app_for_poll,
+                                &window_for_poll,
+                                Arc::clone(&session_for_poll),
+                            );
+                        }
+                        sources::SourceProvider::Gog => {
+                            if let Some(code) = source_gog::authorization_code_from_url(&url) {
+                                eprintln!(
+                                    "[poll] GOG login poll detected auth code: {}",
+                                    url.as_str()
+                                );
+                                finish_gog_login(
+                                    &app_for_poll,
+                                    Arc::clone(&session_for_poll),
+                                    code,
+                                );
+                            }
+                        }
+                        sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
+                            if source_microsoft::is_redirect_page(&url) =>
+                        {
+                            eprintln!(
+                                "[poll] Microsoft login poll detected redirect: {}",
+                                url.as_str()
+                            );
+                            extract_microsoft_login(
+                                &app_for_poll,
+                                &window_for_poll,
+                                provider_for_poll,
+                                Arc::clone(&session_for_poll),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
 
     let outcome = await_source_login(session, provider).await;
     if let Ok(mut sessions) = state.source_logins.lock() {
@@ -4480,20 +5095,67 @@ async fn await_source_login(
     }
 }
 
+/// Exchange an Epic authorization code for a token, whichever channel read it.
+#[cfg(target_os = "android")]
+fn finish_epic_login(app: &AppHandle, session: Arc<SourceLoginSession>, code: String) {
+    if session.settled.load(Ordering::Acquire) || !session.begin_exchange() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = source_epic::connect(code).await;
+        let window = app.get_webview_window(&source_window_label(sources::SourceProvider::Epic));
+        settle_token_login_optional(
+            &app,
+            sources::SourceProvider::Epic,
+            session,
+            window,
+            outcome,
+        );
+    });
+}
+
 fn extract_epic_login(app: &AppHandle, window: &WebviewWindow, session: Arc<SourceLoginSession>) {
     let app = app.clone();
     let login_window = window.clone();
-    let _ = window.eval_with_callback(
+    extract_epic_login_with_retry(app, login_window, session, 0);
+}
+
+fn extract_epic_login_with_retry(
+    app: AppHandle,
+    login_window: WebviewWindow,
+    session: Arc<SourceLoginSession>,
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))] attempt: u32,
+) {
+    if session.settled.load(Ordering::Acquire) {
+        return;
+    }
+    let window_for_cb = login_window.clone();
+    let _ = login_window.eval_with_callback(
         source_epic::AUTHORIZATION_EXTRACTION_SCRIPT,
         move |raw_result| {
             let Some(code) = source_epic::authorization_code_from_eval(&raw_result) else {
-                // Epic sometimes renders the redirect page before its body has
-                // the code. A later page load retries; nothing is settled here.
+                // On mobile, the WebView may need extra time to render after a
+                // redirect. Retry a few times before giving up.
+                #[cfg(target_os = "android")]
+                if !session.settled.load(Ordering::Acquire) && attempt < MOBILE_EVAL_MAX_RETRIES {
+                    let app = app.clone();
+                    let session = Arc::clone(&session);
+                    let window = window_for_cb.clone();
+                    let attempt = attempt + 1;
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(MOBILE_EVAL_RETRY_INTERVAL).await;
+                        extract_epic_login_with_retry(app, window, session, attempt);
+                    });
+                }
                 return;
             };
             let app = app.clone();
             let session = Arc::clone(&session);
-            let login_window = login_window.clone();
+            let login_window = window_for_cb.clone();
+            if !session.begin_exchange() {
+                return;
+            }
             tauri::async_runtime::spawn(async move {
                 let outcome = source_epic::connect(code).await;
                 settle_token_login(
@@ -4509,7 +5171,7 @@ fn extract_epic_login(app: &AppHandle, window: &WebviewWindow, session: Arc<Sour
 }
 
 fn finish_gog_login(app: &AppHandle, session: Arc<SourceLoginSession>, code: String) {
-    if session.settled.load(Ordering::Acquire) {
+    if session.settled.load(Ordering::Acquire) || !session.begin_exchange() {
         return;
     }
     let app = app.clone();
@@ -4532,6 +5194,9 @@ fn extract_microsoft_login(
         let Some(token) = source_microsoft::token_from_eval(&raw) else {
             return;
         };
+        if !session.begin_exchange() {
+            return;
+        }
         let app = app.clone();
         let session = Arc::clone(&session);
         let login_window = login_window.clone();
@@ -4564,6 +5229,13 @@ fn settle_token_login_optional(
             let account_label = credential.account_label().to_string();
             let status = sources::status_from_credential(provider, Some(&credential));
             if session.settle(Ok(status)) {
+                // Closing only happens once the credential is saved, so a
+                // keychain failure leaves the window available for another
+                // attempt. It comes before the event because on Android events
+                // reach whichever webview is on screen.
+                if let Some(window) = window {
+                    close_login_window(&window);
+                }
                 let _ = app.emit_to(
                     MAIN_WINDOW_LABEL,
                     SOURCE_ACCOUNT_CONNECTED_EVENT,
@@ -4572,16 +5244,14 @@ fn settle_token_login_optional(
                         account_label,
                     },
                 );
-                // Close only after the credential is saved, so a keychain
-                // failure leaves the window available for another attempt.
-                if let Some(window) = window {
-                    let _ = window.close();
-                }
             }
         }
         Err(error) => {
             let message = error.to_string();
             if session.settle(Err(message.clone())) {
+                if let Some(window) = window {
+                    close_login_window(&window);
+                }
                 let _ = app.emit_to(
                     MAIN_WINDOW_LABEL,
                     SOURCE_ACCOUNT_LOGIN_FAILED_EVENT,
@@ -4590,9 +5260,6 @@ fn settle_token_login_optional(
                         message,
                     },
                 );
-                if let Some(window) = window {
-                    let _ = window.close();
-                }
             }
         }
     }
@@ -4607,8 +5274,16 @@ fn cancel_source_login(provider: String, app: AppHandle) -> Result<(), String> {
 
 fn close_source_window(app: &AppHandle, provider: sources::SourceProvider) {
     if let Some(window) = app.get_webview_window(&source_window_label(provider)) {
-        let _ = window.close();
+        close_login_window(&window);
     }
+}
+
+/// Closing a sign-in window is two steps on Android: the window itself, then
+/// the content view it took over.
+fn close_login_window(window: &WebviewWindow) {
+    let _ = window.close();
+    #[cfg(target_os = "android")]
+    restore_android_main_webview();
 }
 
 /// Pull one connected store's library and fold it into the catalog.
@@ -4676,25 +5351,38 @@ async fn session_sync(
     let label = source_window_label(provider);
     let window = match app.get_webview_window(&label) {
         Some(window) => {
+            eprintln!("[{}] focusing existing sign-in window", provider.token());
             let _ = window.show().and_then(|_| window.set_focus());
             window
         }
         None => {
+            eprintln!(
+                "[{}] opening sign-in window: {library_url}",
+                provider.token()
+            );
             let url =
                 Url::parse(library_url).map_err(|_| sources::SourceError::Unsupported(provider))?;
-            WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
+            let built = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
                 .title(format!("Connect {} to Orivo", provider.label()))
                 .inner_size(900.0, 820.0)
                 .min_inner_size(560.0, 620.0)
-                .center()
                 // Deliberately *not* incognito: this store has no token to
                 // keep, so its own signed-in session is the connection. It
                 // lives in Orivo's WebView data store and is cleared when the
                 // source is disconnected.
                 .on_navigation(is_allowed_source_auth_navigation)
                 .on_new_window(|_, _| NewWindowResponse::Deny)
-                .build()
-                .map_err(|_| sources::SourceError::Network(provider))?
+                .build();
+            match built {
+                Ok(window) => window,
+                Err(error) => {
+                    eprintln!(
+                        "[{}] sign-in window build failed: {error}",
+                        provider.token()
+                    );
+                    return Err(sources::SourceError::Network(provider));
+                }
+            }
         }
     };
 
@@ -4736,11 +5424,18 @@ async fn session_sync(
                         // re-sync it means the session lapsed, and pretending
                         // otherwise would just spin behind a spinner.
                         sources::SessionSyncState::SignedOut if !wait_for_sign_in => {
+                            eprintln!("[{}] session expired on re-sync", provider.token());
                             return Err(sources::SourceError::SessionExpired(provider));
                         }
                         state => {
                             if state == sources::SessionSyncState::Failed {
                                 failures += 1;
+                                eprintln!(
+                                    "[{}] session sync failed ({failures}): {raw}",
+                                    provider.token()
+                                );
+                            } else {
+                                eprintln!("[{}] session settled: {state:?}", provider.token());
                             }
                             last_settled = sources::session_error(provider, state);
                             break;
@@ -4749,15 +5444,22 @@ async fn session_sync(
                 }
             }
         }
-        // A store that fails repeatedly is not going to succeed by being asked
-        // again for another four minutes.
-        if failures >= MAX_SOURCE_SESSION_FAILURES {
-            return Err(last_settled.unwrap_or(sources::SourceError::Network(provider)));
+        // A re-sync that fails repeatedly is not going to succeed by being
+        // asked again for another minute. During first sign-in the window must
+        // stay open for the full connect timeout: a failed probe while the
+        // user is still typing (or a stale session mid-write) is not grounds
+        // to close the form after three quick retries.
+        if failures >= MAX_SOURCE_SESSION_FAILURES && !wait_for_sign_in {
+            let error = last_settled.unwrap_or(sources::SourceError::Network(provider));
+            eprintln!("[{}] session sync giving up: {error}", provider.token());
+            return Err(error);
         }
         tokio::time::sleep(SOURCE_SESSION_RETRY_INTERVAL).await;
     }
 
-    Err(last_settled.unwrap_or(sources::SourceError::SessionExpired(provider)))
+    let error = last_settled.unwrap_or(sources::SourceError::SessionExpired(provider));
+    eprintln!("[{}] session sync deadline: {error}", provider.token());
+    Err(error)
 }
 
 /// Evaluate one expression in a window and return its result. `eval_with_callback`
@@ -6288,7 +6990,7 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
     let source_landscape = source_asset_url(game, catalog::SOURCE_LANDSCAPE_URL_KEY);
     let host_platform = current_host_platform();
     let supported_platforms = supported_platforms(game);
-    let compatible_with_host = steam_compatibility(game, host_platform, &supported_platforms);
+    let compatible_with_host = host_compatibility(host_platform, &supported_platforms);
     GameView {
         id: game.id.clone(),
         title: game.title.clone(),
@@ -6403,6 +7105,17 @@ fn current_host_platform() -> &'static str {
     }
 }
 
+/// The same machine, named the way a sentence names it: "Runs natively on
+/// Windows", never "Runs natively on windows" and never a guess about macOS.
+fn current_host_platform_label() -> &'static str {
+    match current_host_platform() {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        _ => "this machine",
+    }
+}
+
 /// The studio, if a store named one.
 ///
 /// The bare `developer` key is read too, only because the detail page has
@@ -6449,11 +7162,14 @@ fn supported_platforms(game: &Game) -> Vec<String> {
     platforms
 }
 
-fn steam_compatibility(game: &Game, host_platform: &str, supported: &[String]) -> Option<bool> {
-    (game.source == GameSource::Steam
-        && matches!(host_platform, "windows" | "macos" | "linux")
-        && !supported.is_empty())
-    .then(|| supported.iter().any(|platform| platform == host_platform))
+/// Whether the store's platform matrix puts this game on the machine actually
+/// running Orivo. Only a non-empty matrix can answer; `None` means "never
+/// told", never "no". Every source that published a matrix is judged the same
+/// way — Steam's store flags, an Epic entitlement list, a GOG connector answer
+/// — because the question is about the game and this host, not about Steam.
+fn host_compatibility(host_platform: &str, supported: &[String]) -> Option<bool> {
+    (matches!(host_platform, "windows" | "macos" | "linux") && !supported.is_empty())
+        .then(|| supported.iter().any(|platform| platform == host_platform))
 }
 
 /// All remote artwork URLs are derived from a validated numeric Steam AppID,
@@ -7180,13 +7896,29 @@ mod tests {
             matches!(current_host_platform(), "windows" | "macos" | "linux").then_some(true)
         );
         assert_eq!(
-            steam_compatibility(&game, "macos", &["windows".into()]),
+            host_compatibility("macos", &["windows".into()]),
             Some(false)
         );
         assert!(
             game.extra
                 .contains_key(catalog::STEAM_STORE_METADATA_MARKER)
         );
+    }
+
+    #[test]
+    fn host_compatibility_answers_only_from_a_real_platform_matrix() {
+        assert_eq!(
+            host_compatibility("windows", &["windows".into()]),
+            Some(true)
+        );
+        assert_eq!(
+            host_compatibility("macos", &["windows".into()]),
+            Some(false)
+        );
+        // No matrix is no answer, never "incompatible".
+        assert_eq!(host_compatibility("macos", &[]), None);
+        // A host outside the three desktop OSes cannot be judged against it.
+        assert_eq!(host_compatibility("other", &["windows".into()]), None);
     }
 
     #[test]

@@ -1057,3 +1057,56 @@
   html:not([data-motion="full"]) .store-rail__track { scroll-behavior: auto; }
   html:not([data-motion="full"]) .store-why { animation: none; }
 }
+
+/* ---------------------------------------------------------------------------
+   Compact — see the block at the end of styles.css.
+
+   The Store keeps its promise of being exactly one screen: what changes is how
+   much of that screen the hero is allowed to take, so the rail below it still
+   has room for a portrait card.
+   --------------------------------------------------------------------------- */
+/* One screen is no longer a promise the page can keep: the hero, the shelf and
+   the chip bar together leave the rail about 40px, which turns a portrait card
+   into a strip. The page scrolls instead — the same concession me-page.css
+   already makes below 620px — and the rail gets its full card height back. */
+html[data-form-factor="compact"] .app-page--store { overflow-y: auto; overflow-x: hidden; }
+html[data-form-factor="compact"] .store-page {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+html[data-form-factor="compact"] .store-page__body {
+  height: auto;
+  overflow: visible;
+}
+html[data-form-factor="compact"] .store-rail { min-height: var(--card-max-h); }
+/* `min(100%, …)` resolves against an auto track once the page scrolls. */
+html[data-form-factor="compact"] .store-card { height: var(--card-max-h); }
+
+html[data-form-factor="compact"] .store-page {
+  --pad: 16px;
+  --pad-top: calc(var(--topbar-height) + 8px);
+  --pad-bottom: 8px;
+  --card-w: 138px;
+  --card-max-h: 208px;
+  --card-gap: 10px;
+  --size-title: clamp(20px, 5.4svh, 26px);
+  --lh-title: clamp(22px, 5.8svh, 28px);
+  --size-lead: 12px;
+  --lh-lead: 16px;
+  --gap-shelf: 10px;
+  --gap-label: 6px;
+  --gap-lead: 6px;
+  --gap-action: 8px;
+  --h-action: 40px;
+  --h-chipbar: 40px;
+}
+/* A three-row panel pinned to the right edge has nowhere to go on a short
+   screen, and it is the one piece of the hero the shelf can do without. */
+html[data-form-factor="compact"] .store-highlights { display: none; }
+/* The design indents this row to clear the panel above. With the panel gone,
+   the indent is a third of the width spent on nothing. */
+html[data-form-factor="compact"] .store-shelf__label { margin-left: 0; }
+/* Two lines of editorial standfirst are two lines of games not shown. The
+   title and the button carry the same promise. */
+html[data-form-factor="compact"] .store-hero__lead { display: none; }

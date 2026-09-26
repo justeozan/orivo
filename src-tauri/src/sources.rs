@@ -41,6 +41,19 @@ use std::{
 /// older entry deserialize into something it never meant.
 const KEYRING_SERVICE: &str = "io.orivo.desktop.sources.v1";
 
+/// Windows Credential Manager refuses a credential blob larger than 2560
+/// bytes, and the keyring crate encodes a password as UTF-16 — two bytes per
+/// code unit — so one entry holds at most 1280 ASCII characters. Epic's OAuth
+/// tokens put the serialized credential well past that on Windows alone, while
+/// the macOS keychain has no comparable ceiling. Oversized values are split
+/// across sibling entries instead: chunk 0 in the provider's own account,
+/// chunk *n* under `{account}#n`, and a reader joins them back together.
+/// The budget is counted in UTF-16 code units so a non-BMP character (two
+/// units) can never push a chunk over the platform limit.
+const KEYRING_CHUNK_CODE_UNITS: usize = 1_024;
+/// A damaged keychain that answers for every index must not spin forever.
+const KEYRING_MAX_CHUNKS: usize = 256;
+
 /// Which stores are connected, and under which display name — and nothing else.
 ///
 /// macOS asks for the keychain password every time an application whose code
@@ -464,7 +477,7 @@ impl fmt::Display for SourceError {
             }
             Self::Keychain(_) => write!(
                 f,
-                "Orivo could not read the secure {provider} connection from the system keychain. Connect {provider} again."
+                "Orivo could not access the secure {provider} connection in the system keychain. Connect {provider} again."
             ),
             Self::InvalidCredential(_) => {
                 write!(
@@ -739,18 +752,16 @@ pub fn status_from_credential(
 pub fn load_credential(
     provider: SourceProvider,
 ) -> Result<Option<StoredSourceCredential>, SourceError> {
-    let key = provider
-        .credential_namespace()
-        .keychain_account()
-        .to_string();
+    let base = provider.credential_namespace().keychain_account();
+    let key = base.to_string();
     if let Ok(cache) = credential_cache().lock()
         && let Some(credential) = cache.get(&key)
     {
         return Ok(Some(credential.clone()));
     }
 
-    let entry = credential_entry(provider)?;
-    let encoded = match entry.get_password() {
+    let entry = credential_chunk_entry(provider, base)?;
+    let mut encoded = match entry.get_password() {
         Ok(value) => value,
         Err(KeyringError::NoEntry) => {
             // The directory said connected but the item is gone — the user
@@ -761,6 +772,19 @@ pub fn load_credential(
         }
         Err(error) => return Err(keychain_error(provider, "read", error)),
     };
+    // Join the overflow parts of an oversized save. The first missing index
+    // ends the credential: a gap can only come from a torn write, and the
+    // truncated JSON is rejected below rather than half-trusted.
+    for index in 1..KEYRING_MAX_CHUNKS {
+        let Some(part) = raw_entry(&chunk_account(base, index)) else {
+            break;
+        };
+        match part.get_password() {
+            Ok(chunk) => encoded.push_str(&chunk),
+            Err(KeyringError::NoEntry) => break,
+            Err(error) => return Err(keychain_error(provider, "read", error)),
+        }
+    }
     match serde_json::from_str::<StoredSourceCredential>(&encoded) {
         Ok(credential) => {
             cache_credential(&key, &credential);
@@ -786,16 +810,86 @@ pub fn save_credential(
     credential: &StoredSourceCredential,
 ) -> Result<(), SourceError> {
     let encoded = serde_json::to_string(credential).map_err(|_| SourceError::Keychain(provider))?;
-    credential_entry(provider)?
-        .set_password(&encoded)
-        .map_err(|error| keychain_error(provider, "write", error))?;
-    let key = provider
-        .credential_namespace()
-        .keychain_account()
-        .to_string();
-    cache_credential(&key, credential);
+    let base = provider.credential_namespace().keychain_account();
+    let chunks = split_keyring_chunks(&encoded);
+
+    // Overflow parts land before the primary entry, so a failure keeps the
+    // previous credential addressable; anything that did land is wiped rather
+    // than left behind for a later read to join into a torn value.
+    let mut highest = 0usize;
+    for (index, chunk) in chunks.iter().enumerate().skip(1) {
+        let entry = match Entry::new(KEYRING_SERVICE, &chunk_account(base, index)) {
+            Ok(entry) => entry,
+            Err(error) => return Err(keychain_error(provider, "open", error)),
+        };
+        match entry.set_password(chunk) {
+            Ok(()) => highest = index,
+            Err(error) => {
+                wipe_credential_chunks(base, index);
+                return Err(keychain_error(provider, "write", error));
+            }
+        }
+    }
+    let primary = credential_chunk_entry(provider, base)?;
+    if let Err(error) = primary.set_password(&chunks[0]) {
+        wipe_credential_chunks(base, highest.max(chunks.len() - 1));
+        return Err(keychain_error(provider, "write", error));
+    }
+
+    // A shorter value than last time must not leave a tail behind: the reader
+    // joins every index it finds, so a stale tail would corrupt the JSON.
+    let mut tail = chunks.len();
+    while tail < KEYRING_MAX_CHUNKS {
+        let Some(entry) = raw_entry(&chunk_account(base, tail)) else {
+            break;
+        };
+        match entry.delete_credential() {
+            Ok(()) => tail += 1,
+            Err(_) => break,
+        }
+    }
+
+    cache_credential(base, credential);
     remember_connection(provider, credential.account_label());
     Ok(())
+}
+
+/// Split an encoded credential so every piece fits the Windows blob budget.
+fn split_keyring_chunks(encoded: &str) -> Vec<String> {
+    let mut chunks = vec![String::new()];
+    let mut units = 0usize;
+    for character in encoded.chars() {
+        let width = character.len_utf16();
+        if units + width > KEYRING_CHUNK_CODE_UNITS {
+            chunks.push(String::new());
+            units = 0;
+        }
+        chunks
+            .last_mut()
+            .expect("split_keyring_chunks always keeps one chunk")
+            .push(character);
+        units += width;
+    }
+    chunks
+}
+
+fn chunk_account(base: &str, chunk: usize) -> String {
+    if chunk == 0 {
+        base.to_string()
+    } else {
+        format!("{base}#{chunk}")
+    }
+}
+
+/// Best-effort clear of an entry and its parts after a failed write, so a
+/// half-saved credential reads back as "not connected" instead of corrupt.
+fn wipe_credential_chunks(base: &str, highest: usize) {
+    for index in 0..=highest.min(KEYRING_MAX_CHUNKS - 1) {
+        let Some(entry) = raw_entry(&chunk_account(base, index)) else {
+            continue;
+        };
+        let _ = entry.delete_credential();
+    }
 }
 
 fn cache_credential(key: &str, credential: &StoredSourceCredential) {
@@ -813,19 +907,33 @@ pub fn disconnect(provider: SourceProvider) -> Result<(), SourceError> {
     // reading as connected, or Settings would keep offering a sync that cannot
     // work and the user could never get out of it.
     forget_connection(provider);
-    let entry = credential_entry(provider)?;
+    let base = provider.credential_namespace().keychain_account();
+    let entry = credential_chunk_entry(provider, base)?;
     match entry.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(keychain_error(provider, "delete", error)),
+        Ok(()) | Err(KeyringError::NoEntry) => {}
+        Err(error) => return Err(keychain_error(provider, "delete", error)),
     }
+    // Overflow parts go too: a leftover tail would be joined onto the next
+    // credential this provider saves.
+    for index in 1..KEYRING_MAX_CHUNKS {
+        let Some(part) = raw_entry(&chunk_account(base, index)) else {
+            break;
+        };
+        match part.delete_credential() {
+            Ok(()) => continue,
+            Err(KeyringError::NoEntry) => break,
+            Err(error) => return Err(keychain_error(provider, "delete", error)),
+        }
+    }
+    Ok(())
 }
 
-fn credential_entry(provider: SourceProvider) -> Result<Entry, SourceError> {
-    Entry::new(
-        KEYRING_SERVICE,
-        provider.credential_namespace().keychain_account(),
-    )
-    .map_err(|error| keychain_error(provider, "open", error))
+fn credential_chunk_entry(provider: SourceProvider, account: &str) -> Result<Entry, SourceError> {
+    Entry::new(KEYRING_SERVICE, account).map_err(|error| keychain_error(provider, "open", error))
+}
+
+fn raw_entry(account: &str) -> Option<Entry> {
+    Entry::new(KEYRING_SERVICE, account).ok()
 }
 
 fn keychain_error(provider: SourceProvider, operation: &str, error: KeyringError) -> SourceError {
@@ -1429,5 +1537,66 @@ mod tests {
             }
             .needs_refresh()
         );
+    }
+
+    #[test]
+    fn an_oversized_credential_splits_into_windows_sized_chunks_and_joins_back() {
+        // Windows Credential Manager tops out at 2560 UTF-16 bytes — 1280
+        // ASCII characters — which Epic's OAuth JSON alone bursts through.
+        let mut encoded = String::from(r#"{"kind":"oauth","access_token":""#);
+        encoded.push_str(&"a".repeat(8_000));
+        encoded.push_str(r#"","refresh_token":""#);
+        encoded.push_str(&"b".repeat(400));
+        encoded.push_str(r#"","expires_at_ms":0}"#);
+
+        let chunks = split_keyring_chunks(&encoded);
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            let units = chunk.encode_utf16().count();
+            assert!(units <= KEYRING_CHUNK_CODE_UNITS);
+            // The Windows store measures the UTF-16 encoding in bytes.
+            assert!(units * 2 <= 2_560);
+        }
+        assert_eq!(chunks.concat(), encoded);
+    }
+
+    #[test]
+    fn a_credential_under_the_platform_limit_stays_in_one_entry() {
+        let encoded = r#"{"kind":"session","account_label":"Player"}"#;
+        assert_eq!(split_keyring_chunks(encoded), vec![encoded.to_string()]);
+    }
+
+    #[test]
+    fn a_character_never_splits_across_chunk_boundaries() {
+        // A non-BMP character counts as two UTF-16 code units, so it must
+        // start a fresh chunk rather than straddle the Windows budget.
+        let mut encoded = "x".repeat(KEYRING_CHUNK_CODE_UNITS - 1);
+        encoded.push('🦀');
+        encoded.push_str(&"y".repeat(10));
+
+        let chunks = split_keyring_chunks(&encoded);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].encode_utf16().count(),
+            KEYRING_CHUNK_CODE_UNITS - 1
+        );
+        assert!(chunks[1].starts_with('🦀'));
+        assert_eq!(chunks.concat(), encoded);
+    }
+
+    #[test]
+    fn an_epic_sized_oauth_blob_survives_the_split_and_join() {
+        let credential = StoredSourceCredential::OAuth {
+            account_id: "epic-account".into(),
+            account_label: "Player".into(),
+            // Epic's access token alone is a multi-kilobyte JWT.
+            access_token: "eyJ".to_string() + &"a".repeat(4_000),
+            refresh_token: "r".repeat(300),
+            expires_at_ms: expiry_from_seconds(3_600),
+        };
+        let encoded = serde_json::to_string(&credential).unwrap();
+        let joined: String = split_keyring_chunks(&encoded).into_iter().collect();
+        let decoded = serde_json::from_str::<StoredSourceCredential>(&joined).unwrap();
+        assert_eq!(decoded, credential);
     }
 }

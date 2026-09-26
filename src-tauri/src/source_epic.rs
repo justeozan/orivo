@@ -56,6 +56,64 @@ pub const AUTHORIZATION_EXTRACTION_SCRIPT: &str = r#"
 })()
 "#;
 
+/// Android's WebView answers neither `WebviewWindow::url` nor an eval callback
+/// once the sign-in window has navigated away from its first page, so the code
+/// can only travel back through a navigation. The page asks for a host that
+/// resolves nowhere; the navigation handler reads the code and blocks the load,
+/// so the request never leaves the device.
+const ANDROID_RELAY_HOST: &str = "orivo.invalid";
+const ANDROID_RELAY_PATH: &str = "/epic-authorization";
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub const ANDROID_RELAY_SCRIPT: &str = r#"
+(() => {
+  if (window.__orivoEpicRelay) {
+    return;
+  }
+  window.__orivoEpicRelay = true;
+  const relay = () => {
+    if (location.pathname !== '/id/api/redirect') {
+      return true;
+    }
+    const body = document.body ? document.body.innerText : '';
+    const match = /"authorizationCode"\s*:\s*"([A-Za-z0-9]+)"/.exec(body);
+    if (!match) {
+      return false;
+    }
+    location.replace('https://orivo.invalid/epic-authorization?code=' + encodeURIComponent(match[1]));
+    return true;
+  };
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts += 1;
+    if (relay() || attempts >= 40) {
+      clearInterval(timer);
+    }
+  }, 250);
+})()
+"#;
+
+/// Read the code back out of the relay navigation. The same validation as the
+/// eval path applies: the page only ever hands over one short opaque string.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn authorization_code_from_relay_url(url: &reqwest::Url) -> Option<String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(ANDROID_RELAY_HOST)
+        || url.path() != ANDROID_RELAY_PATH
+    {
+        return None;
+    }
+    let code = url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())?;
+    let code = code.trim();
+    (!code.is_empty()
+        && code.len() <= MAX_AUTHORIZATION_CODE_LENGTH
+        && code.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then(|| code.to_string())
+}
+
 pub fn login_url() -> String {
     format!(
         "https://www.epicgames.com/id/login?redirectUrl={}",
@@ -461,6 +519,33 @@ mod tests {
         assert!(is_authorization_page(&redirect));
         assert!(!is_authorization_page(&login));
         assert!(!is_authorization_page(&lookalike));
+    }
+
+    #[test]
+    fn a_code_is_read_only_from_the_relay_navigation_orivo_owns() {
+        let relay =
+            reqwest::Url::parse("https://orivo.invalid/epic-authorization?code=abc123").unwrap();
+        let elsewhere =
+            reqwest::Url::parse("https://evil.example/epic-authorization?code=abc123").unwrap();
+        let insecure =
+            reqwest::Url::parse("http://orivo.invalid/epic-authorization?code=abc123").unwrap();
+
+        assert!(ANDROID_RELAY_SCRIPT.contains(&format!(
+            "https://{ANDROID_RELAY_HOST}{ANDROID_RELAY_PATH}?code="
+        )));
+        assert_eq!(
+            authorization_code_from_relay_url(&relay).as_deref(),
+            Some("abc123")
+        );
+        assert!(authorization_code_from_relay_url(&elsewhere).is_none());
+        assert!(authorization_code_from_relay_url(&insecure).is_none());
+        assert!(
+            authorization_code_from_relay_url(
+                &reqwest::Url::parse("https://orivo.invalid/epic-authorization?code=a%20b")
+                    .unwrap()
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -101,3 +101,55 @@ jobs:
 
       - name: Check the Rust crate
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+  android:
+    name: Android (cargo check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the frontend
+        run: pnpm exec vite build
+
+      - name: Install JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: ndk;27.0.12077973
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: android
+
+      - name: Check the Rust crate (Android)
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
+        run: cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android

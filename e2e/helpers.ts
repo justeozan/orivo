@@ -75,9 +75,9 @@ export function host(page: Page, name: PageName): Locator {
 export async function waitForPage(page: Page, name: PageName): Promise<void> {
   const ready: Record<PageName, string> = {
     library: `${HOST_ID.library}:not([hidden]) #hero-title`,
-    // `.store-catalog__title` is present for both the populated rail and the
-    // empty state, so a filter that matches nothing still counts as "ready".
-    store: `${HOST_ID.store}:not([hidden]) .store-catalog__title`,
+    // The hero heading is present for both the populated rail and the empty
+    // state, so a filter that matches nothing still counts as "ready".
+    store: `${HOST_ID.store}:not([hidden]) .store-hero__title`,
     game: `${HOST_ID.game}:not([hidden]) .gd-hero__title`,
     settings: `${HOST_ID.settings}:not([hidden]) .settings-layout`,
     "not-found": `${HOST_ID["not-found"]}:not([hidden]) .not-found__title`,

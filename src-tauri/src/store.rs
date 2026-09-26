@@ -544,8 +544,15 @@ impl CachedGame {
         }
     }
 
-    fn supports_macos(&self) -> bool {
-        self.supported_platforms.contains(&GamePlatform::Macos)
+    /// Whether the store published a build for the machine actually running
+    /// Orivo — Windows, macOS or Linux, whichever this is.
+    fn supports_host(&self) -> bool {
+        match crate::current_host_platform() {
+            "windows" => self.supported_platforms.contains(&GamePlatform::Windows),
+            "macos" => self.supported_platforms.contains(&GamePlatform::Macos),
+            "linux" => self.supported_platforms.contains(&GamePlatform::Linux),
+            _ => false,
+        }
     }
 
     fn best_discount_percent(&self) -> u32 {
@@ -1025,9 +1032,12 @@ impl LibraryProfile {
             ));
         }
 
-        if game.supports_macos() {
+        if game.supports_host() {
             score += 3;
-            reasons.push("Runs natively on macOS".to_string());
+            reasons.push(format!(
+                "Runs natively on {}",
+                crate::current_host_platform_label()
+            ));
         }
 
         let facts = normalize(&[game.tags.join(" "), game.genres.join(" ")].join(" "));
@@ -1918,53 +1928,87 @@ fn apple_entry(
 // Opening an offer. The WebView supplies an identifier and nothing else.
 // ---------------------------------------------------------------------------
 
-/// Platform hand-off seam. If the shell later adds `tauri-plugin-opener`, only
-/// this implementation changes; the validation above it stays identical.
+/// Platform hand-off seam. The validation above it stays identical; only the
+/// implementation below ever changes per platform.
 pub trait UrlOpener: Send + Sync {
     fn open(&self, url: &str) -> Result<(), String>;
+}
+
+/// The opener plugin's Android path needs an `AppHandle`, which
+/// [`UrlOpener::open`] deliberately does not carry. Only Android goes through
+/// the plugin, so the handle is parked here during setup instead of widening
+/// the trait for every platform.
+#[cfg(target_os = "android")]
+static ANDROID_APP: OnceLock<AppHandle> = OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn set_android_app(app: AppHandle) {
+    let _ = ANDROID_APP.set(app);
+}
+
+/// `webbrowser::open` must not be used here: it reads its context from
+/// `ndk-context`, which this app never initialises, so it panics inside the
+/// JNI thread and aborts the whole process. The opener plugin hands the URL to
+/// its own Kotlin `OpenerPlugin`, which fires the browser intent directly.
+#[cfg(target_os = "android")]
+fn open_url_android(url: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let app = ANDROID_APP
+        .get()
+        .ok_or("Orivo is not ready to open a browser yet.")?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| format!("Failed to open browser: {error}"))
 }
 
 pub struct SystemUrlOpener;
 
 impl UrlOpener for SystemUrlOpener {
     fn open(&self, url: &str) -> Result<(), String> {
-        // A fixed absolute binary, one argument, and no shell. The argument is
-        // already known to start with `https://`, so it can never be read as a
-        // flag or a path.
-        #[cfg(target_os = "macos")]
-        let mut command = {
-            let mut command = std::process::Command::new("/usr/bin/open");
-            command.arg(url);
+        #[cfg(target_os = "android")]
+        {
+            open_url_android(url)
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            // A fixed absolute binary, one argument, and no shell. The argument is
+            // already known to start with `https://`, so it can never be read as a
+            // flag or a path.
+            #[cfg(target_os = "macos")]
+            let mut command = {
+                let mut command = std::process::Command::new("/usr/bin/open");
+                command.arg(url);
+                command
+            };
+            #[cfg(target_os = "linux")]
+            let mut command = {
+                let mut command = std::process::Command::new("/usr/bin/xdg-open");
+                command.arg(url);
+                command
+            };
+            // An unqualified program name would let Windows resolve `rundll32.exe`
+            // through its search order, which includes the current directory.
+            #[cfg(target_os = "windows")]
+            let mut command = {
+                let system_root = std::env::var("SystemRoot")
+                    .ok()
+                    .filter(|root| Path::new(root).is_absolute())
+                    .unwrap_or_else(|| "C:\\Windows".to_string());
+                let mut command = std::process::Command::new(format!(
+                    "{}\\System32\\rundll32.exe",
+                    system_root.trim_end_matches('\\')
+                ));
+                command.arg("url.dll,FileProtocolHandler").arg(url);
+                command
+            };
             command
-        };
-        #[cfg(target_os = "linux")]
-        let mut command = {
-            let mut command = std::process::Command::new("/usr/bin/xdg-open");
-            command.arg(url);
-            command
-        };
-        // An unqualified program name would let Windows resolve `rundll32.exe`
-        // through its search order, which includes the current directory.
-        #[cfg(target_os = "windows")]
-        let mut command = {
-            let system_root = std::env::var("SystemRoot")
-                .ok()
-                .filter(|root| Path::new(root).is_absolute())
-                .unwrap_or_else(|| "C:\\Windows".to_string());
-            let mut command = std::process::Command::new(format!(
-                "{}\\System32\\rundll32.exe",
-                system_root.trim_end_matches('\\')
-            ));
-            command.arg("url.dll,FileProtocolHandler").arg(url);
-            command
-        };
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map(|_| ())
-            .map_err(|_| "Orivo could not open this store page.".to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map(|_| ())
+                .map_err(|_| "Orivo could not open this store page.".to_string())
+        }
     }
 }
 
@@ -3394,10 +3438,19 @@ mod tests {
     #[test]
     fn recommendations_switch_at_three_played_games() {
         let games = vec![
-            game_fixture(vec![offer_fixture(
-                "offer_a",
-                "https://store.steampowered.com/app/1/",
-            )]),
+            CachedGame {
+                // Every desktop platform, so whichever machine runs this test
+                // has a native build to name in the reason below.
+                supported_platforms: vec![
+                    GamePlatform::Windows,
+                    GamePlatform::Macos,
+                    GamePlatform::Linux,
+                ],
+                ..game_fixture(vec![offer_fixture(
+                    "offer_a",
+                    "https://store.steampowered.com/app/1/",
+                )])
+            },
             CachedGame {
                 id: "steam:2".to_string(),
                 title: "Windows Only".to_string(),
@@ -3432,11 +3485,16 @@ mod tests {
                 .recommendation_reasons
                 .contains(&"Because you play strategy games".to_string())
         );
-        assert!(
-            summaries[0]
-                .recommendation_reasons
-                .contains(&"Runs natively on macOS".to_string())
-        );
+        // The native reason names the machine running Orivo, whichever it is.
+        if matches!(
+            crate::current_host_platform(),
+            "windows" | "macos" | "linux"
+        ) {
+            assert!(summaries[0].recommendation_reasons.contains(&format!(
+                "Runs natively on {}",
+                crate::current_host_platform_label()
+            )));
+        }
         // Every reason must point at a fact, never at a claim about the player.
         for summary in &summaries {
             assert!(!summary.recommendation_reasons.is_empty());

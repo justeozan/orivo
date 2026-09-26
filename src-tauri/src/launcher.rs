@@ -11,6 +11,10 @@ pub enum LaunchError {
     PermissionDenied(std::path::PathBuf),
     SteamNotInstalled,
     #[cfg(not(target_os = "macos"))]
+    // Windows and Linux now dispatch Steam URLs themselves; only platforms
+    // with no opener at all still produce this, so on those two it is never
+    // constructed — kept for the Display arm and the fallback stubs.
+    #[allow(dead_code)]
     SteamUnsupported,
     SteamDispatchFailed(ExitStatus),
     /// The store this game was synced from has no client on this machine, or
@@ -388,16 +392,19 @@ fn launch_direct(game: &Game) -> Result<std::process::Child, LaunchError> {
     command.spawn().map_err(LaunchError::Process)
 }
 
-/// Steam is invoked through its registered macOS bundle with a URL assembled
-/// from a validated catalog app id. We wait for `/usr/bin/open` to accept the
-/// URI, not for the game process itself (`-W` would block on the game). This
-/// lets the UI report a missing or unregistered Steam bundle accurately.
-#[cfg(target_os = "macos")]
+/// Steam is handed a URL assembled from a validated catalog app id. We wait
+/// for the OS opener to accept the URI, not for the game process itself, so a
+/// missing or unregistered handler surfaces as a dispatch failure instead of a
+/// silent no-op. Each supported OS has its own opener, chosen below.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn launch_steam(app_id: u32) -> Result<(), LaunchError> {
     dispatch_steam_uri(steam_launch_uri(app_id))
 }
 
-#[cfg(target_os = "macos")]
+/// macOS and Linux: wait for `/usr/bin/open` / `xdg-open` to accept the URI
+/// (`-W` would block on the game itself), so their exit status stays a real
+/// answer about the handler.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn dispatch_steam_uri(uri: String) -> Result<(), LaunchError> {
     let status = steam_uri_command(&uri)
         .spawn()
@@ -411,6 +418,26 @@ fn dispatch_steam_uri(uri: String) -> Result<(), LaunchError> {
     }
 }
 
+/// Windows: the same explorer hand-off `dispatch_provider_uri` uses — it
+/// resolves the registered scheme with no shell in between, so the reference
+/// never reaches a command interpreter. Explorer's exit status is meaningless
+/// (non-zero even on success for verbs), so only a spawn failure counts.
+#[cfg(target_os = "windows")]
+fn dispatch_steam_uri(uri: String) -> Result<(), LaunchError> {
+    Command::new("explorer.exe")
+        .arg(&uri)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(LaunchError::Process)?
+        .wait()
+        .map_err(LaunchError::Process)?;
+    Ok(())
+}
+
+/// Pinned to the registered Steam bundle rather than the default URL handler,
+/// so a hijacked `steam://` scheme registration cannot receive the request.
 #[cfg(target_os = "macos")]
 fn steam_uri_command(uri: &str) -> Command {
     let mut command = Command::new("/usr/bin/open");
@@ -422,12 +449,25 @@ fn steam_uri_command(uri: &str) -> Command {
     command
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Linux: the desktop's standard opener hands `steam://` to Steam's own
+/// registered handler.
+#[cfg(target_os = "linux")]
+fn steam_uri_command(uri: &str) -> Command {
+    let mut command = Command::new("xdg-open");
+    command
+        .arg(uri)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn launch_steam(_app_id: u32) -> Result<(), LaunchError> {
     Err(LaunchError::SteamUnsupported)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn dispatch_steam_uri(_uri: String) -> Result<(), LaunchError> {
     Err(LaunchError::SteamUnsupported)
 }

@@ -1208,7 +1208,11 @@ describe("status chips", () => {
     overrides: Partial<
       Pick<
         GameDetailViewModel,
-        "installState" | "installPercent" | "macCompatibility"
+        | "installState"
+        | "installPercent"
+        | "macCompatibility"
+        | "hostPlatform"
+        | "supportedPlatforms"
       >
     >,
   ): GameDetailViewModel => ({
@@ -1216,6 +1220,7 @@ describe("status chips", () => {
     installState: "unknown",
     installPercent: null,
     macCompatibility: "unknown",
+    hostPlatform: "other",
     ...overrides,
   });
 
@@ -1241,6 +1246,45 @@ describe("status chips", () => {
     expect(
       statusChips(detailWithStatus({ macCompatibility: "unknown" })),
     ).toEqual([]);
+  });
+
+  it("judges fit against a Windows host from the store's matrix", () => {
+    const native = statusChips(
+      detailWithStatus({
+        hostPlatform: "windows",
+        supportedPlatforms: ["windows", "macos"],
+      }),
+    );
+    expect(native.map((chip) => chip.label)).toEqual(["Windows native"]);
+
+    const blocked = statusChips(
+      detailWithStatus({
+        hostPlatform: "windows",
+        supportedPlatforms: ["macos"],
+      }),
+    );
+    expect(blocked).toEqual([
+      { id: "mac", label: "macOS only", icon: "check", tone: "warn" },
+    ]);
+  });
+
+  it("stays silent on a Windows host the store never published a matrix for", () => {
+    expect(
+      statusChips(
+        detailWithStatus({ hostPlatform: "windows", supportedPlatforms: [] }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("names every platform a Linux host cannot use, not just Windows", () => {
+    const chips = statusChips(
+      detailWithStatus({
+        hostPlatform: "linux",
+        supportedPlatforms: ["windows", "macos"],
+      }),
+    );
+    expect(chips[0].label).toBe("Windows / macOS only");
+    expect(chips[0].tone).toBe("warn");
   });
 
   it("leaves a running download to the button's own progress bar", () => {
@@ -1281,6 +1325,23 @@ describe("status chips", () => {
     expect(action.label).toBe("Install");
     expect(action.progress).toBeNull();
     expect(action.disabled).toBe(false);
+  });
+
+  it("greys the primary action when the store published no build for this host", () => {
+    const action = resolvePrimaryAction(
+      {
+        ...detailWithStatus({
+          hostPlatform: "windows",
+          supportedPlatforms: ["macos"],
+        }),
+        primaryAction: "install-steam" as const,
+      },
+      "steam:1",
+    );
+
+    expect(action.label).toBe("macOS only");
+    expect(action.disabled).toBe(true);
+    expect(action.intent).toBe("none");
   });
 
   it("shows both facts together once both are known", () => {

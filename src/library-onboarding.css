@@ -539,3 +539,24 @@
 [data-motion="reduced"] .onboarding *::before,
 [data-motion="reduced"] .onboarding *::after,
 [data-motion="reduced"] .app-page--library.is-empty .hero-image.is-active { animation: none !important; }
+
+/* ---------------------------------------------------------------------------
+   Compact — see the block at the end of styles.css.
+
+   The welcome screen already stacks below 880px of width. Here the width is
+   fine and the height is not, so what shrinks is the masthead: a 60px wordmark
+   and a 40px greeting push the two things worth tapping off the screen.
+   --------------------------------------------------------------------------- */
+html[data-form-factor="compact"] .onboarding {
+  top: var(--topbar-height);
+  right: var(--edge-right);
+  bottom: var(--edge-bottom);
+  left: var(--edge-left);
+  gap: 14px;
+  align-items: start;
+  align-content: start;
+  overflow-y: auto;
+}
+html[data-form-factor="compact"] .onboarding__title span { font-size: clamp(18px, 4.6svh, 24px); }
+html[data-form-factor="compact"] .onboarding__wordmark { height: clamp(30px, 8svh, 42px); }
+html[data-form-factor="compact"] .onboarding__lead { margin-top: 6px; }

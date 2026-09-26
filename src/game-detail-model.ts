@@ -283,6 +283,19 @@ const PRIMARY_ACTIONS: readonly GameDetailPrimaryAction[] = [
   "view-offer",
   "unavailable",
 ];
+const HOST_PLATFORMS: readonly GameDetailView["hostPlatform"][] = [
+  "windows",
+  "macos",
+  "linux",
+  "other",
+];
+
+/** The desktop OSes, named the way a sentence says them. */
+export const HOST_NAMES: Record<string, string> = {
+  windows: "Windows",
+  macos: "macOS",
+  linux: "Linux",
+};
 
 /** Restore-state encoding. `PageRestoreState.filters` is a plain string list. */
 export const RESTORE_KIND_PREFIX = "kind:";
@@ -599,6 +612,7 @@ export function normaliseGameDetail(
       MAC_COMPATIBILITIES,
       "unknown",
     ),
+    hostPlatform: oneOf(value.hostPlatform, HOST_PLATFORMS, "other"),
     primaryAction: oneOf(value.primaryAction, PRIMARY_ACTIONS, "unavailable"),
   };
   const friends = normaliseFriends(value.friends);
@@ -743,6 +757,61 @@ export function selectActionOffer(
   return ranked[0] ?? null;
 }
 
+function desktopPlatformsOf(
+  platforms: readonly string[],
+): Array<"windows" | "macos" | "linux"> {
+  return platforms.filter(
+    (platform): platform is "windows" | "macos" | "linux" =>
+      platform === "windows" || platform === "macos" || platform === "linux",
+  );
+}
+
+/** The shape both the hero and the detail page judge host fit against. */
+interface HostFitInput {
+  source?: string;
+  hostPlatform?: string;
+  supportedPlatforms?: readonly string[];
+  macCompatibility?: "native" | "not-native" | "unknown";
+}
+
+/**
+ * Whether the store has said this game ships no build for the machine the
+ * question is about. The platform matrix decides when one exists; the
+ * macOS-specific answer only speaks when there is none, and only for a Mac.
+ * An unknown host, an empty answer, and a Wine entry never block: absence of
+ * an answer is not an answer, and running Windows builds is exactly what
+ * Wine is for.
+ */
+export function isBlockedForHost(game: HostFitInput): boolean {
+  if (game.source === "wine") return false;
+  const host = game.hostPlatform;
+  if (host !== "windows" && host !== "macos" && host !== "linux") return false;
+  const platforms = desktopPlatformsOf(game.supportedPlatforms ?? []);
+  if (platforms.length > 0) return !platforms.includes(host);
+  return host === "macos" && game.macCompatibility === "not-native";
+}
+
+/**
+ * What a blocked control says instead of Play or Install: where the game
+ * *does* run, never assuming Windows — GOG sells Linux-only titles, and those
+ * have no macOS build either, so "Windows only" would be a confident lie.
+ */
+export function blockedRunsOnLabel(game: HostFitInput): string {
+  const host = game.hostPlatform;
+  const elsewhere = desktopPlatformsOf(game.supportedPlatforms ?? []).filter(
+    (platform) => platform !== host,
+  );
+  if (elsewhere.length > 0) {
+    return (
+      elsewhere.map((platform) => HOST_NAMES[platform]).join(" / ") + " only"
+    );
+  }
+  // No matrix: the macOS answer's shadow. Epic's non-Mac entitlements are
+  // Windows builds, which is what has always made this label safe.
+  if (game.macCompatibility === "not-native") return "Windows only";
+  return "Unavailable";
+}
+
 export function resolvePrimaryAction(
   detail: GameDetailView | null,
   gameId: GameId | null,
@@ -759,6 +828,16 @@ export function resolvePrimaryAction(
     hint: "This game cannot be started on this device yet.",
   };
   if (!detail || !gameId) return base;
+  // No build for this machine's OS: the button states where the game does
+  // run and goes quiet rather than offering a launch or download this
+  // machine could never use.
+  if (isBlockedForHost(detail)) {
+    return {
+      ...base,
+      label: blockedRunsOnLabel(detail),
+      hint: `${detail.title} ships no build for this machine's OS.`,
+    };
+  }
   switch (detail.primaryAction) {
     case "play":
       return {
@@ -1007,9 +1086,9 @@ export function formatAchievementProgress(
 
 /**
  * The hero's status chips: whether the game is on this machine, and whether it
- * runs natively on this Mac. Both are stated outright rather than implied by
- * the Play button, because "owned but not downloaded" and "runs under
- * translation" are the two things a player most needs to know before clicking.
+ * ships a build for *this* machine's OS. Both are stated outright rather than
+ * implied by the Play button, because "owned but not downloaded" and "runs
+ * here" are the two things a player most needs to know before clicking.
  *
  * A chip is omitted only when the answer is genuinely unknown. Saying nothing
  * is honest; guessing is not.
@@ -1035,6 +1114,36 @@ export function statusChips(
     chips.push({ id: "install", label: "Installed", icon: "check", tone: "ready" });
   }
 
+  const host = detail.hostPlatform;
+  const isDesktopHost =
+    host === "windows" || host === "macos" || host === "linux";
+  const platforms = desktopPlatformsOf(detail.supportedPlatforms);
+
+  if (isDesktopHost && platforms.length > 0) {
+    // The store published a matrix: answer against this machine directly.
+    if (platforms.includes(host)) {
+      chips.push({
+        id: "mac",
+        label: `${HOST_NAMES[host]} native`,
+        icon: "check",
+        tone: "ready",
+      });
+    } else {
+      chips.push({
+        id: "mac",
+        label: `${platforms.map((platform) => HOST_NAMES[platform]).join(" / ")} only`,
+        icon: platforms.includes("windows") ? "windows" : "check",
+        tone: "warn",
+      });
+    }
+    return chips;
+  }
+
+  // No matrix: only the macOS answer can still speak, and it never travels —
+  // a Windows or Linux host stays silent rather than inherit a judgement
+  // about a different OS. An unknown host keeps the legacy answer, which is
+  // the only fact a record without a host ever carried.
+  if (host === "windows" || host === "linux") return chips;
   switch (detail.macCompatibility) {
     case "native":
       chips.push({
@@ -1894,6 +2003,7 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     installState: "unknown",
     installPercent: null,
     macCompatibility: "unknown",
+    hostPlatform: "other",
     primaryAction: "play",
   };
 }

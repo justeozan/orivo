@@ -525,6 +525,7 @@ pub trait MediaFilePicker: Send + Sync + 'static {
 #[derive(Debug, Default)]
 pub struct NativeFilePicker;
 
+#[cfg(not(target_os = "android"))]
 impl MediaFilePicker for NativeFilePicker {
     fn choose_import(&self, kind: GameMediaKind) -> Option<PathBuf> {
         let dialog = rfd::FileDialog::new().set_title(match kind {
@@ -545,6 +546,17 @@ impl MediaFilePicker for NativeFilePicker {
             .set_title("Export this artwork")
             .set_file_name(suggested_file_name)
             .save_file()
+    }
+}
+
+#[cfg(target_os = "android")]
+impl MediaFilePicker for NativeFilePicker {
+    fn choose_import(&self, _kind: GameMediaKind) -> Option<PathBuf> {
+        None
+    }
+
+    fn choose_export(&self, _suggested_file_name: &str) -> Option<PathBuf> {
+        None
     }
 }
 

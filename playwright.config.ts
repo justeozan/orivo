@@ -42,11 +42,27 @@ export default defineConfig({
   projects: [
     {
       name: "chromium-1536",
+      testIgnore: /compact\.spec\.ts$/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1536, height: 1024 } },
     },
     {
       name: "chromium-1040",
+      testIgnore: /compact\.spec\.ts$/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 1040, height: 700 } },
+    },
+    // A phone held sideways: the exact viewport an Android build reports on a
+    // Pixel 8 (1080x2400 at 420dpi). It runs its own spec and nothing else, so
+    // the goldens above can never gain a third baseline to keep in step.
+    {
+      name: "android-914",
+      testMatch: /compact\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 914, height: 411 },
+        deviceScaleFactor: 2.625,
+        isMobile: true,
+        hasTouch: true,
+      },
     },
   ],
   webServer: {

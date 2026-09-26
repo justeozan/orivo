@@ -15,11 +15,13 @@
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
     "store:refresh": "node scripts/fetch-store-catalog.mjs && node scripts/fetch-store-scenes.mjs && node scripts/build-store-catalog.mjs && node scripts/prune-store-media.mjs --apply",
-    "store:build": "node scripts/build-store-catalog.mjs"
+    "store:build": "node scripts/build-store-catalog.mjs",
+    "screenshots:app-store": "node scripts/app-store-screenshots.mjs"
   },
   "dependencies": {
     "@sentry/browser": "^10.69.0",
     "@tauri-apps/api": "2.11.1",
+    "@tauri-apps/plugin-opener": "~2.5.5",
     "@tauri-apps/plugin-process": "^2",
     "@tauri-apps/plugin-updater": "^2"
   },
