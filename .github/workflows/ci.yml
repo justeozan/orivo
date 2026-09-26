@@ -43,6 +43,51 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+  e2e:
+    name: E2E (Playwright)
+    # The six visual goldens (e2e/__screenshots__) are rendered locally on
+    # macOS; Linux ships different fonts and subpixel antialiasing, so a
+    # `ubuntu-latest` runner would need its own baseline set to compare
+    # against. Running on macos-latest instead keeps this job comparing
+    # against the same goldens contributors update locally with
+    # `e2e-locked.sh e2e/visual.spec.ts --update-snapshots` — one baseline,
+    # not two — at the cost of a slower, pricier macOS runner.
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright's Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Runs every project declared in playwright.config.ts — chromium-1536,
+      # chromium-1040 and android-914 — the same three `pnpm test:e2e` runs
+      # locally.
+      - name: End-to-end and visual-golden tests
+        run: pnpm test:e2e
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: node_modules/.cache/playwright
+          retention-days: 7
+
   rust:
     name: Rust (${{ matrix.platform }})
     runs-on: ${{ matrix.platform }}
