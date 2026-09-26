@@ -686,8 +686,9 @@ pub struct PreparedWinlatorLaunch {
 }
 
 impl PreparedWinlatorLaunch {
-    /// Exposed so a host test can assert the exact intent without an emulator.
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// Exposed only so a host test can assert the exact intent without an
+    /// emulator; the hand-off below reads the field directly.
+    #[allow(dead_code)]
     pub fn intent(&self) -> &AndroidIntent {
         &self.intent
     }
