@@ -98,6 +98,45 @@ interface plugin-core {
   health-check: func() -> result<health, plugin-error>;
 }
 
+/// Host-owned reads, scoped by grant. A plugin never receives a filesystem
+/// path: it receives an opaque grant the user approved, and only the host knows
+/// which directory it names. An import the user has not granted is absent from
+/// the host's linker, so a component that needs one cannot be instantiated at
+/// all — it never executes a single instruction under a permission it does not
+/// have.
+interface host-files {
+  use types.{plugin-error};
+
+  record directory-entry {
+    name: string,
+    byte-size: u64,
+    directory: bool,
+  }
+
+  /// Lists one granted directory. The listing is bounded, never recursive, and
+  /// never follows a symbolic link out of the grant.
+  list-directory: func(grant: string) -> result<list<directory-entry>, plugin-error>;
+
+  /// `name` is a single entry of that directory, never a path: the host rejects
+  /// separators, `..`, and anything it did not itself list.
+  read-file: func(grant: string, name: string) -> result<list<u8>, plugin-error>;
+}
+
+/// The host's diagnostic journal. This is not a capability: a plugin that runs
+/// at all may explain itself, and a refused grant is only auditable when the
+/// attempt is recorded beside it. Messages are truncated and never reach the
+/// WebView as-is.
+interface host-journal {
+  enum journal-level {
+    debug,
+    info,
+    warning,
+    error,
+  }
+
+  log: func(level: journal-level, message: string);
+}
+
 /// Source discovery is paginated and resumable. The plugin never writes the
 /// library itself: Orivo normalises candidates and commits one transaction.
 interface source {
@@ -178,6 +217,8 @@ world source-plugin {
 }
 
 world runner-plugin {
+  import host-journal;
+  import host-files;
   export plugin-core;
   export runner;
 }
