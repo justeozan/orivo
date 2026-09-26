@@ -48,15 +48,26 @@ test.describe("the compact form factor", () => {
 
     // The two desktop viewports the suite already covers must keep the desktop
     // scene: this is the assertion that says "nothing above 560px changed".
+    // `applyFormFactor()` (src/form-factor.ts) reflects the attribute from a
+    // `matchMedia` "change" event, which fires asynchronously relative to
+    // `setViewportSize` — under load (a busy CI runner, several suites
+    // sharing one machine) the read can outrace the listener, so each check
+    // polls instead of reading the attribute the instant the resize resolves.
     await page.setViewportSize({ width: 1040, height: 700 });
-    expect(await page.evaluate(() => document.documentElement.dataset.formFactor)).toBeUndefined();
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.formFactor))
+      .toBeUndefined();
     await page.setViewportSize({ width: 1536, height: 1024 });
-    expect(await page.evaluate(() => document.documentElement.dataset.formFactor)).toBeUndefined();
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.formFactor))
+      .toBeUndefined();
 
     // Back to the phone: Android hands the app a new viewport on rotation, and
     // an attribute set once at boot would be stale by now.
     await page.setViewportSize({ width: 914, height: 411 });
-    expect(await page.evaluate(() => document.documentElement.dataset.formFactor)).toBe("compact");
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.formFactor))
+      .toBe("compact");
   });
 });
 
