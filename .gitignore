@@ -1,6 +1,7 @@
 /target/
 /node_modules/
 /dist/
+/downloads/
 /src-tauri/gen/
 .DS_Store
 .gstack/
@@ -11,3 +12,11 @@ e2e/__screenshots__/
 # Local secrets and the Sentry DSN — see .env.example
 .env
 .env.local
+# The Android debug signing key: local to each machine, and a key regardless.
+debug.keystore
+# sccache and other machine-specific cargo wrappers: committing this breaks the
+# build for anyone who does not have the same tools installed.
+/src-tauri/.cargo/
+# Regenerated on demand by scripts/app-store-screenshots.mjs, and 28 MB of PNGs
+# is something git would carry forever.
+/docs/screenshots/
