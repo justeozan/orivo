@@ -86,6 +86,16 @@ les instances vivantes (256 Mio), plus les tables et le nombre d’instances. Un
 boucle infinie est interrompue, et le thread de tick ne tourne que pendant un
 appel.
 
+Deux de ces limites ne sont pas là où on les attend. La deadline se déclenche au
+premier des deux signaux : le compte de ticks, qui est déterministe, ou l’horloge,
+qui est honnête — un tick réarmé pendant un appel hôte compte pour un, donc le
+temps passé hors du wasm n’est visible que par l’horloge. Et `max_wasm_stack` n’est
+une limite que si le thread est plus grand : Wasmtime place son seuil à
+`sp - max_wasm_stack` sans le borner au thread, et ne compte pas les cadres hôte,
+si bien qu’un dépassement pris dans du code hôte est un abort et non un trap. Le
+code invité ne tourne donc que sur les workers du scheduler, dimensionnés à la pile
+wasm plus sa marge, et `invoke` est privé pour que ce soit vrai par construction.
+
 **Un résultat est non fiable jusqu’à validation.** Le host revalide la grammaire
 des IDs opaques, les tailles, les doublons et les curseurs avant toute écriture,
 et `LaunchIntent` est une structure fermée dont le `mode` est un enum : la chaîne

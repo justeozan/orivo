@@ -39,16 +39,26 @@ the nominal path and every refusal:
 | `fixture:ok` | returns the launch intent the host asked for |
 | `fixture:spin` | never returns — fuel, deadline and cancellation |
 | `fixture:grow` | allocates until the memory ceiling refuses it |
+| `fixture:recurse` | recurses until a stack ceiling refuses it |
 | `fixture:bad-mode` | returns a launch mode the host does not recognise |
 | `fixture:bad-target` | answers about a different profile and game |
+| `fixture:bad-runner` | claims to be preparing another runner's launch |
 | `fixture:bad-id` | returns a game reference that is really a path |
 | `fixture:deny` | asks for a directory grant it was never given |
 | `fixture:escape` | reads `../` out of the folder it *was* given |
 | `fixture:fail` | returns a plain WIT error |
+| `fixture:chatty` | earns a refusal, swallows it, then floods the journal |
+| `fixture:read-NAME` | reads `NAME.rom` by name, whatever the host planted there |
 
 The component reads exactly one directory grant, named `fixture-games`, and lists
 `*.rom` entries whose contents are the game titles. A grant for any other id, or
 a name that is not a single entry of that folder, is the host's to refuse.
+
+`fixture:read-NAME` exists because the listing is not the only way in: it asks for
+an entry by name whether or not `list-directory` offered it. That is how a test
+points the component at something it planted in the granted folder — a symbolic
+link out of it, a FIFO, a file larger than the host will read — and checks that
+the *read* refuses it rather than trusting the listing to have filtered it.
 
 ## Seams in the host
 
@@ -71,3 +81,11 @@ These exist so a suite can be adversarial without reaching into private state.
   which is how a refusal is asserted on rather than inferred from an absence.
 - **Cost.** A successful `invoke` returns `InvocationCost`: instantiation, call
   and fuel actually burned.
+- **Journal, in two halves.** `entries()` is the host's decisions and
+  `plugin_messages()` is the plugin's own text. They are separate rings so a
+  component cannot bury a refusal under its own logging, and a test can assert on
+  either without the other interfering.
+- **Worker stacks.** Guest code runs on scheduler workers and nowhere else, sized
+  from `PLUGIN_THREAD_STACK_BYTES`. `PluginRuntime::invoke` is private for that
+  reason: a thread smaller than `max_wasm_stack` plus host headroom turns a guest
+  stack overflow into an abort, so the only public door is `submit`.

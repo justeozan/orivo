@@ -27,9 +27,11 @@ than being hidden in JSON or a command string.
   built against the older world simply does not use it — which is why these
   arrived inside v1 rather than as v2.
 - `host-files` is scoped by grant, never by path. A plugin names an opaque
-  directory grant the user approved and a single entry inside it; only the host
-  knows which folder that is, and it rejects separators, `..` and symbolic links
-  out of the grant.
+  directory grant the user approved and a single ordinary path component inside
+  it; only the host knows which folder that is. It rejects separators, `.`, `..`,
+  control characters and `:` (a Windows drive prefix discards the grant
+  entirely), opens the entry without following a link and without blocking, and
+  then refuses anything that is not a regular file of an allowed size.
 - Grants decide two different things. The *manifest* decides what is linked: an
   import the package never declared is absent, so a component needing it cannot
   be instantiated at all. The *grant* decides what works: a declared but

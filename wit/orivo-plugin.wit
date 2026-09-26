@@ -100,10 +100,17 @@ interface plugin-core {
 
 /// Host-owned reads, scoped by grant. A plugin never receives a filesystem
 /// path: it receives an opaque grant the user approved, and only the host knows
-/// which directory it names. An import the user has not granted is absent from
-/// the host's linker, so a component that needs one cannot be instantiated at
-/// all — it never executes a single instruction under a permission it does not
-/// have.
+/// which directory it names.
+///
+/// Two different things gate this interface, and the difference is worth knowing
+/// before you write a manifest. An import your manifest does not *declare* is
+/// absent from the host's linker, so a component that needs one cannot be
+/// instantiated at all — it never executes a single instruction under a
+/// permission its package did not show the user. An import you declared but the
+/// user has not yet *granted* is linked, and every call through it is refused
+/// with `permission-denied`: that is the state a plugin is in between being
+/// installed and being configured, and it is how the host can ask who you are
+/// before trusting you with anything.
 interface host-files {
   use types.{plugin-error};
 
@@ -113,19 +120,30 @@ interface host-files {
     directory: bool,
   }
 
-  /// Lists one granted directory. The listing is bounded, never recursive, and
-  /// never follows a symbolic link out of the grant.
+  /// Lists one granted directory. The listing is bounded and never recursive,
+  /// and it omits symbolic links rather than resolving them. A directory with
+  /// more entries than the host will report is truncated to the first of them by
+  /// name, so paging it is stable across calls but cannot reach past that bound.
   list-directory: func(grant: string) -> result<list<directory-entry>, plugin-error>;
 
-  /// `name` is a single entry of that directory, never a path: the host rejects
-  /// separators, `..`, and anything it did not itself list.
+  /// `name` is a single ordinary path component of that directory, never a
+  /// path. The host rejects separators, `.`, `..`, control characters and `:`
+  /// — a Windows drive prefix would otherwise discard the grant entirely — and
+  /// it opens the entry without following a symbolic link and without blocking,
+  /// then refuses anything that is not a regular file of an allowed size. The
+  /// name does not have to have come from `list-directory`, but it does have to
+  /// survive all of that.
   read-file: func(grant: string, name: string) -> result<list<u8>, plugin-error>;
 }
 
 /// The host's diagnostic journal. This is not a capability: a plugin that runs
 /// at all may explain itself, and a refused grant is only auditable when the
-/// attempt is recorded beside it. Messages are truncated and never reach the
-/// WebView as-is.
+/// attempt is recorded beside it.
+///
+/// It is still metered like every other host call, and messages are truncated.
+/// They are kept apart from the host's own record of its decisions, so however
+/// much a plugin logs it cannot bury the refusals it earned. Nothing here
+/// reaches the WebView as-is.
 interface host-journal {
   enum journal-level {
     debug,
