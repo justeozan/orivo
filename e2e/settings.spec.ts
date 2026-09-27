@@ -160,17 +160,20 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
     await expect(page.locator("#wine-settings-panel")).toBeHidden();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
+    await expect(page.locator("#runners-panel")).toBeHidden();
 
     // Four "coming soon" rows (Spotify, Moonlight/Sunshine, Playnite,
-    // Ludusavi) now sit alongside the two installed plugins — real, working
+    // Ludusavi) now sit alongside the three installed plugins — real, working
     // teasers, not installable from here — so only the installed ones count.
     const installed = page.locator(".plugin-row:not(.plugin-row--soon)");
-    await expect(installed).toHaveCount(2);
+    await expect(installed).toHaveCount(3);
     await expect(installed.nth(0)).toContainText("Wine");
     await expect(installed.nth(1)).toContainText("Wallpaper Searcher");
+    await expect(installed.nth(2)).toContainText("Third-party runners");
     await expect(page.locator(".plugin-row--soon")).toHaveCount(4);
     await expect(page.locator("[data-plugin-open='wine']")).toBeVisible();
     await expect(page.locator("[data-plugin-open='wallpaper-searcher']")).toBeVisible();
+    await expect(page.locator("[data-plugin-open='runners']")).toBeVisible();
 
     // This suite runs in a plain browser with no Tauri, so the live registry
     // answers nothing and no real catalogue row is ever rendered — but the
@@ -210,6 +213,36 @@ test.describe("Plugins & Runners browser", () => {
 
     await page.locator("#wallpaper-plugin-panel [data-plugin-back]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+
+    await page.locator("[data-plugin-open='runners']").click();
+    await expect(page.locator("#runners-panel")).toBeVisible();
+    await expect(page.locator("#plugins-catalog-panel")).toBeHidden();
+    // No Tauri in this suite, so no runner plugin ever answers: the empty
+    // state is the one thing this panel can show here.
+    await expect(page.locator("#runners-panel-body")).toContainText(
+      "Install a runner plugin to add an emulator",
+    );
+
+    await page.locator("#runners-panel [data-plugin-back]").click();
+    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    await expect(page.locator("#runners-panel")).toBeHidden();
+  });
+
+  test("Plugins & Runners offers automatic updates and a registry check, both no-ops without Tauri", async ({
+    page,
+  }) => {
+    await openRoute(page, "#/settings/plugins", "settings");
+
+    const automaticUpdates = page.locator("#plugins-automatic-updates");
+    await expect(automaticUpdates).not.toBeChecked();
+    await automaticUpdates.click();
+    // Without a desktop host the command simply cannot run; the panel must
+    // not crash or get stuck offering a promise it cannot keep.
+    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+
+    await page.locator("[data-plugin-refresh-registry]").click();
+    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
   });
 
   test("the catalogue search survives an empty registry", async ({ page }) => {
