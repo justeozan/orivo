@@ -158,10 +158,16 @@ jobs:
       #
       # Deliberately not the whole suite: the rest of the crate is
       # platform-independent and already covered on macOS and Linux, and a
-      # Windows runner is the slowest in this matrix.
+      # Windows runner is the slowest in this matrix. The two module paths are
+      # spelled out rather than filtered on `plugin_`, which is a substring match
+      # and also caught, for instance,
+      # `catalog::tests::a_profile_cannot_change_the_plugin_that_owns_it` — a test
+      # in another module, which this step has no business gating on.
       - name: Test the plugin host (Windows)
         if: matrix.platform == 'windows-latest'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib plugin_
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --
+          plugin_runtime:: plugin_scheduler::
 
       # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
       # `wit_compatibility` test is the one thing here that is *supposed* to

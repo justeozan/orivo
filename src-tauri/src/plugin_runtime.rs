@@ -4376,11 +4376,19 @@ mod tests {
     /// Spins the fixture and returns how the host stopped it, ticking the epoch
     /// `ticks` times with `spacing` between each. Bounded, so a deadline that
     /// never fires fails the test instead of hanging it on 2^42 fuel.
+    /// Runs `fixture:spin` under a hand-driven epoch, ticking every `spacing`
+    /// until the job comes back.
+    ///
+    /// Ticking *until it is done* rather than a fixed number of times is what
+    /// makes this reliable: a fixed count can be exhausted before the component is
+    /// even instantiated, and once the epoch stops moving the callback never fires
+    /// again and the call spins until the bounded wait gives up. That is precisely
+    /// what happened on a cold Windows runner. Which half of the deadline fires is
+    /// still decided by the limits each caller passes, not by the number of ticks.
     fn spin_under_manual_epoch(
         runtime: &PluginRuntime,
         prepared: &PreparedComponent,
         grants: &PluginGrants,
-        ticks: u32,
         spacing: Duration,
     ) -> Result<PluginInvocation, JobError> {
         let handle = runtime
@@ -4394,14 +4402,17 @@ mod tests {
                 },
             )
             .unwrap();
+        let finished = Arc::new(AtomicBool::new(false));
         let ticker = runtime.clone();
+        let done = Arc::clone(&finished);
         let ticking = thread::spawn(move || {
-            for _ in 0..ticks {
+            while !done.load(Ordering::Relaxed) {
                 thread::sleep(spacing);
                 ticker.tick_epoch();
             }
         });
         let outcome = handle.wait_for(Duration::from_secs(20));
+        finished.store(true, Ordering::Relaxed);
         ticking.join().unwrap();
         match outcome {
             Ok(outcome) => outcome,
@@ -4532,7 +4543,7 @@ mod tests {
         assert_eq!(runtime.limits().ticks(Duration::from_secs(30)), 3);
         let started = Instant::now();
         let outcome =
-            spin_under_manual_epoch(&runtime, &prepared, &grants, 8, Duration::from_millis(1));
+            spin_under_manual_epoch(&runtime, &prepared, &grants, Duration::from_millis(1));
         assert_eq!(
             outcome.unwrap_err(),
             JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
@@ -4561,7 +4572,7 @@ mod tests {
         );
         assert_eq!(runtime.limits().ticks(Duration::from_millis(50)), 50);
         let outcome =
-            spin_under_manual_epoch(&runtime, &prepared, &grants, 10, Duration::from_millis(10));
+            spin_under_manual_epoch(&runtime, &prepared, &grants, Duration::from_millis(10));
         assert_eq!(
             outcome.unwrap_err(),
             JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
