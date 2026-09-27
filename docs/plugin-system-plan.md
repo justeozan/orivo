@@ -84,6 +84,17 @@ et un index étaient signés de la même façon avec la même clé, si bien que 
 « document d’index » — seuls des champs JSON obligatoires différents séparaient
 les deux rôles.
 
+La jonction entre les deux est désormais faite. Le registre de grants ne demande
+plus si un fichier existe à côté du plugin : il demande à l’installateur si
+*ces octets-là* sont ceux pour lesquels la transaction a accepté une signature.
+Et une permission ne survit à un changement de paquet que si la chaîne de
+consentement tient — même signataire, et strictement en avant : une
+rétrogradation est signée elle aussi, et c’est justement la version dont le
+`validate-profile` ou la découverte étaient peut-être plus faibles. Tout le
+reste — désinstallation, remplacement, rollback, retour à un build de
+développement — révoque les permissions et renvoie les profils à « à
+revalider », en gardant les dossiers choisis et tous les jeux importés.
+
 L’installateur expose enfin **l’identité du paquet** : pour la version vivante
 d’un plugin, sa version, le SHA-256 du composant qui tournera réellement, et
 quelle clé l’a signé. Un grant, comme un profil de runner jugé valide, est un

@@ -146,12 +146,111 @@ pub struct PackageIdentity {
 /// holding a grant against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityChange {
-    /// The live version of this plugin is now this identity. Sent for an
-    /// install, an update, a rollback, and a crash recovery that moved the
-    /// plugin — anything that makes the running package a different package.
-    Activated(PackageIdentity),
+    /// The live version of this plugin is now `current`. Sent for an install,
+    /// an update, a rollback, and a crash recovery that moved the plugin —
+    /// anything that makes the running package a different package.
+    ///
+    /// `previous` is what it was, and it is carried rather than left for the
+    /// observer to have remembered: the interesting question is not *what is
+    /// installed* but *what changed*, and a rollback and an update are the same
+    /// event without it.
+    Activated {
+        previous: Option<PackageIdentity>,
+        current: PackageIdentity,
+    },
     /// The plugin is no longer installed.
     Removed { plugin_id: String },
+}
+
+impl IdentityChange {
+    pub fn plugin_id(&self) -> &str {
+        match self {
+            Self::Activated { current, .. } => &current.plugin_id,
+            Self::Removed { plugin_id } => plugin_id,
+        }
+    }
+}
+
+/// What a change of package means for permissions already granted to the id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantVerdict {
+    /// The new package is the old one's successor under the same signature, so
+    /// the consent chain is unbroken.
+    Keep,
+    /// Whatever was agreed was agreed with something else. The holder should
+    /// revoke and ask again.
+    Revalidate,
+}
+
+/// Whether permissions given to one package carry over to the one that
+/// replaced it.
+///
+/// A release signature is the consent chain: the user agreed to a package the
+/// key vouches for, and the key vouches for its successors too. Everything that
+/// breaks that chain breaks the inheritance — and a *downgrade* breaks it as
+/// surely as a different signer does, because an older build is still signed
+/// and may be the one whose `validate-profile` or discovery was weaker. That is
+/// the case a signature check alone cannot see, so the version is compared
+/// here rather than trusted.
+pub fn grant_verdict(
+    previous: Option<&PackageIdentity>,
+    current: &PackageIdentity,
+) -> GrantVerdict {
+    let Some(previous) = previous else {
+        // Nothing was installed under this id, so there is nothing to inherit.
+        return GrantVerdict::Keep;
+    };
+    if previous.component_sha256 == current.component_sha256 && previous.channel == current.channel
+    {
+        // The same bytes, arrived the same way. A version string that moved
+        // without the component moving is not a new package.
+        //
+        // The channel has to match too. The same component can be live as a
+        // signed package and then, after a rollback, as the sideloaded build it
+        // replaced — identical code, and a permission recorded against "this is
+        // signed" that no longer describes it.
+        return GrantVerdict::Keep;
+    }
+    match (&previous.channel, &current.channel) {
+        // Same signer, and forward. The only way through.
+        (PackageChannel::Official { signer: was }, PackageChannel::Official { signer: now })
+            if was == now && is_newer(&current.version, &previous.version) =>
+        {
+            GrantVerdict::Keep
+        }
+        // A sideloaded build has no signer to vouch for a successor, a
+        // different signer is a different authority, and an older or equal
+        // version under the same one is not a successor at all.
+        _ => GrantVerdict::Revalidate,
+    }
+}
+
+/// Strictly newer, by `(major, minor, patch)`, with a prerelease below its
+/// release. An unparseable version on either side is not newer: refusing to
+/// compare is the safe answer when the alternative is inheriting a permission
+/// on a guess.
+fn is_newer(candidate: &str, installed: &str) -> bool {
+    fn key(value: &str) -> Option<(u32, u32, u32, bool, String)> {
+        let (core, prerelease) = value.split_once('-').unwrap_or((value, ""));
+        let mut parts = core.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some((
+            major,
+            minor,
+            patch,
+            prerelease.is_empty(),
+            prerelease.to_owned(),
+        ))
+    }
+    match (key(candidate), key(installed)) {
+        (Some(candidate), Some(installed)) => candidate > installed,
+        _ => false,
+    }
 }
 
 /// Registered from `lib.rs`, so the installer never has to know who is
@@ -349,7 +448,10 @@ impl PluginStore {
         let after = self.identity(plugin_id);
         if before != after {
             let change = match after {
-                Some(identity) => IdentityChange::Activated(identity),
+                Some(current) => IdentityChange::Activated {
+                    previous: before,
+                    current,
+                },
                 None => IdentityChange::Removed {
                     plugin_id: plugin_id.to_owned(),
                 },
@@ -434,6 +536,21 @@ impl PluginStore {
     pub fn is_trusted(&self, plugin_id: &str) -> bool {
         self.identity(plugin_id)
             .is_some_and(|identity| identity.channel.is_official())
+    }
+
+    /// The channel recorded for a component the caller has *already* hashed.
+    ///
+    /// The runner host re-reads and re-hashes a package before it will invoke
+    /// it, and then has to know whether that exact component is the one the
+    /// install transaction accepted a signature for. Asking with the digest in
+    /// hand is both cheaper than re-deriving it and stricter than asking about
+    /// the id: a component swapped under an installed plugin answers
+    /// `Development`, whatever file sits beside it.
+    pub fn channel_for_component(&self, plugin_id: &str, component_sha256: &str) -> PackageChannel {
+        if !valid_plugin_id(plugin_id) {
+            return PackageChannel::Development;
+        }
+        self.recorded_channel(plugin_id, component_sha256)
     }
 
     fn staged_directory(&self, plugin_id: &str) -> PathBuf {
@@ -2098,6 +2215,99 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// The rule the junction turns on, branch by branch.
+    ///
+    /// A release signature is the consent chain: the user agreed to a package
+    /// the key vouches for, and the key vouches for its successors. Everything
+    /// that breaks the chain breaks the inheritance — and a *downgrade* breaks
+    /// it as surely as a different signer does, which is the case a signature
+    /// check alone cannot see. That branch has no end-to-end test because the
+    /// reference fixture reports exactly one version and a package claiming
+    /// another fails the identity probe, so it is pinned here.
+    #[test]
+    fn permissions_follow_a_package_only_forward_and_only_under_one_signer() {
+        fn identity(version: &str, digest: &str, channel: PackageChannel) -> PackageIdentity {
+            PackageIdentity {
+                plugin_id: PLUGIN.into(),
+                version: version.into(),
+                component_sha256: digest.into(),
+                channel,
+            }
+        }
+        let signed = |signer: &str| PackageChannel::Official {
+            signer: signer.into(),
+        };
+        let one = identity("1.0.0", "aaaa", signed("orivo-release-v1"));
+
+        // Nothing was installed under this id, so there is nothing to inherit.
+        assert_eq!(grant_verdict(None, &one), GrantVerdict::Keep);
+        // The same package, unchanged.
+        assert_eq!(grant_verdict(Some(&one), &one), GrantVerdict::Keep);
+        // Forward, under the same signature: the chain the signature exists for.
+        assert_eq!(
+            grant_verdict(
+                Some(&one),
+                &identity("1.0.1", "bbbb", signed("orivo-release-v1"))
+            ),
+            GrantVerdict::Keep
+        );
+
+        for (label, current) in [
+            // A rollback. Still signed, still the same signer, and not a
+            // successor — the build whose discovery or `validate-profile` was
+            // weaker is exactly the one a rollback reaches.
+            (
+                "older",
+                identity("0.9.0", "bbbb", signed("orivo-release-v1")),
+            ),
+            // A re-release under a version already consented to.
+            (
+                "same version, other bytes",
+                identity("1.0.0", "bbbb", signed("orivo-release-v1")),
+            ),
+            // Another authority entirely.
+            (
+                "another signer",
+                identity("1.0.1", "bbbb", signed("orivo-release-v2")),
+            ),
+            // Nobody vouches for a sideloaded build's successor.
+            (
+                "unsigned",
+                identity("1.0.1", "bbbb", PackageChannel::Development),
+            ),
+            // The same bytes, arrived a different way: a permission recorded
+            // against "this is signed" no longer describes it.
+            (
+                "same bytes, unsigned",
+                identity("1.0.0", "aaaa", PackageChannel::Development),
+            ),
+        ] {
+            assert_eq!(
+                grant_verdict(Some(&one), &current),
+                GrantVerdict::Revalidate,
+                "{label}"
+            );
+        }
+
+        // And nothing an unsigned build was allowed transfers, in any
+        // direction: it has no signer to answer for a new version.
+        let unsigned = identity("1.0.0", "aaaa", PackageChannel::Development);
+        assert_eq!(
+            grant_verdict(
+                Some(&unsigned),
+                &identity("1.0.1", "bbbb", PackageChannel::Development)
+            ),
+            GrantVerdict::Revalidate
+        );
+        assert_eq!(
+            grant_verdict(
+                Some(&unsigned),
+                &identity("1.0.1", "bbbb", signed("orivo-release-v1"))
+            ),
+            GrantVerdict::Revalidate
+        );
+    }
+
     /// The seam E2 plugs into. A grant is an agreement with a package, so the
     /// holder has to be told every time the package behind an id changes — and
     /// told *nothing* when it does not, or the notification means nothing.
@@ -2134,15 +2344,20 @@ mod tests {
         let versions = seen
             .iter()
             .map(|change| match change {
-                IdentityChange::Activated(identity) => identity.version.clone(),
+                IdentityChange::Activated { current, .. } => current.version.clone(),
                 IdentityChange::Removed { .. } => "removed".to_string(),
             })
             .collect::<Vec<_>>();
         assert_eq!(versions, vec!["1.0.0", "2.0.0", "1.0.0", "removed"]);
         // The identity carries what a grant is actually held against.
-        let IdentityChange::Activated(first) = &seen[0] else {
+        let IdentityChange::Activated {
+            previous,
+            current: first,
+        } = &seen[0]
+        else {
             panic!("the first change is an activation");
         };
+        assert_eq!(previous, &None, "a first install displaces nothing");
         assert_eq!(first.plugin_id, PLUGIN);
         assert_eq!(first.component_sha256.len(), 64);
         assert!(first.channel.is_official());

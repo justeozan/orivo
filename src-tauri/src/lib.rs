@@ -818,7 +818,7 @@ pub fn run() {
             // Third-party runners write through the same catalog lease the rest
             // of the backend takes, so the service is handed the live catalog
             // rather than a second one it would have to keep in step.
-            app.manage(Arc::new(runner_commands::ThirdPartyRunnerService::new(
+            let runners = Arc::new(runner_commands::ThirdPartyRunnerService::new(
                 runner_host::CatalogStore::new(
                     Arc::clone(&state.catalog),
                     state.catalog_path.clone(),
@@ -826,7 +826,8 @@ pub fn run() {
                 ),
                 state.plugin_root.clone(),
                 HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
-            )));
+            ));
+            app.manage(Arc::clone(&runners));
             app.manage(state);
             app.manage(detail);
             app.manage(media);
@@ -866,34 +867,48 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION"),
             ));
             app.manage(Arc::clone(&plugin_installer));
-            // Registered here rather than inside the installer so the dependency
-            // points one way: the installer announces that a plugin has become a
-            // different package, and this file decides who is told. The consumer
-            // the plan names next is grants and runner profiles — both are
-            // agreements with a component, not with an id — and they hook in
-            // beside this line without the installer learning about them.
-            plugin_installer.observe_identity(Arc::new(|change| {
-                let Ok(runtime) = plugin_runtime::PluginRuntime::shared() else {
-                    return;
-                };
-                let (plugin_id, detail) = match change {
-                    plugin_update::IdentityChange::Activated(identity) => (
-                        identity.plugin_id.as_str(),
-                        format!(
+            // The junction between the installer and the permissions given to
+            // what it installs. Registered here rather than inside either, so
+            // the dependency points one way and neither has to know the other:
+            // the installer announces that a plugin has become a different
+            // package, and this file decides who is told.
+            //
+            // A grant, and a runner profile the plugin accepted, are agreements
+            // with a *component*. `grant_verdict` is where the rule lives —
+            // same signer and strictly forward keeps them, anything else does
+            // not — and `forget_plugin` is how the ledger records that the
+            // agreement lapsed: it revokes the permissions and sends the
+            // profiles back to "needs revalidation", keeping the folders the
+            // user picked and every game already imported. That is the plan's
+            // sixth promise, and it is why an uninstall does not delete a
+            // library.
+            let junction = Arc::clone(&runners);
+            plugin_installer.observe_identity(Arc::new(move |change| {
+                if let Ok(runtime) = plugin_runtime::PluginRuntime::shared() {
+                    let detail = match change {
+                        plugin_update::IdentityChange::Activated { current, .. } => format!(
                             "version {}, component {}, {}",
-                            identity.version, identity.component_sha256, identity.channel
+                            current.version, current.component_sha256, current.channel
                         ),
-                    ),
-                    plugin_update::IdentityChange::Removed { plugin_id } => {
-                        (plugin_id.as_str(), "uninstalled".to_string())
+                        plugin_update::IdentityChange::Removed { .. } => "uninstalled".to_string(),
+                    };
+                    runtime.journal().record(
+                        plugin_runtime::next_correlation_id(),
+                        change.plugin_id(),
+                        "package-identity",
+                        detail,
+                    );
+                }
+                let lapsed = match change {
+                    plugin_update::IdentityChange::Removed { .. } => true,
+                    plugin_update::IdentityChange::Activated { previous, current } => {
+                        plugin_update::grant_verdict(previous.as_ref(), current)
+                            == plugin_update::GrantVerdict::Revalidate
                     }
                 };
-                runtime.journal().record(
-                    plugin_runtime::next_correlation_id(),
-                    plugin_id,
-                    "package-identity",
-                    detail,
-                );
+                if lapsed {
+                    let _ = junction.forget_plugin(change.plugin_id());
+                }
             }));
             // A plugin update interrupted by a crash is settled here, and — only
             // with consent — the registry is asked what is new. Spawned, never

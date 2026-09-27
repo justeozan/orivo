@@ -345,8 +345,8 @@ impl RunnerPackage {
         }
         Ok(Self {
             identity: PluginPackageIdentity {
+                trusted: package_is_trusted(plugin_root, plugin_id, &sha256),
                 fingerprint: sha256,
-                trusted: package_is_trusted(plugin_root, plugin_id),
             },
             runtime: runtime.clone(),
             manifest,
@@ -591,20 +591,17 @@ pub fn directory_grant_is_active(
         })
 }
 
-/// The marker the installer writes beside a package it accepted with the
-/// release key.
+/// Whether the installer accepted a release signature for *these bytes*.
 ///
-/// Reading it here duplicates a path `plugin_installer` owns, which is a seam
-/// that should be an accessor on its service rather than a shared constant.
-/// The layout is host-owned state about *how* a package arrived and lives
-/// outside the plugin's own directory, so a package cannot declare itself
-/// trusted by writing one.
-fn package_is_trusted(plugin_root: &Path, plugin_id: &str) -> bool {
-    plugin_root
-        .join(".staging")
-        .join("trusted")
-        .join(plugin_id)
-        .is_file()
+/// It used to read the marker file's path directly, for existence — which
+/// answers the weaker question "is there a marker beside this plugin" and would
+/// still have said yes after a component was swapped underneath one. The
+/// installer's record now names the digest it was earned by and is written
+/// inside the install transaction, so this is a statement about the component
+/// the host is about to invoke rather than about a file next to it.
+fn package_is_trusted(plugin_root: &Path, plugin_id: &str, component_sha256: &str) -> bool {
+    crate::plugin_installer::component_channel(plugin_root, plugin_id, component_sha256)
+        .is_official()
 }
 
 // ---------------------------------------------------------------------------

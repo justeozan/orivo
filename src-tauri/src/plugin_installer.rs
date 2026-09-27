@@ -270,6 +270,17 @@ impl PluginInstallerService {
         self.store.recover()
     }
 
+    /// Remove a plugin and everything the host kept about it. The command is
+    /// this, on a blocking worker.
+    pub(crate) fn uninstall(&self, plugin_id: &str) -> Result<(), String> {
+        self.store.remove(plugin_id)
+    }
+
+    /// Go back to the version Orivo kept, returning which one that was.
+    pub(crate) fn roll_back(&self, plugin_id: &str) -> Result<String, String> {
+        self.store.rollback(plugin_id).map(|target| target.version)
+    }
+
     /// Be told when an installed plugin becomes a different package, or stops
     /// being installed.
     ///
@@ -433,14 +444,9 @@ pub async fn rollback_plugin(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<String, String> {
     let service = Arc::clone(&service);
-    tauri::async_runtime::spawn_blocking(move || {
-        service
-            .store
-            .rollback(&plugin_id)
-            .map(|target| target.version)
-    })
-    .await
-    .map_err(|_| "The rollback did not finish.".to_string())?
+    tauri::async_runtime::spawn_blocking(move || service.roll_back(&plugin_id))
+        .await
+        .map_err(|_| "The rollback did not finish.".to_string())?
 }
 
 /// Synchronous on purpose: macOS requires the native picker on the main
@@ -479,7 +485,7 @@ pub async fn uninstall_plugin(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<(), String> {
     let service = Arc::clone(&service);
-    tauri::async_runtime::spawn_blocking(move || service.store.remove(&plugin_id))
+    tauri::async_runtime::spawn_blocking(move || service.uninstall(&plugin_id))
         .await
         .map_err(|_| "The removal did not finish.".to_string())?
 }
@@ -730,28 +736,46 @@ fn install_package(
         },
         _ => PackageChannel::Development,
     };
-    let registry = service.registry();
-    service
-        .store
-        .install(
-            &plugin_id,
-            &version,
-            channel,
-            &files,
-            &|directory, checkpoint| {
-                // Staging cannot ask the component who it is: the directory is
-                // not named after the plugin, and that name is half the
-                // question. Everything else is cheaper to refuse there.
-                let depth = match checkpoint {
-                    Checkpoint::Staged => VerifyDepth::Contract,
-                    Checkpoint::Live => VerifyDepth::Smoke,
-                };
-                verify_until_conclusive(|| {
-                    registry.verify_package(&runtime, directory, &plugin_id, depth)
-                })
-            },
-        )
+    install_verified(service, &plugin_id, &version, channel, &files)
         .map(|outcome| outcome.plugin_id)
+}
+
+/// The transaction, with the host's verdict wired into both of its checkpoints.
+///
+/// Separate from [`install_package`] because the channel is decided there by
+/// the signature policy, and the junction tests need to drive a *signed*
+/// install without holding Orivo's private key. Everything the transaction
+/// actually does — staging, grading, the swap, the smoke test, the automatic
+/// rollback — is this call, so those tests exercise the production path instead
+/// of a re-creation of it.
+pub(crate) fn install_verified(
+    service: &PluginInstallerService,
+    plugin_id: &str,
+    version: &str,
+    channel: PackageChannel,
+    files: &PackageFiles,
+) -> Result<crate::plugin_update::InstallOutcome, String> {
+    let runtime =
+        PluginRuntime::shared().map_err(|_| "The plugin runtime is unavailable.".to_string())?;
+    let registry = service.registry();
+    service.store.install(
+        plugin_id,
+        version,
+        channel,
+        files,
+        &|directory, checkpoint| {
+            // Staging cannot ask the component who it is: the directory is not
+            // named after the plugin, and that name is half the question.
+            // Everything else is cheaper to refuse there.
+            let depth = match checkpoint {
+                Checkpoint::Staged => VerifyDepth::Contract,
+                Checkpoint::Live => VerifyDepth::Smoke,
+            };
+            verify_until_conclusive(|| {
+                registry.verify_package(&runtime, directory, plugin_id, depth)
+            })
+        },
+    )
 }
 
 /// Ask the host for a verdict, and keep asking while it says it has none.
@@ -799,7 +823,7 @@ fn refuse_a_downgrade(installed: Option<&str>, offered: &str) -> Result<(), Stri
 /// Read the gzipped tar wholly in memory, bounded on entry count, per-entry
 /// size and total size. Nothing is written to disk until the whole archive has
 /// been read and accepted.
-fn read_package(bytes: &[u8]) -> Result<PackageFiles, String> {
+pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles, String> {
     if bytes.len() as u64 > MAX_PACKAGE_BYTES {
         return Err("This package is larger than Orivo allows.".into());
     }
@@ -935,6 +959,26 @@ fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, std::io::Er
 
 pub fn plugin_root_for(app_data: &Path) -> PathBuf {
     app_data.join(PLUGINS_DIRECTORY)
+}
+
+/// Whether *this component* is the one the install transaction accepted a
+/// release signature for.
+///
+/// The runner host asks this the moment before it will invoke a package, with
+/// the digest it has just re-derived from disk. It used to read
+/// `.staging/trusted/<id>` for existence, which answers a weaker question — is
+/// there a marker beside this plugin — and would still have said yes after
+/// somebody dropped a different `component.wasm` into an installed one. The
+/// answer here is about bytes, because that is what a grant is given to.
+///
+/// Free function rather than a method: the caller has a plugin root and not the
+/// service, and every path it needs is derived from that root.
+pub fn component_channel(
+    plugin_root: &Path,
+    plugin_id: &str,
+    component_sha256: &str,
+) -> PackageChannel {
+    PluginStore::new(plugin_root.to_path_buf()).channel_for_component(plugin_id, component_sha256)
 }
 
 #[cfg(test)]
@@ -1490,7 +1534,7 @@ mod tests {
         assert_eq!(identity.component_sha256, hex_digest(RUNNER_COMPONENT));
         assert_eq!(identity.channel, PackageChannel::Development);
 
-        service.store.remove(RUNNER_ID).unwrap();
+        service.uninstall(RUNNER_ID).unwrap();
         assert_eq!(service.package_identity(RUNNER_ID), None);
         fs::remove_dir_all(&root).ok();
     }
