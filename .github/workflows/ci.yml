@@ -194,6 +194,17 @@ jobs:
           workspaces: '. -> target'
           key: android
 
+      # setup-android installs the NDK under $ANDROID_SDK_ROOT/ndk/<version> but
+      # never puts its clang on PATH or points cc-rs at it, so crates with a C
+      # build script (ring, for one) can't find a compiler for the target and
+      # cargo check fails before it gets anywhere near our own code.
+      - name: Point cc-rs at the NDK toolchain
+        run: |
+          NDK_BIN="$ANDROID_SDK_ROOT/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "CC_aarch64_linux_android=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$NDK_BIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$NDK_BIN/aarch64-linux-android24-clang" >> "$GITHUB_ENV"
+
       - name: Check the Rust crate (Android)
         env:
           RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
