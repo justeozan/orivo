@@ -66,6 +66,10 @@ const MAX_DIRECTORY_SCAN: usize = 4_096;
 /// A candidate's external id is what names a file inside a granted folder, so it
 /// is held to the host's opaque-id grammar rather than to a filename's.
 const MAX_EXTERNAL_ID_LENGTH: usize = 256;
+/// The longest entry name `host-files` will report, and therefore the longest a
+/// hex-encoded external id could stand for. Past it an id names nothing the host
+/// would have listed, so decoding one is work with no possible answer.
+const MAX_ENTRY_NAME_BYTES: usize = 255;
 /// How long a caller waits for a queued job beyond the deadline that stops the
 /// component itself. A job can be behind another plugin's work, and waiting
 /// forever for the queue is how a panel stops opening.
@@ -693,11 +697,21 @@ fn usable_profile<'catalog>(
 /// granted folders, and say which folder it was found in.
 ///
 /// The rule is the host's and it is deliberately narrow: a match is a file whose
-/// name, or whose name without its final extension, is exactly the external id.
+/// name, or whose name without its final extension, is exactly the external id —
+/// or, failing that, whose name the external id is the hexadecimal encoding of.
 /// Nothing is recursive, symbolic links are not followed, and an id that matches
 /// in more than one place is refused rather than guessed — an ambiguous
 /// resolution is how a runner ends up starting a different game than the one the
 /// user picked.
+///
+/// The hex form exists because an external id has to pass the opaque-id grammar
+/// (`[A-Za-z0-9._\-:]`) and a great many real library files do not: a Switch dump
+/// is conventionally `Title [0100…][v0].nsp`, and a plugin that can only spell
+/// grammar-safe names can address almost nothing in a user's folder. Hex widens
+/// *which names a plugin can say*, and nothing else: the id stays opaque, the
+/// file still comes out of the host's own listing of a granted folder, and no
+/// decoded byte is ever joined onto a path. A plain name takes precedence, so a
+/// library that resolved before this existed resolves to the same file now.
 pub fn resolve_game_file(
     profile: &RunnerProfile,
     granted: &BTreeSet<String>,
@@ -706,7 +720,9 @@ pub fn resolve_game_file(
     if !valid_opaque_id(external_id, MAX_EXTERNAL_ID_LENGTH) {
         return Err(RunnerHostError::GameUnresolvable);
     }
+    let decoded_name = decoded_entry_name(external_id);
     let mut matches = Vec::new();
+    let mut decoded_matches = Vec::new();
     for directory in &profile.game_directories {
         // A folder the permission no longer covers is not a folder to read. The
         // launch path already refused an entry resolved in one; leaving the
@@ -734,21 +750,64 @@ pub fn resolve_game_file(
                 continue;
             };
             let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
-            if name != external_id && stem != external_id {
+            let exact = name == external_id || stem == external_id;
+            if !exact && decoded_name.as_deref() != Some(name) {
                 continue;
             }
             let path = entry.path();
             if let Ok(canonical) = canonical_file_inside(&path, &root) {
-                matches.push((directory.id.clone(), canonical));
+                let into = if exact {
+                    &mut matches
+                } else {
+                    &mut decoded_matches
+                };
+                into.push((directory.id.clone(), canonical));
             }
         }
     }
-    matches.sort();
-    matches.dedup();
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
+    for found in [&mut matches, &mut decoded_matches] {
+        found.sort();
+        found.dedup();
+    }
+    // An exact name is the older, narrower rule, so it answers on its own —
+    // including when it answers "more than one file", which is still a refusal
+    // rather than a reason to consult the hex form.
+    if !matches.is_empty() || decoded_matches.is_empty() {
+        return match matches.len() {
+            1 => Ok(matches.remove(0)),
+            _ => Err(RunnerHostError::GameUnresolvable),
+        };
+    }
+    match decoded_matches.len() {
+        1 => Ok(decoded_matches.remove(0)),
         _ => Err(RunnerHostError::GameUnresolvable),
     }
+}
+
+/// The entry name a hex-encoded external id stands for, or `None` for an id that
+/// is not one.
+///
+/// This decodes; it does not authorise. What comes back is compared against the
+/// names the host read out of a granted folder, never joined onto a path, so a
+/// decoded `../secret` is simply a name no entry has. The bounds are here so an
+/// id that is merely long cannot make the host allocate: an entry name the host
+/// will list is at most [`MAX_ENTRY_NAME_BYTES`] bytes, and anything past that
+/// names nothing it could match.
+fn decoded_entry_name(external_id: &str) -> Option<String> {
+    let digits = external_id.as_bytes();
+    if digits.is_empty()
+        || !digits.len().is_multiple_of(2)
+        || digits.len() / 2 > MAX_ENTRY_NAME_BYTES
+    {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks(2) {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        bytes.push(((high << 4) | low) as u8);
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// Re-check the file an inventory entry already names, immediately before it is
@@ -1584,6 +1643,60 @@ mod tests {
             Err(RunnerHostError::GameUnresolvable)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The grammar an external id has to pass allows `[A-Za-z0-9._\-:]`, and a
+    /// Switch dump is conventionally called `Title [0100…][v0].nsp`. Without the
+    /// hex form there is no id a plugin could return for that file at all, so
+    /// the first official runner would import nothing out of a normally named
+    /// library.
+    #[test]
+    fn resolves_a_candidate_by_the_hex_encoding_of_a_name_the_grammar_forbids() {
+        let root = temporary_root("hex-name");
+        fs::create_dir_all(root.join("games")).unwrap();
+        let name = "Super Mario Odyssey [0100000000010000][v0].nsp";
+        fs::write(root.join("games").join(name), b"not a real dump").unwrap();
+        let profile = profile_over(&root);
+
+        // The plugin cannot spell this name; it can only spell its bytes.
+        assert!(!valid_opaque_id(name, MAX_EXTERNAL_ID_LENGTH));
+        let (grant, path) =
+            resolve_game_file(&profile, &all_slots(&profile), &hex_of(name)).unwrap();
+        assert_eq!(grant, "fixture-games");
+        assert_eq!(path.file_name().unwrap(), name);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Hex is injective, so it can never name two files — but a file could be
+    /// *called* the hex of another one's name. The plain name is the older rule
+    /// and stays the answer, so no library that resolved before resolves
+    /// differently now.
+    #[test]
+    fn a_plain_name_wins_over_a_hex_encoding_that_names_another_file() {
+        let root = temporary_root("hex-collision");
+        fs::create_dir_all(root.join("games")).unwrap();
+        // "ab" hex-encodes to "6162", which is also a legal file name.
+        fs::write(root.join("games/ab"), b"the hex-addressed one").unwrap();
+        fs::write(root.join("games/6162"), b"the literally named one").unwrap();
+        let profile = profile_over(&root);
+
+        let (_, path) = resolve_game_file(&profile, &all_slots(&profile), "6162").unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"the literally named one",
+            "the exact name is the match, and the hex one is not consulted"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn hex_of(value: &str) -> String {
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     /// The external id is what a plugin *chose*, so it is held to the host's
