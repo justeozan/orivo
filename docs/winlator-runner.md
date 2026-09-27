@@ -262,27 +262,59 @@ optional, so a `catalog.json` written before any of this loads unchanged.
 
 ## What was verified on a device
 
-On the Pixel 8 emulator, with a profile and a shortcut placed where Orivo can
-read them, pressing Play produced this — the component, the flags and the
-sender are all Orivo's:
+On the `Orivo_Test` emulator (arm64, Android 17 / API 37) with **Winlator Cmod
+v13.1.1** installed from its own GitHub release, and a container created through
+Winlator's own UI.
+
+The folder is unreachable by pathname, as Orivo's own uid:
+
+```
+$ adb shell run-as io.orivo.desktop ls /storage/emulated/0/Download/Winlator/Frontend
+ls: /storage/emulated/0/Download/Winlator/Frontend: Permission denied
+```
+
+Connecting it from the Sources menu opens the system chooser; picking
+`Download/Winlator/Frontend` and allowing it makes Orivo read the shortcut —
+through the provider, by document, never by path:
+
+```
+MediaProvider: Open with lower FS for
+  /storage/emulated/0/Download/Winlator/Frontend/Orivo Test Game.desktop. Uid: 10111
+```
+
+The card appears in the library, and pressing Play hands the game over. This is
+Winlator's own log, and it is the link that was missing before — Winlator
+**reads the extras**, resolves the container from them, and starts Box64 and
+Wine for that shortcut:
 
 ```
 ActivityTaskManager: START u0 {flg=0x14008000 xflg=0x4
   cmp=com.winlator.cmod/.XServerDisplayActivity (has extras)}
-  with LAUNCH_MULTIPLE from uid 10230 (io.orivo.desktop)
-System.err: android.content.ActivityNotFoundException: Unable to find explicit
-  activity class {com.winlator.cmod/com.winlator.cmod.XServerDisplayActivity}
+  with LAUNCH_SINGLE_TASK from uid 10230 (io.orivo.desktop)
+XServerDisplayActivity: Shortcut Path: /storage/emulated/0/Download/Winlator/Frontend/Orivo Test Game.desktop
+XServerDisplayActivity: Container ID from Intent: 1
+XServerDisplayActivity: Intent Extras: Bundle[{shortcut_name=Orivo Test Game,
+  shortcut_path=/storage/emulated/0/Download/Winlator/Frontend/Orivo Test Game.desktop,
+  container_id=1}]
+ProcessHelper: cmd: .../usr/bin/box64 wine explorer /desktop=shell,1280x720
+  winhandler.exe /dir D: "Orivo-Test-Game.exe"
 ```
 
-`0x14008000` is exactly `NEW_TASK | CLEAR_TASK | CLEAR_TOP`. The exception is
-Winlator not being installed, and it reached the player as a sentence:
-*"Winlator is not installed on this device. Install it, export a shortcut from
-it, and try again."*
+`0x14008000` is exactly `NEW_TASK | CLEAR_TASK | CLEAR_TOP`.
 
-Winlator Cmod itself could not be installed: its APK is 667 MB and the AVD's
-`/data` had 552 MB free. So the last unverified link is that Winlator *reads*
-the extras it was sent — their exact keys and values are pinned by a host test
-instead.
+Two more things were watched on the device rather than only in a test. Editing
+the shortcut after it was adopted made Play refuse it — *"This Winlator shortcut
+changed. Export it again from Winlator so Orivo can pick it up."* — with no
+intent sent at all. And killing Orivo and starting it again re-read the same
+folder with no second chooser: the grant is persisted, and the background pass
+picked the edited shortcut back up.
+
+**Where it stops.** The Wine session itself never finishes booting in this
+emulator: Winlator sits on *"Starting up…"* whether it is started from Orivo or
+from Winlator's own container list, which is nested emulation meeting Box64 and
+Vulkan, not anything Orivo does. So no game is *displayed* here. Everything up to
+and including Winlator spawning Box64 and Wine for the shortcut Orivo adopted is
+what the log above shows.
 
 ## Seams left for the “Add an emulator” flow
 

@@ -21,9 +21,12 @@ android {
 }
 
 dependencies {
-    // Jackson is how `Invoke` reads and writes its payload; the Tauri library is
-    // where `Plugin` and the activity-result plumbing come from. Both are
-    // already in the APK because every Tauri Android build links them.
+    // All three are already in every Tauri Android build: Jackson is how `Invoke`
+    // reads and writes its payload, `androidx.activity` is where `ActivityResult`
+    // comes from — the Tauri library holds it as an `implementation` dependency,
+    // so it is in the APK but not on this project's compile classpath — and the
+    // Tauri library itself is where `Plugin` and the picker plumbing live.
     implementation("com.fasterxml.jackson.core:jackson-databind:2.15.3")
+    implementation("androidx.activity:activity:1.5.1")
     implementation(project(":tauri-android"))
 }

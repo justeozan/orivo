@@ -2,6 +2,7 @@ package io.orivo.saf
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -39,7 +40,8 @@ class SafPlugin(private val activity: Activity) : Plugin(activity) {
     @ActivityCallback
     fun onDocumentTreePicked(invoke: Invoke, result: ActivityResult) {
         val answer = JSObject()
-        val tree = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
+        val tree: Uri? =
+            if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
         if (tree == null) {
             // Backing out of the chooser is an ordinary outcome, not an error.
             // The key is left out rather than set to null, because JSONObject
