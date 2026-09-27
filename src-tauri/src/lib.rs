@@ -631,7 +631,29 @@ struct WinlatorExportFolderView {
 struct WinlatorShortcutView {
     game_ref: String,
     title: String,
+    /// The file itself, and the folders between the connected one and it. A
+    /// `Name=` line is not an identity, so these are what the user is actually
+    /// asked to recognise. Relative to the grant: the absolute path stays
+    /// host-private.
+    file_name: String,
+    folder_path: String,
+    duplicate_title: WinlatorTitleCollision,
     already_imported: bool,
+}
+
+/// Whose name this shortcut is also using.
+///
+/// A planted file named after a game the user already has is the whole point of
+/// naming it, so the collision is said out loud rather than left for the user to
+/// notice. The library case is the louder one and wins when both hold.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum WinlatorTitleCollision {
+    None,
+    /// A game already in the library carries this title.
+    Library,
+    /// Another shortcut in the connected folder carries it.
+    Folder,
 }
 
 #[derive(Debug, Serialize)]
@@ -3268,6 +3290,30 @@ fn winlator_managed_profile(
     Ok(Some((profile, inventory)))
 }
 
+/// Whose name a found shortcut is also using.
+///
+/// Case-insensitive on purpose: "celeste" and "Celeste" are the same name to
+/// somebody reading a menu, and it is that reader the check is for.
+fn winlator_title_collision(
+    title: &str,
+    taken_titles: &BTreeSet<String>,
+    found: &[winlator_runner::ScannedWinlatorShortcut],
+) -> WinlatorTitleCollision {
+    let folded = title.to_lowercase();
+    if taken_titles.contains(&folded) {
+        return WinlatorTitleCollision::Library;
+    }
+    let sharing = found
+        .iter()
+        .filter(|shortcut| shortcut.title.to_lowercase() == folded)
+        .count();
+    if sharing > 1 {
+        WinlatorTitleCollision::Folder
+    } else {
+        WinlatorTitleCollision::None
+    }
+}
+
 /// Scan the connected folder and remember what was found, so the user can be
 /// shown it and asked.
 ///
@@ -3301,15 +3347,44 @@ fn preview_winlator_shortcuts(
     )
     .map_err(|error| error.to_string())?;
 
+    // Titles already spoken for, read under a read lock of its own and never
+    // across the folder walk above. A shortcut named after one of these is the
+    // planted file this confirmation exists to make visible.
+    let taken_titles = state
+        .catalog
+        .read()
+        .map(|catalog| {
+            catalog
+                .games
+                .iter()
+                .map(|game| game.title.to_lowercase())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let connected_root = profile
+        .shortcut_directories
+        .first()
+        .cloned()
+        .unwrap_or_default();
     let found = scan
         .shortcuts
         .iter()
-        .map(|shortcut| WinlatorShortcutView {
-            game_ref: shortcut.game_ref.clone(),
-            title: shortcut.title.clone(),
-            already_imported: inventory.iter().any(|entry| {
-                entry.game_ref == shortcut.game_ref && entry.fingerprint == shortcut.fingerprint
-            }),
+        .map(|shortcut| {
+            let origin = winlator_runner::shortcut_origin(&connected_root, &shortcut.shortcut_path);
+            WinlatorShortcutView {
+                game_ref: shortcut.game_ref.clone(),
+                title: shortcut.title.clone(),
+                file_name: origin.file_name,
+                folder_path: origin.folder_path,
+                duplicate_title: winlator_title_collision(
+                    &shortcut.title,
+                    &taken_titles,
+                    &scan.shortcuts,
+                ),
+                already_imported: inventory.iter().any(|entry| {
+                    entry.game_ref == shortcut.game_ref && entry.fingerprint == shortcut.fingerprint
+                }),
+            }
         })
         .collect::<Vec<_>>();
     let label = profile
@@ -3476,7 +3551,9 @@ fn import_winlator_shortcuts_now(
     let message = match skipped_refs.len() {
         0 => message,
         1 => format!("{message} One changed since Orivo listed it and was left out."),
-        skipped => format!("{message} {skipped} changed since Orivo listed them and were left out."),
+        skipped => {
+            format!("{message} {skipped} changed since Orivo listed them and were left out.")
+        }
     };
     Ok(WinlatorImportResponse {
         imported_ids,
@@ -10080,6 +10157,74 @@ mod tests {
                 changed: 0
             }
         );
+    }
+
+    /// `Name=` is not an identity. A file dropped into the connected folder can
+    /// carry the name of a game the user already has, or of another file in the
+    /// same list, and a confirmation showing only that name cannot be answered.
+    /// So the confirmation carries what the user can go and check — the file and
+    /// the folder holding it — and says which names collide.
+    #[test]
+    fn the_confirmation_names_the_file_its_folder_and_a_name_already_taken() {
+        let home = temporary_directory("winlator-spoof");
+        let granted = temporary_directory("winlator-spoof-folder");
+        let nested = granted.join("new");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        // The same displayed name, a different file, one folder down.
+        fs::write(
+            nested.join("Free Coins.desktop"),
+            exported_winlator_shortcut("Celeste", 3),
+        )
+        .unwrap();
+        fs::write(
+            granted.join("Braid.desktop"),
+            exported_winlator_shortcut("Braid", 4),
+        )
+        .unwrap();
+
+        let state = state_for(&home);
+        // A game the library already holds under that exact name.
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            catalog.games.push(Game {
+                id: "already-here".into(),
+                title: "Braid".into(),
+                ..imported_local_game_fixture()
+            });
+        }
+        let view = preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+
+        let celeste_in_root = view
+            .found
+            .iter()
+            .find(|found| found.file_name == "Celeste.desktop")
+            .expect("the shortcut in the connected folder");
+        assert_eq!(celeste_in_root.folder_path, "");
+        assert_eq!(
+            celeste_in_root.duplicate_title,
+            WinlatorTitleCollision::Folder
+        );
+
+        let planted = view
+            .found
+            .iter()
+            .find(|found| found.file_name == "Free Coins.desktop")
+            .expect("the planted shortcut");
+        assert_eq!(planted.title, "Celeste");
+        assert_eq!(planted.folder_path, "new");
+        assert_eq!(planted.duplicate_title, WinlatorTitleCollision::Folder);
+
+        let braid = view
+            .found
+            .iter()
+            .find(|found| found.file_name == "Braid.desktop")
+            .expect("the shortcut named like a game already in the library");
+        assert_eq!(braid.duplicate_title, WinlatorTitleCollision::Library);
     }
 
     /// Any app can drop a file into a shared folder, so the window between "Add

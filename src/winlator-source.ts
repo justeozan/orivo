@@ -14,11 +14,28 @@
  * only the references that come back from this list.
  */
 
+/** Whose name a found shortcut is also using, as the host judged it. */
+export type WinlatorTitleCollision = "none" | "library" | "folder";
+
 /** One shortcut the host found in the connected folder. */
 export interface WinlatorShortcut {
   gameRef: string;
   title: string;
+  /** The file itself. A `Name=` line is not an identity; this is. */
+  fileName: string;
+  /** The folders between the connected one and the file, `/`-joined. */
+  folderPath: string;
+  duplicateTitle: WinlatorTitleCollision;
   alreadyImported: boolean;
+}
+
+/** One line of the confirmation: what it is called, where it is, who else has that name. */
+export interface WinlatorReviewEntry {
+  title: string;
+  /** The connected folder, the folders under it, and the file. Never an absolute path. */
+  origin: string;
+  /** A sentence, or `null` when this name is nobody else's. */
+  collision: string | null;
 }
 
 /** What `connect_winlator_export_folder` answers. */
@@ -73,13 +90,25 @@ function normaliseWinlatorShortcuts(payload: unknown): WinlatorShortcut[] {
     const record = entry as Record<string, unknown>;
     if (typeof record.gameRef !== "string" || !record.gameRef) continue;
     if (typeof record.title !== "string" || !record.title) continue;
+    // The file name is what makes a planted shortcut answerable at all, so an
+    // entry arriving without one is dropped rather than shown under its own
+    // `Name=` — which is exactly the thing that cannot be trusted.
+    if (typeof record.fileName !== "string" || !record.fileName) continue;
     shortcuts.push({
       gameRef: record.gameRef,
       title: record.title,
+      fileName: record.fileName,
+      folderPath: typeof record.folderPath === "string" ? record.folderPath : "",
+      duplicateTitle: normaliseWinlatorTitleCollision(record.duplicateTitle),
       alreadyImported: record.alreadyImported === true,
     });
   }
   return shortcuts;
+}
+
+/** A value outside the closed set is read as no collision, never rendered. */
+function normaliseWinlatorTitleCollision(payload: unknown): WinlatorTitleCollision {
+  return payload === "library" || payload === "folder" ? payload : "none";
 }
 
 export function normaliseWinlatorImportResult(payload: unknown): WinlatorImportResult | null {
@@ -112,13 +141,30 @@ export function winlatorReviewPrompt(shortcuts: WinlatorShortcut[]): string {
   return `Add these ${shortcuts.length} Winlator games to your library?`;
 }
 
-/** The titles to show, and how many were left out of that list. */
-export function winlatorReviewList(shortcuts: WinlatorShortcut[]): {
-  titles: string[];
-  remaining: number;
-} {
-  const titles = shortcuts.slice(0, MAX_LISTED_WINLATOR_SHORTCUTS).map((shortcut) => shortcut.title);
-  return { titles, remaining: Math.max(0, shortcuts.length - titles.length) };
+/**
+ * The lines to show, and how many were left out of that list.
+ *
+ * Each line names the file and the folder holding it, because the title came out
+ * of the file and a file can claim any title. `folderLabel` is the connected
+ * folder's own name as the host reported it; without one the line starts at the
+ * grant rather than inventing a root.
+ */
+export function winlatorReviewList(
+  shortcuts: WinlatorShortcut[],
+  folderLabel: string | null,
+): { entries: WinlatorReviewEntry[]; remaining: number } {
+  const entries = shortcuts.slice(0, MAX_LISTED_WINLATOR_SHORTCUTS).map((shortcut) => ({
+    title: shortcut.title,
+    origin: [folderLabel, shortcut.folderPath, shortcut.fileName].filter((part) => part).join("/"),
+    collision: winlatorCollisionSentence(shortcut.duplicateTitle),
+  }));
+  return { entries, remaining: Math.max(0, shortcuts.length - entries.length) };
+}
+
+function winlatorCollisionSentence(collision: WinlatorTitleCollision): string | null {
+  if (collision === "library") return "A game already in your library uses this name";
+  if (collision === "folder") return "Another file in this folder uses this name";
+  return null;
 }
 
 /**

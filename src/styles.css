@@ -1643,6 +1643,19 @@ body[data-mood="rage"] { --violet: #f2453c; }
   max-height: 132px;
   overflow-y: auto;
 }
+.library-source-review__list li + li { margin-top: 6px; }
+.library-source-review__list strong { color: #efeaf6; font-weight: 600; }
+/* The file and its folder sit under the title rather than beside it: they are
+   long, and truncating the one thing that distinguishes two identical names
+   would undo the point of showing it. */
+.library-source-review__origin,
+.library-source-review__collision {
+  display: block;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.library-source-review__origin { color: #8f8a9b; }
+.library-source-review__collision { color: #e8b86b; }
 
 /* ---------------------------------------------------------------------------
    Settings page (a normal page: no backdrop, no focus trap, no Escape-to-close)

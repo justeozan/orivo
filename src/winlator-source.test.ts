@@ -8,7 +8,17 @@ import {
   winlatorReviewPrompt,
   winlatorShortcutsToOffer,
   winlatorWaitingToast,
+  type WinlatorShortcut,
 } from "./winlator-source";
+
+const shortcut = (title: string): WinlatorShortcut => ({
+  gameRef: `shortcut:${title.toLowerCase()}`,
+  title,
+  fileName: `${title}.desktop`,
+  folderPath: "",
+  duplicateTitle: "none",
+  alreadyImported: false,
+});
 
 const folder = (found: unknown[]): unknown => ({
   connected: true,
@@ -40,34 +50,87 @@ describe("normaliseWinlatorExportFolder", () => {
     expect(
       normaliseWinlatorExportFolder(
         folder([
-          { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
-          { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+          {
+            gameRef: "shortcut:aa",
+            title: "Celeste",
+            fileName: "Celeste.desktop",
+            folderPath: "",
+            duplicateTitle: "none",
+            alreadyImported: false,
+          },
+          {
+            gameRef: "shortcut:bb",
+            title: "Braid",
+            fileName: "Braid.desktop",
+            folderPath: "new",
+            duplicateTitle: "library",
+            alreadyImported: true,
+          },
         ]),
       ),
     ).toEqual({
       connected: true,
       folderLabel: "Frontend",
       found: [
-        { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
-        { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+        {
+          gameRef: "shortcut:aa",
+          title: "Celeste",
+          fileName: "Celeste.desktop",
+          folderPath: "",
+          duplicateTitle: "none",
+          alreadyImported: false,
+        },
+        {
+          gameRef: "shortcut:bb",
+          title: "Braid",
+          fileName: "Braid.desktop",
+          folderPath: "new",
+          duplicateTitle: "library",
+          alreadyImported: true,
+        },
       ],
       message: "Connected Frontend.",
     });
   });
 
+  // The file name is what makes a planted shortcut answerable, so an entry that
+  // arrives without one is dropped rather than shown under its own `Name=`.
   it("drops a shortcut it cannot read rather than offering a nameless one", () => {
     const answer = normaliseWinlatorExportFolder(
       folder([
-        { gameRef: "shortcut:aa", title: "Celeste" },
-        { gameRef: "", title: "No reference" },
-        { gameRef: "shortcut:cc", title: "" },
+        { gameRef: "shortcut:aa", title: "Celeste", fileName: "Celeste.desktop" },
+        { gameRef: "", title: "No reference", fileName: "x.desktop" },
+        { gameRef: "shortcut:cc", title: "", fileName: "x.desktop" },
+        { gameRef: "shortcut:dd", title: "No file name" },
+        { gameRef: "shortcut:ee", title: "Empty file name", fileName: "" },
         "not a shortcut",
         null,
       ]),
     );
     expect(answer?.found).toEqual([
-      { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
+      {
+        gameRef: "shortcut:aa",
+        title: "Celeste",
+        fileName: "Celeste.desktop",
+        folderPath: "",
+        duplicateTitle: "none",
+        alreadyImported: false,
+      },
     ]);
+  });
+
+  it("reads an unknown collision as no collision rather than as markup", () => {
+    const answer = normaliseWinlatorExportFolder(
+      folder([
+        {
+          gameRef: "shortcut:aa",
+          title: "Celeste",
+          fileName: "Celeste.desktop",
+          duplicateTitle: "<b>library</b>",
+        },
+      ]),
+    );
+    expect(answer?.found[0]!.duplicateTitle).toBe("none");
   });
 
   it("refuses an answer it cannot read rather than inventing a cheerful one", () => {
@@ -81,8 +144,8 @@ describe("what the user is asked", () => {
   it("offers only the shortcuts that are not already cards", () => {
     const answer = normaliseWinlatorExportFolder(
       folder([
-        { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
-        { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+        { ...shortcut("Celeste"), alreadyImported: false },
+        { ...shortcut("Braid"), alreadyImported: true },
       ]),
     )!;
     expect(winlatorShortcutsToOffer(answer).map((shortcut) => shortcut.title)).toEqual(["Celeste"]);
@@ -91,23 +154,56 @@ describe("what the user is asked", () => {
   // A `.desktop` file runs a command, so the confirmation names what it would
   // add: a count alone hides the one thing the user is vouching for.
   it("names the games instead of only counting them", () => {
-    const shortcuts = [
-      { gameRef: "a", title: "Celeste", alreadyImported: false },
-      { gameRef: "b", title: "Braid", alreadyImported: false },
-    ];
+    const shortcuts = [shortcut("Celeste"), shortcut("Braid")];
     expect(winlatorReviewPrompt(shortcuts)).toBe("Add these 2 Winlator games to your library?");
     expect(winlatorReviewPrompt(shortcuts.slice(0, 1))).toBe("Add “Celeste” to your library?");
-    expect(winlatorReviewList(shortcuts).titles).toEqual(["Celeste", "Braid"]);
+    expect(winlatorReviewList(shortcuts, "Frontend").entries.map((entry) => entry.title)).toEqual([
+      "Celeste",
+      "Braid",
+    ]);
+  });
+
+  // A `Name=` line is not an identity: a file dropped into the folder can carry
+  // the name of a game the user already has. What they can check is the file and
+  // the folder holding it, so that is what the list says.
+  it("names the file and the folder holding it, not only the title", () => {
+    const entries = winlatorReviewList(
+      [
+        shortcut("Celeste"),
+        { ...shortcut("Celeste"), gameRef: "shortcut:planted", fileName: "Free Coins.desktop", folderPath: "new" },
+      ],
+      "Frontend",
+    ).entries;
+    expect(entries[0]!.origin).toBe("Frontend/Celeste.desktop");
+    expect(entries[1]!.origin).toBe("Frontend/new/Free Coins.desktop");
+  });
+
+  it("says whose name a shortcut is reusing", () => {
+    const entries = winlatorReviewList(
+      [
+        { ...shortcut("Celeste"), duplicateTitle: "folder" },
+        { ...shortcut("Braid"), gameRef: "shortcut:b", duplicateTitle: "library" },
+        { ...shortcut("Doom"), gameRef: "shortcut:c" },
+      ],
+      "Frontend",
+    ).entries;
+    expect(entries[0]!.collision).toBe("Another file in this folder uses this name");
+    expect(entries[1]!.collision).toBe("A game already in your library uses this name");
+    expect(entries[2]!.collision).toBe(null);
+  });
+
+  it("falls back to the connected folder's own name when the host could not give one", () => {
+    const entries = winlatorReviewList([shortcut("Celeste")], null).entries;
+    expect(entries[0]!.origin).toBe("Celeste.desktop");
   });
 
   it("keeps a long list readable without hiding that it is long", () => {
     const shortcuts = Array.from({ length: 9 }, (_, index) => ({
+      ...shortcut(`Game ${index}`),
       gameRef: `shortcut:${index}`,
-      title: `Game ${index}`,
-      alreadyImported: false,
     }));
-    const { titles, remaining } = winlatorReviewList(shortcuts);
-    expect(titles).toHaveLength(6);
+    const { entries, remaining } = winlatorReviewList(shortcuts, "Frontend");
+    expect(entries).toHaveLength(6);
     expect(remaining).toBe(3);
   });
 });

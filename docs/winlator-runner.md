@@ -257,10 +257,20 @@ So the folder is read, and then the user is asked:
 Sources ▸ Winlator shortcuts
   → the folder, picked once (or reviewed again, with no chooser)
   → a bounded, cancellable scan, with no catalog lock held
-  → the shortcuts found, by name, in the menu
+  → the shortcuts found, in the menu: the name, the file, the folder
   → "Add this game" / "Not now"
   → only the chosen references become cards
 ```
+
+And the question names more than `Name=`, because `Name=` is whatever the file
+says. A shortcut planted in the folder can call itself after a game the user
+already has, or after another file in the same list, and a confirmation showing
+only that line cannot be answered. So each row carries the file's own name and
+the folders between the connected one and it — relative to the grant, never the
+absolute path — and says out loud whose name is being reused: *"A game already in
+your library uses this name"*, *"Another file in this folder uses this name"*. The
+comparison is case-insensitive, because it is a person reading a menu that it
+protects.
 
 What the user vouches for is a file's *contents*, not its name. Every reference
 Orivo holds — the game reference included — is derived from the pathname, and the

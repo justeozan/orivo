@@ -1522,12 +1522,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const prompt = document.createElement("p");
     prompt.className = "library-source-review__prompt";
     prompt.textContent = winlatorReviewPrompt(review.shortcuts);
-    const { titles, remaining } = winlatorReviewList(review.shortcuts);
+    const { entries, remaining } = winlatorReviewList(review.shortcuts, review.folderLabel);
     const found = document.createElement("ul");
     found.className = "library-source-review__list";
-    for (const title of titles) {
+    for (const entry of entries) {
       const item = document.createElement("li");
-      item.textContent = title;
+      const title = document.createElement("strong");
+      title.textContent = entry.title;
+      // The file and its folder: a `Name=` line is whatever the file says, so
+      // this is the part the user can actually go and check.
+      const origin = document.createElement("span");
+      origin.className = "library-source-review__origin";
+      origin.textContent = entry.origin;
+      item.append(title, origin);
+      if (entry.collision) {
+        const collision = document.createElement("span");
+        collision.className = "library-source-review__collision";
+        collision.textContent = entry.collision;
+        item.append(collision);
+      }
       found.append(item);
     }
     if (remaining > 0) {

@@ -990,6 +990,128 @@ describe("application shell against the desktop backend", () => {
  * of ten titles nobody owns — and left the one screen whose whole job is to ask
  * for a connection with nothing to ask for.
  */
+/**
+ * The Winlator confirmation is the one screen in Orivo that turns a file on
+ * shared storage into something one tap from running, so what it says about that
+ * file is load-bearing. Android only, which is why it gets its own harness.
+ */
+describe("the Winlator confirmation on Android", () => {
+  let root: HTMLElement;
+  let userAgent: ReturnType<typeof vi.spyOn>;
+
+  const reviewItems = (): string[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(".library-source-review__list li")).map(
+      (item) => item.textContent ?? "",
+    );
+
+  beforeEach(async () => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    userAgent = vi
+      .spyOn(navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Linux; Android 17; sdk_gphone64_arm64) AppleWebKit/537.36");
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_library":
+          return [];
+        case "get_preferences":
+          return {};
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "" };
+        case "connect_winlator_export_folder":
+          return {
+            connected: true,
+            folderLabel: "Frontend",
+            message: "Connected Frontend.",
+            found: [
+              {
+                gameRef: "shortcut:aa",
+                title: "Celeste",
+                fileName: "Celeste.desktop",
+                folderPath: "",
+                duplicateTitle: "none",
+                alreadyImported: false,
+              },
+              {
+                gameRef: "shortcut:bb",
+                title: "Celeste",
+                fileName: "Free Coins.desktop",
+                folderPath: "new",
+                duplicateTitle: "folder",
+                alreadyImported: false,
+              },
+            ],
+          };
+        default:
+          return undefined;
+      }
+    });
+    root = document.createElement("div");
+    document.body.append(root);
+    mountApp(root, { storePage: stubPage("Store") });
+    await settle();
+  });
+
+  afterEach(() => {
+    userAgent.mockRestore();
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  it("names the file and the folder of each shortcut, and says which name is taken twice", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='winlator-folder']")!
+      .click();
+    await settle();
+
+    const items = reviewItems();
+    expect(items).toHaveLength(2);
+    // Two shortcuts called "Celeste": the title alone cannot be answered, so the
+    // file, its folder and the collision are all on the row.
+    expect(items[0]).toContain("Frontend/Celeste.desktop");
+    expect(items[1]).toContain("Frontend/new/Free Coins.desktop");
+    expect(items[1]).toContain("Another file in this folder uses this name");
+  });
+
+  it("never writes a file name as markup", async () => {
+    tauri.invoke.mockImplementation(async (command) => {
+      if (command === "get_library") return [];
+      if (command === "get_preferences") return {};
+      if (command === "get_steam_account_status")
+        return { connected: false, steamId: "", method: "" };
+      if (command === "connect_winlator_export_folder")
+        return {
+          connected: true,
+          folderLabel: "Frontend",
+          message: "Connected Frontend.",
+          found: [
+            {
+              gameRef: "shortcut:aa",
+              title: "<img src=x onerror=alert(1)>",
+              fileName: "<script>alert(2)</script>.desktop",
+              folderPath: "",
+              duplicateTitle: "none",
+              alreadyImported: false,
+            },
+          ],
+        };
+      return undefined;
+    });
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='winlator-folder']")!
+      .click();
+    await settle();
+
+    const list = root.querySelector<HTMLElement>(".library-source-review__list")!;
+    expect(list.querySelector("script")).toBeNull();
+    expect(list.querySelector("img")).toBeNull();
+    expect(list.textContent).toContain("<script>alert(2)</script>.desktop");
+  });
+});
+
 describe("the library welcome screen", () => {
   let root: HTMLElement;
   const backend = {
