@@ -1519,6 +1519,7 @@ mod tests {
                 shortcut_directories: vec![std::path::PathBuf::from(
                     "/storage/emulated/0/Download/Winlator/Frontend",
                 )],
+                shortcut_trees: Vec::new(),
                 enabled: true,
                 last_imported_at: None,
             })
