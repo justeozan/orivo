@@ -95,7 +95,11 @@ These exist so a suite can be adversarial without reaching into private state.
 
 - **Injectable limits.** `PluginLimits` and `SchedulerLimits` are plain values;
   `PluginRuntime::with_all_limits` takes both. Shrinking a deadline to two ticks
-  or a memory ceiling to 8 MiB needs no feature flag.
+  or a memory ceiling to 8 MiB needs no feature flag. `hostcall_bytes` is the odd
+  one out: it is spent by Wasmtime inside the canonical ABI, before an argument is
+  copied out of guest memory, which is the only place an oversized one can be
+  refused without first being allocated. The byte charge on `log` is the
+  per-invocation total beside it, because hostcall fuel is reset for every call.
 - **Controlled epoch.** `EpochMode::Manual` stops the runtime from spawning its
   tick thread, and `PluginRuntime::tick_epoch` advances the epoch by hand. The
   deadline is counted in ticks rather than read off a clock, so a test decides
