@@ -82,10 +82,32 @@ describe("phraseJournalEntry", () => {
       ["resumed", "This plugin was resumed."],
       ["scope-refused", "This plugin asked for a folder it was not granted."],
       ["identity-mismatch", "This plugin's component does not match what it announced."],
+      [
+        "host-call-budget",
+        "This plugin made too many requests to Orivo in one call and was cut off.",
+      ],
     ];
     for (const [decision, expected] of cases) {
       expect(phraseJournalEntry(entry({ decision, detail: "" }))).toBe(expected);
     }
+  });
+
+  it("phrases a missing capability neutrally rather than as an accusation", () => {
+    // A plugin that simply has no use for a capability logs this on every
+    // call it makes — that is expected behaviour, not wrongdoing, so the
+    // phrase must not read as one.
+    const phrase = phraseJournalEntry(
+      entry({
+        decision: "capability-unlinked",
+        detail: "files_read is not declared, so its host import is absent",
+      }),
+    );
+    expect(phrase).toBe("files_read is not declared, so its host import is absent");
+    expect(phrase).not.toMatch(/asked for/i);
+
+    expect(phraseJournalEntry(entry({ decision: "capability-unlinked", detail: "" }))).toBe(
+      "A capability this plugin's manifest does not declare is unavailable to it.",
+    );
   });
 
   it("folds the host's own detail into decisions that carry one", () => {

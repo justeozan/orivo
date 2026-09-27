@@ -153,14 +153,17 @@ const DECISION_PHRASES: Readonly<Record<string, (detail: string) => string>> = {
   degraded: () => "Orivo paused this plugin after repeated failures.",
   resumed: () => "This plugin was resumed.",
   "submit-refused": (detail) => `Orivo could not queue a request${detail ? `: ${detail}` : "."}`,
-  "host-call-budget": () => "A request was refused: it sent Orivo more data than one call allows.",
+  "host-call-budget": () =>
+    "This plugin made too many requests to Orivo in one call and was cut off.",
   "capability-refused": (detail) =>
     `This plugin tried something it has no permission for${detail ? `: ${detail}` : "."}`,
   "scope-refused": () => "This plugin asked for a folder it was not granted.",
   "files-truncated": (detail) => `A folder listing was shortened${detail ? `: ${detail}` : "."}`,
   "identity-mismatch": () => "This plugin's component does not match what it announced.",
-  "capability-unlinked": (detail) =>
-    `This plugin asked for something its manifest never declared${detail ? `: ${detail}` : "."}`,
+  // Neutral on purpose: a plugin that simply has no use for a capability logs
+  // this on every call it makes, which is expected behaviour, not wrongdoing —
+  // "asked for" would accuse a plugin that is doing exactly what it should.
+  "capability-unlinked": (detail) => detail || "A capability this plugin's manifest does not declare is unavailable to it.",
   trap: (detail) => `This plugin's request failed${detail ? `: ${detail}` : "."}`,
   "get-identity": (detail) => `Reading this plugin's identity failed${detail ? `: ${detail}` : "."}`,
   "health-check": (detail) => `The last health check failed${detail ? `: ${detail}` : "."}`,
