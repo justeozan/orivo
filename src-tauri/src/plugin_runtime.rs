@@ -3346,6 +3346,28 @@ mod tests {
         }
     }
 
+    /// Limits for a test that is not about time.
+    ///
+    /// The production deadline is one second for an interactive call, which is the
+    /// right policy and the wrong thing for a test to inherit: a test asserting the
+    /// *shape* of a refusal, while a component makes four hundred host calls,
+    /// starts failing on a machine under load and tells you nothing true when it
+    /// does. `the_same_refusal_earned_again_is_counted_and_not_repeated` did
+    /// exactly that at a load average around fifty, and passed eight times out of
+    /// eight when the machine was quiet.
+    ///
+    /// Fuel is deliberately left at its default: it is the bound that still catches
+    /// a component that never returns, so removing the clock does not remove the
+    /// safety net. Only the clock goes.
+    fn untimed() -> PluginLimits {
+        PluginLimits {
+            interactive_deadline: Duration::from_secs(60),
+            discovery_deadline: Duration::from_secs(60),
+            probe_deadline: Duration::from_secs(60),
+            ..PluginLimits::default()
+        }
+    }
+
     fn temporary_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "orivo-plugin-host-{tag}-{}-{}",
@@ -3682,7 +3704,7 @@ mod tests {
     #[test]
     fn invokes_every_runner_export_end_to_end() {
         let library = FixtureLibrary::new("nominal");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let PluginResponse::Identity(identity) = harness.call(PluginRequest::Identity).unwrap()
         else {
@@ -3742,7 +3764,7 @@ mod tests {
     #[test]
     fn discovery_resumes_from_its_own_cursor() {
         let library = FixtureLibrary::new("cursor");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let PluginResponse::DiscoveryPage(first) = harness
             .call(PluginRequest::DiscoverPage {
@@ -3787,7 +3809,7 @@ mod tests {
     /// linked to it, so it cannot be instantiated at all.
     #[test]
     fn an_undeclared_capability_refuses_instantiation() {
-        let harness = Harness::new(PluginLimits::default(), None);
+        let harness = Harness::new(untimed(), None);
         let error = harness.call(PluginRequest::Identity).unwrap_err();
         assert_eq!(
             error,
@@ -3861,7 +3883,7 @@ mod tests {
     #[test]
     fn a_directory_outside_the_grant_is_refused_at_the_call() {
         let library = FixtureLibrary::new("deny");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:deny").unwrap_err();
         assert!(matches!(
             error,
@@ -3883,7 +3905,7 @@ mod tests {
     #[test]
     fn a_name_that_leaves_the_granted_directory_is_refused() {
         let library = FixtureLibrary::new("escape");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:escape").unwrap_err();
         assert!(matches!(
             error,
@@ -3928,7 +3950,7 @@ mod tests {
             library.games.join("link.rom"),
         )
         .unwrap();
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:read-link").unwrap_err();
         assert!(
             matches!(
@@ -3971,7 +3993,7 @@ mod tests {
         redirect_directory(&through, &approved);
 
         let harness = Harness::with_directories(
-            PluginLimits::default(),
+            untimed(),
             &[GAMES_GRANT],
             &BTreeMap::from([(GAMES_GRANT.to_string(), through.join("games"))]),
         );
@@ -4011,7 +4033,7 @@ mod tests {
         // Safety: a path this process owns, in a directory it just created.
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let handle = harness
             .runtime
             .submit(
@@ -4093,7 +4115,7 @@ mod tests {
             .unwrap();
             fs::set_permissions(&library.games, fs::Permissions::from_mode(mode)).unwrap();
 
-            let harness = Harness::new(PluginLimits::default(), Some(&library));
+            let harness = Harness::new(untimed(), Some(&library));
             let outcome = harness.prepare("fixture:read-twin");
             assert_eq!(
                 outcome.is_ok(),
@@ -4130,7 +4152,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(facts.owner, host_account());
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let outcome = harness.prepare("fixture:read-twin");
         // Unix can tell that this temporary folder is private, so the user's own
         // link stays readable. Windows cannot tell yet, and a folder whose write
@@ -4221,7 +4243,7 @@ mod tests {
             vec![b'x'; MAX_HOST_FILE_BYTES as usize + 1],
         )
         .unwrap();
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(matches!(
             harness.prepare("fixture:read-big").unwrap_err(),
             PluginRuntimeError::Plugin {
@@ -4253,7 +4275,7 @@ mod tests {
             fs::write(outside.join("secret.txt"), b"a keychain token").unwrap();
             redirect_directory(&library.games.join("zeta.rom"), &outside);
         }
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
             .call(PluginRequest::DiscoverPage {
                 profile_id: FIXTURE_PROFILE.into(),
@@ -4292,7 +4314,7 @@ mod tests {
         // library's own directory is removed.
         let _locked = plant_unopenable_file(&library.games.join("locked.rom"));
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:census").is_ok());
         let census = harness
             .runtime
@@ -4936,7 +4958,7 @@ mod tests {
     #[test]
     fn a_cancel_before_the_first_instruction_never_instantiates() {
         let library = FixtureLibrary::new("cancel-early");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let cancel = Arc::new(AtomicBool::new(true));
         assert_eq!(
             harness
@@ -4971,7 +4993,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_cursor_that_does_not_advance() {
         let library = FixtureLibrary::new("loop-cursor");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness
                 .call(PluginRequest::DiscoverPage {
@@ -4999,7 +5021,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_launch_mode_it_does_not_recognise() {
         let library = FixtureLibrary::new("bad-mode");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-mode").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent mode")
@@ -5009,7 +5031,7 @@ mod tests {
     #[test]
     fn the_host_refuses_an_intent_about_another_profile() {
         let library = FixtureLibrary::new("bad-target");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-target").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent profile")
@@ -5019,7 +5041,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_game_reference_that_is_really_a_path() {
         let library = FixtureLibrary::new("bad-id");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-id").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent game reference")
@@ -5029,7 +5051,7 @@ mod tests {
     #[test]
     fn the_host_refuses_an_intent_that_names_another_runner() {
         let library = FixtureLibrary::new("bad-runner");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-runner").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent runner")
@@ -5044,7 +5066,7 @@ mod tests {
     #[test]
     fn a_plugins_chatter_cannot_bury_the_hosts_decisions() {
         let library = FixtureLibrary::new("chatty");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:chatty").is_ok());
 
         let decisions = harness.runtime.journal().entries();
@@ -5086,7 +5108,7 @@ mod tests {
     #[test]
     fn the_same_refusal_earned_again_is_counted_and_not_repeated() {
         let library = FixtureLibrary::new("nag");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:nag").is_ok());
 
         let refusals = harness
@@ -5151,7 +5173,7 @@ mod tests {
     #[test]
     fn a_refusal_survives_the_traffic_that_earned_it() {
         let library = FixtureLibrary::new("bury");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:bury").is_ok());
 
         let decisions = harness.runtime.journal().entries();
@@ -5180,7 +5202,7 @@ mod tests {
     #[test]
     fn a_plugin_pays_for_the_text_it_hands_the_journal() {
         let library = FixtureLibrary::new("shout");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:shout").is_ok());
 
         // Sixty-four messages of 64 KiB. Counting calls, all sixty-four are free
@@ -5211,7 +5233,7 @@ mod tests {
         // And an ordinary line still costs one call, so metering by size does not
         // make the journal a capability a plugin has to ration.
         let library = FixtureLibrary::new("shout-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:ok").is_ok());
         assert_eq!(
             journal_cost(MAX_JOURNAL_MESSAGE_BYTES),
@@ -5232,7 +5254,7 @@ mod tests {
     #[test]
     fn an_oversized_host_call_argument_traps_before_it_is_copied() {
         let library = FixtureLibrary::new("megashout");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:megashout").unwrap_err(),
             PluginRuntimeError::Trapped,
@@ -5259,14 +5281,14 @@ mod tests {
         // if the ceiling is ever tightened to where real work lives.
         assert!(harness.runtime.limits().hostcall_bytes >= 1024 * 1024);
         let library = FixtureLibrary::new("megashout-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:shout").is_ok());
     }
 
     #[test]
     fn a_plugin_error_reaches_the_host_as_bounded_text() {
         let library = FixtureLibrary::new("fail");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:fail").unwrap_err();
         assert_eq!(
             error,
@@ -5536,7 +5558,7 @@ mod tests {
     #[test]
     fn a_scheduled_invocation_returns_a_validated_result() {
         let library = FixtureLibrary::new("scheduled-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let invocation = harness
             .runtime
             .submit(
@@ -5559,7 +5581,7 @@ mod tests {
     #[test]
     fn repeated_invalid_results_park_the_plugin() {
         let library = FixtureLibrary::new("scheduled-degraded");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
             let error = harness
                 .runtime
@@ -5659,11 +5681,7 @@ mod tests {
         both.insert("fixture-other".to_string(), second.other.clone());
 
         // `fixture:deny` reads the grant id `fixture-other`. Granted, it works.
-        let widened = Harness::with_directories(
-            PluginLimits::default(),
-            &[GAMES_GRANT, "fixture-other"],
-            &both,
-        );
+        let widened = Harness::with_directories(untimed(), &[GAMES_GRANT, "fixture-other"], &both);
         assert!(
             widened.prepare("fixture:deny").is_ok(),
             "a folder the user did grant was refused"
@@ -5671,7 +5689,7 @@ mod tests {
 
         // Not granted, the same call is refused — and the refusal is recorded
         // rather than inferred from the absence of a result.
-        let narrowed = Harness::with_directories(PluginLimits::default(), &[GAMES_GRANT], &both);
+        let narrowed = Harness::with_directories(untimed(), &[GAMES_GRANT], &both);
         assert!(matches!(
             narrowed.prepare("fixture:deny").unwrap_err(),
             PluginRuntimeError::Plugin {
@@ -5696,7 +5714,7 @@ mod tests {
     #[test]
     fn a_revoked_grant_stops_the_next_call_while_the_running_one_ends_on_its_own() {
         let library = FixtureLibrary::new("revoked");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:read-alpha").is_ok());
 
         // The same runtime, the same component, and a grant set that no longer
@@ -5779,7 +5797,7 @@ mod tests {
         // keeps holds opaque ids and a closed mode, so there is no field for an
         // executable, a working directory or an argument to travel in.
         let library = FixtureLibrary::new("no-binary");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::LaunchIntent(intent) = harness.prepare("fixture:ok").unwrap() else {
             panic!("expected an intent");
         };
@@ -6000,7 +6018,7 @@ mod tests {
                 interactive_fuel: 1 << 42,
                 interactive_deadline: Duration::from_secs(30),
                 epoch_tick: Duration::from_millis(5),
-                ..PluginLimits::default()
+                ..untimed()
             },
             Some(&library),
         );
@@ -6108,7 +6126,7 @@ mod tests {
     #[test]
     fn a_cancellation_racing_instantiation_is_always_one_of_two_answers() {
         let library = FixtureLibrary::new("cancel-instantiate");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let mut cancelled = 0;
         for attempt in 0..60u32 {
             let cancel = Arc::new(AtomicBool::new(false));
@@ -6149,7 +6167,7 @@ mod tests {
             )
             .unwrap();
         }
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let whole = harness
             .call_with(
@@ -6169,7 +6187,7 @@ mod tests {
 
         // A *new* runtime: a restart, with nothing carried over but the cursor
         // the host wrote down.
-        let restarted = Harness::new(PluginLimits::default(), Some(&library));
+        let restarted = Harness::new(untimed(), Some(&library));
         let resumed = restarted
             .call_with(
                 PluginRequest::DiscoverPage {
@@ -6285,7 +6303,7 @@ mod tests {
     #[test]
     fn a_parked_plugin_is_never_called_again_on_its_own() {
         let library = FixtureLibrary::new("no-retry");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
             let _ = harness
                 .runtime
@@ -6347,7 +6365,7 @@ mod tests {
     #[test]
     fn a_hostile_page_is_refused_after_the_call_succeeded() {
         let library = FixtureLibrary::new("hostile-page");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for (selector, cursor, limit, expected) in [
             ("fixture:dup", None, 10, "duplicate reference"),
             ("fixture:overfill", None, 2, "page longer than asked"),
