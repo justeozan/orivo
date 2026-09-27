@@ -214,6 +214,15 @@ purpose, along with an oversized document, an unreadable one, a directory row th
 would make the walk loop, and a document rewritten between preparing an intent
 and sending it.
 
+One Android detail does not survive being ignored: a listing takes three JNI
+local references per row, and Android 7 — this app's `minSdk` — guarantees only
+512 live at a time, aborting the process rather than returning an error above
+that. Three references a row is 171 documents, well inside the scanner's own
+4 000-file ceiling, so the rows are read one reference frame at a time. The frame
+discipline is written in platform-independent code and tested with a double that
+counts references, because the alternative is finding out on a device that
+crashes at every launch.
+
 ### Receiving the folder: one Kotlin class, in this repository
 
 JNI covers nearly all of Android from Rust — sending the intent, querying a
@@ -236,29 +245,47 @@ dependency the repository did not already have.
 
 ## How a Winlator game gets into the library
 
-Adoption reads whatever Winlator has already exported — the connected folder if
-there is one, the default export path otherwise — scope-checks and hashes each
-`.desktop` file, and turns it into a card behind one managed profile
-(`orivo-auto-winlator`), provisioned without a wizard, the same shape as the
-managed default Wine profile. A pass that finds nothing new does not rewrite
-`catalog.json`, and a profile the user disabled is left alone.
+**A shortcut is a question, never an answer.** A `.desktop` file carries an
+`Exec=` line Winlator runs inside a container that can reach the whole of storage
+and the network, so finding one is not a reason to make it a card — a card is one
+tap from running it. Orivo would be the thing that made an unknown file visible,
+named and launchable; Winlator itself would never have listed it.
 
-**It does not run at startup.** It used to, inside `AppState::new`, under a
-comment claiming the first paint never waited on it — true only while the folder
-was unreachable, and false the moment a grant made it readable. It is now a
-background pass started by the first finished page load: bounded by the scanner's
-own limits, cancellable, and silent unless it changed something, in which case it
-says so and the library reloads rather than waiting for a restart. On a desktop it
-returns before doing anything at all.
+So the folder is read, and then the user is asked:
 
-Connecting a different folder overtakes a pass that is already walking the old
-one — both write the same managed profile — and it keeps the profile's identity
-while dropping the inventory entries that fell outside the new grant: those could
-never be launched again, and the catalog's own scope check would refuse the write.
+```text
+Sources ▸ Winlator shortcuts
+  → the folder, picked once (or reviewed again, with no chooser)
+  → a bounded, cancellable scan, with no catalog lock held
+  → the shortcuts found, by name, in the menu
+  → "Add this game" / "Not now"
+  → only the chosen references become cards
+```
+
+The background pass — started after the first paint, never in `AppState::new` —
+does the same read and **writes nothing**: it counts what is not in the library
+and what changed underneath it, says so once, and leaves. It does not refresh a
+changed shortcut's fingerprint either: that would silently re-arm a file whose
+`Exec=` line may now point somewhere else, which is exactly what the launch guard
+refuses. The user is told, and the guard keeps refusing until they look.
+
+Two more rules make the folder itself trustworthy. A grant on the volume root, on
+a shared drop folder (`Download`, `DCIM`, `Documents`, …) or anywhere under
+`Android/` is refused — those are where any app can leave a file with no
+permission at all — and that check runs on *every* use of a grant, not only when
+it was picked. And a grant no profile points at any more is handed back with
+`releasePersistableUriPermission`, because a persistable permission has no expiry
+of its own.
+
+Cards live behind one managed profile (`orivo-auto-winlator`), provisioned
+without a wizard, the same shape as the managed default Wine profile. Connecting
+a different folder keeps the profile — and so the card ids — while dropping the
+inventory entries that fell outside the new grant: those could never be launched
+again, and the catalog's own scope check would refuse the write.
 
 Nothing is added to the catalog schema version: `winlator_profiles`,
-`winlator_inventory` and the `shortcut_trees` a profile now carries are all
-optional, so a `catalog.json` written before any of this loads unchanged.
+`winlator_inventory` and the `shortcut_trees` a profile carries are all optional,
+so a `catalog.json` written before any of this loads unchanged.
 
 ## What was verified on a device
 
@@ -273,8 +300,11 @@ $ adb shell run-as io.orivo.desktop ls /storage/emulated/0/Download/Winlator/Fro
 ls: /storage/emulated/0/Download/Winlator/Frontend: Permission denied
 ```
 
-Connecting it from the Sources menu opens the system chooser; picking
-`Download/Winlator/Frontend` and allowing it makes Orivo read the shortcut —
+Connecting it from the Sources menu opens the system chooser. Picking
+`Download` itself is refused by Android's own picker on this version — *"Can't
+use this folder. To protect your privacy, choose another folder"* — which is the
+same answer Orivo gives for the folders the picker does not cover. Picking
+`Download/Winlator/Frontend` and allowing it makes Orivo read the shortcut
 through the provider, by document, never by path:
 
 ```
@@ -282,15 +312,17 @@ MediaProvider: Open with lower FS for
   /storage/emulated/0/Download/Winlator/Frontend/Orivo Test Game.desktop. Uid: 10111
 ```
 
-The card appears in the library, and pressing Play hands the game over. This is
-Winlator's own log, and it is the link that was missing before — Winlator
-**reads the extras**, resolves the container from them, and starts Box64 and
-Wine for that shortcut:
+Nothing is imported: the menu lists what it found — *Add “Orivo Test Game” to
+your library?* — and the library stays empty until **Add this game** is pressed.
+Then the card appears, and pressing Play hands the game over. This is Winlator's
+own log, and it is the link that was missing before — Winlator **reads the
+extras**, resolves the container from them, and starts Box64 and Wine for that
+shortcut:
 
 ```
 ActivityTaskManager: START u0 {flg=0x14008000 xflg=0x4
   cmp=com.winlator.cmod/.XServerDisplayActivity (has extras)}
-  with LAUNCH_SINGLE_TASK from uid 10230 (io.orivo.desktop)
+  with LAUNCH_SINGLE_TASK from uid 10231 (io.orivo.desktop)
 XServerDisplayActivity: Shortcut Path: /storage/emulated/0/Download/Winlator/Frontend/Orivo Test Game.desktop
 XServerDisplayActivity: Container ID from Intent: 1
 XServerDisplayActivity: Intent Extras: Bundle[{shortcut_name=Orivo Test Game,
@@ -302,18 +334,24 @@ ProcessHelper: cmd: .../usr/bin/box64 wine explorer /desktop=shell,1280x720
 
 `0x14008000` is exactly `NEW_TASK | CLEAR_TASK | CLEAR_TOP`.
 
-Two more things were watched on the device rather than only in a test. Editing
-the shortcut after it was adopted made Play refuse it — *"This Winlator shortcut
-changed. Export it again from Winlator so Orivo can pick it up."* — with no
-intent sent at all. And killing Orivo and starting it again re-read the same
-folder with no second chooser: the grant is persisted, and the background pass
-picked the edited shortcut back up.
+Then a second `.desktop` file was dropped into the connected folder — the attack
+the review named, minus the attacker. Orivo restarted, the library still held one
+card, and the background pass said so rather than adding anything: *"Winlator has
+one new shortcut. Open Sources to review them."* Opening that entry offered the
+new file by name, and only it — the shortcut already imported was not offered
+again.
+
+Two more things were watched rather than only tested. Editing an imported
+shortcut made Play refuse it — *"This Winlator shortcut changed. Export it again
+from Winlator so Orivo can pick it up."* — with no intent sent. And killing Orivo
+and starting it again re-read the same folder with no second chooser: the grant is
+persisted.
 
 **Where it stops.** The Wine session itself never finishes booting in this
 emulator: Winlator sits on *"Starting up…"* whether it is started from Orivo or
 from Winlator's own container list, which is nested emulation meeting Box64 and
 Vulkan, not anything Orivo does. So no game is *displayed* here. Everything up to
-and including Winlator spawning Box64 and Wine for the shortcut Orivo adopted is
+and including Winlator spawning Box64 and Wine for the shortcut the user added is
 what the log above shows.
 
 ## Seams left for the “Add an emulator” flow
