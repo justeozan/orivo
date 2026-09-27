@@ -110,7 +110,8 @@ WebView → game_id
   → LaunchTarget::Runner { runner_id: "com.orivo.winlator", profile_id, game_ref }
   → WinlatorProfile + WinlatorShortcutInventoryEntry (host-private)
   → WinlatorLaunchIntent { runner_id, profile_id, game_ref, mode: ExportedShortcut }
-  → prepare_winlator_launch: canonicalise, scope-check, re-hash the shortcut
+  → WinlatorShortcutSource: a readable directory, or the granted document tree
+  → prepare_winlator_launch: resolve, scope-check, re-hash the shortcut
   → AndroidIntent { package, activity, flags, extras: [Int|Text with &'static str keys] }
   → re-hash once more, immediately before the hand-off
   → JNI: Intent().setComponent(ComponentName).addFlags().putExtra()… startActivity()
@@ -133,12 +134,12 @@ shortcut whenever the user re-exports it, and the new file can point at a
 different executable or container, so a changed shortcut is refused until a
 deliberate reimport has updated Orivo's private inventory.
 
-## The one thing that is not resolved: reading the export folder
+## Reading the export folder: the storage access framework
 
-Sending the intent needs no permission. *Finding* the shortcut does, and Orivo
-does not currently have it.
+Sending the intent needs no permission. *Finding* the shortcut does, and by
+pathname Orivo cannot have it.
 
-Measured on the emulator (Pixel 8, Android 17 / API 37), as Orivo's own uid:
+Measured on the emulator (Android 17 / API 37), as Orivo's own uid:
 
 ```
 $ adb shell run-as io.orivo.desktop ls /storage/emulated/0/Download/Winlator/Frontend
@@ -147,36 +148,117 @@ ls: /storage/emulated/0/Download/Winlator/Frontend: Permission denied
 
 That is scoped storage doing its job: a `.desktop` file is not media, so on
 API 30+ an app opens it by path only with `MANAGE_EXTERNAL_STORAGE`. Orivo's
-manifest asks for `INTERNET` and nothing else. The app-specific external
-directory would be readable without a permission, but nothing can write a file
-there — not Winlator, not a file manager — so it is not a handover point.
+manifest asks for `INTERNET` and nothing else — and `src-tauri/gen/` is not
+tracked, so a manifest permission is not something a commit here could deliver
+even if it were wanted.
 
-Three ways out, none of which this change picks:
+The answer is **`ACTION_OPEN_DOCUMENT_TREE`**: the user points at the folder
+once, Orivo takes a *persistable* read permission on it, and every read after
+that goes through a `ContentResolver`. No manifest change, a grant the user can
+see and revoke in the system settings, and nothing to ask for again after a
+restart. It is also the grant the "Add an emulator" flow would have created
+anyway.
 
-1. **`MANAGE_EXTERNAL_STORAGE`** in the manifest. Works today, costs one
-   special-access screen, and is the permission Play scrutinises hardest.
-2. **`ACTION_OPEN_DOCUMENT_TREE`** — no manifest change at all: the user picks
-   the folder once and Orivo holds a persistable grant. The cost is that SAF
-   reads through `ContentResolver`, not the filesystem, so the scanner and the
-   fingerprint would both read a stream rather than a path. The folder picker
-   itself is the "Add an emulator" flow.
-3. **Ask Winlator to export somewhere permission-free** — not Orivo's call.
+### The one hard part: a document is not a path
 
-Until one is chosen, the adoption pass below finds nothing on a real device and
-costs nothing, and the launch path is reached by a card created any other way.
+Winlator's `shortcut_path` extra is a **file path**. It opens that file itself,
+with its own permissions — a `content://` URI would be a file it cannot open. So
+Orivo has to be able to say, without guessing, when a document it can read *is* a
+file at a path Winlator can open.
+
+Exactly one provider allows the claim to be made:
+
+| Provider | Identifier | Is it a path? |
+| --- | --- | --- |
+| `com.android.externalstorage.documents`, `primary:` | `primary:Download/Winlator/Frontend/Celeste.desktop` | **Yes** — `<getExternalStorageDirectory()>/Download/Winlator/Frontend/Celeste.desktop` |
+| `com.android.externalstorage.documents`, `1234-ABCD:` | a removable volume | No — the mount point would have to be inferred |
+| `com.android.providers.downloads.documents` | `msf:42` | No — a row, not a file |
+| any cloud provider | opaque | No |
+
+So the rule, in [`src-tauri/src/winlator_saf.rs`](../src-tauri/src/winlator_saf.rs),
+is narrow on purpose: the authority must be primary external storage, the
+document identifier must start with `primary:`, the shared volume's root is asked
+for (`Environment.getExternalStorageDirectory()`) rather than assumed to be
+`/storage/emulated/0`, and every other case is refused with a sentence —
+*"Orivo can only read a folder in this device's own storage."* — instead of a
+guessed path. The mapping is a bijection under those conditions, which is why the
+catalog stores no second copy of it: the inventory keeps the path, and the
+document identifier is recomputed from it when the file has to be read again.
+
+A profile therefore holds **both halves** of the grant: `shortcut_directories`,
+the folder Winlator opens and the scope every check already used, and
+`shortcut_trees`, the tree URIs that are only *how Orivo reads* it. Neither
+replaces the other.
+
+### Two grants, one pipeline
+
+The scanner did not fork. `WinlatorShortcutSource` has two implementations — a
+readable directory, and a granted document tree — and everything above it is
+written once: the bounded, cancellable walk, the 64 KiB cap, the scope check, the
+SHA-256 fingerprint, the intent. The filesystem source canonicalises a pathname
+and opens it with `O_NOFOLLOW`; the SAF source resolves a document identifier and
+opens a stream. A device with a plainly readable folder still uses the first, and
+so does every test that does not need a provider.
+
+A document tree is checked **twice**, because its two halves can disagree:
+
+- as an identifier, which has to sit under the granted tree — a provider is free
+  to answer a listing with any row it likes, and a row that does not resolve to a
+  child of the folder being listed is dropped rather than followed;
+- as a path, which has to sit under the directory that tree stands for — an
+  identifier containing `..` looks perfectly inside the tree to the provider and
+  would leave the folder on the filesystem.
+
+Both are exercised on a host against a fake provider that returns those rows on
+purpose, along with an oversized document, an unreadable one, a directory row that
+would make the walk loop, and a document rewritten between preparing an intent
+and sending it.
+
+### Receiving the folder: one Kotlin class, in this repository
+
+JNI covers nearly all of Android from Rust — sending the intent, querying a
+`ContentResolver`, opening a document. It does not cover *receiving an activity
+result*: `onActivityResult` lands on a Java class, and none can be conjured at
+runtime.
+
+| Option | Verdict |
+| --- | --- |
+| Pure JNI | The picker's result never arrives. A `java.lang.reflect.Proxy` for Tauri's `ActivityResultCallback` still needs a Java `InvocationHandler`; loading a dex at runtime is worse than a build-time class in every way. |
+| A Kotlin file in `src-tauri/gen/android` | Untracked and regenerated. It could not be delivered by a commit. |
+| A third-party crate | None found that takes a *persistable* tree permission, which is the whole point; and it would be a new dependency for sixty lines of Kotlin. |
+| **A local Tauri plugin** | Chosen. [`tauri-plugin-orivo-saf/`](../tauri-plugin-orivo-saf) is a path dependency of this workspace, so its Android library project is tracked, and `tauri-build` wires it into the generated project on every build. |
+
+That plugin does three things and stops: it starts the chooser, takes the
+persistable read permission on the folder that comes back — which only the
+process that received the grant may do — and hands Rust the tree URI as a string.
+It declares no permission, exposes no command to the WebView, and adds no Cargo
+dependency the repository did not already have.
 
 ## How a Winlator game gets into the library
 
-On Android, startup adopts whatever Winlator has already exported: if the default
-frontend directory exists, its `.desktop` files are scanned, scope-checked,
-hashed, and turned into cards behind one managed profile
-(`orivo-auto-winlator`), provisioned without a wizard — the same shape as the
+Adoption reads whatever Winlator has already exported — the connected folder if
+there is one, the default export path otherwise — scope-checks and hashes each
+`.desktop` file, and turns it into a card behind one managed profile
+(`orivo-auto-winlator`), provisioned without a wizard, the same shape as the
 managed default Wine profile. A pass that finds nothing new does not rewrite
 `catalog.json`, and a profile the user disabled is left alone.
 
-Nothing is added to the catalog schema version: `winlator_profiles` and
-`winlator_inventory` are optional arrays, so a `catalog.json` written before this
-change loads unchanged.
+**It does not run at startup.** It used to, inside `AppState::new`, under a
+comment claiming the first paint never waited on it — true only while the folder
+was unreachable, and false the moment a grant made it readable. It is now a
+background pass started by the first finished page load: bounded by the scanner's
+own limits, cancellable, and silent unless it changed something, in which case it
+says so and the library reloads rather than waiting for a restart. On a desktop it
+returns before doing anything at all.
+
+Connecting a different folder overtakes a pass that is already walking the old
+one — both write the same managed profile — and it keeps the profile's identity
+while dropping the inventory entries that fell outside the new grant: those could
+never be launched again, and the catalog's own scope check would refuse the write.
+
+Nothing is added to the catalog schema version: `winlator_profiles`,
+`winlator_inventory` and the `shortcut_trees` a profile now carries are all
+optional, so a `catalog.json` written before any of this loads unchanged.
 
 ## What was verified on a device
 
@@ -204,8 +286,9 @@ instead.
 
 ## Seams left for the “Add an emulator” flow
 
-- Choosing a distribution and a shortcut directory by hand, instead of the
-  managed default: `WinlatorProfile` already carries both.
+- Choosing a distribution and *several* folders by hand, instead of one managed
+  default: `WinlatorProfile` already carries both, and connecting one folder — in
+  the Sources menu, on Android only — is already wired end to end.
 - Enabling, disabling and deleting a profile: `enabled` is honoured on every
   path; a removal helper is the missing piece.
 - A visible import with progress and cancellation:
