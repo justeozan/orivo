@@ -9,6 +9,7 @@ mod launcher;
 // gate, so a busy CI runner can't turn a timing into a false failure.
 #[cfg(test)]
 mod perf_bench;
+mod plugin_health;
 mod plugin_index;
 mod plugin_installer;
 // `pub`, not `mod`: the developer SDK (`sdk/orivo-plugin-sdk`) links this crate
@@ -1092,7 +1093,10 @@ pub fn run() {
             runner_commands::revoke_runner_profile_directory,
             runner_commands::start_runner_import,
             runner_commands::get_runner_import_status,
-            runner_commands::cancel_runner_import
+            runner_commands::cancel_runner_import,
+            plugin_health::get_plugin_health_report,
+            plugin_health::resume_plugin,
+            plugin_health::get_plugin_journal
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orivo");
