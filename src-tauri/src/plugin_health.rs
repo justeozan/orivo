@@ -8,22 +8,30 @@
 //! the same time (a compile cache, Windows sandbox parity): reading already
 //! `pub` methods from a new file cannot conflict with either.
 //!
-//! The journal's text is already bounded and stripped of control characters
-//! before it reaches `PluginJournal` (`plugin_runtime.rs`'s `sanitise_text`),
-//! so this module passes it through rather than sanitising it a second time.
-//! Turning a decision code into a sentence a player can read is the settings
-//! panel's job, the same way `plugin-manager.ts` turns `PluginState` into a
-//! sentence today.
+//! Guest-authored text — a health-check message, a plugin's own log line — is
+//! already bounded and stripped of control characters before it reaches
+//! `PluginJournal` (`plugin_runtime.rs`'s `sanitise_text`), so this module
+//! passes it through rather than sanitising it a second time. Host-authored
+//! text (a panic message, a job's own error) is not guest input and carries no
+//! such guarantee, but it is also not attacker-controlled — it comes from this
+//! codebase's own `Display` impls. Turning a decision code into a sentence a
+//! player can read is the settings panel's job, the same way `plugin-manager.ts`
+//! turns a bare `PluginState` into a sentence today.
 
 use crate::plugin_manifest::valid_opaque_id;
 use crate::plugin_runtime::{PluginJournal, PluginRuntime};
 use crate::plugin_scheduler::PluginScheduler;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 const MAX_PLUGIN_ID_LENGTH: usize = 256;
 /// A settings panel wants the last page of what happened, not the whole ring:
 /// the ring itself is already bounded for the host's own reasons.
 const MAX_JOURNAL_ROWS: usize = 40;
+/// A batched health read is for the plugins Settings actually lists. Bounded
+/// so a malformed or hostile caller cannot turn one IPC round trip into an
+/// unbounded scan of the scheduler's table.
+const MAX_HEALTH_REPORT_IDS: usize = 256;
 
 fn opaque(value: &str) -> bool {
     valid_opaque_id(value, MAX_PLUGIN_ID_LENGTH)
@@ -61,25 +69,80 @@ fn health_view(scheduler: &PluginScheduler, plugin_id: &str) -> PluginHealthView
 
 /// One plugin's journal, newest first and bounded to [`MAX_JOURNAL_ROWS`].
 ///
-/// Decisions and the plugin's own log lines are two separate rings, so they are
-/// not already interleaved in the order they happened — sorting by
-/// `correlation_id` puts them back in that order, because both rings draw from
-/// the same monotonic counter.
+/// Two things happen before the row budget is spent. First, decisions and the
+/// plugin's own log lines are two separate rings, ordered against each other
+/// by `correlation_id` — both draw from the same monotonic counter, so this
+/// approximates the order they happened in, though two entries sharing one
+/// correlation id are not resolved any further against each other, since the
+/// host does not record a sub-order within one call. Second, the ring only
+/// collapses a decision reached twice under the *same* correlation id; a
+/// decision reached on every call, each under its own id — a plugin that
+/// simply never declared a capability logs `capability-unlinked` exactly this
+/// way — is not collapsed there, and would otherwise fill this window with one
+/// reason repeated, pushing out whichever refusal actually caused `degraded`.
+/// Folding matching `(decision, detail)` pairs together here, before
+/// truncating, is what keeps that from happening — the merged row's own
+/// `repeats` still says how often it was reached.
 fn journal_view(journal: &PluginJournal, plugin_id: &str) -> Vec<PluginJournalEntryView> {
     let mut rows = journal.entries();
     rows.extend(journal.plugin_messages());
     rows.retain(|entry| entry.plugin_id == plugin_id);
-    rows.sort_by_key(|entry| entry.correlation_id.0);
-    rows.reverse();
-    rows.truncate(MAX_JOURNAL_ROWS);
-    rows.into_iter()
-        .map(|entry| PluginJournalEntryView {
-            plugin_id: entry.plugin_id,
-            decision: entry.decision.to_owned(),
-            detail: entry.detail,
-            repeats: entry.repeats,
+
+    let mut merged: BTreeMap<(&'static str, String), (u32, u64)> = BTreeMap::new();
+    for entry in &rows {
+        let slot = merged
+            .entry((entry.decision, entry.detail.clone()))
+            .or_insert((0, entry.correlation_id.0));
+        slot.0 = slot.0.saturating_add(entry.repeats);
+        slot.1 = slot.1.max(entry.correlation_id.0);
+    }
+
+    let mut collapsed: Vec<(u64, PluginJournalEntryView)> = merged
+        .into_iter()
+        .map(|((decision, detail), (repeats, newest_correlation_id))| {
+            (
+                newest_correlation_id,
+                PluginJournalEntryView {
+                    plugin_id: plugin_id.to_owned(),
+                    decision: decision.to_owned(),
+                    detail,
+                    repeats,
+                },
+            )
         })
-        .collect()
+        .collect();
+    collapsed.sort_by_key(|(correlation_id, _)| *correlation_id);
+    collapsed.reverse();
+    collapsed.truncate(MAX_JOURNAL_ROWS);
+    collapsed.into_iter().map(|(_, view)| view).collect()
+}
+
+fn get_plugin_health_report_sync(plugin_ids: Vec<String>) -> Result<Vec<PluginHealthView>, String> {
+    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
+    let scheduler = runtime.scheduler();
+    Ok(plugin_ids
+        .into_iter()
+        .filter(|id| opaque(id))
+        .take(MAX_HEALTH_REPORT_IDS)
+        .map(|id| health_view(scheduler, &id))
+        .collect())
+}
+
+fn resume_plugin_sync(plugin_id: &str) -> Result<PluginHealthView, String> {
+    if !opaque(plugin_id) {
+        return Err("This plugin is no longer available.".into());
+    }
+    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
+    runtime.scheduler().resume(plugin_id);
+    Ok(health_view(runtime.scheduler(), plugin_id))
+}
+
+fn get_plugin_journal_sync(plugin_id: &str) -> Result<Vec<PluginJournalEntryView>, String> {
+    if !opaque(plugin_id) {
+        return Err("This plugin is no longer available.".into());
+    }
+    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
+    Ok(journal_view(runtime.journal(), plugin_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -89,36 +152,34 @@ fn journal_view(journal: &PluginJournal, plugin_id: &str) -> Vec<PluginJournalEn
 /// One report per requested id. An id nobody ever submitted a job for reads as
 /// perfectly healthy — a plugin that has never run cannot be degraded — so the
 /// caller does not need to special-case "not found" here.
+///
+/// `spawn_blocking`, like `runner_commands::get_installed_runners`: the first
+/// call into `PluginRuntime::shared()` in a process starts the scheduler's
+/// worker threads, which does not belong on Tauri's command executor any more
+/// than discovery does.
 #[tauri::command]
-pub fn get_plugin_health_report(plugin_ids: Vec<String>) -> Result<Vec<PluginHealthView>, String> {
-    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
-    let scheduler = runtime.scheduler();
-    Ok(plugin_ids
-        .into_iter()
-        .filter(|id| opaque(id))
-        .map(|id| health_view(scheduler, &id))
-        .collect())
+pub async fn get_plugin_health_report(
+    plugin_ids: Vec<String>,
+) -> Result<Vec<PluginHealthView>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_plugin_health_report_sync(plugin_ids))
+        .await
+        .map_err(|_| "Orivo could not read plugin health.".to_string())?
 }
 
 /// Take a plugin out of `degraded`. Explicit, by request: the plan asks for a
 /// resume button, not a timer that quietly re-enables a broken extension.
 #[tauri::command]
-pub fn resume_plugin(plugin_id: String) -> Result<PluginHealthView, String> {
-    if !opaque(&plugin_id) {
-        return Err("This plugin is no longer available.".into());
-    }
-    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
-    runtime.scheduler().resume(&plugin_id);
-    Ok(health_view(runtime.scheduler(), &plugin_id))
+pub async fn resume_plugin(plugin_id: String) -> Result<PluginHealthView, String> {
+    tauri::async_runtime::spawn_blocking(move || resume_plugin_sync(&plugin_id))
+        .await
+        .map_err(|_| "Resuming this plugin did not finish. Try again.".to_string())?
 }
 
 #[tauri::command]
-pub fn get_plugin_journal(plugin_id: String) -> Result<Vec<PluginJournalEntryView>, String> {
-    if !opaque(&plugin_id) {
-        return Err("This plugin is no longer available.".into());
-    }
-    let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
-    Ok(journal_view(runtime.journal(), &plugin_id))
+pub async fn get_plugin_journal(plugin_id: String) -> Result<Vec<PluginJournalEntryView>, String> {
+    tauri::async_runtime::spawn_blocking(move || get_plugin_journal_sync(&plugin_id))
+        .await
+        .map_err(|_| "Orivo could not read this plugin's log.".to_string())?
 }
 
 #[cfg(test)]
@@ -205,15 +266,89 @@ mod tests {
         assert_eq!(rows.len(), MAX_JOURNAL_ROWS);
     }
 
+    /// The regression this module actually shipped with: a plugin that logs the
+    /// same refusal on every call — which is exactly what happens when it never
+    /// declares a capability it does not use — must not be able to fill the
+    /// 40-row window with one reason and push out something that only happened
+    /// once but mattered more.
+    #[test]
+    fn a_reason_repeated_under_many_correlation_ids_is_folded_into_one_row() {
+        let journal = PluginJournal::default();
+        for _ in 0..60 {
+            journal.record(
+                next_correlation_id(),
+                "com.orivo.chatty",
+                "capability-unlinked",
+                "files_read is not declared, so its host import is absent",
+            );
+        }
+        journal.record(
+            next_correlation_id(),
+            "com.orivo.chatty",
+            "degraded",
+            "paused after repeated failures; a resume is required",
+        );
+
+        let rows = journal_view(&journal, "com.orivo.chatty");
+
+        assert_eq!(rows.len(), 2, "the repeated reason cost one row, not sixty");
+        assert_eq!(
+            rows[0].decision, "degraded",
+            "the newest, distinct entry still leads"
+        );
+        assert_eq!(rows[1].decision, "capability-unlinked");
+        assert_eq!(rows[1].repeats, 60);
+    }
+
+    /// `journal.entries()` and `journal.plugin_messages()` are two separate
+    /// rings, and only `record()` (decisions) is public — a component's own log
+    /// line only ever reaches the second ring through a real plugin invocation,
+    /// which is what `record_plugin_message` being `pub(crate)` for tests is
+    /// for. Without exercising both rings, a bug that only manifests when
+    /// interleaving them (an off-by-one in the merge, a decision silently
+    /// dropped) has nothing here to catch it.
+    #[test]
+    fn the_journal_actually_interleaves_both_rings_not_just_one() {
+        let journal = PluginJournal::default();
+        let first = next_correlation_id();
+        journal.record(first, "com.orivo.a", "discover-page", "refused: no grant");
+        let second = next_correlation_id();
+        journal.record_plugin_message(second, "com.orivo.a", "info: starting import");
+
+        let rows = journal_view(&journal, "com.orivo.a");
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "a row from each ring, not just the public one"
+        );
+        assert_eq!(
+            rows[0].detail, "info: starting import",
+            "the plugin's own line is newer"
+        );
+        assert_eq!(rows[1].detail, "refused: no grant");
+    }
+
     #[test]
     fn an_id_that_is_not_opaque_is_refused() {
         assert_eq!(
-            resume_plugin("../etc/passwd".into()),
+            resume_plugin_sync("../etc/passwd"),
             Err("This plugin is no longer available.".into())
         );
         assert_eq!(
-            get_plugin_journal("../etc/passwd".into()),
+            get_plugin_journal_sync("../etc/passwd"),
             Err("This plugin is no longer available.".into())
         );
+    }
+
+    #[test]
+    fn a_health_report_is_bounded_and_drops_ids_that_fail_the_opaque_grammar() {
+        let mut ids: Vec<String> = (0..(MAX_HEALTH_REPORT_IDS + 10))
+            .map(|index| format!("com.orivo.plugin-{index}"))
+            .collect();
+        ids.push("../etc/passwd".into());
+        let report = get_plugin_health_report_sync(ids).unwrap();
+        assert_eq!(report.len(), MAX_HEALTH_REPORT_IDS);
+        assert!(report.iter().all(|row| row.plugin_id != "../etc/passwd"));
     }
 }

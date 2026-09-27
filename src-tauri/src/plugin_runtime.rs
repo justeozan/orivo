@@ -331,7 +331,12 @@ impl PluginJournal {
 
     /// Text a plugin chose. Kept apart from the host's decisions so a chatty
     /// component cannot push them out of the ring.
-    fn record_plugin_message(
+    ///
+    /// `pub(crate)` rather than private only so `plugin_health.rs`'s tests can
+    /// populate this ring directly — the only public way to reach it otherwise
+    /// is a real plugin invocation logging through the WIT `log` import, which
+    /// is what production code still does.
+    pub(crate) fn record_plugin_message(
         &self,
         correlation_id: CorrelationId,
         plugin_id: &str,
@@ -2896,8 +2901,7 @@ impl PluginRuntime {
     }
 
     /// Records why a guest stopped, for every arm `classify` flattens into
-    /// `Trapped`. The text is Wasmtime's, never the plugin's, and the journal is
-    /// host-private either way.
+    /// `Trapped`. The text is Wasmtime's, never the plugin's.
     fn record_trap(&self, store: &mut Store<HostState>, detail: String) {
         let plugin_id = store.data().plugin_id.clone();
         let correlation_id = store.data().correlation_id;
