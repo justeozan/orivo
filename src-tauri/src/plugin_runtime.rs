@@ -2316,7 +2316,20 @@ impl PluginRuntime {
         match error.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => PluginRuntimeError::FuelExhausted,
             Some(Trap::Interrupt) => PluginRuntimeError::DeadlineExceeded,
-            Some(_) => PluginRuntimeError::Trapped,
+            // Every remaining trap is the same sentence to a user, and they are
+            // not the same event to whoever has to explain one. Recording which
+            // trap it was is also what lets a test tell a guest that ran out of
+            // *wasm* stack from one that ran out of the stack it keeps in its own
+            // linear memory — outwardly identical, and reached by different
+            // ceilings.
+            Some(trap) => {
+                let plugin_id = store.data().plugin_id.clone();
+                let correlation_id = store.data().correlation_id;
+                self.inner
+                    .journal
+                    .record(correlation_id, &plugin_id, "trap", trap.to_string());
+                PluginRuntimeError::Trapped
+            }
             None => PluginRuntimeError::Trapped,
         }
     }
@@ -3543,25 +3556,64 @@ mod tests {
     }
 
     /// Wasm frames live on the native stack, so `max_wasm_stack` is only a limit
-    /// if the thread underneath it is bigger. Wasmtime's documentation says
-    /// exhausting the *thread* stack aborts the process, which would take Orivo
-    /// down every time Settings → Plugins probed a package like this — and
-    /// uninstalling a plugin lives in that panel.
+    /// if the thread underneath it is bigger — and exhausting the *thread* stack
+    /// is an abort, not a trap. This is the guest-side half of that: deep
+    /// recursion inside wasm must end as a trap the host can report, on a worker
+    /// the scheduler sized.
     ///
-    /// Read the result honestly: this passes with the worker stack at its default
-    /// too, because an overflow taken *inside wasm* hits Wasmtime's guard page and
-    /// becomes a trap. The stack size is what protects the case this cannot reach
-    /// — an overflow taken in host code, in a host function or a trampoline — and
-    /// `a_worker_has_room_for_the_whole_wasm_stack_and_host_frames` is the test
-    /// that fails without it. This one is the guest-side regression guard: a
-    /// future change that made deep guest recursion abort instead of trap would
-    /// fail here.
+    /// The assertion is on *which* ceiling stopped it, and that is the point.
+    /// `fixture:recurse` used to take the address of a 512-byte local, which
+    /// forces Rust to put every frame in linear memory: it ran out of its own
+    /// shadow stack after a megabyte and never came within reach of
+    /// `max_wasm_stack`, while its doc comment claimed otherwise. The rewritten
+    /// selector carries only wasm locals, so the trap below is the stack limit
+    /// this host actually sets.
     #[test]
-    fn a_recursing_component_traps_instead_of_aborting_the_process() {
-        let library = FixtureLibrary::new("recurse");
+    fn a_deep_guest_recursion_traps_on_the_wasm_stack() {
+        let trap = trap_from("recurse-frames", "fixture:recurse");
+        assert!(
+            trap.contains("call stack exhausted"),
+            "the descent was stopped by {trap:?} rather than by the wasm stack"
+        );
+    }
+
+    /// The other stack, and the reason the test above has to name its own. A
+    /// guest whose frames live in linear memory runs out of an ordinary region at
+    /// an ordinary address, which is a different trap reached by a different
+    /// ceiling — and must still be a trap rather than an abort.
+    #[test]
+    fn filling_the_guests_own_stack_in_linear_memory_traps_too() {
+        let trap = trap_from("recurse-shadow", "fixture:shadow-stack");
+        // Measured, and named here because it is the trap the old
+        // `fixture:recurse` produced: the address the guest's own stack pointer
+        // walked off, not a frame count. Which is why the test above cannot be
+        // satisfied by this selector.
+        assert!(
+            trap.contains("out of bounds memory access"),
+            "a guest stack inside linear memory ended as {trap:?}"
+        );
+    }
+
+    /// The blunt case, for completeness: a component that simply stops. It is the
+    /// shape every other trap is reported as, so the host has to survive it with
+    /// nothing left behind but a journal line.
+    #[test]
+    fn a_component_that_executes_unreachable_traps() {
+        assert!(
+            trap_from("trap", "fixture:trap").contains("unreachable"),
+            "the host did not record the guest's own trap"
+        );
+    }
+
+    /// Runs one misbehaviour to its trap and hands back what the host recorded.
+    ///
+    /// Through the scheduler, because that is the only door onto a thread with
+    /// room for the whole wasm stack plus host frames; fuel and the deadline are
+    /// deliberately generous, so nothing but the trap can end the call.
+    fn trap_from(tag: &str, selector: &str) -> String {
+        let library = FixtureLibrary::new(tag);
         let harness = Harness::new(
             PluginLimits {
-                // Generous on both other axes: the stack has to be what stops it.
                 interactive_fuel: 1 << 42,
                 interactive_deadline: Duration::from_secs(30),
                 ..PluginLimits::default()
@@ -3576,7 +3628,7 @@ mod tests {
                 &harness.grants,
                 PluginRequest::PrepareLaunch {
                     profile_id: FIXTURE_PROFILE.into(),
-                    game_reference: "fixture:recurse".into(),
+                    game_reference: selector.into(),
                 },
             )
             .unwrap();
@@ -3587,9 +3639,17 @@ mod tests {
             ),
             Err(handle) => {
                 handle.cancel();
-                panic!("the recursing component never came back");
+                panic!("{selector} never came back");
             }
         }
+        harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.decision == "trap")
+            .map(|entry| entry.detail)
+            .expect("the host recorded no trap")
     }
 
     /// Isolates the tick half. The epoch tick is a whole second, so the wall
@@ -3793,13 +3853,18 @@ mod tests {
         assert_eq!(format!("{:x}", digest.finalize()), COMPOSED_MEMORIES_SHA256);
 
         let runtime = PluginRuntime::new().unwrap();
-        // Either outcome is acceptable; an unwind is not, and is what this
-        // catches. A panic here fails the test rather than aborting, because
-        // compilation is guarded.
-        match runtime.prepare_component(COMPOSED_MEMORIES, COMPOSED_MEMORIES_SHA256) {
-            Ok(_) => {}
-            Err(error) => assert_eq!(error, PluginRuntimeError::InvalidComponent),
-        }
+        // Accepting either outcome made this pass again the moment someone put
+        // `wasm_multi_memory(false)` back, which is the one change it exists to
+        // catch: with the feature off Wasmtime does not refuse such a component,
+        // it panics inside its own translator, and `without_unwinding` turns that
+        // into exactly the `InvalidComponent` the old assertion allowed. The
+        // property is that a legitimate composed plugin *compiles*.
+        assert!(
+            runtime
+                .prepare_component(COMPOSED_MEMORIES, COMPOSED_MEMORIES_SHA256)
+                .is_ok(),
+            "a composed component with two memories was refused"
+        );
     }
 
     #[test]
