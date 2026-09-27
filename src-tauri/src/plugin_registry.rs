@@ -18,7 +18,7 @@ use crate::plugin_manifest::{
     CompatibleVersionInfo, HostCompatibility, PluginExtension, PluginManifest,
     ValidatedPluginManifest,
 };
-use crate::plugin_runtime::{PluginRuntime, PluginRuntimeError, RunnerCheck};
+use crate::plugin_runtime::{PluginHealth, PluginRuntime, PluginRuntimeError, RunnerCheck};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -176,6 +176,50 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// Grade one package tree the way discovery grades an installed plugin,
+    /// and say so with a sentence instead of a row.
+    ///
+    /// This is the installer's smoke test. It takes `expected_id` rather than
+    /// reading the folder's name because a candidate is verified twice: once in
+    /// staging, where the directory is called `<id>~new`, and once at its final
+    /// path, where the name *is* the identity and discovery will check it.
+    ///
+    /// [`VerifyDepth::Contract`] compiles and type-checks without running guest
+    /// code — enough to refuse a package before it displaces anything.
+    /// [`VerifyDepth::Smoke`] also asks the component who it is and whether it
+    /// is ready, under the host's probe budget and with none of the user's
+    /// grants, which is the only question worth answering *after* a swap.
+    pub fn verify_package(
+        &self,
+        runtime: &PluginRuntime,
+        directory: &Path,
+        expected_id: &str,
+        depth: VerifyDepth,
+    ) -> Result<(), String> {
+        let plugin = self.inspect_plugin_directory(directory.to_path_buf(), expected_id.into());
+        if plugin.record.state != PluginState::Ready {
+            return Err(plugin.record.message);
+        }
+        let check = match depth {
+            VerifyDepth::Contract => RunnerCheck::ContractOnly,
+            VerifyDepth::Smoke => RunnerCheck::ContractAndHealth,
+        };
+        match plugin.preflight_reporting_health(runtime, check)? {
+            // A component that answers "not ready" has answered. Discovery
+            // still lists such a plugin — showing the reason is E2's row — but
+            // an *update* that lands on one is precisely what a rollback is
+            // for, so here it is a refusal.
+            Some(health) if !health.ready => Err(health
+                .message
+                .filter(|message| !message.trim().is_empty())
+                .map_or_else(
+                    || "This plugin reports that it is not ready to run.".to_string(),
+                    |message| sanitised(&message),
+                )),
+            _ => Ok(()),
+        }
+    }
+
     fn inspect_plugin_directory(
         &self,
         directory: PathBuf,
@@ -286,10 +330,22 @@ impl DiscoveredPlugin {
         }
     }
 
+    fn preflight(&self, runtime: &PluginRuntime, check: RunnerCheck) -> Result<(), &'static str> {
+        self.preflight_reporting_health(runtime, check).map(|_| ())
+    }
+
     /// Re-read and re-hash the component immediately before Wasmtime sees its
     /// bytes. This closes the discovery-to-compile race without exposing a
     /// plugin path beyond this backend module.
-    fn preflight(&self, runtime: &PluginRuntime, check: RunnerCheck) -> Result<(), &'static str> {
+    ///
+    /// The health answer is returned rather than dropped because the installer
+    /// acts on it — discovery does not, and both callers reading the same code
+    /// is what keeps a package from passing one and failing the other.
+    fn preflight_reporting_health(
+        &self,
+        runtime: &PluginRuntime,
+        check: RunnerCheck,
+    ) -> Result<Option<PluginHealth>, &'static str> {
         let component = self
             .component
             .as_ref()
@@ -306,13 +362,34 @@ impl DiscoveredPlugin {
         // slice implements the runner world, and judging a contract Orivo cannot
         // yet invoke would refuse a package for a reason it cannot be sure of.
         let Some(manifest) = self.runner_manifest.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         runtime
             .verify_runner(&prepared, manifest, check)
-            .map(|_| ())
             .map_err(runner_refusal)
     }
+}
+
+/// How far [`PluginRegistry::verify_package`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyDepth {
+    /// Compile and type-check. No guest code runs.
+    Contract,
+    /// Also ask the component who it is and whether it is ready.
+    Smoke,
+}
+
+/// A component's own words, on their way to a dialog. Bounded and stripped of
+/// control characters, because the only thing the host knows about this string
+/// is that a plugin chose it.
+fn sanitised(message: &str) -> String {
+    message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Whether the package at this position in a discovery pass is called or only
