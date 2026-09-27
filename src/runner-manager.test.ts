@@ -119,9 +119,13 @@ function createFakeRunnerManager(overrides: Partial<RunnerManagerClient> = {}): 
     },
     async cancelImport(jobId, signal) {
       calls.push(`cancelImport:${jobId}`);
+      // The real cancel_import (runner_commands.rs) only sets a flag and
+      // returns the job's current view — still "running" until the worker
+      // thread notices and stops — which is exactly what the default here
+      // mimics, rather than pretending the cancel is instant.
       return overrides.cancelImport
         ? overrides.cancelImport(jobId, signal)
-        : job({ jobId, phase: "cancelled" });
+        : job({ jobId, phase: "running" });
     },
   };
   return { client, calls };
@@ -320,21 +324,45 @@ describe("createRunnerManagerController", () => {
     expect(fake.calls.filter((call) => call === "getInstalledRunners")).toHaveLength(2);
   });
 
-  it("cancels a running import through the client", async () => {
+  it("keeps polling after cancel until the host actually stops the job", async () => {
     vi.useFakeTimers();
-    const fake = createFakeRunnerManager();
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => job({ jobId, phase: "cancelled" }),
+    });
     const controller = createRunnerManagerController(fake.client);
     await controller.load(liveSignal());
 
     await controller.startImport("runner-1");
     await controller.cancelImport("runner-1");
 
-    expect(controller.importFor("runner-1")?.phase).toBe("cancelled");
+    // cancel_import only flags the job; the answer to the cancel call itself
+    // is still "running" until the worker thread notices and stops, so the
+    // panel must not read this as settled yet.
+    expect(controller.importFor("runner-1")?.phase).toBe("running");
     expect(fake.calls).toContain("cancelImport:runner-import-1");
 
-    // Cancelling stopped the poll: nothing should fire afterwards.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.importFor("runner-1")?.phase).toBe("cancelled");
+  });
+
+  it("stops polling once the host confirms the cancellation went through", async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => job({ jobId, phase: "cancelled" }),
+    });
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    await controller.startImport("runner-1");
+    await controller.cancelImport("runner-1");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(controller.importFor("runner-1")?.phase).toBe("cancelled");
+
+    const pollsAtSettling = fake.calls.filter((call) => call.startsWith("getImportStatus")).length;
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(fake.calls.filter((call) => call.startsWith("getImportStatus"))).toHaveLength(0);
+    expect(fake.calls.filter((call) => call.startsWith("getImportStatus"))).toHaveLength(
+      pollsAtSettling,
+    );
   });
 
   it("turns a refused start into a failed job rather than throwing", async () => {

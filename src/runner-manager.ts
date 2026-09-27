@@ -520,6 +520,16 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
         if (disposed) return;
         jobs.set(profileId, view);
         notify();
+        // Cancelling only sets a flag the host checks at its next chance to
+        // look — the job can still answer "running" right after this call,
+        // until the worker thread actually stops. Keep polling until it
+        // genuinely does, otherwise the panel is left showing a job that will
+        // never move again on its own.
+        if (view.phase === "running") {
+          poll(profileId, job.jobId);
+        } else {
+          await refresh();
+        }
       } catch (error) {
         if (disposed) return;
         jobs.set(profileId, { ...job, phase: "failed", message: runnerErrorMessage(error) });
