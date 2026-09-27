@@ -292,6 +292,15 @@ Three things make that digest reproducible rather than a local accident, and
   carry whoever built it. The script greps the result for `$HOME` afterwards,
   because a remap that quietly stopped working would be invisible in the digest.
 
+And it is reproduced somewhere other than the machine that committed it: the
+`Plugin artifact (reproducible build)` job in `.github/workflows/ci.yml` rebuilds
+the component on every pull request — pinned toolchain, pinned `wasm-tools`, a
+Linux runner — and fails if the bytes differ from `manifest.json`. The digest
+check in the Rust suite only proves the manifest and the blob agree, and both come
+from the same commit; this is what makes the blob a *build output* rather than an
+asserted constant. A difference there is a build to fix, never a digest to
+re-paste.
+
 Paste both into `package/manifest.json`. `cargo test` never runs that script: it
 reads the committed `component.wasm` and checks the digest the manifest declares,
 so a stale digest fails its own test first
