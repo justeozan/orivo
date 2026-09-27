@@ -543,6 +543,10 @@ fn ryujinx_service(
         manifest().version.as_str(),
         crate::plugin_update::PackageChannel::Development,
         &files,
+        // A hand-loaded package on the development channel, which is the door
+        // with no downgrade rule to re-check: `expected` is only `Some` through
+        // the registry.
+        false,
     )
     .expect("the shipped package must install");
 

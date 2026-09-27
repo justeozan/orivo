@@ -194,6 +194,10 @@ impl Harness {
             manifest().version.as_str(),
             PackageChannel::Development,
             &files,
+            // A hand-loaded package on the development channel, which is the door
+            // with no downgrade rule to re-check: `expected` is only `Some` through
+            // the registry.
+            false,
         )
         .expect("the shipped Ryujinx package must install");
     }
@@ -443,6 +447,35 @@ fn the_installed_plugin_is_offered_as_a_configurable_runner() {
     assert_eq!(ryujinx.name, "Ryujinx");
     assert_eq!(ryujinx.version, "1.0.0");
     assert!(ryujinx.profiles.is_empty());
+}
+
+/// Settings' "Add a game folder…" passes no slot (`runner-view.ts` calls
+/// `grantDirectory(profile.id)`), so the command falls back to
+/// `DEFAULT_DIRECTORY_SLOT` — and this component hard-codes the slot it asks
+/// `host-files` for, because the v1 manifest has no field to declare one in. The
+/// two have to be the same string or that button silently grants a folder the
+/// plugin cannot read, and a comment saying so is not a guarantee.
+///
+/// So this configures a profile the way E3 does — without naming a slot at all —
+/// and imports through it.
+#[test]
+fn the_folder_button_in_settings_grants_the_slot_this_component_asks_for() {
+    assert_eq!(GAMES_SLOT, crate::runner_commands::DEFAULT_DIRECTORY_SLOT);
+
+    let harness = Harness::new("default-slot");
+    harness
+        .service
+        .create_profile_with_id(PROFILE_ID, PLUGIN_ID, "Ryujinx", &harness.application)
+        .unwrap();
+    let profile = harness
+        .service
+        .grant_directory(PROFILE_ID, None, &harness.games)
+        .unwrap();
+    assert_eq!(profile.directories.len(), 1);
+    assert!(profile.directories[0].granted);
+
+    let outcome = harness.import();
+    assert_eq!(outcome.progress.imported, LIBRARY.len());
 }
 
 // ---------------------------------------------------------------------------
