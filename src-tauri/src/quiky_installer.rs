@@ -193,7 +193,11 @@ impl QuikyService {
     }
 
     fn plugin(&self) -> Option<InstallerPlugin> {
-        let runtime = PluginRuntime::new().ok()?;
+        // The process-wide runtime: a fresh one here would give this path its own
+        // compiled-component cache, its own memory ceiling and its own failure
+        // counter, so a plugin parked as degraded would answer again on the next
+        // Store open.
+        let runtime = PluginRuntime::shared().ok()?;
         PluginRegistry::new(
             self.plugin_root.clone(),
             HostCompatibility::v1(self.host_version),

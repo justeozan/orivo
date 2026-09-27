@@ -56,11 +56,86 @@ neuf par titre, puis enregistrement dans la bibliothèque en réutilisant la
 présentation de la fiche Store d’origine. La WebView n’envoie jamais qu’un slug
 opaque.
 
-Restent volontairement hors de cette intégration : l’invocation WIT de
-composants tiers avec grants, l’import de ROMs et les runners GPTK/CrossOver. Les targets Runner tiers continuent donc à
-échouer explicitement au lieu d’accepter une commande libre. Wine-Staging ne
-charge pas un faux composant Wasm : il applique le contrat WIT `prepare-launch`
-comme adapter natif, puis le host valide les IDs opaques et possède le processus.
+Le host de composants existe désormais pour de vrai. `plugin_runtime.rs` génère
+les liaisons typées du monde `runner-plugin` depuis `wit/`, instancie un
+composant vérifié et appelle `plugin-core` et `runner@1`. Trois règles y tiennent
+ensemble, parce qu’aucune ne vaut seule.
+
+**Le manifeste décide de ce qui est lié ; le grant décide de ce qui fonctionne.**
+Un import que le manifeste n’a jamais déclaré est absent du `Linker`, donc un
+composant qui le demande échoue à l’instanciation : il n’exécute pas une
+instruction sous une permission que son paquet n’a pas montrée à l’utilisateur.
+Une capability déclarée mais non accordée est liée et refuse chaque appel avec
+une erreur WIT typée — c’est l’état de tout plugin entre son installation et sa
+configuration, et c’est ce qui permet de l’identifier et de le sonder sans
+autorité. Le scope reste vérifié à chaque appel : un plugin ne reçoit jamais un
+chemin, seulement un identifiant de dossier accordé que le host résout. Il n’y a
+aucun WASI, général ou non : un composant qui importe une horloge, une socket ou
+un dossier préouvert est refusé avant qu’un `Store` existe.
+
+**Les limites appartiennent au host.** Fuel et deadline viennent par paliers :
+une sonde d’identité ou de santé (5 M de fuel, 250 ms), un appel interactif
+(50 M, 1 s), une page de découverte (500 M, 5 s). Le budget interactif de 150 ms
+du contrat de performance reste un budget d’*affichage* — passé ce délai
+l’interface montre une progression — et non la deadline dure qui interrompt le
+composant : un premier appel à froid le dépasse légitimement. La deadline se
+compte en ticks d’epoch (10 ms), ce qui sert aussi à l’annulation : le même
+drapeau interrompt un job en file et un appel déjà dans Wasmtime. Un
+`ResourceLimiter` borne la mémoire par instance (64 Mio) et le total de toutes
+les instances vivantes (256 Mio), plus les tables et le nombre d’instances. Une
+boucle infinie est interrompue, et le thread de tick ne tourne que pendant un
+appel.
+
+Deux de ces limites ne sont pas là où on les attend. La deadline se déclenche au
+premier des deux signaux : le compte de ticks, qui est déterministe, ou l’horloge,
+qui est honnête — un tick réarmé pendant un appel hôte compte pour un, donc le
+temps passé hors du wasm n’est visible que par l’horloge. Et `max_wasm_stack` n’est
+une limite que si le thread est plus grand : Wasmtime place son seuil à
+`sp - max_wasm_stack` sans le borner au thread, et ne compte pas les cadres hôte,
+si bien qu’un dépassement pris dans du code hôte est un abort et non un trap. Le
+code invité ne tourne donc que sur les workers du scheduler, dimensionnés à la pile
+wasm plus sa marge, et `invoke` est privé pour que ce soit vrai par construction.
+
+**Un résultat est non fiable jusqu’à validation.** Le host revalide la grammaire
+des IDs opaques, les tailles, les doublons et les curseurs avant toute écriture,
+et `LaunchIntent` est une structure fermée dont le `mode` est un enum : la chaîne
+WIT ne peut pas devenir un argument de processus. Un intent qui parle d’un autre
+profil ou d’un autre jeu que l’appel est rejeté.
+
+Le scheduler (`plugin_scheduler.rs`) met tout cela hors du chemin de rendu :
+concurrence globale bornée, un job à la fois par plugin, file bornée qui répond
+`Busy` au lieu de grossir, `correlation_id`, états de job, annulation, et mise en
+`degraded` après trois échecs consécutifs — avec reprise explicite, sans aucune
+boucle de retry. Une annulation ou un refus de capability ne comptent pas comme
+échec du plugin. Chaque décision est journalisée.
+
+L’étape 1.3 est faite : `src-tauri/fixtures/runner-fixture` est un vrai composant
+tiers, construit par un script reproductible et committé avec son SHA-256, qui ne
+peut lire qu’un dossier fixture et produit une `LaunchIntent` contrôlée — et qui
+sait mal se comporter sur demande, pour que chaque plafond soit prouvé plutôt
+qu’affirmé. La découverte s’en sert : un paquet qui annonce l’extension `runner`
+n’est plus « prêt à configurer » parce qu’il compile, mais parce que son
+composant exporte le monde runner, n’importe rien que le host ne sache servir, ne
+demande pas plus que son manifeste, et répond à `get-identity` et `health-check`
+avec une identité qui concorde avec le paquet installé.
+
+Restent volontairement hors de cette intégration : l’import de ROMs, les runners
+GPTK/CrossOver, et le lancement d’un runner tiers. Les targets `Runner` tiers
+continuent donc à échouer explicitement au lieu d’accepter une commande libre :
+sans le flux « Ajouter un émulateur », aucun profil runner tiers n’existe contre
+lequel résoudre un intent, et le host n’inventera pas d’exécutable. Wine-Staging
+ne charge pas un faux composant Wasm : il applique le contrat WIT
+`prepare-launch` comme adapter natif, puis le host valide les IDs opaques et
+possède le processus.
+
+Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
+bas (`plugin_grants`, `plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt
+n’a aucune dépendance SQLite et son catalogue est un JSON versionné
+(`catalog.rs`, schéma v7). Rien de ce que le host produit n’avait besoin d’être
+persisté pour ce palier : les grants sont résolus par appel, l’état des jobs vit
+dans le scheduler et le journal est un anneau borné en mémoire. La première
+persistance à créer sera celle des grants, avec le flux « Ajouter un émulateur »
+qui les fabrique.
 
 ## Les promesses à préserver
 

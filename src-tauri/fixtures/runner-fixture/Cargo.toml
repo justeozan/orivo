@@ -1,0 +1,25 @@
+# Its own workspace: this crate is built for wasm32-unknown-unknown by
+# `build.sh` when the fixture changes, never by `cargo test`. Keeping it out of
+# Orivo's workspace is what stops `cargo build` from needing a wasm target, a
+# component tool, or a network fetch.
+[workspace]
+
+[package]
+name = "orivo-runner-fixture"
+version = "1.0.0"
+edition = "2024"
+publish = false
+license-file = "../../../LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.62.0", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

@@ -1,15 +1,24 @@
 //! Lazy, read-only discovery of locally installed plugin components.
 //!
-//! The registry intentionally does not instantiate a component. It runs only
-//! when an extension surface is opened, validates the untrusted manifest and
-//! component bytes, and returns presentation-safe summaries. This keeps an
-//! invalid extension out of Orivo's startup and rendering critical paths.
+//! The registry runs only when an extension surface is opened, validates the
+//! untrusted manifest and component bytes, and returns presentation-safe
+//! summaries. This keeps an invalid extension out of Orivo's startup and
+//! rendering critical paths.
+//!
+//! For a package that claims to be a runner it now goes further than compiling.
+//! It checks the *contract* — that the component exports the runner world,
+//! imports only what the host can serve, and needs no capability its manifest
+//! never asked the user for — and then asks the component itself, under the
+//! host's probe budget and with none of the user's grants, who it is and whether
+//! it is ready. A package that fails any of that is unusable, and saying so here
+//! is cheaper and far clearer than letting the emulator flow offer it and fail
+//! at launch.
 
 use crate::plugin_manifest::{
     CompatibleVersionInfo, HostCompatibility, PluginExtension, PluginManifest,
     ValidatedPluginManifest,
 };
-use crate::plugin_runtime::PluginRuntime;
+use crate::plugin_runtime::{PluginRuntime, PluginRuntimeError, RunnerCheck};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -21,6 +30,12 @@ use std::{
 pub const PLUGINS_DIRECTORY: &str = "plugins";
 const MANIFEST_FILE: &str = "manifest.json";
 const MAX_DISCOVERED_PLUGINS: usize = 128;
+/// How many packages one discovery pass will actually *call*. The contract check
+/// is free; the probe runs guest code, and a pass that opens a settings panel has
+/// to stay bounded whatever a user installed. Sixteen is more extensions than
+/// the first SDK targets, and discovery is sorted by directory name, so which
+/// packages fall past the bound does not change between runs.
+const MAX_PROBED_PLUGINS: usize = 16;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const COPY_BUFFER_BYTES: usize = 32 * 1024;
 
@@ -84,7 +99,11 @@ impl PluginRegistry {
             })
             .map(|(directory, mut plugin)| {
                 if plugin.record.state == PluginState::Ready {
-                    match plugin.preflight(runtime) {
+                    // The Store resolves this surface every time it opens, and a
+                    // manifest may declare `installer` *and* `runner`. Probing
+                    // here would run guest code on that path; the installer's own
+                    // contract is not this host slice's to judge either way.
+                    match plugin.preflight(runtime, RunnerCheck::ContractOnly) {
                         Ok(()) => {}
                         Err(message) => {
                             plugin.record.state = PluginState::Invalid;
@@ -110,9 +129,10 @@ impl PluginRegistry {
     pub fn installed_plugins(&self, runtime: &PluginRuntime) -> Vec<PluginRecord> {
         self.discover_internal()
             .into_iter()
-            .map(|(_, mut plugin)| {
+            .enumerate()
+            .map(|(index, (_, mut plugin))| {
                 if plugin.record.state == PluginState::Ready
-                    && let Err(message) = plugin.preflight(runtime)
+                    && let Err(message) = plugin.preflight(runtime, runner_check(index))
                 {
                     plugin.record.state = PluginState::Invalid;
                     plugin.record.message = message.into();
@@ -134,9 +154,10 @@ impl PluginRegistry {
                     .any(|extension| extension == "runner")
                     .then_some(plugin)
             })
-            .map(|mut plugin| {
+            .enumerate()
+            .map(|(index, mut plugin)| {
                 if plugin.record.state == PluginState::Ready {
-                    match plugin.preflight(runtime) {
+                    match plugin.preflight(runtime, runner_check(index)) {
                         Ok(()) => {}
                         Err(message) => {
                             plugin.record.state = PluginState::Invalid;
@@ -232,6 +253,11 @@ impl PluginRegistry {
                     "Ready to configure. Orivo will request permissions before activation.",
                 ),
                 component: Some(component),
+                runner_manifest: validated
+                    .manifest()
+                    .extensions
+                    .contains(&PluginExtension::Runner)
+                    .then_some(validated),
             },
             Err(message) => DiscoveredPlugin::without_component(PluginRecord::with_manifest(
                 &validated,
@@ -246,6 +272,9 @@ impl PluginRegistry {
 struct DiscoveredPlugin {
     record: PluginRecord,
     component: Option<VerifiedComponent>,
+    /// Set only for a package that claims the runner extension. The probe needs
+    /// the manifest to compare the component's own account of itself against.
+    runner_manifest: Option<ValidatedPluginManifest>,
 }
 
 impl DiscoveredPlugin {
@@ -253,13 +282,14 @@ impl DiscoveredPlugin {
         Self {
             record,
             component: None,
+            runner_manifest: None,
         }
     }
 
     /// Re-read and re-hash the component immediately before Wasmtime sees its
     /// bytes. This closes the discovery-to-compile race without exposing a
     /// plugin path beyond this backend module.
-    fn preflight(&self, runtime: &PluginRuntime) -> Result<(), &'static str> {
+    fn preflight(&self, runtime: &PluginRuntime, check: RunnerCheck) -> Result<(), &'static str> {
         let component = self
             .component
             .as_ref()
@@ -269,9 +299,57 @@ impl DiscoveredPlugin {
         if sha256_bytes(&bytes) != component.sha256 {
             return Err("The plugin component changed before validation.");
         }
+        let prepared = runtime
+            .prepare_component(&bytes, &component.sha256)
+            .map_err(|_| "The plugin component did not pass WebAssembly validation.")?;
+        // Source, metadata and installer packages stay compile-only: this host
+        // slice implements the runner world, and judging a contract Orivo cannot
+        // yet invoke would refuse a package for a reason it cannot be sure of.
+        let Some(manifest) = self.runner_manifest.as_ref() else {
+            return Ok(());
+        };
         runtime
-            .preflight_component(&bytes)
-            .map_err(|_| "The plugin component did not pass WebAssembly validation.")
+            .verify_runner(&prepared, manifest, check)
+            .map(|_| ())
+            .map_err(runner_refusal)
+    }
+}
+
+/// Whether the package at this position in a discovery pass is called or only
+/// type-checked. The contract half is free; guest code is not.
+fn runner_check(index: usize) -> RunnerCheck {
+    if index < MAX_PROBED_PLUGINS {
+        RunnerCheck::ContractAndHealth
+    } else {
+        RunnerCheck::ContractOnly
+    }
+}
+
+/// The host's typed refusal, as a sentence the Plugins panel can show. The
+/// wording separates the three things a user can act on — a package that is not
+/// a runner, one asking for more than it declared, and one Orivo has paused —
+/// from everything else, which is simply a broken plugin.
+fn runner_refusal(error: PluginRuntimeError) -> &'static str {
+    match error {
+        PluginRuntimeError::MissingWorld => {
+            "This plugin does not implement Orivo's runner contract."
+        }
+        PluginRuntimeError::UnknownImport => {
+            "This plugin asks for a host capability Orivo does not provide."
+        }
+        PluginRuntimeError::CapabilityUndeclared(_) => {
+            "This plugin needs more permissions than its manifest declares."
+        }
+        PluginRuntimeError::IdentityMismatch => {
+            "This plugin does not match the package it was installed from."
+        }
+        PluginRuntimeError::Paused => {
+            "Orivo paused this plugin after repeated failures. Resume it to try again."
+        }
+        PluginRuntimeError::DeadlineExceeded | PluginRuntimeError::FuelExhausted => {
+            "This plugin did not answer Orivo's health check in time."
+        }
+        _ => "This plugin failed Orivo's health check.",
     }
 }
 
@@ -476,34 +554,61 @@ mod tests {
     };
     use std::{
         collections::BTreeSet,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     const EMPTY_COMPONENT: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+    /// The reference runner from `src-tauri/fixtures`. A runner package is only
+    /// `Ready` if its component really implements the contract, so these tests
+    /// need the real thing rather than an empty component.
+    const RUNNER_COMPONENT: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
+    /// Must be the identity the fixture component reports: the probe refuses a
+    /// package whose component disagrees with its manifest.
+    const RUNNER_ID: &str = "com.orivo.fixture-runner";
 
+    /// A root no other test can land in. The clock alone is not enough: these
+    /// tests run in parallel, write the same plugin directory name, and a
+    /// microsecond-resolution timestamp does collide.
     fn temporary_root() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "orivo-plugin-registry-{}-{}",
+            "orivo-plugin-registry-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
         ))
     }
 
     fn write_runner(root: &Path, component: &[u8], declared_hash: String) {
-        let directory = root.join("com.orivo.ryujinx");
+        write_runner_with(
+            root,
+            component,
+            declared_hash,
+            vec![PluginCapability::RunnerPrepare, PluginCapability::FilesRead],
+        );
+    }
+
+    fn write_runner_with(
+        root: &Path,
+        component: &[u8],
+        declared_hash: String,
+        capabilities: Vec<PluginCapability>,
+    ) {
+        let directory = root.join(RUNNER_ID);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join("component.wasm"), component).unwrap();
         let manifest = PluginManifest {
-            id: "com.orivo.ryujinx".into(),
-            name: "Ryujinx Runner".into(),
+            id: RUNNER_ID.into(),
+            name: "Fixture Runner".into(),
             version: "1.0.0".into(),
             sdk: PLUGIN_SDK_V1.into(),
             min_orivo_version: Some("0.3.0".into()),
             extensions: vec![PluginExtension::Runner],
-            capabilities: vec![PluginCapability::RunnerPrepare],
+            capabilities,
             network_domains: Vec::new(),
             artifacts: vec![ArtifactDescriptor {
                 path: "component.wasm".into(),
@@ -519,13 +624,17 @@ mod tests {
         .unwrap();
     }
 
+    fn sha256_of(bytes: &[u8]) -> String {
+        let mut hash = Sha256::new();
+        hash.update(bytes);
+        format!("{:x}", hash.finalize())
+    }
+
     #[test]
     fn discovers_a_valid_runner_without_exposing_paths() {
         let root = temporary_root();
-        let component = EMPTY_COMPONENT;
-        let mut hash = Sha256::new();
-        hash.update(component);
-        write_runner(&root, component, format!("{:x}", hash.finalize()));
+        let component = RUNNER_COMPONENT;
+        write_runner(&root, component, sha256_of(component));
 
         let runtime = PluginRuntime::new().unwrap();
         let plugins = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"))
@@ -554,13 +663,98 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A component that compiles is not a runner. Saying so at discovery keeps
+    /// the emulator flow from offering a package it could never invoke.
+    #[test]
+    fn a_runner_without_the_runner_world_is_not_ready() {
+        let root = temporary_root();
+        write_runner(&root, EMPTY_COMPONENT, sha256_of(EMPTY_COMPONENT));
+
+        let runtime = PluginRuntime::new().unwrap();
+        let plugins = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"))
+            .runner_plugins(&runtime);
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].state, PluginState::Invalid);
+        assert!(plugins[0].message.contains("runner contract"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The consent screen shows the manifest. A component needing a capability
+    /// the manifest never listed was agreed to under a false description.
+    #[test]
+    fn a_runner_needing_more_than_it_declared_is_not_ready() {
+        let root = temporary_root();
+        write_runner_with(
+            &root,
+            RUNNER_COMPONENT,
+            sha256_of(RUNNER_COMPONENT),
+            vec![PluginCapability::RunnerPrepare],
+        );
+
+        let runtime = PluginRuntime::new().unwrap();
+        let plugins = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"))
+            .runner_plugins(&runtime);
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].state, PluginState::Invalid);
+        assert!(plugins[0].message.contains("more permissions"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A signed archive proves where a package came from, not that the component
+    /// inside it is the one the manifest describes. The probe is what closes
+    /// that gap, and it closes it before the emulator flow can offer the plugin.
+    #[test]
+    fn a_runner_whose_component_claims_another_identity_is_not_ready() {
+        let root = temporary_root();
+        write_runner(&root, RUNNER_COMPONENT, sha256_of(RUNNER_COMPONENT));
+        let mismatched = root.join("com.orivo.impostor");
+        fs::create_dir_all(&mismatched).unwrap();
+        fs::write(mismatched.join("component.wasm"), RUNNER_COMPONENT).unwrap();
+        let manifest = PluginManifest {
+            id: "com.orivo.impostor".into(),
+            name: "Impostor Runner".into(),
+            version: "1.0.0".into(),
+            sdk: PLUGIN_SDK_V1.into(),
+            min_orivo_version: Some("0.3.0".into()),
+            extensions: vec![PluginExtension::Runner],
+            capabilities: vec![PluginCapability::RunnerPrepare, PluginCapability::FilesRead],
+            network_domains: Vec::new(),
+            artifacts: vec![ArtifactDescriptor {
+                path: "component.wasm".into(),
+                kind: ArtifactKind::Component,
+                sha256: sha256_of(RUNNER_COMPONENT),
+                byte_size: RUNNER_COMPONENT.len() as u64,
+            }],
+        };
+        fs::write(
+            mismatched.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::new().unwrap();
+        let plugins = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"))
+            .runner_plugins(&runtime);
+        let impostor = plugins
+            .iter()
+            .find(|plugin| plugin.id == "com.orivo.impostor")
+            .expect("the impostor is still listed");
+        assert_eq!(impostor.state, PluginState::Invalid);
+        assert!(impostor.message.contains("does not match the package"));
+        // One bad package is one bad row: the genuine runner is untouched.
+        let genuine = plugins
+            .iter()
+            .find(|plugin| plugin.id == RUNNER_ID)
+            .expect("the fixture runner is listed");
+        assert_eq!(genuine.state, PluginState::Ready);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn an_unrelated_bad_plugin_does_not_hide_a_valid_runner() {
         let root = temporary_root();
-        let component = EMPTY_COMPONENT;
-        let mut hash = Sha256::new();
-        hash.update(component);
-        write_runner(&root, component, format!("{:x}", hash.finalize()));
+        let component = RUNNER_COMPONENT;
+        write_runner(&root, component, sha256_of(component));
         let invalid = root.join("broken.plugin");
         fs::create_dir_all(&invalid).unwrap();
         fs::write(invalid.join(MANIFEST_FILE), b"not json").unwrap();
@@ -573,11 +767,70 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A manifest may declare `installer` *and* `runner`, and the Store resolves
+    /// the installer surface every time it opens. That path must not run guest
+    /// code, so it asks for the contract only — while the surface that actually
+    /// chooses a runner still probes.
+    ///
+    /// The package here passes the contract and fails the probe, so the two
+    /// surfaces have to disagree about it. If `installer_plugin` asked for
+    /// `ContractAndHealth`, its row would be `Invalid` and this fails.
+    #[test]
+    fn the_installer_surface_grades_a_runner_without_calling_it() {
+        let root = temporary_root();
+        let directory = root.join("com.orivo.impostor");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("component.wasm"), RUNNER_COMPONENT).unwrap();
+        let manifest = PluginManifest {
+            // Not the identity the component reports, so the probe refuses it.
+            id: "com.orivo.impostor".into(),
+            name: "Impostor Acquirer".into(),
+            version: "1.0.0".into(),
+            sdk: PLUGIN_SDK_V1.into(),
+            min_orivo_version: Some("0.3.0".into()),
+            extensions: vec![PluginExtension::Installer, PluginExtension::Runner],
+            capabilities: vec![
+                PluginCapability::NetworkFetch,
+                PluginCapability::RunnerPrepare,
+                PluginCapability::FilesRead,
+            ],
+            network_domains: vec!["example.com".into()],
+            artifacts: vec![ArtifactDescriptor {
+                path: "component.wasm".into(),
+                kind: ArtifactKind::Component,
+                sha256: sha256_of(RUNNER_COMPONENT),
+                byte_size: RUNNER_COMPONENT.len() as u64,
+            }],
+        };
+        fs::write(
+            directory.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let runtime = PluginRuntime::new().unwrap();
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+
+        let installer = registry
+            .installer_plugin(&runtime)
+            .expect("the installer surface is resolved");
+        assert_eq!(installer.state, PluginState::Ready);
+
+        let runner = registry
+            .runner_plugins(&runtime)
+            .into_iter()
+            .find(|plugin| plugin.id == "com.orivo.impostor")
+            .expect("the same package is listed as a runner");
+        assert_eq!(runner.state, PluginState::Invalid);
+        assert!(runner.message.contains("does not match the package"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn directory_grants_stay_opaque_in_a_runner_view() {
         let view = RunnerPluginView {
-            id: "com.orivo.ryujinx".into(),
-            name: "Ryujinx Runner".into(),
+            id: RUNNER_ID.into(),
+            name: "Fixture Runner".into(),
             version: "1.0.0".into(),
             state: PluginState::Ready,
             message: "Ready".into(),

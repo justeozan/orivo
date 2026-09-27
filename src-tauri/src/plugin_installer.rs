@@ -149,7 +149,9 @@ impl PluginInstallerService {
     }
 
     fn installed(&self) -> Vec<InstalledPluginView> {
-        let Ok(runtime) = PluginRuntime::new() else {
+        // One process-wide runtime: its compiled-component cache, memory
+        // ceiling and epoch ticker are only global if every surface shares them.
+        let Ok(runtime) = PluginRuntime::shared() else {
             return Vec::new();
         };
         PluginRegistry::new(
@@ -460,7 +462,7 @@ fn install_package(
     }
 
     let runtime =
-        PluginRuntime::new().map_err(|_| "The plugin runtime is unavailable.".to_string())?;
+        PluginRuntime::shared().map_err(|_| "The plugin runtime is unavailable.".to_string())?;
     let component = files
         .get(COMPONENT_FILE)
         .ok_or_else(|| "The package has no component.".to_string())?;

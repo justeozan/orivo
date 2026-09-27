@@ -115,12 +115,11 @@ impl ValidatedPluginManifest {
     /// it impossible to grant a capability that was not shown in the install
     /// consent screen or to widen the plugin's declared network allowlist.
     ///
-    /// Nothing calls it yet, and that is deliberate rather than an oversight:
-    /// `plugin_runtime` currently only preflights a component, and its own
-    /// module note says invocation, host functions, grants and `Store` limits
-    /// arrive together in the runner host slice. A policy that lands after the
-    /// code it is supposed to gate is a policy that never gates anything, so
-    /// this half is written, tested and waiting for that caller.
+    /// `plugin_runtime::PluginGrants::resolve` is the caller this was written
+    /// for: it runs every persisted grant through here before a single host
+    /// import reaches the linker. That resolution waits on the "Add an
+    /// emulator" flow to create the first directory grant, which is why both
+    /// halves are still tested rather than used.
     #[allow(dead_code)]
     pub fn validate_grant(&self, grant: &CapabilityGrant) -> Result<(), GrantValidationError> {
         if grant.plugin_id != self.manifest.id {
@@ -333,6 +332,7 @@ impl HostCompatibility {
 /// or to the WebView.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct CapabilityGrant {
     pub plugin_id: String,
     pub capability: PluginCapability,
@@ -341,6 +341,7 @@ pub struct CapabilityGrant {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "values", rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum CapabilityScope {
     LibraryGames(BTreeSet<String>),
     DirectoryGrants(BTreeSet<String>),
@@ -351,6 +352,7 @@ pub enum CapabilityScope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum GrantValidationError {
     PluginMismatch,
     CapabilityNotDeclared(PluginCapability),
@@ -491,7 +493,10 @@ fn valid_plugin_id(value: &str) -> bool {
         })
 }
 
-fn valid_opaque_id(value: &str, max_length: usize) -> bool {
+/// The catalogue's opaque-token grammar, shared with the plugin host: a
+/// validated grant scope and a value a component hands back have to agree on
+/// what an identifier may look like, or one of the two becomes the weak side.
+pub fn valid_opaque_id(value: &str, max_length: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_length
         && value
