@@ -262,6 +262,15 @@ Sources ▸ Winlator shortcuts
   → only the chosen references become cards
 ```
 
+What the user vouches for is a file's *contents*, not its name. Every reference
+Orivo holds — the game reference included — is derived from the pathname, and the
+title and container on the confirmation were read out of the file's bytes, so the
+window between "Add “Celeste”?" and the tap on it is one another app can write in
+by dropping a file at that same path. The import therefore re-reads the file and
+refuses it unless it still hashes to what the preview showed, rather than
+importing whatever is there now under the name that was confirmed — and it says
+so, because a shortcut the user chose and did not get is worth a sentence.
+
 The background pass — started after the first paint, never in `AppState::new` —
 does the same read and **writes nothing**: it counts what is not in the library
 and what changed underneath it, says so once, and leaves. It does not refresh a

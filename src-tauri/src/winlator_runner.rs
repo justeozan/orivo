@@ -846,6 +846,14 @@ pub fn validate_winlator_shortcut_for_profile(
 /// Recheck a scan snapshot at the exact moment it crosses into persistence. A
 /// scan is only a preview: Winlator may have re-exported the shortcut, or a
 /// symlink may have been inserted, before the user pressed Import.
+///
+/// The game reference is a hash of the *path*, so on its own it says nothing
+/// about what is at that path now — and the title and the container the user was
+/// shown come out of the file's bytes. The content digest is therefore part of
+/// what is being confirmed: a file rewritten between the preview and the
+/// confirmation is refused, so the shortcut that gets imported, and whose
+/// fingerprint the launch guard then pins, is the one the user actually read a
+/// name for.
 pub fn revalidate_winlator_import_candidate(
     profile: &WinlatorProfile,
     source: &dyn WinlatorShortcutSource,
@@ -858,7 +866,7 @@ pub fn revalidate_winlator_import_candidate(
         &candidate.shortcut_path,
         cancelled,
     )?;
-    if candidate.game_ref != current.game_ref {
+    if candidate.game_ref != current.game_ref || candidate.fingerprint != current.fingerprint {
         return Err(WinlatorRunnerError::ShortcutNotLaunchable);
     }
     Ok(ScannedWinlatorShortcut {
@@ -1663,6 +1671,73 @@ mod tests {
             prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent),
             Err(WinlatorRunnerError::ShortcutNotLaunchable)
         );
+    }
+
+    /// The file the user vouched for is the file that gets imported.
+    ///
+    /// The preview names a game; between that sentence and "Add this game" the
+    /// file behind it can be rewritten, and every reference Orivo holds — the
+    /// game reference included — is derived from the *path*. So the content
+    /// digest is the only thing that can tell the two files apart, and a
+    /// mismatch is a refusal rather than an import of whatever is there now.
+    #[test]
+    fn refuses_to_import_a_shortcut_rewritten_after_the_user_was_shown_it() {
+        let granted = temporary_directory("rewritten-before-import");
+        write_shortcut(&granted, "Celeste.desktop", &exported_shortcut("Celeste", 4));
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        // The same pathname, a different program, a different name on the
+        // confirmation the user already read.
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Not Celeste", 9),
+        );
+        assert_eq!(
+            revalidate_winlator_import_candidate(
+                &profile,
+                &filesystem(&profile),
+                &previewed,
+                &AtomicBool::new(false),
+            ),
+            Err(WinlatorRunnerError::ShortcutNotLaunchable)
+        );
+    }
+
+    /// The same file still imports, so the check above is a content check and
+    /// not a ban on importing at all.
+    #[test]
+    fn imports_the_shortcut_the_preview_actually_showed() {
+        let granted = temporary_directory("unchanged-before-import");
+        write_shortcut(&granted, "Celeste.desktop", &exported_shortcut("Celeste", 4));
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        let imported = revalidate_winlator_import_candidate(
+            &profile,
+            &filesystem(&profile),
+            &previewed,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(imported, previewed);
     }
 
     /// The same check has to hold between preparing the intent and sending it,

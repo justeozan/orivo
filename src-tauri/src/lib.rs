@@ -3444,7 +3444,7 @@ fn import_winlator_shortcuts_now(
 
     if imported_ids.is_empty() {
         return Ok(WinlatorImportResponse {
-            message: "None of those Winlator shortcuts could be added. Connect the folder again."
+            message: "None of those Winlator shortcuts could be added. They may have changed since Orivo listed them — review the folder again."
                 .into(),
             imported_ids,
             skipped_refs,
@@ -3468,6 +3468,15 @@ fn import_winlator_shortcuts_now(
     let message = match imported_ids.len() {
         1 => "One Winlator game was added to your library.".to_string(),
         added => format!("{added} Winlator games were added to your library."),
+    };
+    // A shortcut the user chose and did not get is worth a sentence: the usual
+    // reason is that its file changed between the list and the confirmation,
+    // and staying quiet about it would make the library disagree with what was
+    // just confirmed.
+    let message = match skipped_refs.len() {
+        0 => message,
+        1 => format!("{message} One changed since Orivo listed it and was left out."),
+        skipped => format!("{message} {skipped} changed since Orivo listed them and were left out."),
     };
     Ok(WinlatorImportResponse {
         imported_ids,
@@ -10071,6 +10080,32 @@ mod tests {
                 changed: 0
             }
         );
+    }
+
+    /// Any app can drop a file into a shared folder, so the window between "Add
+    /// “Celeste”?" and the tap on it is one somebody else can write in. What the
+    /// user vouched for is a file's contents, and the import says no when the
+    /// contents moved under it — rather than importing whatever is there now
+    /// under the name that was confirmed.
+    #[test]
+    fn a_shortcut_rewritten_between_the_question_and_the_answer_is_not_imported() {
+        let home = temporary_directory("winlator-swapped");
+        let granted = temporary_directory("winlator-swapped-folder");
+        let shortcut = granted.join("Celeste.desktop");
+        fs::write(&shortcut, exported_winlator_shortcut("Celeste", 2)).unwrap();
+        let state = state_for(&home);
+        let view = preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+        assert_eq!(view.found.len(), 1);
+        assert_eq!(view.found[0].title, "Celeste");
+
+        fs::write(&shortcut, exported_winlator_shortcut("Not Celeste", 9)).unwrap();
+        let chosen = vec![view.found[0].game_ref.clone()];
+        let imported = import_winlator_shortcuts_now(&state, &chosen).unwrap();
+
+        assert!(imported.imported_ids.is_empty());
+        assert_eq!(imported.skipped_refs, chosen);
+        assert!(state.catalog.read().unwrap().games.is_empty());
+        assert!(state.catalog.read().unwrap().winlator_inventory.is_empty());
     }
 
     /// A reference the WebView made up is not a shortcut. The preview is the
