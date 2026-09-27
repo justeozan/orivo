@@ -102,16 +102,22 @@ These exist so a suite can be adversarial without reaching into private state.
   a call already inside Wasmtime.
 - **Grants without a UI.** `PluginGrants::declared_only` is a plugin between
   install and configuration; `PluginGrants::resolve` maps opaque grant ids onto
-  real directories, so a test supplies its own temporary folder.
-- **Journal.** `PluginRuntime::journal().entries()` returns the host's decisions,
-  which is how a refusal is asserted on rather than inferred from an absence.
-- **Cost.** A successful `invoke` returns `InvocationCost`: instantiation, call
-  and fuel actually burned.
-- **Journal, in two halves.** `entries()` is the host's decisions and
-  `plugin_messages()` is the plugin's own text. They are separate rings, so
-  logging cannot push a refusal out of the host's — though the host's ring is
-  bounded as well, and enough refusals in one session will scroll the earlier ones
-  out of it.
+  real directories, so a test supplies its own temporary folder. `resolve` *opens*
+  each of them: a grant is a descriptor, not a path, so a test can swap the folder
+  or a parent afterwards and watch the grant hold.
+- **Journal, in three rings.** `entries()` is the host's decisions, `traces()` is
+  per-call bookkeeping, and `plugin_messages()` is the plugin's own text. Only the
+  first is a refusal, and it is the one nothing a plugin does in a loop can write
+  to: traffic goes to `traces()`, and a decision reached twice under the same
+  correlation is counted in `repeats` rather than appended. That is what makes
+  asserting on a refusal meaningful after two hundred and fifty-six host calls.
+  The decision ring also carries `trap`, which is how a test tells a guest that
+  filled the wasm stack from one that filled its own stack inside linear memory.
+- **Cost.** A successful `invoke` returns `InvocationCost`: instantiation, call,
+  fuel burned, host calls made and bytes read. The last two are what fuel does not
+  measure — a page that reads a hundred files burns barely more fuel than one that
+  reads two — and they are how "resumes without rescanning the library" becomes a
+  number rather than a claim.
 - **Worker stacks.** Guest code runs on scheduler workers and nowhere else, sized
   from `PLUGIN_THREAD_STACK_BYTES`. `PluginRuntime::invoke` is private for that
   reason: a thread smaller than `max_wasm_stack` plus host headroom turns a guest
@@ -120,6 +126,10 @@ These exist so a suite can be adversarial without reaching into private state.
   Wasmtime's translator — it `expect`s its own invariants — into
   `PluginRuntimeError::InvalidComponent`. It is generic over the work, so a test
   can hand it a panic instead of a component.
+
+A listing cut at 256 entries leaves a `files-truncated` decision behind. The
+contract has no field for it — see the ABI note in the PR that added this — so the
+journal is the only place a short library currently comes with a reason.
 
 Two of the refusal fixtures are there because of limits the host got wrong once:
 `memory64.wasm` for the feature that reaches Wasmtime's one
