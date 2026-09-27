@@ -12,11 +12,14 @@
 //! already bounded and stripped of control characters before it reaches
 //! `PluginJournal` (`plugin_runtime.rs`'s `sanitise_text`), so this module
 //! passes it through rather than sanitising it a second time. Host-authored
-//! text (a panic message, a job's own error) is not guest input and carries no
-//! such guarantee, but it is also not attacker-controlled — it comes from this
-//! codebase's own `Display` impls. Turning a decision code into a sentence a
-//! player can read is the settings panel's job, the same way `plugin-manager.ts`
-//! turns a bare `PluginState` into a sentence today.
+//! text (a panic message, a job's own error) is not guest input on its own,
+//! but is not automatically innocent either: a `job-failed` detail can be the
+//! `Display` of a `PluginRuntimeError::Plugin`, which embeds a message the
+//! plugin chose — sanitised at the point it was captured, by the same
+//! `sanitise_text` call a health-check message goes through, not by anything
+//! in this module. Turning a decision code into a sentence a player can read
+//! is the settings panel's job, the same way `plugin-manager.ts` turns a bare
+//! `PluginState` into a sentence today.
 
 use crate::plugin_manifest::valid_opaque_id;
 use crate::plugin_runtime::{PluginJournal, PluginRuntime};
@@ -32,6 +35,10 @@ const MAX_JOURNAL_ROWS: usize = 40;
 /// so a malformed or hostile caller cannot turn one IPC round trip into an
 /// unbounded scan of the scheduler's table.
 const MAX_HEALTH_REPORT_IDS: usize = 256;
+/// The decision `PluginJournal::plugin_messages` always records under — never
+/// used for a host decision, which is what lets `journal_view` tell a
+/// component's own log line apart from the host's account of what happened.
+const PLUGIN_LOG_DECISION: &str = "plugin-log";
 
 fn opaque(value: &str) -> bool {
     valid_opaque_id(value, MAX_PLUGIN_ID_LENGTH)
@@ -69,20 +76,30 @@ fn health_view(scheduler: &PluginScheduler, plugin_id: &str) -> PluginHealthView
 
 /// One plugin's journal, newest first and bounded to [`MAX_JOURNAL_ROWS`].
 ///
-/// Two things happen before the row budget is spent. First, decisions and the
-/// plugin's own log lines are two separate rings, ordered against each other
-/// by `correlation_id` — both draw from the same monotonic counter, so this
-/// approximates the order they happened in, though two entries sharing one
-/// correlation id are not resolved any further against each other, since the
-/// host does not record a sub-order within one call. Second, the ring only
-/// collapses a decision reached twice under the *same* correlation id; a
-/// decision reached on every call, each under its own id — a plugin that
-/// simply never declared a capability logs `capability-unlinked` exactly this
-/// way — is not collapsed there, and would otherwise fill this window with one
-/// reason repeated, pushing out whichever refusal actually caused `degraded`.
-/// Folding matching `(decision, detail)` pairs together here, before
-/// truncating, is what keeps that from happening — the merged row's own
-/// `repeats` still says how often it was reached.
+/// Three things happen before the row budget is spent.
+///
+/// First, decisions and the plugin's own log lines are two separate rings,
+/// ordered against each other by `correlation_id` — both draw from the same
+/// monotonic counter, so this approximates the order they happened in, though
+/// two entries sharing one correlation id are not resolved any further
+/// against each other, since the host does not record a sub-order within one
+/// call.
+///
+/// Second, the ring only collapses a decision reached twice under the *same*
+/// correlation id; a decision reached on every call, each under its own id —
+/// a plugin that simply never declared a capability logs `capability-unlinked`
+/// exactly this way — is not collapsed there. Folding matching
+/// `(decision, detail)` pairs together here, before truncating, is what stops
+/// that from filling the window on its own — the merged row's own `repeats`
+/// still says how often it was reached.
+///
+/// Third, a component earns `degraded` (or `job-failed`, `host-call-budget`,
+/// ...) by making a call fail — the same call it may also have logged dozens
+/// of lines during, all sharing that call's one correlation id. Sorting by
+/// recency alone cannot separate them in that case, so the host's own
+/// decisions are kept first, unconditionally, and the plugin's own log lines
+/// only get whatever room is left: they can crowd each other out, but never
+/// the one line that explains why the plugin is in the state it is in.
 fn journal_view(journal: &PluginJournal, plugin_id: &str) -> Vec<PluginJournalEntryView> {
     let mut rows = journal.entries();
     rows.extend(journal.plugin_messages());
@@ -111,10 +128,25 @@ fn journal_view(journal: &PluginJournal, plugin_id: &str) -> Vec<PluginJournalEn
             )
         })
         .collect();
-    collapsed.sort_by_key(|(correlation_id, _)| *correlation_id);
-    collapsed.reverse();
-    collapsed.truncate(MAX_JOURNAL_ROWS);
-    collapsed.into_iter().map(|(_, view)| view).collect()
+    // Newest first. A plain `sort_by_key` here is stable, so two entries tied
+    // on correlation id — the ordinary case for a plugin's own log lines from
+    // one call — would otherwise keep whatever order `BTreeMap` happened to
+    // iterate its `(decision, detail)` keys in, which is alphabetical and has
+    // nothing to do with either recency or importance.
+    collapsed.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let (host, plugin_log): (Vec<_>, Vec<_>) = collapsed
+        .into_iter()
+        .partition(|(_, view)| view.decision != PLUGIN_LOG_DECISION);
+    let mut kept: Vec<(u64, PluginJournalEntryView)> =
+        host.into_iter().take(MAX_JOURNAL_ROWS).collect();
+    let remaining = MAX_JOURNAL_ROWS.saturating_sub(kept.len());
+    kept.extend(plugin_log.into_iter().take(remaining));
+    // `partition` preserved each half's own newest-first order, but the halves
+    // themselves are no longer interleaved — restore that before returning, so
+    // a call that needed no trimming at all still reads in plain recency order.
+    kept.sort_by(|left, right| right.0.cmp(&left.0));
+    kept.into_iter().map(|(_, view)| view).collect()
 }
 
 fn get_plugin_health_report_sync(plugin_ids: Vec<String>) -> Result<Vec<PluginHealthView>, String> {
@@ -342,13 +374,54 @@ mod tests {
     }
 
     #[test]
-    fn a_health_report_is_bounded_and_drops_ids_that_fail_the_opaque_grammar() {
-        let mut ids: Vec<String> = (0..(MAX_HEALTH_REPORT_IDS + 10))
+    fn a_health_report_is_bounded_even_when_every_id_is_valid() {
+        let ids: Vec<String> = (0..(MAX_HEALTH_REPORT_IDS + 10))
             .map(|index| format!("com.orivo.plugin-{index}"))
             .collect();
-        ids.push("../etc/passwd".into());
+        let report = get_plugin_health_report_sync(ids).unwrap();
+        assert_eq!(report.len(), MAX_HEALTH_REPORT_IDS);
+    }
+
+    /// The invalid id has to sit well inside the bound, not past it: the
+    /// filter and the `.take` compose left to right, so an invalid id placed
+    /// beyond `MAX_HEALTH_REPORT_IDS` is never reached by either one and the
+    /// assertion below would pass whether or not the opaque check exists.
+    #[test]
+    fn a_health_report_drops_an_id_that_fails_the_opaque_grammar() {
+        let mut ids: Vec<String> = vec!["../etc/passwd".into()];
+        ids.extend((0..MAX_HEALTH_REPORT_IDS).map(|index| format!("com.orivo.plugin-{index}")));
         let report = get_plugin_health_report_sync(ids).unwrap();
         assert_eq!(report.len(), MAX_HEALTH_REPORT_IDS);
         assert!(report.iter().all(|row| row.plugin_id != "../etc/passwd"));
+    }
+
+    /// The failing-first proof for the journal window's priority rule: a
+    /// plugin that logs generously in the very call that fails must not be
+    /// able to bury the host's own account of that failure.
+    #[test]
+    fn a_hosts_own_decision_survives_a_chatty_plugin_in_the_same_failing_call() {
+        let journal = PluginJournal::default();
+        let failing_call = next_correlation_id();
+        for index in 0..(MAX_JOURNAL_ROWS + 10) {
+            journal.record_plugin_message(
+                failing_call,
+                "com.orivo.chatty",
+                format!("info: step {index}"),
+            );
+        }
+        journal.record(
+            failing_call,
+            "com.orivo.chatty",
+            "trap",
+            "paused after repeated failures; a resume is required",
+        );
+
+        let rows = journal_view(&journal, "com.orivo.chatty");
+
+        assert_eq!(rows.len(), MAX_JOURNAL_ROWS);
+        assert!(
+            rows.iter().any(|row| row.decision == "trap"),
+            "the plugin's own fifty log lines from the same call must not bury it"
+        );
     }
 }
