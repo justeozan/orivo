@@ -20,6 +20,7 @@ mod plugin_installer;
 // policy and invocation code Orivo runs, instead of a second copy that could
 // drift from it. Nothing else changes: every other item in both modules kept
 // the visibility it already had.
+mod console_commands;
 pub mod plugin_manifest;
 mod plugin_registry;
 pub mod plugin_runtime;
@@ -39,6 +40,7 @@ mod source_epic;
 mod source_gog;
 mod source_instant_gaming;
 mod source_microsoft;
+mod source_review;
 mod source_ubisoft;
 mod sources;
 mod steam;
@@ -64,11 +66,10 @@ use std::{
 };
 
 use catalog::{
-    Catalog, CatalogError, ConsoleEmulator, ConsoleEmulatorProfile, ConsoleRomInventoryEntry,
-    ConsoleSystem, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID, WINLATOR_RUNNER_ID,
-    WineGameCompatibility, WineGameInventoryEntry, WineGraphicsBackend, WineGraphicsOptions,
-    WineProfile, WinlatorDistribution, WinlatorProfile, WinlatorShortcutInventoryEntry,
-    is_console_runner_id,
+    Catalog, CatalogError, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID,
+    WINLATOR_RUNNER_ID, WineGameCompatibility, WineGameInventoryEntry, WineGraphicsBackend,
+    WineGraphicsOptions, WineProfile, WinlatorDistribution, WinlatorProfile,
+    WinlatorShortcutInventoryEntry, is_console_runner_id,
 };
 use futures_util::StreamExt;
 use game_detail::{
@@ -118,17 +119,6 @@ const WINLATOR_ADOPTION_PAGE_SIZE: usize = 50;
 /// The background Wine auto-apply pass commits at most this many pending
 /// `.exe` games per catalog mutation lease, for the same reason.
 const WINE_AUTO_APPLY_PAGE_SIZE: usize = 50;
-/// The Orivo-managed console emulator profiles, one per (emulator, console).
-///
-/// One connect covers a whole emulator, and the folder it grants is shared by
-/// every console that emulator runs — but a *card* has to know which console it
-/// is for, because that is what picks the core. So the managed profiles are
-/// provisioned together, keyed by a fixed opaque token so they are reused across
-/// restarts, and each ROM lands in the one its extension names. The full "Add an
-/// emulator" flow, which will let a user point several folders at hand-made
-/// profiles, is a separate change.
-const AUTO_CONSOLE_PROFILE_PREFIX: &str = "orivo-auto";
-const CONSOLE_IMPORT_PAGE_SIZE: usize = 50;
 const MAX_WINE_SETUP_SESSIONS: usize = 12;
 const MAX_WINE_SCAN_JOBS: usize = 12;
 const MAX_WINE_IMPORT_SELECTION: usize = 2_000;
@@ -303,10 +293,11 @@ struct AppState {
     /// It holds host-private paths and fingerprints; the WebView sees only the
     /// opaque references and titles projected out of it.
     winlator_preview: Mutex<Option<WinlatorImportPreview>>,
-    /// A console ROM scan the user has not acted on yet. Same shape and same rule
-    /// as the Winlator one: the WebView sees opaque references, and the import
-    /// re-derives everything from the folder.
-    console_preview: Mutex<Option<ConsoleImportPreview>>,
+    /// A console ROM scan the user has not acted on yet. Same rule as the
+    /// Winlator one — the WebView sees opaque references and the import
+    /// re-derives everything from the folder — plus a token, because two connects
+    /// can overlap, and a flag, because hashing a folder is bounded but not fast.
+    console_preview: console_commands::ConsoleImportState,
     /// Long-running scans are owned by Rust and polled through safe, bounded
     /// view models. Cancelling a job never touches the persistent library.
     wine_scan_jobs: Mutex<BTreeMap<String, Arc<WineScanJob>>>,
@@ -655,61 +646,8 @@ struct WinlatorShortcutView {
     /// host-private.
     file_name: String,
     folder_path: String,
-    duplicate_title: SourceTitleCollision,
+    duplicate_title: source_review::SourceTitleCollision,
     already_imported: bool,
-}
-
-/// Whose name a file found in a shared folder is also using.
-///
-/// A planted file named after a game the user already has is the whole point of
-/// naming it, so the collision is said out loud rather than left for the user to
-/// notice. The library case is the louder one and wins when both hold. Shared by
-/// both source flows that ask this question, because the answer is the same one.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-enum SourceTitleCollision {
-    None,
-    /// A game already in the library carries this title.
-    Library,
-    /// Another shortcut in the connected folder carries it.
-    Folder,
-}
-
-/// What the WebView learns about a ROM folder. Never a URI, never an absolute
-/// path — and never a card, because the answer to this is the user choosing.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleRomFolderView {
-    connected: bool,
-    emulator: String,
-    emulator_label: String,
-    folder_label: Option<String>,
-    found: Vec<ConsoleRomView>,
-    message: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleRomView {
-    game_ref: String,
-    title: String,
-    /// The console the file's extension names, for the row the user reads.
-    system_label: String,
-    /// The file itself, and the folders between the connected one and it. A ROM's
-    /// title is its file name, so two files can claim the same game and one of
-    /// them may have arrived without the user knowing.
-    file_name: String,
-    folder_path: String,
-    duplicate_title: SourceTitleCollision,
-    already_imported: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleImportResponse {
-    imported_ids: Vec<String>,
-    skipped_refs: Vec<String>,
-    message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -768,7 +706,7 @@ impl AppState {
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
             wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
-            console_preview: Mutex::new(None),
+            console_preview: console_commands::ConsoleImportState::default(),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
         })
@@ -1143,8 +1081,8 @@ pub fn run() {
             delete_wine_profile,
             connect_winlator_export_folder,
             import_winlator_shortcuts,
-            connect_console_rom_folder,
-            import_console_roms,
+            console_commands::connect_console_rom_folder,
+            console_commands::import_console_roms,
             launch_game,
             install_steam_game,
             install_epic_game,
@@ -3349,30 +3287,6 @@ fn winlator_managed_profile(
     Ok(Some((profile, inventory)))
 }
 
-/// Whose name a found shortcut is also using.
-///
-/// Case-insensitive on purpose: "celeste" and "Celeste" are the same name to
-/// somebody reading a menu, and it is that reader the check is for.
-fn winlator_title_collision(
-    title: &str,
-    taken_titles: &BTreeSet<String>,
-    found: &[winlator_runner::ScannedWinlatorShortcut],
-) -> SourceTitleCollision {
-    let folded = title.to_lowercase();
-    if taken_titles.contains(&folded) {
-        return SourceTitleCollision::Library;
-    }
-    let sharing = found
-        .iter()
-        .filter(|shortcut| shortcut.title.to_lowercase() == folded)
-        .count();
-    if sharing > 1 {
-        SourceTitleCollision::Folder
-    } else {
-        SourceTitleCollision::None
-    }
-}
-
 /// Scan the connected folder and remember what was found, so the user can be
 /// shown it and asked.
 ///
@@ -3409,17 +3323,21 @@ fn preview_winlator_shortcuts(
     // Titles already spoken for, read under a read lock of its own and never
     // across the folder walk above. A shortcut named after one of these is the
     // planted file this confirmation exists to make visible.
-    let taken_titles = state
-        .catalog
-        .read()
-        .map(|catalog| {
-            catalog
-                .games
-                .iter()
-                .map(|game| game.title.to_lowercase())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
+    let taken_titles = source_review::taken_titles(
+        state
+            .catalog
+            .read()
+            .map(|catalog| {
+                catalog
+                    .games
+                    .iter()
+                    .map(|game| game.title.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+            .iter()
+            .map(String::as_str),
+    );
     let connected_root = profile
         .shortcut_directories
         .first()
@@ -3435,10 +3353,10 @@ fn preview_winlator_shortcuts(
                 title: shortcut.title.clone(),
                 file_name: origin.file_name,
                 folder_path: origin.folder_path,
-                duplicate_title: winlator_title_collision(
+                duplicate_title: source_review::title_collision(
                     &shortcut.title,
                     &taken_titles,
-                    &scan.shortcuts,
+                    scan.shortcuts.iter().map(|other| other.title.as_str()),
                 ),
                 already_imported: inventory.iter().any(|entry| {
                     entry.game_ref == shortcut.game_ref && entry.fingerprint == shortcut.fingerprint
@@ -3672,548 +3590,23 @@ fn apply_winlator_import(
     Ok((imported_ids, rejected))
 }
 
-/// Console emulators are Android applications, so these runners exist nowhere
-/// else. The refusal is the same shape as Winlator's and Wine's.
-fn require_console_runner_platform() -> Result<(), String> {
-    if cfg!(target_os = "android") {
-        Ok(())
-    } else {
-        Err(console_runner::ConsoleRunnerError::PlatformUnsupported.to_string())
-    }
-}
-
-/// The managed profile id for one console of one emulator.
-fn auto_console_profile_id(emulator: ConsoleEmulator, system: ConsoleSystem) -> String {
-    format!(
-        "{AUTO_CONSOLE_PROFILE_PREFIX}-{}-{}",
-        emulator.slug(),
-        system.slug()
-    )
-}
-
-fn auto_console_profile_name(emulator: ConsoleEmulator, system: ConsoleSystem) -> String {
-    format!("{} ({})", system.label(), emulator.label())
-}
-
-fn console_game_id(profile_id: &str, game_ref: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(profile_id.as_bytes());
-    digest.update(game_ref.as_bytes());
-    format!("runner:{profile_id}:{:x}", digest.finalize())
-}
-
-fn console_catalog_game(
-    profile: &ConsoleEmulatorProfile,
-    candidate: &console_runner::ScannedRom,
-) -> Game {
-    Game {
-        id: console_game_id(&profile.id, &candidate.game_ref),
-        title: candidate.title.clone(),
-        executable_path: None,
-        source: GameSource::Local,
-        source_id: None,
-        launch_target: LaunchTarget::Runner {
-            runner_id: profile.runner_id().into(),
-            game_ref: candidate.game_ref.clone(),
-            profile_id: profile.id.clone(),
-        },
-        installation_path: None,
-        working_directory: None,
-        arguments: Vec::new(),
-        description: Some(format!(
-            "{} game started through {} on this device.",
-            candidate.system.label(),
-            profile.emulator.label()
-        )),
-        metadata: Some(candidate.system.label().into()),
-        artwork_path: None,
-        artwork_source_path: None,
-        cover_path: None,
-        cover_source_path: None,
-        home_image_path: None,
-        landscape_image_path: None,
-        logo_path: None,
-        hidden: false,
-        hero_video_path: None,
-        last_played_at: None,
-        play_time_seconds: 0,
-        extra: BTreeMap::new(),
-    }
-}
-
-/// A ROM scan the user has not acted on yet.
+/// Every tree URI a profile still points at.
 ///
-/// The WebView only ever sees opaque references, titles and console names out of
-/// this; the paths and the fingerprints stay here, and the import re-derives them
-/// from the folder rather than from anything it was sent.
-#[derive(Debug)]
-struct ConsoleImportPreview {
-    emulator: ConsoleEmulator,
-    roms: Vec<console_runner::ScannedRom>,
-}
-
-/// How a pass reaches a ROM folder. The directory is what an emulator taking a
-/// path opens and what every scope check compares against; the tree is how Orivo
-/// reads it, which on API 30+ is the only way it can.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ConsoleRomFolder {
-    directory: PathBuf,
-    tree_uri: Option<String>,
-}
-
-impl ConsoleRomFolder {
-    /// A folder read by pathname is stored canonical, because every later scope
-    /// check compares it against a canonicalised ROM path. A folder behind a
-    /// storage access grant is already canonical — it was derived from the
-    /// identifier the provider gave — and a path Orivo cannot read cannot be
-    /// canonicalised anyway.
-    fn granted_directory(&self) -> Option<PathBuf> {
-        match self.tree_uri {
-            Some(_) => Some(self.directory.clone()),
-            None => fs::canonicalize(&self.directory).ok(),
-        }
-    }
-}
-
-/// The managed profiles for one emulator, and their inventories, cloned out from
-/// under a read lock that is released immediately: everything after this reads a
-/// folder, and reading a folder is not something to do while the catalog is
-/// locked.
-#[allow(clippy::type_complexity)]
-fn console_managed_profiles(
-    state: &AppState,
-    emulator: ConsoleEmulator,
-) -> Result<(Vec<ConsoleEmulatorProfile>, Vec<ConsoleRomInventoryEntry>), String> {
-    let catalog = state
-        .catalog
-        .read()
-        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
-    let profiles = emulator
-        .systems()
-        .iter()
-        .filter_map(|system| catalog.console_profile(&auto_console_profile_id(emulator, *system)))
-        .filter(|profile| profile.enabled)
-        .cloned()
-        .collect::<Vec<_>>();
-    let wanted = profiles
-        .iter()
-        .map(|profile| profile.id.clone())
-        .collect::<BTreeSet<_>>();
-    let inventory = catalog
-        .console_inventory
-        .iter()
-        .filter(|entry| wanted.contains(&entry.profile_id))
-        .cloned()
-        .collect();
-    Ok((profiles, inventory))
-}
-
-/// Point every managed profile of one emulator at a folder, creating them the
-/// first time.
-fn point_managed_console_profiles(
-    state: &AppState,
-    emulator: ConsoleEmulator,
-    folder: &ConsoleRomFolder,
-) -> Result<(), String> {
-    let _mutation = state
-        .catalog_mutation
-        .lock()
-        .map_err(|_| "Emulator profiles are temporarily unavailable.".to_string())?;
-    let mut next = state
-        .catalog
-        .read()
-        .map_err(|_| "Emulator profiles are temporarily unavailable.".to_string())?
-        .clone();
-    point_managed_console_profiles_at(&mut next, emulator, folder)?;
-    persist_catalog(&next, &state.catalog_path).map_err(|_| {
-        "Orivo could not save that folder. Your library was left unchanged.".to_string()
-    })?;
-    let mut catalog = state
-        .catalog
-        .write()
-        .map_err(|_| "Emulator profiles are temporarily unavailable.".to_string())?;
-    *catalog = next;
-    Ok(())
-}
-
-/// Move an emulator's managed profiles to a folder without losing what still
-/// belongs to them.
-///
-/// A profile keeps its identity across a change of folder, so its cards keep
-/// theirs. What cannot survive is an inventory entry outside the new grant: it
-/// could never be launched again, and the catalog's own scope check would refuse
-/// the whole write. Those entries, and the cards that stand on them, go.
-fn point_managed_console_profiles_at(
-    catalog: &mut Catalog,
-    emulator: ConsoleEmulator,
-    folder: &ConsoleRomFolder,
-) -> Result<(), String> {
-    let directory = folder
-        .granted_directory()
-        .ok_or_else(|| "Orivo could not read that folder.".to_string())?;
-    let managed = emulator
-        .systems()
-        .iter()
-        .map(|system| auto_console_profile_id(emulator, *system))
-        .collect::<BTreeSet<_>>();
-
-    catalog.console_inventory.retain(|entry| {
-        !managed.contains(&entry.profile_id) || entry.rom_path.starts_with(&directory)
-    });
-    let live = catalog
-        .console_inventory
-        .iter()
-        .map(|entry| (entry.profile_id.clone(), entry.game_ref.clone()))
-        .collect::<BTreeSet<_>>();
-    catalog.games.retain(|game| match &game.launch_target {
-        LaunchTarget::Runner {
-            runner_id,
-            profile_id,
-            game_ref,
-        } if is_console_runner_id(runner_id) && managed.contains(profile_id) => {
-            live.contains(&(profile_id.clone(), game_ref.clone()))
-        }
-        _ => true,
-    });
-
-    for system in emulator.systems() {
-        let id = auto_console_profile_id(emulator, *system);
-        let mut profile =
-            catalog
-                .console_profile(&id)
-                .cloned()
-                .unwrap_or_else(|| ConsoleEmulatorProfile {
-                    id: id.clone(),
-                    display_name: auto_console_profile_name(emulator, *system),
-                    emulator,
-                    system: *system,
-                    rom_directories: Vec::new(),
-                    rom_trees: Vec::new(),
-                    enabled: true,
-                    last_imported_at: None,
-                });
-        profile.rom_directories = vec![directory.clone()];
-        profile.rom_trees = folder.tree_uri.iter().cloned().collect();
-        // Choosing the folder by hand is explicit enough to undo an earlier
-        // disable: the alternative is a connect that appears to do nothing.
-        profile.enabled = true;
-        catalog
-            .upsert_console_profile(profile)
-            .map_err(|_| "Orivo could not use that folder for this emulator.".to_string())?;
-    }
+/// Split out of the sweep below so a test can exercise the rule rather than a
+/// copy of it: the sweep itself has to ask the platform which grants exist, and
+/// no host can answer that.
+pub(crate) fn document_grants_in_use(catalog: &Catalog) -> Vec<String> {
     catalog
-        .validate()
-        .map_err(|_| "Orivo could not use that folder for this emulator.".to_string())?;
-    Ok(())
-}
-
-/// Scan a connected ROM folder and remember what was found, so the user can be
-/// shown it and asked.
-///
-/// The scan runs with no catalog lock held. It reads a folder over a
-/// `ContentResolver` and hashes what it finds, and is bounded but not fast;
-/// holding the lock across it would make every other catalog write wait on shared
-/// storage.
-fn preview_console_roms(
-    state: &AppState,
-    emulator: ConsoleEmulator,
-    folder: Option<&ConsoleRomFolder>,
-) -> Result<ConsoleRomFolderView, String> {
-    if let Some(folder) = folder {
-        point_managed_console_profiles(state, emulator, folder)?;
-        release_stale_document_grants(state);
-    }
-    let (profiles, inventory) = console_managed_profiles(state, emulator)?;
-    // Every managed profile of one emulator shares the grant, and the scan is
-    // emulator-wide: which console a file is for is the file's extension. So any
-    // one of them carries the folder and the bounds for the whole scan.
-    let Some(scanning_profile) = profiles.first() else {
-        return Err(console_runner::ConsoleRunnerError::RomFolderNotConnected.to_string());
-    };
-    let source = console_runner::rom_source_for_profile(scanning_profile)
-        .map_err(|error| error.to_string())?;
-    let cancelled = AtomicBool::new(false);
-    let scan = console_runner::scan_roms(
-        scanning_profile,
-        source.as_ref(),
-        &cancelled,
-        console_runner::ScanLimits::default(),
-        |_| {},
-    )
-    .map_err(|error| error.to_string())?;
-
-    let taken_titles = state
-        .catalog
-        .read()
-        .map(|catalog| {
+        .winlator_profiles
+        .iter()
+        .flat_map(|profile| profile.shortcut_trees.iter().cloned())
+        .chain(
             catalog
-                .games
+                .console_profiles
                 .iter()
-                .map(|game| game.title.to_lowercase())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let connected_root = scanning_profile
-        .rom_directories
-        .first()
-        .cloned()
-        .unwrap_or_default();
-    let found = scan
-        .roms
-        .iter()
-        .map(|rom| {
-            let origin = console_runner::rom_origin(&connected_root, &rom.rom_path);
-            ConsoleRomView {
-                game_ref: rom.game_ref.clone(),
-                title: rom.title.clone(),
-                system_label: rom.system.label().into(),
-                file_name: origin.file_name,
-                folder_path: origin.folder_path,
-                duplicate_title: console_title_collision(&rom.title, &taken_titles, &scan.roms),
-                already_imported: inventory.iter().any(|entry| {
-                    entry.game_ref == rom.game_ref && entry.fingerprint == rom.fingerprint
-                }),
-            }
-        })
-        .collect::<Vec<_>>();
-    let label = connected_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_string);
-
-    *state
-        .console_preview
-        .lock()
-        .map_err(|_| "This emulator's import is temporarily unavailable.".to_string())? =
-        Some(ConsoleImportPreview {
-            emulator,
-            roms: scan.roms,
-        });
-
-    let waiting = found.iter().filter(|found| !found.already_imported).count();
-    let folder_name = label.clone().unwrap_or_else(|| "that folder".into());
-    let emulator_label = emulator.label();
-    Ok(ConsoleRomFolderView {
-        connected: true,
-        emulator: emulator.slug().into(),
-        emulator_label: emulator_label.into(),
-        folder_label: label,
-        message: match (found.len(), waiting) {
-            (0, _) => format!(
-                "Connected {folder_name}. Orivo found nothing in it that {emulator_label} plays."
-            ),
-            (_, 0) => {
-                format!("Connected {folder_name}. Every game in it is already in your library.")
-            }
-            (_, 1) => format!("Connected {folder_name}. One game is waiting to be added."),
-            (_, waiting) => {
-                format!("Connected {folder_name}. {waiting} games are waiting to be added.")
-            }
-        },
-        found,
-    })
-}
-
-/// Whose name a found ROM is also using. The same rule as Winlator's, and for the
-/// same reason: a file's name is whatever somebody called it.
-fn console_title_collision(
-    title: &str,
-    taken_titles: &BTreeSet<String>,
-    found: &[console_runner::ScannedRom],
-) -> SourceTitleCollision {
-    let folded = title.to_lowercase();
-    if taken_titles.contains(&folded) {
-        return SourceTitleCollision::Library;
-    }
-    let sharing = found
-        .iter()
-        .filter(|rom| rom.title.to_lowercase() == folded)
-        .count();
-    if sharing > 1 {
-        SourceTitleCollision::Folder
-    } else {
-        SourceTitleCollision::None
-    }
-}
-
-/// Turn the ROMs the user picked into library cards.
-///
-/// The preview is a preview, never an authorization: every reference is looked up
-/// in the host's own snapshot, re-resolved against the profile's grant and re-read
-/// from the folder before it becomes a card, so a reference the WebView invented
-/// resolves to nothing.
-fn import_console_roms_now(
-    state: &AppState,
-    game_refs: &[String],
-) -> Result<ConsoleImportResponse, String> {
-    if game_refs.is_empty() || game_refs.len() > MAX_WINE_IMPORT_SELECTION {
-        return Err("Choose the games to add, then try again.".into());
-    }
-    let requested = game_refs.iter().cloned().collect::<BTreeSet<_>>();
-    let (emulator, candidates) = {
-        let preview = state
-            .console_preview
-            .lock()
-            .map_err(|_| "This emulator's import is temporarily unavailable.".to_string())?;
-        let preview = preview.as_ref().ok_or_else(|| {
-            "This list is no longer available. Connect the folder again.".to_string()
-        })?;
-        (
-            preview.emulator,
-            preview
-                .roms
-                .iter()
-                .filter(|rom| requested.contains(&rom.game_ref))
-                .cloned()
-                .collect::<Vec<_>>(),
+                .flat_map(|profile| profile.rom_trees.iter().cloned()),
         )
-    };
-    let mut skipped_refs = requested
-        .iter()
-        .filter(|game_ref| {
-            !candidates
-                .iter()
-                .any(|candidate| &&candidate.game_ref == game_ref)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-
-    let (profiles, _) = console_managed_profiles(state, emulator)?;
-    if profiles.is_empty() {
-        return Err("This folder is no longer connected.".into());
-    }
-
-    // Re-read and re-hash before the lock is taken, not under it: a preview is
-    // only a preview, and the folder is the slow part.
-    let cancelled = AtomicBool::new(false);
-    let mut validated = Vec::new();
-    for candidate in &candidates {
-        // The profile for the console this file is for: the grant is the same
-        // across an emulator's profiles, but the card has to belong to the one
-        // whose core will open it.
-        let Some(profile) = profiles
-            .iter()
-            .find(|profile| profile.system == candidate.system)
-        else {
-            skipped_refs.push(candidate.game_ref.clone());
-            continue;
-        };
-        let source = match console_runner::rom_source_for_profile(profile) {
-            Ok(source) => source,
-            Err(error) => return Err(error.to_string()),
-        };
-        match console_runner::revalidate_rom_import_candidate(
-            profile,
-            source.as_ref(),
-            candidate,
-            &cancelled,
-        ) {
-            Ok(current) => validated.push((profile.clone(), current)),
-            Err(_) => skipped_refs.push(candidate.game_ref.clone()),
-        }
-    }
-
-    let _mutation = state
-        .catalog_mutation
-        .lock()
-        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
-    let mut next = state
-        .catalog
-        .read()
-        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?
-        .clone();
-    let imported_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default();
-    let (imported_ids, rejected) = apply_console_import(&mut next, &validated, imported_at)?;
-    skipped_refs.extend(rejected);
-
-    if imported_ids.is_empty() {
-        return Ok(ConsoleImportResponse {
-            message: "None of those games could be added. They may have changed since Orivo listed them — review the folder again."
-                .into(),
-            imported_ids,
-            skipped_refs,
-        });
-    }
-    for profile in &profiles {
-        if let Some(persisted) = next
-            .console_profiles
-            .iter_mut()
-            .find(|persisted| persisted.id == profile.id)
-        {
-            persisted.last_imported_at = Some(imported_at);
-        }
-    }
-    persist_catalog(&next, &state.catalog_path)
-        .map_err(|_| "Orivo could not save these games.".to_string())?;
-    let mut catalog = state
-        .catalog
-        .write()
-        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
-    *catalog = next;
-
-    let message = match imported_ids.len() {
-        1 => "One game was added to your library.".to_string(),
-        added => format!("{added} games were added to your library."),
-    };
-    // A ROM the user chose and did not get is worth a sentence: the usual reason
-    // is that its file changed between the list and the confirmation.
-    let message = match skipped_refs.len() {
-        0 => message,
-        1 => format!("{message} One changed since Orivo listed it and was left out."),
-        skipped => {
-            format!("{message} {skipped} changed since Orivo listed them and were left out.")
-        }
-    };
-    Ok(ConsoleImportResponse {
-        imported_ids,
-        skipped_refs,
-        message,
-    })
-}
-
-/// Write the chosen ROMs into a catalog, in bounded pages.
-///
-/// One page at a time, like the runner contract's `discover-page`: every upsert
-/// validates before it mutates, so one rejected candidate is skipped rather than
-/// rolled back, and the whole catalog is validated once a page rather than once a
-/// candidate.
-fn apply_console_import(
-    catalog: &mut Catalog,
-    validated: &[(ConsoleEmulatorProfile, console_runner::ScannedRom)],
-    imported_at: u64,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let mut imported_ids = Vec::new();
-    let mut rejected = Vec::new();
-    for page in validated.chunks(CONSOLE_IMPORT_PAGE_SIZE) {
-        let mut applied = catalog.clone();
-        for (profile, current) in page {
-            let entry = ConsoleRomInventoryEntry {
-                profile_id: profile.id.clone(),
-                game_ref: current.game_ref.clone(),
-                title: current.title.clone(),
-                rom_path: current.rom_path.clone(),
-                fingerprint: current.fingerprint.clone(),
-                imported_at: Some(imported_at),
-            };
-            let game = console_catalog_game(profile, current);
-            let game_id = game.id.clone();
-            if applied.upsert_console_inventory(entry).is_err()
-                || applied.upsert_runner(game).is_err()
-            {
-                rejected.push(current.game_ref.clone());
-                continue;
-            }
-            imported_ids.push(game_id);
-        }
-        if applied.validate().is_err() {
-            return Err("Orivo could not add these games safely.".into());
-        }
-        *catalog = applied;
-    }
-    Ok((imported_ids, rejected))
+        .collect()
 }
 
 /// Give back every persisted grant no profile points at any more.
@@ -4228,17 +3621,7 @@ fn apply_console_import(
 /// silently break every card behind it.
 fn release_stale_document_grants(state: &AppState) {
     let in_use = match state.catalog.read() {
-        Ok(catalog) => catalog
-            .winlator_profiles
-            .iter()
-            .flat_map(|profile| profile.shortcut_trees.iter().cloned())
-            .chain(
-                catalog
-                    .console_profiles
-                    .iter()
-                    .flat_map(|profile| profile.rom_trees.iter().cloned()),
-            )
-            .collect::<Vec<_>>(),
+        Ok(catalog) => document_grants_in_use(&catalog),
         Err(_) => return,
     };
     let Ok(persisted) = winlator_saf::persisted_read_tree_uris() else {
@@ -4328,109 +3711,6 @@ async fn import_winlator_shortcuts(
         import_winlator_shortcuts_now(state, &game_refs)
     })
     .await
-}
-
-#[tauri::command]
-async fn connect_console_rom_folder(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    emulator: String,
-) -> Result<ConsoleRomFolderView, String> {
-    use tauri_plugin_orivo_saf::OrivoSafExt;
-
-    require_console_runner_platform()?;
-    // The WebView names an emulator because it is choosing a menu row, and this
-    // is the only door that token comes through: anything outside the closed set
-    // is refused here rather than becoming a package name later.
-    let emulator = ConsoleEmulator::from_slug(&emulator)
-        .ok_or_else(|| "Orivo does not know that emulator.".to_string())?;
-    // A folder already connected is reviewed without a chooser: the same menu
-    // entry is what the user reaches for after adding ROMs to it, and re-picking
-    // the same folder to see them would be a chore.
-    let connected = {
-        let catalog = state
-            .catalog
-            .read()
-            .map_err(|_| "Emulator profiles are temporarily unavailable.".to_string())?;
-        emulator.systems().iter().any(|system| {
-            catalog
-                .console_profile(&auto_console_profile_id(emulator, *system))
-                .is_some_and(|profile| profile.enabled && !profile.rom_trees.is_empty())
-        })
-    };
-    if connected {
-        let review = console_blocking(&app, move |state| {
-            preview_console_roms(state, emulator, None)
-        })
-        .await;
-        match review {
-            Ok(view) => return Ok(view),
-            // The grant was revoked, or the folder stopped being one Orivo may
-            // read. Asking for it again is the answer, so fall through.
-            Err(error) => eprintln!("orivo: ROM folder review needs a new grant: {error}"),
-        }
-    }
-
-    let picked = app
-        .orivo_saf()
-        .pick_document_tree()
-        .await
-        .map_err(|error| {
-            // The detail names a Java exception; the player gets a sentence.
-            eprintln!("orivo: ROM folder picker: {error}");
-            "Orivo could not open the folder chooser. Try again.".to_string()
-        })?;
-    let Some(tree_uri) = picked else {
-        return Ok(ConsoleRomFolderView {
-            connected: false,
-            emulator: emulator.slug().into(),
-            emulator_label: emulator.label().into(),
-            folder_label: None,
-            found: Vec::new(),
-            message: "No folder was connected.".into(),
-        });
-    };
-
-    console_blocking(&app, move |state| {
-        // The chooser returns whichever provider the user browsed to, and
-        // whichever folder. An emulator taking a path opens a *file path*, and a
-        // folder every app can drop a file into is not a ROM folder, so both are
-        // refused here — before anything is persisted.
-        let grant = console_runner::grant_for_picked_rom_folder(&tree_uri)
-            .map_err(|error| error.to_string())?;
-        let folder = ConsoleRomFolder {
-            directory: grant.directory().to_path_buf(),
-            tree_uri: Some(grant.tree_uri().to_string()),
-        };
-        preview_console_roms(state, emulator, Some(&folder))
-    })
-    .await
-}
-
-#[tauri::command]
-async fn import_console_roms(
-    app: AppHandle,
-    game_refs: Vec<String>,
-) -> Result<ConsoleImportResponse, String> {
-    require_console_runner_platform()?;
-    console_blocking(&app, move |state| {
-        import_console_roms_now(state, &game_refs)
-    })
-    .await
-}
-
-/// Run one piece of console-emulator work off the command executor, for the same
-/// reason the Winlator flow does: all of it reads shared storage over a
-/// `ContentResolver` and hashes what it finds.
-async fn console_blocking<T, F>(app: &AppHandle, work: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&AppState) -> Result<T, String> + Send + 'static,
-{
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || work(&app.state::<AppState>()))
-        .await
-        .map_err(|_| "That did not finish. Try again.".to_string())?
 }
 
 /// Run one piece of Winlator work off the command executor.
@@ -7938,7 +7218,7 @@ async fn launch_game(
     }
 
     if let Some((profile, inventory, runner_id, game_ref)) = console_launch {
-        require_console_runner_platform()?;
+        console_commands::require_console_runner_platform()?;
         let emulator_label = profile.emulator.label();
         // Building the intent reads and hashes part of the ROM, so it belongs on
         // a blocking worker rather than the command executor.
@@ -7954,11 +7234,16 @@ async fn launch_game(
             // so the pre-send recheck reads the ROM exactly the way the
             // preparation did.
             let source = console_runner::rom_source_for_profile(&profile)?;
+            // What the platform says about this emulator's packages: which are
+            // installed, and where each one actually keeps its data. Read once,
+            // here, because everything below it is pure.
+            let packages = console_runner::installed_packages();
             let prepared = console_runner::prepare_console_launch(
                 &profile,
                 source.as_ref(),
                 &inventory,
                 &intent,
+                packages.as_ref(),
             )?;
             prepared.launch(source.as_ref())?;
             Ok::<String, console_runner::ConsoleRunnerError>(prepared.title().to_string())
@@ -9727,8 +9012,12 @@ fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
     })
 }
 
+/// `pub(crate)` only so a sibling module's tests can reuse the fixtures below —
+/// an `AppState` with nothing behind it but a temporary directory, above all.
+/// Writing a second copy of that per module is how a test helper drifts from the
+/// struct it builds.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A game the launcher has no manifest for must lose any install state a
@@ -10616,7 +9905,7 @@ mod tests {
     /// A local record whose artwork was copied into Orivo's own media cache.
     /// The title deliberately matches no showcase fixture, so the presentation
     /// catalog keeps the imported paths instead of borrowing bundled artwork.
-    fn imported_local_game_fixture() -> Game {
+    pub(crate) fn imported_local_game_fixture() -> Game {
         Game {
             id: "local-imported-artwork".into(),
             title: "Imported Artwork Fixture".into(),
@@ -10901,7 +10190,7 @@ mod tests {
     /// An `AppState` with nothing behind it but a temporary directory. It is
     /// what lets the Winlator flow — which is all state, locks and a folder —
     /// be exercised without a device or a Tauri app.
-    fn state_for(directory: &Path) -> AppState {
+    pub(crate) fn state_for(directory: &Path) -> AppState {
         AppState {
             catalog_path: directory.join("catalog.json"),
             wine_prefix_root: directory.join("wine-prefixes"),
@@ -10916,7 +10205,7 @@ mod tests {
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
             wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
-            console_preview: Mutex::new(None),
+            console_preview: console_commands::ConsoleImportState::default(),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
         }
@@ -11010,7 +10299,7 @@ mod tests {
         assert_eq!(celeste_in_root.folder_path, "");
         assert_eq!(
             celeste_in_root.duplicate_title,
-            SourceTitleCollision::Folder
+            source_review::SourceTitleCollision::Folder
         );
 
         let planted = view
@@ -11020,14 +10309,20 @@ mod tests {
             .expect("the planted shortcut");
         assert_eq!(planted.title, "Celeste");
         assert_eq!(planted.folder_path, "new");
-        assert_eq!(planted.duplicate_title, SourceTitleCollision::Folder);
+        assert_eq!(
+            planted.duplicate_title,
+            source_review::SourceTitleCollision::Folder
+        );
 
         let braid = view
             .found
             .iter()
             .find(|found| found.file_name == "Braid.desktop")
             .expect("the shortcut named like a game already in the library");
-        assert_eq!(braid.duplicate_title, SourceTitleCollision::Library);
+        assert_eq!(
+            braid.duplicate_title,
+            source_review::SourceTitleCollision::Library
+        );
     }
 
     /// Any app can drop a file into a shared folder, so the window between "Add
@@ -11075,303 +10370,6 @@ mod tests {
         assert!(imported.imported_ids.is_empty());
         assert_eq!(imported.skipped_refs, ["shortcut:deadbeef"]);
         assert!(state.catalog.read().unwrap().games.is_empty());
-    }
-
-    fn nes_rom(name: &str) -> Vec<u8> {
-        let mut bytes = b"NES\x1a\x02\x01".to_vec();
-        bytes.extend_from_slice(name.as_bytes());
-        bytes
-    }
-
-    fn console_folder(directory: &Path) -> ConsoleRomFolder {
-        ConsoleRomFolder {
-            directory: directory.to_path_buf(),
-            tree_uri: None,
-        }
-    }
-
-    /// The whole flow, with nothing between the folder and the card but the
-    /// user's answer: a ROM is offered, chosen, and only then written.
-    #[test]
-    fn imports_only_the_roms_that_were_chosen() {
-        let home = temporary_directory("console-chosen");
-        let granted = temporary_directory("console-chosen-folder");
-        for (file, name) in [
-            ("Alter Ego.nes", "Alter Ego"),
-            ("Uwol.smc", "Uwol"),
-            ("notes.txt", "notes"),
-        ] {
-            fs::write(granted.join(file), nes_rom(name)).unwrap();
-        }
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-
-        // The text file is not a game, and nothing is in the library yet.
-        assert_eq!(view.found.len(), 2);
-        assert!(state.catalog.read().unwrap().games.is_empty());
-
-        let chosen = view
-            .found
-            .iter()
-            .filter(|found| found.title == "Alter Ego")
-            .map(|found| found.game_ref.clone())
-            .collect::<Vec<_>>();
-        let imported = import_console_roms_now(&state, &chosen).unwrap();
-        assert_eq!(imported.imported_ids.len(), 1);
-        assert!(imported.skipped_refs.is_empty());
-
-        let catalog = state.catalog.read().unwrap();
-        assert_eq!(catalog.games.len(), 1);
-        assert_eq!(catalog.console_inventory.len(), 1);
-        // And it landed in the profile for the console its extension names, not
-        // in whichever one the scan happened to run through.
-        assert_eq!(
-            catalog.console_inventory[0].profile_id,
-            auto_console_profile_id(ConsoleEmulator::RetroArch, ConsoleSystem::Nes)
-        );
-        catalog.validate().unwrap();
-    }
-
-    /// One connect covers a whole emulator, so a folder holding two consoles
-    /// produces cards in two profiles — and each card knows which core will open
-    /// it.
-    #[test]
-    fn a_mixed_folder_files_each_game_under_its_own_console() {
-        let home = temporary_directory("console-mixed");
-        let granted = temporary_directory("console-mixed-folder");
-        fs::write(granted.join("Alter Ego.nes"), nes_rom("Alter Ego")).unwrap();
-        fs::write(granted.join("Uwol.smc"), nes_rom("Uwol")).unwrap();
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-        let chosen = view
-            .found
-            .iter()
-            .map(|found| found.game_ref.clone())
-            .collect::<Vec<_>>();
-        import_console_roms_now(&state, &chosen).unwrap();
-
-        let catalog = state.catalog.read().unwrap();
-        let profiles = catalog
-            .console_inventory
-            .iter()
-            .map(|entry| entry.profile_id.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(
-            profiles,
-            BTreeSet::from([
-                auto_console_profile_id(ConsoleEmulator::RetroArch, ConsoleSystem::Nes),
-                auto_console_profile_id(ConsoleEmulator::RetroArch, ConsoleSystem::Snes),
-            ])
-        );
-        catalog.validate().unwrap();
-    }
-
-    /// A reference the WebView made up is not a game. The preview is the host's
-    /// own snapshot, and anything outside it resolves to nothing.
-    #[test]
-    fn an_invented_rom_reference_imports_nothing() {
-        let home = temporary_directory("console-invented");
-        let granted = temporary_directory("console-invented-folder");
-        fs::write(granted.join("Alter Ego.nes"), nes_rom("Alter Ego")).unwrap();
-        let state = state_for(&home);
-        preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-
-        let imported = import_console_roms_now(&state, &["rom:deadbeef".to_string()]).unwrap();
-        assert!(imported.imported_ids.is_empty());
-        assert_eq!(imported.skipped_refs, ["rom:deadbeef"]);
-        assert!(state.catalog.read().unwrap().games.is_empty());
-    }
-
-    /// Any app can drop a file into a shared folder, so the window between the
-    /// question and the answer is one somebody else can write in.
-    #[test]
-    fn a_rom_replaced_between_the_question_and_the_answer_is_not_imported() {
-        let home = temporary_directory("console-swapped");
-        let granted = temporary_directory("console-swapped-folder");
-        let rom = granted.join("Alter Ego.nes");
-        fs::write(&rom, nes_rom("Alter Ego")).unwrap();
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-
-        fs::write(&rom, nes_rom("something else entirely")).unwrap();
-        let chosen = vec![view.found[0].game_ref.clone()];
-        let imported = import_console_roms_now(&state, &chosen).unwrap();
-
-        assert!(imported.imported_ids.is_empty());
-        assert_eq!(imported.skipped_refs, chosen);
-        assert!(state.catalog.read().unwrap().games.is_empty());
-        assert!(state.catalog.read().unwrap().console_inventory.is_empty());
-    }
-
-    /// A ROM's title is its file name, so the confirmation has to name the file
-    /// and its folder — and say when a name is already somebody else's.
-    #[test]
-    fn the_rom_confirmation_names_the_file_its_folder_and_its_console() {
-        let home = temporary_directory("console-spoof");
-        let granted = temporary_directory("console-spoof-folder");
-        let nested = granted.join("new");
-        fs::create_dir_all(&nested).unwrap();
-        fs::write(granted.join("Alter Ego.nes"), nes_rom("one")).unwrap();
-        fs::write(nested.join("Alter Ego.nes"), nes_rom("two")).unwrap();
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-
-        assert_eq!(view.found.len(), 2);
-        for found in &view.found {
-            assert_eq!(found.file_name, "Alter Ego.nes");
-            assert_eq!(found.system_label, "NES");
-            assert_eq!(found.duplicate_title, SourceTitleCollision::Folder);
-        }
-        let folders = view
-            .found
-            .iter()
-            .map(|found| found.folder_path.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(folders, BTreeSet::from([String::new(), "new".to_string()]));
-    }
-
-    /// Connecting another folder keeps the profiles — and so the card ids — while
-    /// dropping the inventory entries that fell outside the new grant: those
-    /// could never be launched again.
-    #[test]
-    fn connecting_another_rom_folder_drops_the_cards_from_the_old_one() {
-        let home = temporary_directory("console-repoint");
-        let granted = temporary_directory("console-repoint-folder");
-        fs::write(granted.join("Alter Ego.nes"), nes_rom("Alter Ego")).unwrap();
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-        import_console_roms_now(&state, &[view.found[0].game_ref.clone()]).unwrap();
-        assert_eq!(state.catalog.read().unwrap().console_inventory.len(), 1);
-
-        let elsewhere = temporary_directory("console-repoint-elsewhere");
-        preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&elsewhere)),
-        )
-        .unwrap();
-
-        let catalog = state.catalog.read().unwrap();
-        assert!(catalog.console_inventory.is_empty());
-        assert!(!catalog.games.iter().any(|game| matches!(
-            &game.launch_target,
-            LaunchTarget::Runner { runner_id, .. } if is_console_runner_id(runner_id)
-        )));
-        // The profiles themselves survive, so every card imported into them next
-        // keeps a stable id.
-        assert_eq!(
-            catalog.console_profiles.len(),
-            ConsoleEmulator::RetroArch.systems().len()
-        );
-        catalog.validate().unwrap();
-    }
-
-    /// The library projection derives "can this be played?" from the profile and
-    /// the private inventory behind a card, and it reads them out of the
-    /// presentation catalog rather than the stored one. A kind of profile that
-    /// projection forgets to carry makes every card of that kind say
-    /// *Unavailable* on a device where it works — which is exactly what the
-    /// first end-to-end run on the emulator showed.
-    #[test]
-    fn a_console_card_keeps_its_profile_through_the_library_projection() {
-        let home = temporary_directory("console-projection");
-        let granted = temporary_directory("console-projection-folder");
-        fs::write(granted.join("Alter Ego.nes"), nes_rom("Alter Ego")).unwrap();
-        let state = state_for(&home);
-        let view = preview_console_roms(
-            &state,
-            ConsoleEmulator::RetroArch,
-            Some(&console_folder(&granted)),
-        )
-        .unwrap();
-        import_console_roms_now(&state, &[view.found[0].game_ref.clone()]).unwrap();
-
-        let stored = state.catalog.read().unwrap();
-        let presentation = presentation_catalog(&stored, false);
-        let game = presentation
-            .games
-            .iter()
-            .find(|game| game.title == "Alter Ego")
-            .expect("the imported card");
-        let LaunchTarget::Runner {
-            profile_id,
-            game_ref,
-            ..
-        } = &game.launch_target
-        else {
-            panic!("a console card must be a runner target");
-        };
-        assert!(
-            game_detail::console_game_launchable(&presentation, profile_id, game_ref),
-            "the card lost its profile on the way to the library"
-        );
-    }
-
-    /// A persisted grant is handed back when nothing points at it any more, and a
-    /// sweep that only knew about Winlator would hand back a ROM folder and
-    /// silently break every card behind it.
-    #[test]
-    fn a_rom_folder_grant_is_not_swept_away_as_stale() {
-        const ROM_TREE: &str =
-            "content://com.android.externalstorage.documents/tree/primary%3ADownload%2FRoms";
-        let mut catalog = Catalog::default();
-        catalog.console_profiles.push(ConsoleEmulatorProfile {
-            id: auto_console_profile_id(ConsoleEmulator::RetroArch, ConsoleSystem::Nes),
-            display_name: "NES (RetroArch)".into(),
-            emulator: ConsoleEmulator::RetroArch,
-            system: ConsoleSystem::Nes,
-            rom_directories: vec![PathBuf::from("/storage/emulated/0/Download/Roms")],
-            rom_trees: vec![ROM_TREE.to_string()],
-            enabled: true,
-            last_imported_at: None,
-        });
-        catalog.validate().unwrap();
-
-        let in_use = catalog
-            .winlator_profiles
-            .iter()
-            .flat_map(|profile| profile.shortcut_trees.iter().cloned())
-            .chain(
-                catalog
-                    .console_profiles
-                    .iter()
-                    .flat_map(|profile| profile.rom_trees.iter().cloned()),
-            )
-            .collect::<Vec<_>>();
-        assert!(
-            winlator_saf::stale_persisted_trees(&[ROM_TREE.to_string()], &in_use).is_empty(),
-            "a connected ROM folder was treated as a grant nobody wanted"
-        );
     }
 
     /// The background pass and the user's scan cancel separately. Stopping the
@@ -11667,7 +10665,7 @@ mod tests {
         );
     }
 
-    fn temporary_directory(label: &str) -> PathBuf {
+    pub(crate) fn temporary_directory(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "orivo-{label}-{}-{}",
             std::process::id(),

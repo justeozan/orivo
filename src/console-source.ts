@@ -56,8 +56,13 @@ export interface ConsoleRom {
 /** What `connect_console_rom_folder` answers. */
 export interface ConsoleRomFolder {
   connected: boolean;
+  /** Which scan this list came from; handed back with the answer. */
+  token: number;
   emulator: string;
   emulatorLabel: string;
+  /** Is the app this list would hand a game to actually installed, and by whom? */
+  emulatorInstalled: boolean;
+  emulatorInstaller: string | null;
   folderLabel: string | null;
   found: ConsoleRom[];
   message: string;
@@ -91,6 +96,18 @@ export function normaliseConsoleRomFolder(payload: unknown): ConsoleRomFolder | 
   if (typeof record.emulator !== "string" || !record.emulator) return null;
   return {
     connected: record.connected,
+    // A token that is not a safe integer is read as none: the host refuses that
+    // and asks for the folder again, which is better than an answer landing on a
+    // list nobody is looking at.
+    token:
+      typeof record.token === "number" && Number.isSafeInteger(record.token) && record.token > 0
+        ? record.token
+        : 0,
+    emulatorInstalled: record.emulatorInstalled === true,
+    emulatorInstaller:
+      typeof record.emulatorInstaller === "string" && record.emulatorInstaller.trim()
+        ? record.emulatorInstaller
+        : null,
     emulator: record.emulator,
     emulatorLabel:
       typeof record.emulatorLabel === "string" && record.emulatorLabel.trim()
@@ -163,7 +180,26 @@ export function consoleReviewPrompt(roms: ConsoleRom[], emulatorLabel: string): 
 export function consoleReviewList(
   roms: ConsoleRom[],
   folderLabel: string | null,
-): { entries: SourceReviewEntry[]; remaining: number } {
+): { entries: SourceReviewEntry[] } {
   const files: ReviewedFile[] = roms.map((rom) => ({ ...rom, label: rom.systemLabel }));
   return sourceReviewList(files, folderLabel);
+}
+
+/**
+ * What the host could say about the emulator's own install, in one line.
+ *
+ * The user is about to hand a game to that app. Who put it on the device is the
+ * part Orivo cannot judge for them, so it is reported rather than acted on — and
+ * when the platform said nothing at all, saying *that* is better than implying
+ * the app is absent.
+ */
+export function consoleEmulatorNote(folder: {
+  emulatorLabel: string;
+  emulatorInstalled: boolean;
+  emulatorInstaller: string | null;
+}): string | null {
+  if (!folder.emulatorInstalled) return null;
+  return folder.emulatorInstaller
+    ? `${folder.emulatorLabel} on this device was installed by ${folder.emulatorInstaller}.`
+    : `${folder.emulatorLabel} on this device was installed by hand, not from a store.`;
 }

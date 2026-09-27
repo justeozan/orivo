@@ -43,22 +43,29 @@ when it refuses to run:
 Error: Destination directory doesn't exist (/data/user/0/com.retroarch.aarch64/cores)
 ```
 
-Orivo cannot *ask* for that directory. `PackageManager.getApplicationInfo` is
-filtered on API 30+ unless the package is visible, which needs a `<queries>`
-manifest entry `src-tauri/gen/` could not deliver — and the platform says so out
-loud the moment Orivo addresses RetroArch at all:
+Orivo **asks** for that directory. `PackageManager.getApplicationInfo` is filtered
+on API 30+ unless the package is visible, and the platform says so out loud when
+it is not:
 
 ```
 AppsFilter: interaction: PackageSetting{io.orivo.desktop/10235}
   -> PackageSetting{com.retroarch.aarch64/10233} BLOCKED
 ```
 
-The *launch* needs no visibility, because an explicit component bypasses intent
-filters entirely. So the core path is composed, and a device where that is wrong
-fails legibly — RetroArch says it cannot load the core — rather than silently.
-A secondary Android user, whose `dataDir` is `/data/user/<id>/…`, is the known
-limit; a profile carrying its own core directory is the seam for E3's
-"Add an emulator" flow.
+Visibility comes from a `<queries>` entry naming exactly the packages in the
+table above. `src-tauri/gen/android` is regenerated and untracked, so the app
+manifest is not something a commit here can change — but a Tauri plugin's Android
+*library* project is tracked, and Gradle merges its manifest into the app's. That
+makes [`tauri-plugin-orivo-saf/android/src/main/AndroidManifest.xml`](../tauri-plugin-orivo-saf/android/src/main/AndroidManifest.xml)
+the only manifest this repository can reach, and where the entry lives.
+
+Package visibility is not a permission and grants nothing: an explicit component
+already bypasses intent filters, so the *launch* never needed it. What it buys is
+the ability to ask — the real core directory instead of a composed one, and who
+installed the app a game is about to be handed to, which the confirmation now
+says. A device that answers nothing still works: the composed
+`/data/user/0/<package>/cores` is the fallback, and a package the platform is
+silent about is still tried, because silence is not the same as absent.
 
 The consoles Orivo names, and the libretro core each one resolves to:
 
@@ -68,14 +75,15 @@ The consoles Orivo names, and the libretro core each one resolves to:
 | SNES | `snes9x_libretro_android.so` | `smc` `sfc` `swc` `fig` |
 | Game Boy / Color | `gambatte_libretro_android.so` | `gb` `gbc` |
 | Game Boy Advance | `mgba_libretro_android.so` | `gba` |
-| Mega Drive / Master System | `genesis_plus_gx_libretro_android.so` | `md` `smd` `gen` `sms` `gg` |
+| Mega Drive / Master System | `genesis_plus_gx_libretro_android.so` | `smd` `gen` `sms` `gg` |
 
 No extension is claimed by two of them, which is what lets **one connect cover a
 whole emulator**: the user grants one folder, and each file lands under the
 console its extension names. An archive is deliberately not on any list — Orivo
 would then be offering a file whose contents it never looked at — and neither is
 a generic extension such as `bin`, because every console claims it and the folder
-is shared storage.
+is shared storage. `md` is absent for the same reason in reverse: it is a Mega
+Drive dump to one person and a README to everyone else.
 
 ### PPSSPP
 
@@ -151,6 +159,32 @@ A grant on the volume root, on a shared drop folder (`Download`, `DCIM`,
 **every use** of a grant rather than only when it was picked. A folder *inside*
 one of them — `Download/Roms` — is exactly right.
 
+## What the file decides, and what it does not
+
+A fingerprint answers "are these the same bytes?". For RetroArch that is not the
+whole question, because its loader reads two things Orivo never gave it.
+
+**A patch beside the ROM.** `runloop_path_fill_names` (`runloop.c`) truncates the
+content path at its last dot and looks for `<that>.ips`, `.bps`, `.ups` and
+`.xdelta`; `task_content.c` applies whichever it finds unless `--no-patch` was
+passed, which an intent cannot pass, and the cartridge cores load into memory so
+the patch takes. A file Orivo never hashed would then decide what runs. So the
+launch lists the ROM's own folder and refuses when one of those four names is
+there — *"A patch file sits next to this game, and the emulator would apply it
+without asking."* — rather than handing over a game it cannot describe. It is
+checked at the launch and not at the import because a patch dropped in afterwards
+is exactly the case this exists for. PPSSPP is handed one document and has read
+access to nothing else, so it has no "beside" to read, and the check does not
+apply to it.
+
+**A path that names something inside an archive.** `path_get_archive_delim`
+(`libretro-common/file/file_path.c`) reads `…/pack.zip#Game.nes` as the entry
+`Game.nes` inside `pack.zip` — the first `#` that directly follows `.zip`, `.apk`
+or `.7z`, case insensitively. Such a path *ends in* `.nes`, so it passes every
+check Orivo makes about what kind of file it is, while the bytes the host hashed
+are the decoy's. It is refused before any read, in both sources, and again on the
+exact string that crosses.
+
 ## Is this still the file you added?
 
 A `.desktop` file is read whole and hashed at every launch. A ROM cannot be: a
@@ -193,6 +227,13 @@ Sources ▸ RetroArch games / PPSSPP games
   → only the chosen references become cards
 ```
 
+**The confirmation lists everything it would add.** Not the first few with "and
+35 more": the button under the list imports every row of it, and the host orders
+its answer by a hash of the pathname, so a truncated list would ask the user to
+vouch for files chosen at random and never shown. The list is complete and
+scrollable, and it is sorted by how much a row needs reading — a name the library
+already uses first, then a name shared inside the folder, then the rest by title.
+
 **A file in a shared folder is a question, never an answer.** Any app can create
 one in `Download/<subfolder>/` through MediaStore with no permission at all, so
 finding a file is not a reason to make it a card. And a ROM's title *is* its file
@@ -206,6 +247,16 @@ re-reads it and refuses it unless it still hashes to what the preview showed, an
 says so rather than importing whatever is there now under the name that was
 confirmed. The same check runs again immediately before the intent leaves the
 process.
+
+A title cannot hide behind characters nobody can see, either: a zero-width space
+or a bidi override makes two names *read* identically and *compare* differently,
+which is the whole trick, so those characters are removed from what is shown and
+from what is compared, and the comparison ignores case and spacing on top.
+
+Two connects can overlap — the second chooser opens while the first is still
+walking a folder. The scan in flight is cancelled when a new one starts, and every
+list carries a token the answer comes back with: an answer to a list that has been
+replaced imports nothing rather than landing on whichever snapshot arrived last.
 
 Cards live behind managed profiles (`orivo-auto-retroarch-nes`,
 `orivo-auto-ppsspp-psp`, …), one per emulator and console, provisioned without a
@@ -263,6 +314,22 @@ or this build of the homebrew was not chased down: it is on the other side of th
 hand-off. Everything up to and including PPSSPP reading Orivo's document is in the
 log above.
 
+A `pack.zip#Trojan.nes` dropped into the connected folder was **never read at
+all** — `MediaProvider` logged one open, for the real game — and never appeared in
+the confirmation. A `240p Test Suite.ips` dropped beside the imported ROM made
+Play refuse it with no intent sent, and the confirmation said who installed the
+emulator it would have gone to: *"RetroArch on this device was installed by hand,
+not from a store."* — which is the `<queries>` entry answering.
+
+**What it costs.** Reviewing a folder hashes every candidate. Measured here, 16
+ROMs of 6.2 MB plus one of 64 KB — 33 provider reads, ~115 MB — took **2.2 s**
+through the `ContentResolver`, so about **53 MB/s** on this emulator. A complete
+Game Boy Advance set is roughly 1 500 titles averaging some 12 MB, which is around
+**six minutes** for one review and the same again for the import that follows. A
+scan can be abandoned: connecting another folder stops the one in flight. Making
+that visible — progress, and a way to stop it from the menu — is E3's, and
+`scan_roms` already takes the flag and the callback for it.
+
 Two more things were watched rather than only tested. Replacing an imported ROM
 made Play refuse it — *"This file changed since you added it. Add it again so
 Orivo knows what it is."* — with no intent sent. And a second file dropped into
@@ -277,8 +344,11 @@ touched.
 ## Seams left for the "Add an emulator" flow
 
 - Several folders, and a profile per folder rather than one managed set.
-- A core directory on a RetroArch profile, for a device where `/data/user/0` is
-  not where that emulator's data lives.
+- Pinning the emulator's **signing certificate**, so a package that took the name
+  of RetroArch could not receive a game. It is a product decision, not a technical
+  one: Play, F-Droid and the project's own buildbot sign differently, and pinning
+  the wrong set would make Orivo refuse the app the user actually installed. Today
+  the installer is *shown* instead.
 - Enabling, disabling and deleting a profile: `enabled` is honoured on every path;
   a removal helper is the missing piece.
 - A background pass that says what is waiting, the way Winlator's does.

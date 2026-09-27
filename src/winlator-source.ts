@@ -139,7 +139,7 @@ export function winlatorReviewPrompt(shortcuts: WinlatorShortcut[]): string {
 export function winlatorReviewList(
   shortcuts: WinlatorShortcut[],
   folderLabel: string | null,
-): { entries: SourceReviewEntry[]; remaining: number } {
+): { entries: SourceReviewEntry[] } {
   return sourceReviewList(shortcuts, folderLabel);
 }
 

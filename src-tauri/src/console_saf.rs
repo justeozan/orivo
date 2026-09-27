@@ -167,32 +167,39 @@ mod android {
 
                 let buffer = env.new_byte_array(READ_CHUNK_BYTES as i32)?;
                 let mut head: Vec<u8> = Vec::new();
+                // Every exit below closes the stream, including the failing ones:
+                // a `ParcelFileDescriptor` the provider opened and nobody closed
+                // is a descriptor leaked for the life of the process.
                 // One byte past the bound is what tells a bounded prefix from a
                 // whole file, which is the difference between the two kinds of
                 // fingerprint this feeds.
                 let mut ended = false;
-                while (head.len() as u64) <= max_bytes {
-                    let read = env
-                        .call_method(
-                            &stream,
-                            "read",
-                            "([BII)I",
-                            &[
-                                (&buffer).into(),
-                                JValue::Int(0),
-                                JValue::Int(READ_CHUNK_BYTES as i32),
-                            ],
-                        )?
-                        .i()?;
-                    if read <= 0 {
-                        ended = true;
-                        break;
+                let read = (|| -> jni::errors::Result<()> {
+                    while (head.len() as u64) <= max_bytes {
+                        let read = env
+                            .call_method(
+                                &stream,
+                                "read",
+                                "([BII)I",
+                                &[
+                                    (&buffer).into(),
+                                    JValue::Int(0),
+                                    JValue::Int(READ_CHUNK_BYTES as i32),
+                                ],
+                            )?
+                            .i()?;
+                        if read <= 0 {
+                            ended = true;
+                            return Ok(());
+                        }
+                        let mut chunk = vec![0i8; read as usize];
+                        env.get_byte_array_region(&buffer, 0, &mut chunk)?;
+                        head.extend(chunk.into_iter().map(|byte| byte as u8));
                     }
-                    let mut chunk = vec![0i8; read as usize];
-                    env.get_byte_array_region(&buffer, 0, &mut chunk)?;
-                    head.extend(chunk.into_iter().map(|byte| byte as u8));
-                }
-                env.call_method(&stream, "close", "()V", &[])?;
+                    Ok(())
+                })();
+                close_quietly(env, &stream);
+                read?;
 
                 // A file the read reached the end of has an exact length already.
                 // Anything larger has to be asked for, and a provider that will
@@ -240,10 +247,30 @@ mod android {
             return Ok(None);
         }
         let size = read_size_row(env, &cursor);
-        // The cursor is closed whether or not the row was readable: one left open
-        // holds the provider's own resources.
-        let _ = env.call_method(&cursor, "close", "()V", &[]);
+        // The cursor is closed whether or not the row was readable — one left open
+        // holds the provider's own resources — and the close happens with no Java
+        // exception armed. `call_method` starts with `GetObjectClass`, and CheckJNI
+        // aborts the process for any JNI call made while an exception is pending,
+        // so a debug build would die here on exactly the failure this is handling.
+        close_quietly(env, &cursor);
         size
+    }
+
+    /// Close one `Closeable`, having first taken any pending exception.
+    ///
+    /// Nothing is reported: the caller already has the error that matters, and a
+    /// close that failed adds nothing a user could act on.
+    fn close_quietly(env: &mut jni::JNIEnv<'_>, closeable: &JObject<'_>) {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        let _ = env.call_method(closeable, "close", "()V", &[]);
+        // A close that threw must not leave the exception armed for the next call
+        // on this thread either.
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
     }
 
     fn read_size_row(

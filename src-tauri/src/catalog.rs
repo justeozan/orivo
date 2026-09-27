@@ -844,7 +844,10 @@ impl ConsoleSystem {
             Self::Snes => &["smc", "sfc", "swc", "fig"],
             Self::GameBoy => &["gb", "gbc"],
             Self::GameBoyAdvance => &["gba"],
-            Self::MegaDrive => &["md", "smd", "gen", "sms", "gg"],
+            // `md` is deliberately absent: it is a Mega Drive dump to one person
+            // and a README to everyone else, and this list decides what Orivo
+            // offers out of a folder on shared storage.
+            Self::MegaDrive => &["smd", "gen", "sms", "gg"],
             Self::PlayStationPortable => &["iso", "cso", "chd", "pbp", "elf"],
         }
     }

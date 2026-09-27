@@ -1028,8 +1028,11 @@ describe("the Android source confirmations", () => {
         case "connect_console_rom_folder":
           return {
             connected: true,
+            token: 3,
             emulator: "retroarch",
             emulatorLabel: "RetroArch",
+            emulatorInstalled: true,
+            emulatorInstaller: "com.android.vending",
             folderLabel: "Roms",
             message: "Connected Roms.",
             found: [
@@ -1102,10 +1105,11 @@ describe("the Android source confirmations", () => {
     const items = reviewItems();
     expect(items).toHaveLength(2);
     // Two shortcuts called "Celeste": the title alone cannot be answered, so the
-    // file, its folder and the collision are all on the row.
-    expect(items[0]).toContain("Frontend/Celeste.desktop");
-    expect(items[1]).toContain("Frontend/new/Free Coins.desktop");
-    expect(items[1]).toContain("Another file in this folder uses this name");
+    // file, its folder and the collision are all on the row — and the rows that
+    // have to be read come first.
+    expect(items[0]).toContain("Frontend/new/Free Coins.desktop");
+    expect(items[0]).toContain("Another file in this folder uses this name");
+    expect(items[1]).toContain("Frontend/Celeste.desktop");
   });
 
   it("offers one row per emulator and asks about the folder that row connects", async () => {
@@ -1126,10 +1130,31 @@ describe("the Android source confirmations", () => {
     const items = reviewItems();
     expect(items).toHaveLength(2);
     // The console, the file and the folder — the title alone is the file's own
-    // claim about itself.
-    expect(items[0]).toContain("NES · Roms/Alter Ego.nes");
-    expect(items[1]).toContain("NES · Roms/new/Free Coins.nes");
-    expect(items[1]).toContain("Another file in this folder uses this name");
+    // claim about itself — with the colliding row first.
+    expect(items[0]).toContain("NES · Roms/new/Free Coins.nes");
+    expect(items[0]).toContain("Another file in this folder uses this name");
+    expect(items[1]).toContain("NES · Roms/Alter Ego.nes");
+  });
+
+  it("hands the host back the token of the list it showed, and says who installed the emulator", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='console-folder'][data-console-emulator='retroarch']")!
+      .click();
+    await settle();
+
+    expect(root.querySelector(".library-source-review__note")?.textContent).toBe(
+      "RetroArch on this device was installed by com.android.vending.",
+    );
+
+    root.querySelector<HTMLButtonElement>("[data-library-action='console-import']")!.click();
+    await settle();
+    // Every reference the list showed, and only those: the button and the rows
+    // are one set, whatever order each is in.
+    expect(tauri.invoke).toHaveBeenCalledWith("import_console_roms", {
+      token: 3,
+      gameRefs: ["rom:aa", "rom:bb"],
+    });
   });
 
   it("never writes a file name as markup", async () => {

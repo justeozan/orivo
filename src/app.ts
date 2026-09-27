@@ -55,6 +55,7 @@ import {
   CONSOLE_EMULATORS,
   consoleReviewList,
   consoleReviewPrompt,
+  consoleEmulatorNote,
   consoleRomsToOffer,
   isConsoleEmulatorHost,
   normaliseConsoleImportResult,
@@ -390,8 +391,11 @@ interface State {
   // The same question for a console emulator's ROM folder, held separately
   // because it names the emulator that would open them.
   consoleReview: {
+    token: number;
     emulator: string;
     emulatorLabel: string;
+    emulatorInstalled: boolean;
+    emulatorInstaller: string | null;
     folderLabel: string | null;
     roms: ConsoleRom[];
   } | null;
@@ -1540,9 +1544,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     review: {
       heading: string;
       prompt: string;
+      /** One line about the source itself, above the files it found. */
+      note?: string | null;
       entries: SourceReviewEntry[];
-      remaining: number;
-      count: number;
       importAction: string;
       dismissAction: string;
     },
@@ -1553,6 +1557,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const prompt = document.createElement("p");
     prompt.className = "library-source-review__prompt";
     prompt.textContent = review.prompt;
+    if (review.note) {
+      const note = document.createElement("small");
+      note.className = "library-source-review__note";
+      note.textContent = review.note;
+      prompt.append(note);
+    }
     const found = document.createElement("ul");
     found.className = "library-source-review__list";
     for (const entry of review.entries) {
@@ -1573,11 +1583,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
       found.append(item);
     }
-    if (review.remaining > 0) {
-      const more = document.createElement("li");
-      more.textContent = `and ${review.remaining} more`;
-      found.append(more);
-    }
 
     const add = document.createElement("button");
     add.type = "button";
@@ -1587,7 +1592,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const addCopy = document.createElement("span");
     addCopy.className = "library-source-action__copy";
     const addLabel = document.createElement("strong");
-    addLabel.textContent = review.count === 1 ? "Add this game" : `Add these ${review.count} games`;
+    // The count is the list's, not a separate number: the button imports exactly
+    // the rows above it, and saying so with the same value is what keeps that true.
+    addLabel.textContent =
+      review.entries.length === 1
+        ? "Add this game"
+        : `Add these ${review.entries.length} games`;
     addCopy.append(addLabel);
     add.append(addCopy);
 
@@ -1611,13 +1621,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (!review || review.shortcuts.length === 0) {
       return;
     }
-    const { entries, remaining } = winlatorReviewList(review.shortcuts, review.folderLabel);
+    const { entries } = winlatorReviewList(review.shortcuts, review.folderLabel);
     renderSourceReview(list, {
       heading: review.folderLabel ? `Winlator · ${review.folderLabel}` : "Winlator",
       prompt: winlatorReviewPrompt(review.shortcuts),
       entries,
-      remaining,
-      count: review.shortcuts.length,
       importAction: "winlator-import",
       dismissAction: "winlator-dismiss",
     });
@@ -1628,15 +1636,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (!review || review.roms.length === 0) {
       return;
     }
-    const { entries, remaining } = consoleReviewList(review.roms, review.folderLabel);
+    const { entries } = consoleReviewList(review.roms, review.folderLabel);
     renderSourceReview(list, {
       heading: review.folderLabel
         ? `${review.emulatorLabel} · ${review.folderLabel}`
         : review.emulatorLabel,
       prompt: consoleReviewPrompt(review.roms, review.emulatorLabel),
+      // What the emulator's own install looks like from here. A game is about to
+      // be handed to that app, so who put it on the device is worth a line.
+      note: consoleEmulatorNote(review),
       entries,
-      remaining,
-      count: review.roms.length,
       importAction: "console-import",
       dismissAction: "console-dismiss",
     });
@@ -1849,8 +1858,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const waiting = consoleRomsToOffer(answer);
       state.consoleReview = waiting.length
         ? {
+            token: answer.token,
             emulator: answer.emulator,
             emulatorLabel: answer.emulatorLabel,
+            emulatorInstalled: answer.emulatorInstalled,
+            emulatorInstaller: answer.emulatorInstaller,
             folderLabel: answer.folderLabel,
             roms: waiting,
           }
@@ -1880,6 +1892,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     try {
       const result = normaliseConsoleImportResult(
         await invoke<unknown>("import_console_roms", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
           gameRefs: review.roms.map((rom) => rom.gameRef),
         }),
       );

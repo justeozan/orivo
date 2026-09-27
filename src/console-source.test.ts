@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CONSOLE_EMULATORS,
+  consoleEmulatorNote,
   consoleReviewList,
   consoleReviewPrompt,
   consoleRomsToOffer,
@@ -21,8 +22,11 @@ const rom = (title: string, fileName = `${title}.nes`): Record<string, unknown> 
 
 const folder = (found: unknown[]): unknown => ({
   connected: true,
+  token: 7,
   emulator: "retroarch",
   emulatorLabel: "RetroArch",
+  emulatorInstalled: true,
+  emulatorInstaller: "com.android.vending",
   folderLabel: "Roms",
   found,
   message: "Connected Roms.",
@@ -41,8 +45,11 @@ describe("normaliseConsoleRomFolder", () => {
     const answer = normaliseConsoleRomFolder(folder([rom("Alter Ego")]));
     expect(answer).toEqual({
       connected: true,
+      token: 7,
       emulator: "retroarch",
       emulatorLabel: "RetroArch",
+      emulatorInstalled: true,
+      emulatorInstaller: "com.android.vending",
       folderLabel: "Roms",
       found: [
         {
@@ -116,19 +123,73 @@ describe("what the user is asked", () => {
       ]),
     )!;
     const { entries } = consoleReviewList(answer.found, "Roms");
-    expect(entries[0]!.origin).toBe("NES · Roms/Alter Ego.nes");
-    expect(entries[1]!.origin).toBe("NES · Roms/new/Free Coins.nes");
-    expect(entries[1]!.collision).toBe("Another file in this folder uses this name");
-    expect(entries[0]!.collision).toBe(null);
+    // The planted one leads, because its row is the one that has to be read.
+    expect(entries[0]!.origin).toBe("NES · Roms/new/Free Coins.nes");
+    expect(entries[0]!.collision).toBe("Another file in this folder uses this name");
+    expect(entries[1]!.origin).toBe("NES · Roms/Alter Ego.nes");
+    expect(entries[1]!.collision).toBe(null);
   });
 
-  it("keeps a long list readable without hiding that it is long", () => {
+  // The button under this list imports everything in it, so a list that stopped
+  // at six would be asking the user to vouch for what it never showed — and the
+  // host orders its answer by a hash of the pathname, so which six they saw would
+  // be a draw. The list is complete and scrollable, and the rows that exist to be
+  // read come first.
+  it("shows every game it would import, not the first few", () => {
     const answer = normaliseConsoleRomFolder(
-      folder(Array.from({ length: 9 }, (_, index) => rom(`Game ${index}`))),
+      folder(Array.from({ length: 41 }, (_, index) => rom(`Game ${index}`))),
     )!;
-    const { entries, remaining } = consoleReviewList(answer.found, "Roms");
-    expect(entries).toHaveLength(6);
-    expect(remaining).toBe(3);
+    const { entries } = consoleReviewList(answer.found, "Roms");
+    expect(entries).toHaveLength(41);
+  });
+
+  it("puts the names that collide at the top, whatever the host's order was", () => {
+    const answer = normaliseConsoleRomFolder(
+      folder([
+        rom("Zelda"),
+        { ...rom("Pokemon Emerald"), gameRef: "rom:planted", duplicateTitle: "library" },
+        rom("Alter Ego"),
+        { ...rom("Uwol"), gameRef: "rom:twin", duplicateTitle: "folder" },
+      ]),
+    )!;
+    const { entries } = consoleReviewList(answer.found, "Roms");
+    expect(entries.map((entry) => entry.title)).toEqual([
+      "Pokemon Emerald",
+      "Uwol",
+      "Alter Ego",
+      "Zelda",
+    ]);
+  });
+});
+
+describe("what the host said about the emulator itself", () => {
+  it("names who installed it, because that is the app the game goes to", () => {
+    expect(
+      consoleEmulatorNote({
+        emulatorLabel: "RetroArch",
+        emulatorInstalled: true,
+        emulatorInstaller: "com.android.vending",
+      }),
+    ).toBe("RetroArch on this device was installed by com.android.vending.");
+    expect(
+      consoleEmulatorNote({
+        emulatorLabel: "RetroArch",
+        emulatorInstalled: true,
+        emulatorInstaller: null,
+      }),
+    ).toBe("RetroArch on this device was installed by hand, not from a store.");
+  });
+
+  // Silence from the platform is not "the app is missing", and saying so would be
+  // a sentence the user cannot act on.
+  it("says nothing when the platform said nothing", () => {
+    expect(
+      consoleEmulatorNote({
+        emulatorLabel: "PPSSPP",
+        emulatorInstalled: false,
+        emulatorInstaller: null,
+      }),
+    ).toBe(null);
   });
 });
 

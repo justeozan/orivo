@@ -157,9 +157,11 @@ describe("what the user is asked", () => {
     const shortcuts = [shortcut("Celeste"), shortcut("Braid")];
     expect(winlatorReviewPrompt(shortcuts)).toBe("Add these 2 Winlator games to your library?");
     expect(winlatorReviewPrompt(shortcuts.slice(0, 1))).toBe("Add “Celeste” to your library?");
+    // Sorted by title once nothing collides, so the same folder always reads the
+    // same way whatever order the host answered in.
     expect(winlatorReviewList(shortcuts, "Frontend").entries.map((entry) => entry.title)).toEqual([
-      "Celeste",
       "Braid",
+      "Celeste",
     ]);
   });
 
@@ -178,6 +180,8 @@ describe("what the user is asked", () => {
     expect(entries[1]!.origin).toBe("Frontend/new/Free Coins.desktop");
   });
 
+  // The list is ordered by how much the row needs reading, so the library
+  // collision leads and the untouched name is last.
   it("says whose name a shortcut is reusing", () => {
     const entries = winlatorReviewList(
       [
@@ -187,8 +191,9 @@ describe("what the user is asked", () => {
       ],
       "Frontend",
     ).entries;
-    expect(entries[0]!.collision).toBe("Another file in this folder uses this name");
-    expect(entries[1]!.collision).toBe("A game already in your library uses this name");
+    expect(entries.map((entry) => entry.title)).toEqual(["Braid", "Celeste", "Doom"]);
+    expect(entries[0]!.collision).toBe("A game already in your library uses this name");
+    expect(entries[1]!.collision).toBe("Another file in this folder uses this name");
     expect(entries[2]!.collision).toBe(null);
   });
 
@@ -197,14 +202,27 @@ describe("what the user is asked", () => {
     expect(entries[0]!.origin).toBe("Celeste.desktop");
   });
 
-  it("keeps a long list readable without hiding that it is long", () => {
-    const shortcuts = Array.from({ length: 9 }, (_, index) => ({
+  // "Add these 41 games" has to mean the 41 rows above it. A list that stopped at
+  // six was asking the user to vouch for 35 files it never showed them.
+  it("shows every shortcut it would import, not the first few", () => {
+    const shortcuts = Array.from({ length: 41 }, (_, index) => ({
       ...shortcut(`Game ${index}`),
       gameRef: `shortcut:${index}`,
     }));
-    const { entries, remaining } = winlatorReviewList(shortcuts, "Frontend");
-    expect(entries).toHaveLength(6);
-    expect(remaining).toBe(3);
+    const { entries } = winlatorReviewList(shortcuts, "Frontend");
+    expect(entries).toHaveLength(41);
+  });
+
+  it("puts the names that collide at the top", () => {
+    const entries = winlatorReviewList(
+      [
+        shortcut("Zelda"),
+        { ...shortcut("Celeste"), gameRef: "shortcut:planted", duplicateTitle: "library" },
+        shortcut("Alter Ego"),
+      ],
+      "Frontend",
+    ).entries;
+    expect(entries.map((entry) => entry.title)).toEqual(["Celeste", "Alter Ego", "Zelda"]);
   });
 });
 

@@ -43,11 +43,6 @@ const MAX_SHORTCUT_BYTES: u64 = 64 * 1024;
 const MAX_SHORTCUT_TITLE_CHARS: usize = 160;
 /// What a granted folder is called when its own name cannot be shown.
 const DEFAULT_ROOT_LABEL: &str = "Authorized shortcut folder";
-/// The same, for the file and the folders under the grant that the confirmation
-/// names. Both are only ever reached by a name that is not displayable text,
-/// which a shortcut Winlator exported never has.
-const UNNAMED_SHORTCUT_FILE: &str = "an unnamed file";
-const ELIDED_PATH_COMPONENT: &str = "…";
 
 /// The default directory Winlator Cmod writes an exported frontend shortcut
 /// into when the user has not chosen another one. It is shared storage, which
@@ -1276,63 +1271,26 @@ fn shortcut_title_from_filename(path: &Path) -> String {
         .unwrap_or_else(|| "Winlator game".into())
 }
 
+/// Text out of a shortcut file, reduced to what may be shown. The rule — a
+/// control character refuses the string, a character nobody can see is removed —
+/// is shared, because a title that *reads* identically has to *compare*
+/// identically on both sides of the duplicate check.
 fn display_text(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
-        .then(|| trimmed.chars().take(MAX_SHORTCUT_TITLE_CHARS).collect())
+    crate::source_review::display_text(value, MAX_SHORTCUT_TITLE_CHARS)
 }
 
-/// How a shortcut is named on the confirmation.
+/// How a shortcut is named on the confirmation: the file itself, and the folders
+/// between the connected one and it.
 ///
-/// `Name=` is not an identity: any file may carry any name, including the name
-/// of a game already in the library or of another file in the same list, so a
-/// confirmation that shows only that name cannot be answered. What can be
-/// checked is the file itself and the folders holding it, and that is what this
-/// carries — relative to the connected folder, because the absolute path is
-/// host-private and naming it would tell the WebView where shared storage is
-/// mounted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShortcutOrigin {
-    pub file_name: String,
-    /// The folders between the connected one and the shortcut, `/`-joined.
-    /// Empty when the shortcut sits directly in the connected folder.
-    pub folder_path: String,
-}
-
-/// What a shortcut is called, and where it sits inside the folder that was
-/// granted. A component the host cannot display is elided rather than dropped:
-/// the shape of the nesting is itself part of what the user is checking.
-pub fn shortcut_origin(root: &Path, shortcut: &Path) -> ShortcutOrigin {
-    let file_name = shortcut
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .and_then(|name| display_text(&name))
-        .unwrap_or_else(|| UNNAMED_SHORTCUT_FILE.into());
-    let folder_path = shortcut
-        .parent()
-        .and_then(|directory| directory.strip_prefix(root).ok())
-        .map(|relative| {
-            relative
-                .components()
-                .map(|component| {
-                    display_text(&component.as_os_str().to_string_lossy())
-                        .unwrap_or_else(|| ELIDED_PATH_COMPONENT.into())
-                })
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .unwrap_or_default();
-    ShortcutOrigin {
-        file_name,
-        folder_path,
-    }
+/// `Name=` is not an identity — any file may carry any name, including one a game
+/// already in the library uses — so the rule is shared with every other source
+/// that asks this question, and lives in `source_review`.
+pub fn shortcut_origin(root: &Path, shortcut: &Path) -> crate::source_review::FileOrigin {
+    crate::source_review::file_origin(root, shortcut, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 fn safe_label(path: &Path, fallback: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(display_text)
-        .unwrap_or_else(|| fallback.into())
+    crate::source_review::folder_label(path, fallback, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 /// Hash the shortcut bytes independently from the persistent game reference.

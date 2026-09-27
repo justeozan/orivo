@@ -49,8 +49,6 @@ pub const DEFAULT_MAX_SCAN_DEPTH: usize = 4;
 const MAX_ROM_TITLE_CHARS: usize = 160;
 /// What a granted folder is called when its own name cannot be shown.
 const DEFAULT_ROOT_LABEL: &str = "Authorized ROM folder";
-const UNNAMED_ROM_FILE: &str = "an unnamed file";
-const ELIDED_PATH_COMPONENT: &str = "…";
 
 /// A ROM small enough to be hashed whole.
 ///
@@ -147,6 +145,12 @@ pub enum ConsoleRunnerError {
     /// The folder answered, the file did not — including a provider that will not
     /// say how large a document is, which is half of what identifies it.
     RomUnreadable,
+    /// The path names something *inside* an archive, so the bytes the host hashed
+    /// are not the bytes the emulator would load.
+    RomInsideArchive,
+    /// A patch file sits beside the ROM, and the emulator would apply it without
+    /// being asked.
+    RomHasSidecarPatch,
     AccessDenied,
     TooManyFiles,
     InvalidIntent,
@@ -211,6 +215,12 @@ impl std::fmt::Display for ConsoleRunnerError {
                 "This file changed since you added it. Add it again so Orivo knows what it is."
             }
             Self::RomUnreadable => "Orivo could not read this ROM. Check the folder and try again.",
+            Self::RomInsideArchive => {
+                "This game is inside an archive. Unpack it into the folder so Orivo can see what it is adding."
+            }
+            Self::RomHasSidecarPatch => {
+                "A patch file sits next to this game, and the emulator would apply it without asking. Move it out of the folder, or add the patched game itself."
+            }
             Self::AccessDenied => {
                 "Orivo could not read one of the folders allowed for this emulator."
             }
@@ -290,6 +300,14 @@ struct ConsoleLaunchSurface {
     /// `Intent.setAction`, where the emulator's entry point is an action rather
     /// than bare extras.
     action: Option<&'static str>,
+    /// Does this emulator's loader read files *beside* the one it was given?
+    ///
+    /// RetroArch does: `runloop_path_fill_names` in `runloop.c` truncates the
+    /// content path at its last dot and looks for `<that>.ips`, `.bps`, `.ups`
+    /// and `.xdelta`, then `task_content.c` applies whichever it finds unless
+    /// `--no-patch` was passed — which an intent cannot pass. So a file the host
+    /// never hashed decides what runs, and the host has to look for it.
+    applies_soft_patches: bool,
 }
 
 /// The extra keys RetroArch's own frontend interface documents.
@@ -301,14 +319,14 @@ struct ConsoleLaunchSurface {
 const RETROARCH_ROM_EXTRA: &str = "ROM";
 const RETROARCH_CORE_EXTRA: &str = "LIBRETRO";
 /// Where RetroArch keeps the cores it downloaded: `ApplicationInfo.dataDir` plus
-/// `cores`, and for a primary-user install `dataDir` is `/data/user/0/<package>`.
+/// `cores` (`platform_unix.c`, `DEFAULT_DIR_CORE`).
 ///
-/// Orivo cannot ask for it. `PackageManager.getApplicationInfo` is filtered on
-/// API 30+ unless the package is visible, which needs a manifest entry this
-/// repository cannot deliver — while the *launch* needs no visibility at all,
-/// because an explicit component bypasses intent filters. So this is composed,
-/// and a device where it is wrong fails legibly: RetroArch says it cannot load
-/// the core, rather than Orivo saying nothing.
+/// `dataDir` is *asked for*, through a `<queries>` entry the tracked Android
+/// library project of `tauri-plugin-orivo-saf` merges into the app manifest —
+/// which is the only manifest a commit in this repository can reach, since
+/// `src-tauri/gen/android` is regenerated. The constant below is the fallback for
+/// a device that answers nothing: it is what a primary-user install has, and a
+/// secondary user's `/data/user/<id>/…` is exactly the case the query covers.
 const ANDROID_PRIMARY_USER_DATA_ROOT: &str = "/data/user/0";
 const RETROARCH_CORE_DIRECTORY: &str = "cores";
 
@@ -327,6 +345,7 @@ fn launch_surface(emulator: ConsoleEmulator) -> ConsoleLaunchSurface {
             activity: "com.retroarch.browser.retroactivity.RetroActivityFuture",
             delivery: RomDelivery::Path,
             action: None,
+            applies_soft_patches: true,
         },
         ConsoleEmulator::Ppsspp => ConsoleLaunchSurface {
             emulator,
@@ -335,6 +354,9 @@ fn launch_surface(emulator: ConsoleEmulator) -> ConsoleLaunchSurface {
             activity: "org.ppsspp.ppsspp.PpssppActivity",
             delivery: RomDelivery::Document,
             action: Some(ACTION_VIEW),
+            // PPSSPP is handed one document and has read access to nothing else,
+            // so there is no "beside" for it to read.
+            applies_soft_patches: false,
         },
     }
 }
@@ -356,6 +378,80 @@ fn libretro_core(system: ConsoleSystem) -> Option<&'static str> {
         // console, and the catalog refuses the pairing anyway.
         ConsoleSystem::PlayStationPortable => None,
     }
+}
+
+/// What the platform says about one emulator package.
+///
+/// Package visibility is not a permission and grants nothing — an explicit
+/// component already bypasses intent filters, so the launch never needed it. What
+/// it buys is the ability to *ask*: where this emulator actually keeps its data,
+/// and who installed it. Both are facts about the app a game is about to be handed
+/// to, and both used to be composed or unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledPackage {
+    /// `ApplicationInfo.dataDir`, when the platform answered.
+    pub data_directory: Option<PathBuf>,
+    /// The package that installed it — Play, F-Droid, a file manager, or nothing
+    /// at all for a sideload.
+    pub installer: Option<String>,
+}
+
+/// The platform's answer about the packages Orivo names, or silence.
+///
+/// A trait because everything above it is pure and has to stay testable on a
+/// host: a device answers through JNI, a desktop answers nothing, and a test
+/// answers whatever the case under test needs.
+pub trait InstalledPackages {
+    fn lookup(&self, package: &str) -> Option<InstalledPackage>;
+}
+
+/// What a desktop build, and any device that will not answer, knows.
+///
+/// On a device this is only the fallback inside [`installed_packages`], so a
+/// release build for Android never names it — and every test does.
+#[cfg_attr(target_os = "android", allow(dead_code))]
+pub struct NoInstalledPackages;
+
+impl InstalledPackages for NoInstalledPackages {
+    fn lookup(&self, _package: &str) -> Option<InstalledPackage> {
+        None
+    }
+}
+
+/// The platform on this build.
+pub fn installed_packages() -> Box<dyn InstalledPackages> {
+    #[cfg(target_os = "android")]
+    {
+        Box::new(android::AndroidPackages)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Box::new(NoInstalledPackages)
+    }
+}
+
+/// Which of an emulator's published packages are installed, most specific first,
+/// and what the platform said about each.
+///
+/// A package the platform does not answer about is still tried: the query can
+/// fail for reasons that have nothing to do with the app being absent, and a
+/// launch that refused on silence would be worse than one that finds out from
+/// `ActivityNotFoundException`. Installed ones simply go first.
+pub fn emulator_packages(
+    emulator: ConsoleEmulator,
+    packages: &dyn InstalledPackages,
+) -> Vec<(&'static str, Option<InstalledPackage>)> {
+    let surface = launch_surface(emulator);
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for package in surface.packages {
+        match packages.lookup(package) {
+            Some(facts) => known.push((*package, Some(facts))),
+            None => unknown.push((*package, None)),
+        }
+    }
+    known.extend(unknown);
+    known
 }
 
 /// One document, named the way the platform names it.
@@ -438,6 +534,44 @@ pub trait RomSource {
     /// plain readable directory has none, and says so rather than handing over a
     /// `file://` URI — which the platform refuses to let one app give another.
     fn document(&self, rom: &Path) -> Result<RomDocument, ConsoleRunnerError>;
+
+    /// The names that exist beside this file, in the same folder.
+    ///
+    /// Asked for rather than probed one pathname at a time, because the storage
+    /// access grant answers a *listing* and cannot answer "does this path exist".
+    fn sibling_names(&self, rom: &Path) -> Result<Vec<String>, ConsoleRunnerError>;
+}
+
+/// Refuse a ROM an emulator would load with something the host never saw.
+///
+/// Only for the emulators whose loader does that, and only immediately before the
+/// hand-off: a patch dropped into the folder after the import is exactly the case
+/// this exists for, and the import cannot see the future.
+fn refuse_sidecar_patch(
+    surface: &ConsoleLaunchSurface,
+    source: &dyn RomSource,
+    rom: &Path,
+) -> Result<(), ConsoleRunnerError> {
+    if !surface.applies_soft_patches {
+        return Ok(());
+    }
+    let beside = source.sibling_names(rom)?;
+    let patches = crate::source_review::soft_patch_siblings(rom);
+    let named = patches
+        .iter()
+        .filter_map(|patch| patch.file_name().and_then(|name| name.to_str()))
+        .collect::<Vec<_>>();
+    // The comparison is case-insensitive because the loader lowercases nothing
+    // and the filesystem under shared storage does not either: `.IPS` is the
+    // same file to a user and a different string to a `==`.
+    if beside.iter().any(|existing| {
+        named
+            .iter()
+            .any(|patch| existing.eq_ignore_ascii_case(patch))
+    }) {
+        return Err(ConsoleRunnerError::RomHasSidecarPatch);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,7 +670,16 @@ impl RomSource for FilesystemRoms<'_> {
     }
 
     fn resolve(&self, rom: &Path) -> Result<PathBuf, ConsoleRunnerError> {
+        // Before the canonicalisation, because a file literally named
+        // `pack.zip#Alter Ego.nes` exists and canonicalises perfectly well — and
+        // is the one an emulator would read as an entry inside `pack.zip`.
+        if !crate::source_review::is_plain_file_path(rom) {
+            return Err(ConsoleRunnerError::RomInsideArchive);
+        }
         let rom = fs::canonicalize(rom).map_err(|_| ConsoleRunnerError::RomMissing)?;
+        if !crate::source_review::is_plain_file_path(&rom) {
+            return Err(ConsoleRunnerError::RomInsideArchive);
+        }
         if !rom.is_file() || self.emulator.system_for(&rom).is_none() {
             return Err(ConsoleRunnerError::RomMissing);
         }
@@ -552,6 +695,21 @@ impl RomSource for FilesystemRoms<'_> {
 
     fn document(&self, _rom: &Path) -> Result<RomDocument, ConsoleRunnerError> {
         Err(ConsoleRunnerError::RomFolderNotConnected)
+    }
+
+    fn sibling_names(&self, rom: &Path) -> Result<Vec<String>, ConsoleRunnerError> {
+        let directory = rom.parent().ok_or(ConsoleRunnerError::RomMissing)?;
+        Ok(self
+            .entries(directory)?
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect())
     }
 }
 
@@ -656,6 +814,12 @@ impl RomSource for DocumentTreeRoms {
 
     fn resolve(&self, rom: &Path) -> Result<PathBuf, ConsoleRunnerError> {
         self.locate(rom)?;
+        // A provider may hand back a name with an archive delimiter in it, and
+        // `primary:…/pack.zip#Alter Ego.nes` is a perfectly ordinary document
+        // identifier that resolves to a perfectly ordinary path.
+        if !crate::source_review::is_plain_file_path(rom) {
+            return Err(ConsoleRunnerError::RomInsideArchive);
+        }
         if self.emulator.system_for(rom).is_none() {
             return Err(ConsoleRunnerError::RomMissing);
         }
@@ -676,6 +840,21 @@ impl RomSource for DocumentTreeRoms {
             tree_uri: granted.grant.tree_uri().to_string(),
             document_id,
         })
+    }
+
+    fn sibling_names(&self, rom: &Path) -> Result<Vec<String>, ConsoleRunnerError> {
+        let directory = rom.parent().ok_or(ConsoleRunnerError::RomMissing)?;
+        Ok(self
+            .entries(directory)?
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .collect())
     }
 }
 
@@ -1104,6 +1283,7 @@ pub fn prepare_console_launch(
     source: &dyn RomSource,
     game: &ConsoleRomInventoryEntry,
     intent: &ConsoleLaunchIntent,
+    packages: &dyn InstalledPackages,
 ) -> Result<PreparedConsoleLaunch, ConsoleRunnerError> {
     let surface = launch_surface(profile.emulator);
     if intent.runner_id() != surface.runner_id
@@ -1130,25 +1310,37 @@ pub fn prepare_console_launch(
     if game.fingerprint != current.fingerprint || game.game_ref != current.game_ref {
         return Err(ConsoleRunnerError::RomNotLaunchable);
     }
+    // The fingerprint answers "are these the same bytes?", and for an emulator
+    // that reads files beside the one it is given, that is not the whole question.
+    refuse_sidecar_patch(&surface, source, &current.rom_path)?;
 
     let handoff = match surface.delivery {
         RomDelivery::Document => RomHandoff::Document(source.document(&current.rom_path)?),
-        RomDelivery::Path => RomHandoff::Path(
-            // Android extras are Java strings. A pathname that is not valid
-            // UTF-8 could not survive the crossing intact, so it is refused here
-            // rather than silently replaced.
-            current
-                .rom_path
-                .to_str()
-                .ok_or(ConsoleRunnerError::RomNotLaunchable)?
-                .to_string(),
-        ),
+        RomDelivery::Path => {
+            // The last place this can be asked, on the exact string that will
+            // cross: the checks above were about a `Path`, and this is what the
+            // emulator parses.
+            if !crate::source_review::is_plain_file_path(&current.rom_path) {
+                return Err(ConsoleRunnerError::RomInsideArchive);
+            }
+            RomHandoff::Path(
+                // Android extras are Java strings. A pathname that is not valid
+                // UTF-8 could not survive the crossing intact, so it is refused
+                // here rather than silently replaced.
+                current
+                    .rom_path
+                    .to_str()
+                    .ok_or(ConsoleRunnerError::RomNotLaunchable)?
+                    .to_string(),
+            )
+        }
     };
 
-    let candidates = surface
-        .packages
-        .iter()
-        .map(|package| console_intent(&surface, package, profile.system, &handoff))
+    let candidates = emulator_packages(profile.emulator, packages)
+        .into_iter()
+        .map(|(package, facts)| {
+            console_intent(&surface, package, profile.system, &handoff, facts.as_ref())
+        })
         .collect::<Vec<_>>();
 
     Ok(PreparedConsoleLaunch {
@@ -1172,6 +1364,7 @@ fn console_intent(
     package: &'static str,
     system: ConsoleSystem,
     handoff: &RomHandoff,
+    facts: Option<&InstalledPackage>,
 ) -> ConsoleIntent {
     let mut extras = Vec::new();
     let mut data = None;
@@ -1183,11 +1376,18 @@ fn console_intent(
                 value: path.clone(),
             });
             if let Some(core) = libretro_core(system) {
+                // The directory the platform reported, or the one a primary-user
+                // install has. Either way the *file name* comes from the closed
+                // table above: this is a library the emulator will `dlopen`.
+                let directory = facts
+                    .and_then(|facts| facts.data_directory.clone())
+                    .unwrap_or_else(|| {
+                        PathBuf::from(format!("{ANDROID_PRIMARY_USER_DATA_ROOT}/{package}"))
+                    })
+                    .join(RETROARCH_CORE_DIRECTORY);
                 extras.push(AndroidIntentExtra::Text {
                     key: RETROARCH_CORE_EXTRA,
-                    value: format!(
-                        "{ANDROID_PRIMARY_USER_DATA_ROOT}/{package}/{RETROARCH_CORE_DIRECTORY}/{core}"
-                    ),
+                    value: directory.join(core).to_string_lossy().into_owned(),
                 });
             }
         }
@@ -1262,10 +1462,99 @@ impl PreparedConsoleLaunch {
 /// sentence instead of a silently dropped tap.
 #[cfg(target_os = "android")]
 mod android {
-    use super::{ConsoleEmulator, ConsoleIntent, ConsoleRunnerError};
+    use super::{ConsoleEmulator, ConsoleIntent, ConsoleRunnerError, InstalledPackage};
     use crate::winlator_runner::AndroidIntentExtra;
+    use crate::winlator_saf::android::{java_string, with_env};
     use jni::{JNIEnv, objects::JObject};
-    use std::{sync::mpsc, time::Duration};
+    use std::{path::PathBuf, sync::mpsc, time::Duration};
+
+    /// `Build.VERSION_CODES.R`, where `getInstallSourceInfo` arrived.
+    const ANDROID_R: i32 = 30;
+
+    /// The platform's answers about the packages the `<queries>` entry in
+    /// `tauri-plugin-orivo-saf`'s library manifest makes visible.
+    ///
+    /// Silence is an ordinary answer: a package that is not installed, a device
+    /// that filtered the query anyway, or a build whose manifest predates the
+    /// entry. The caller falls back rather than refusing.
+    pub struct AndroidPackages;
+
+    impl super::InstalledPackages for AndroidPackages {
+        fn lookup(&self, package: &str) -> Option<InstalledPackage> {
+            let package = package.to_string();
+            with_env(move |env, activity| {
+                let manager = env
+                    .call_method(
+                        activity,
+                        "getPackageManager",
+                        "()Landroid/content/pm/PackageManager;",
+                        &[],
+                    )?
+                    .l()?;
+                let name = env.new_string(&package)?;
+                let information = env
+                    .call_method(
+                        &manager,
+                        "getApplicationInfo",
+                        "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
+                        &[(&name).into(), 0i32.into()],
+                    )?
+                    .l()?;
+                let data_directory = env
+                    .get_field(&information, "dataDir", "Ljava/lang/String;")?
+                    .l()?;
+                Ok(Some(InstalledPackage {
+                    data_directory: java_string(env, &data_directory).map(PathBuf::from),
+                    installer: installer_of(env, &manager, &package),
+                }))
+            })
+            .ok()
+            .flatten()
+        }
+    }
+
+    /// Who installed this package, when the platform will say.
+    ///
+    /// `getInstallSourceInfo` is API 30; below that only the deprecated
+    /// `getInstallerPackageName` exists, and a sideload answers `null` on both.
+    /// None of the three outcomes is an error: the user is being *shown* this,
+    /// not gated on it.
+    fn installer_of(env: &mut JNIEnv<'_>, manager: &JObject<'_>, package: &str) -> Option<String> {
+        let sdk = env
+            .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+            .and_then(|version| version.i())
+            .unwrap_or(0);
+        let name = env.new_string(package).ok()?;
+        let installer = if sdk >= ANDROID_R {
+            let source = env
+                .call_method(
+                    manager,
+                    "getInstallSourceInfo",
+                    "(Ljava/lang/String;)Landroid/content/pm/InstallSourceInfo;",
+                    &[(&name).into()],
+                )
+                .and_then(|source| source.l())
+                .ok()?;
+            env.call_method(
+                &source,
+                "getInstallingPackageName",
+                "()Ljava/lang/String;",
+                &[],
+            )
+            .and_then(|installer| installer.l())
+            .ok()?
+        } else {
+            env.call_method(
+                manager,
+                "getInstallerPackageName",
+                "(Ljava/lang/String;)Ljava/lang/String;",
+                &[(&name).into()],
+            )
+            .and_then(|installer| installer.l())
+            .ok()?
+        };
+        java_string(env, &installer)
+    }
 
     /// Starting an activity is a handful of JNI calls on an already-running main
     /// thread. A wait this long only ever expires when that thread is wedged, in
@@ -1284,7 +1573,17 @@ mod android {
         candidates: Vec<ConsoleIntent>,
     ) -> Result<(), ConsoleRunnerError> {
         let (sender, receiver) = mpsc::sync_channel(1);
+        // The closure runs on the main thread whenever that thread gets round to
+        // it, which may be after this call has given up waiting. Reporting a
+        // failure and then starting the emulator anyway is the one outcome worth
+        // preventing: the user would be reading "could not start" while the game
+        // came up behind it. So the wait and the work agree through this flag.
+        let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let queued = std::sync::Arc::clone(&abandoned);
         tauri::wry::prelude::dispatch(move |env, activity, _webview| {
+            if queued.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             let mut outcome = Err(ConsoleRunnerError::EmulatorMissing(emulator));
             for intent in &candidates {
                 outcome = match build_and_start(env, activity, intent) {
@@ -1300,9 +1599,10 @@ mod android {
             }
             let _ = sender.send(outcome);
         });
-        receiver
-            .recv_timeout(HAND_OFF_TIMEOUT)
-            .unwrap_or(Err(ConsoleRunnerError::LaunchFailed(emulator)))
+        receiver.recv_timeout(HAND_OFF_TIMEOUT).unwrap_or_else(|_| {
+            abandoned.store(true, std::sync::atomic::Ordering::Release);
+            Err(ConsoleRunnerError::LaunchFailed(emulator))
+        })
     }
 
     fn build_and_start(
@@ -1444,39 +1744,10 @@ mod android {
 /// between the connected one and it.
 ///
 /// The same reason Winlator's shortcuts need it, for a weaker but real version of
-/// the same problem: a file's name is whatever somebody called it, two files can
-/// claim the same game, and one of them may have arrived without the user's
-/// knowing. Relative to the grant, because the absolute path is host-private.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RomOrigin {
-    pub file_name: String,
-    pub folder_path: String,
-}
-
-pub fn rom_origin(root: &Path, rom: &Path) -> RomOrigin {
-    let file_name = rom
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .and_then(|name| display_text(&name))
-        .unwrap_or_else(|| UNNAMED_ROM_FILE.into());
-    let folder_path = rom
-        .parent()
-        .and_then(|directory| directory.strip_prefix(root).ok())
-        .map(|relative| {
-            relative
-                .components()
-                .map(|component| {
-                    display_text(&component.as_os_str().to_string_lossy())
-                        .unwrap_or_else(|| ELIDED_PATH_COMPONENT.into())
-                })
-                .collect::<Vec<_>>()
-                .join("/")
-        })
-        .unwrap_or_default();
-    RomOrigin {
-        file_name,
-        folder_path,
-    }
+/// the same problem: a ROM's title *is* its file name, two files can claim the
+/// same game, and one of them may have arrived without the user knowing.
+pub fn rom_origin(root: &Path, rom: &Path) -> crate::source_review::FileOrigin {
+    crate::source_review::file_origin(root, rom, MAX_ROM_TITLE_CHARS)
 }
 
 fn belongs_to_grant(rom: &Path, directories: &[PathBuf]) -> Result<bool, ConsoleRunnerError> {
@@ -1522,21 +1793,16 @@ fn valid_opaque_id(value: &str) -> bool {
 fn rom_title_from_filename(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
-        .and_then(display_text)
+        .and_then(|name| display_text(name))
         .unwrap_or_else(|| "Console game".into())
 }
 
 fn display_text(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
-        .then(|| trimmed.chars().take(MAX_ROM_TITLE_CHARS).collect())
+    crate::source_review::display_text(value, MAX_ROM_TITLE_CHARS)
 }
 
 fn safe_label(path: &Path, fallback: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(display_text)
-        .unwrap_or_else(|| fallback.into())
+    crate::source_review::folder_label(path, fallback, MAX_ROM_TITLE_CHARS)
 }
 
 /// Hash the ROM's path independently from its contents. The reference is
@@ -1745,7 +2011,13 @@ mod tests {
             ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
                 .unwrap();
         assert_eq!(
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent),
+            prepare_console_launch(
+                &profile,
+                &filesystem(&profile),
+                &entry,
+                &intent,
+                &NoInstalledPackages,
+            ),
             Err(ConsoleRunnerError::RomNotLaunchable)
         );
     }
@@ -1833,8 +2105,14 @@ mod tests {
             ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
                 .unwrap();
 
-        let prepared =
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
+        let prepared = prepare_console_launch(
+            &profile,
+            &filesystem(&profile),
+            &entry,
+            &intent,
+            &NoInstalledPackages,
+        )
+        .unwrap();
         let candidates = prepared.candidates();
         assert_eq!(
             candidates
@@ -1895,7 +2173,9 @@ mod tests {
         let intent =
             ConsoleLaunchIntent::new(PPSSPP_RUNNER_ID, &granted.id, &candidate.game_ref).unwrap();
 
-        let prepared = prepare_console_launch(&granted, &source, &entry, &intent).unwrap();
+        let prepared =
+            prepare_console_launch(&granted, &source, &entry, &intent, &NoInstalledPackages)
+                .unwrap();
         let candidates = prepared.candidates();
         assert_eq!(
             candidates
@@ -1938,9 +2218,146 @@ mod tests {
         let intent =
             ConsoleLaunchIntent::new(PPSSPP_RUNNER_ID, &profile.id, &candidate.game_ref).unwrap();
         assert_eq!(
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent),
+            prepare_console_launch(
+                &profile,
+                &filesystem(&profile),
+                &entry,
+                &intent,
+                &NoInstalledPackages,
+            ),
             Err(ConsoleRunnerError::RomFolderNotConnected)
         );
+    }
+
+    /// RetroArch reads `pack.zip#Alter Ego.nes` as an entry inside `pack.zip`, so
+    /// a path like that ends in `.nes`, passes every check about what kind of file
+    /// it is, and makes the host hash the decoy while the core loads the archive.
+    #[test]
+    fn refuses_a_rom_path_that_names_a_file_inside_an_archive() {
+        let granted = temporary_directory("archive-member");
+        // The decoy is a real file; what makes the path dangerous is the `#`.
+        write_rom(&granted, "pack.zip", NES_HEADER);
+        let profile = nes_profile(&granted);
+        let member = granted.join("pack.zip#Alter Ego.nes");
+        assert_eq!(
+            filesystem(&profile).resolve(&member),
+            Err(ConsoleRunnerError::RomInsideArchive)
+        );
+    }
+
+    /// A patch dropped beside a ROM is applied by RetroArch without being asked,
+    /// so the file the host hashed stops deciding what runs. The launch says so
+    /// rather than handing over a game it cannot describe.
+    #[test]
+    fn refuses_to_launch_a_rom_with_a_patch_file_beside_it() {
+        let granted = temporary_directory("sidecar-patch");
+        write_rom(&granted, "Alter Ego.nes", NES_HEADER);
+        let profile = nes_profile(&granted);
+        let candidate = scan(&profile, &filesystem(&profile))[0].clone();
+        let entry = inventory(&profile, &candidate);
+        let intent =
+            ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
+                .unwrap();
+        // It launches while the folder holds only the ROM.
+        prepare_console_launch(
+            &profile,
+            &filesystem(&profile),
+            &entry,
+            &intent,
+            &NoInstalledPackages,
+        )
+        .unwrap();
+
+        for patch in [
+            "Alter Ego.ips",
+            "Alter Ego.BPS",
+            "Alter Ego.ups",
+            "Alter Ego.xdelta",
+        ] {
+            let path = granted.join(patch);
+            fs::write(&path, b"PATCH").unwrap();
+            assert_eq!(
+                prepare_console_launch(
+                    &profile,
+                    &filesystem(&profile),
+                    &entry,
+                    &intent,
+                    &NoInstalledPackages,
+                ),
+                Err(ConsoleRunnerError::RomHasSidecarPatch),
+                "a {patch} beside the ROM was ignored"
+            );
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    /// PPSSPP is handed one document and has read access to nothing else, so
+    /// there is no file beside it to find — and refusing there would cost a user
+    /// a game for a file the emulator can never open.
+    #[test]
+    fn a_patch_beside_a_psp_image_does_not_block_it() {
+        let granted = through_a_storage_access_grant::granted_profile(
+            ConsoleEmulator::Ppsspp,
+            ConsoleSystem::PlayStationPortable,
+        );
+        let tree = through_a_storage_access_grant::folder(&[
+            ("primary:Download/Roms/Wagic.pbp", NES_HEADER.to_vec()),
+            ("primary:Download/Roms/Wagic.ips", b"PATCH".to_vec()),
+        ]);
+        let source = through_a_storage_access_grant::source(&granted, tree);
+        let candidate = scan(&granted, &source)[0].clone();
+        let entry = inventory(&granted, &candidate);
+        let intent =
+            ConsoleLaunchIntent::new(PPSSPP_RUNNER_ID, &granted.id, &candidate.game_ref).unwrap();
+        assert!(
+            prepare_console_launch(&granted, &source, &entry, &intent, &NoInstalledPackages)
+                .is_ok()
+        );
+    }
+
+    /// The core's *directory* is the platform's answer when there is one, and the
+    /// primary-user default when there is not. Its file name is never either.
+    #[test]
+    fn asks_the_platform_where_the_cores_are_before_composing_a_path() {
+        struct Elsewhere;
+        impl InstalledPackages for Elsewhere {
+            fn lookup(&self, package: &str) -> Option<InstalledPackage> {
+                (package == "com.retroarch").then(|| InstalledPackage {
+                    data_directory: Some(PathBuf::from("/data/user/11/com.retroarch")),
+                    installer: Some("com.android.vending".into()),
+                })
+            }
+        }
+
+        let granted = temporary_directory("core-directory");
+        write_rom(&granted, "Alter Ego.nes", NES_HEADER);
+        let profile = nes_profile(&granted);
+        let candidate = scan(&profile, &filesystem(&profile))[0].clone();
+        let entry = inventory(&profile, &candidate);
+        let intent =
+            ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
+                .unwrap();
+        let prepared =
+            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent, &Elsewhere)
+                .unwrap();
+
+        // The installed package is tried first, and its own data directory is
+        // where its cores are — not the primary user's.
+        let candidates = prepared.candidates();
+        assert_eq!(candidates[0].package(), "com.retroarch");
+        assert!(candidates[0].extras().contains(&AndroidIntentExtra::Text {
+            key: "LIBRETRO",
+            value: "/data/user/11/com.retroarch/cores/fceumm_libretro_android.so".into(),
+        }));
+        // The ones the platform said nothing about still get an intent, with the
+        // default a primary-user install has.
+        assert!(candidates[1].extras().contains(&AndroidIntentExtra::Text {
+            key: "LIBRETRO",
+            value: format!(
+                "/data/user/0/{}/cores/fceumm_libretro_android.so",
+                candidates[1].package()
+            ),
+        }));
     }
 
     #[test]
@@ -1960,7 +2377,13 @@ mod tests {
             b"NES\x1a something else entirely",
         );
         assert_eq!(
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent),
+            prepare_console_launch(
+                &profile,
+                &filesystem(&profile),
+                &entry,
+                &intent,
+                &NoInstalledPackages,
+            ),
             Err(ConsoleRunnerError::RomNotLaunchable)
         );
     }
@@ -1977,8 +2400,14 @@ mod tests {
         let intent =
             ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
                 .unwrap();
-        let prepared =
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
+        let prepared = prepare_console_launch(
+            &profile,
+            &filesystem(&profile),
+            &entry,
+            &intent,
+            &NoInstalledPackages,
+        )
+        .unwrap();
 
         write_rom(
             &granted,
@@ -2045,7 +2474,13 @@ mod tests {
             ConsoleLaunchIntent::new(PPSSPP_RUNNER_ID, &profile.id, &candidate.game_ref).unwrap(),
         ] {
             assert_eq!(
-                prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent),
+                prepare_console_launch(
+                    &profile,
+                    &filesystem(&profile),
+                    &entry,
+                    &intent,
+                    &NoInstalledPackages,
+                ),
                 Err(ConsoleRunnerError::InvalidIntent),
                 "accepted {intent:?}"
             );
@@ -2084,7 +2519,13 @@ mod tests {
         profile.enabled = false;
 
         assert_eq!(
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent),
+            prepare_console_launch(
+                &profile,
+                &filesystem(&profile),
+                &entry,
+                &intent,
+                &NoInstalledPackages,
+            ),
             Err(ConsoleRunnerError::ProfileDisabled)
         );
         assert_eq!(
@@ -2138,27 +2579,6 @@ mod tests {
         );
     }
 
-    /// The confirmation has to be answerable: two files can claim the same game,
-    /// and one of them may have arrived without the user knowing.
-    #[test]
-    fn names_a_rom_by_its_file_and_the_folder_under_the_grant() {
-        let root = Path::new("/storage/emulated/0/Download/Roms");
-        assert_eq!(
-            rom_origin(root, &root.join("Alter Ego.nes")),
-            RomOrigin {
-                file_name: "Alter Ego.nes".into(),
-                folder_path: String::new(),
-            }
-        );
-        assert_eq!(
-            rom_origin(root, &root.join("new/Free Coins.nes")),
-            RomOrigin {
-                file_name: "Free Coins.nes".into(),
-                folder_path: "new".into(),
-            }
-        );
-    }
-
     #[test]
     fn a_launch_on_a_desktop_host_is_refused_rather_than_shelled_out() {
         let granted = temporary_directory("desktop-launch");
@@ -2169,8 +2589,14 @@ mod tests {
         let intent =
             ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
                 .unwrap();
-        let prepared =
-            prepare_console_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
+        let prepared = prepare_console_launch(
+            &profile,
+            &filesystem(&profile),
+            &entry,
+            &intent,
+            &NoInstalledPackages,
+        )
+        .unwrap();
 
         // Everything up to the hand-off works everywhere; only the hand-off is
         // Android's, and off it that is a sentence rather than a process.

@@ -42,11 +42,18 @@ export interface SourceReviewEntry {
   collision: string | null;
 }
 
-/** At most this many files are listed before the rest become a count. */
-export const MAX_LISTED_REVIEW_ENTRIES = 6;
-
 /**
- * The lines to show, and how many were left out of that list.
+ * Every line to show, in the order to show them.
+ *
+ * **Every** line: the button below this list imports everything in it, so a list
+ * that stopped at six and said "and 35 more" would be asking the user to vouch
+ * for 35 files they never saw — and the host orders its answer by a hash of the
+ * pathname, so which six they did see was effectively a draw. The list is
+ * scrollable; the confirmation is not a summary of it.
+ *
+ * The order is the host's ordering undone: the names that collide come first,
+ * because those are the rows that exist to be read, and the rest follow by title
+ * so the same folder always reads the same way.
  *
  * `folderLabel` is the connected folder's own name as the host reported it;
  * without one the line starts at the grant rather than inventing a root.
@@ -54,13 +61,25 @@ export const MAX_LISTED_REVIEW_ENTRIES = 6;
 export function sourceReviewList(
   files: ReviewedFile[],
   folderLabel: string | null,
-): { entries: SourceReviewEntry[]; remaining: number } {
-  const entries = files.slice(0, MAX_LISTED_REVIEW_ENTRIES).map((file) => ({
-    title: file.title,
-    origin: reviewOrigin(file, folderLabel),
-    collision: collisionSentence(file.duplicateTitle),
-  }));
-  return { entries, remaining: Math.max(0, files.length - entries.length) };
+): { entries: SourceReviewEntry[] } {
+  const entries = [...files]
+    .sort((left, right) => {
+      const byRisk = collisionRank(right.duplicateTitle) - collisionRank(left.duplicateTitle);
+      return byRisk !== 0 ? byRisk : left.title.localeCompare(right.title);
+    })
+    .map((file) => ({
+      title: file.title,
+      origin: reviewOrigin(file, folderLabel),
+      collision: collisionSentence(file.duplicateTitle),
+    }));
+  return { entries };
+}
+
+/** A name the library already uses is louder than one shared inside the folder. */
+function collisionRank(collision: TitleCollision): number {
+  if (collision === "library") return 2;
+  if (collision === "folder") return 1;
+  return 0;
 }
 
 function reviewOrigin(file: ReviewedFile, folderLabel: string | null): string {
