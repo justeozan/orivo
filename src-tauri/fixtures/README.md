@@ -157,12 +157,26 @@ Closed, and asserted on the runner:
   `std`'s unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`). A
   junction re-pointed at a folder the user never approved — which `mklink /J`
   makes with no privilege at all — no longer redirects a read or a listing.
-- **The link count and the folder's identity** come from
-  `GetFileInformationByHandle`, so the hard-link rule fires on Windows and a
-  stored grant is pinned there rather than refused for want of an identity.
+- **The link count** comes from `GetFileInformationByHandle`, so the hard-link rule
+  fires on Windows.
+- **The folder's identity is the whole identifier.** `GetFileInformationByHandleEx`
+  with `FileIdInfo` gives 128 bits and a 64-bit volume serial number, which is what
+  ReFS — and therefore a Dev Drive — actually uses; the 64-bit file index the older
+  query reports is a truncation of it with no uniqueness guarantee. The fallback to
+  that index is only reached on a filesystem answering neither NTFS's nor ReFS's
+  query, where it is the only identity on offer.
+- **A reparse point is only a redirection when its tag names one.**
+  `IsReparseTagNameSurrogate` (`ntifs.h`, one bit) separates a symbolic link or a
+  junction from a file whose bytes merely live elsewhere: a OneDrive placeholder
+  that has not been downloaded, a deduplicated or WOF-compressed file. Refusing all
+  of them alike made a granted folder under OneDrive-managed Documents look empty
+  to a plugin, and every read in it fail. A non-redirecting reparse point is now
+  reopened relative to the handle *following* it, so the filter driver serves the
+  file the user actually has.
 - **A listing still opens nothing that matters.** Entries are opened for
   `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
-  another opener's share mode.
+  another opener's share mode. Only `read_file` follows a placeholder, which is
+  what a plugin asking to read it should cost.
 
 Still open:
 
@@ -177,6 +191,11 @@ Still open:
   `read_dir`; every fact comes from the handle. An attacker who redirects a parent
   can hide entries, never reveal one. Enumerating from the handle needs
   `fdopendir`/`readdir` on Unix and `NtQueryDirectoryFile` on Windows.
+- **A 128-bit identity has nowhere to be stored yet.** `DirectoryIdentity::wide` is
+  what a Dev Drive needs, and `DirectoryIdentity::new` is the 64-bit form every
+  other filesystem hands out; the catalogue keeps two `u64`s, so a wide identity
+  cannot be persisted and a reload would compare unequal — which refuses, never
+  accepts. Widening that record belongs with whoever owns the catalogue.
 
 A listing cut at 256 entries leaves a `files-truncated` decision behind. The
 contract has no field for it — see the ABI note in the PR that added this — so the

@@ -485,6 +485,30 @@ pub struct GrantedDirectory {
     identity: Option<DirectoryIdentity>,
 }
 
+/// Whether a Windows reparse tag stands for another named object.
+///
+/// This is Windows' own test, from `ntifs.h`:
+///
+/// ```c
+/// #define IsReparseTagNameSurrogate(_tag) (((_tag) & 0x20000000) != 0)
+/// ```
+///
+/// A name surrogate *is* a redirection: a symbolic link, a mount point (what
+/// `mklink /J` makes). Every other reparse tag describes where a file's bytes
+/// live and nothing about which file it is — a OneDrive placeholder that has not
+/// been downloaded, a deduplicated file, a WOF-compressed one. Refusing those as
+/// links is how a granted folder under OneDrive-managed Documents looks empty to a
+/// plugin and refuses every read in it.
+///
+/// A pure function over a `u32` so the rule can be driven on any platform, which
+/// is the only way the tags that matter get tested at all: no CI runner has
+/// OneDrive.
+#[allow(dead_code)]
+fn reparse_tag_redirects(tag: u32) -> bool {
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    tag & NAME_SURROGATE != 0
+}
+
 /// Handle-relative file access on Windows.
 ///
 /// `openat` has an exact equivalent here, and the pattern in this module is the
@@ -515,9 +539,11 @@ mod windows_relative {
 
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, SYNCHRONIZE,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_ID_INFO,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        SYNCHRONIZE,
     };
 
     /// `winternl.h`. `Length` and `MaximumLength` are byte counts, not character
@@ -555,6 +581,20 @@ mod windows_relative {
     const FILE_OPEN: u32 = 1;
     const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
     const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    /// Whether an open follows a reparse point or opens the point itself.
+    ///
+    /// `AsItself` is what a grant needs from a *redirection*: the link, so the kind
+    /// check refuses it instead of reading wherever it leads. `Following` is what a
+    /// grant needs from every other reparse point, because the bytes of a OneDrive
+    /// placeholder or a deduplicated file are behind a filter driver, and opening
+    /// the reparse point is precisely how you go round that driver and read the
+    /// stub.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Reparse {
+        AsItself,
+        Following,
+    }
 
     unsafe extern "system" {
         fn NtCreateFile(
@@ -596,7 +636,12 @@ mod windows_relative {
     /// so the caller's kind check refuses it rather than following it out of the
     /// grant. `FILE_SYNCHRONOUS_IO_NONALERT` is required for the handle to be
     /// usable with ordinary reads afterwards.
-    fn open_relative(directory: &File, name: &str, access: u32) -> io::Result<File> {
+    fn open_relative(
+        directory: &File,
+        name: &str,
+        access: u32,
+        reparse: Reparse,
+    ) -> io::Result<File> {
         let mut wide = OsStr::new(name).encode_wide().collect::<Vec<u16>>();
         if wide.is_empty() {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -632,7 +677,10 @@ mod windows_relative {
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 FILE_OPEN,
-                FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                match reparse {
+                    Reparse::AsItself => FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    Reparse::Following => FILE_SYNCHRONOUS_IO_NONALERT,
+                },
                 ptr::null(),
                 0,
             )
@@ -647,8 +695,27 @@ mod windows_relative {
         Ok(unsafe { File::from_raw_handle(handle as _) })
     }
 
+    /// Opens one entry for its bytes.
+    ///
+    /// Two steps, because the first answer decides the second. The entry is opened
+    /// as itself so its reparse tag can be read without following anything; a tag
+    /// that names another object is handed back as the link it is, for the caller
+    /// to refuse. A tag that only says where the bytes live — OneDrive, dedup, WOF
+    /// — is opened again *following* it, which is what lets the filter driver serve
+    /// the file the user actually has.
     pub(super) fn open_entry_for_reading(directory: &File, name: &str) -> io::Result<File> {
-        open_relative(directory, name, FILE_GENERIC_READ)
+        let entry = open_relative(directory, name, FILE_GENERIC_READ, Reparse::AsItself)?;
+        match reparse_tag(&entry)? {
+            Some(tag) if !super::reparse_tag_redirects(tag) => {
+                // Followed, so a filter driver serves the file the user has. If
+                // nothing owns the tag, NTFS refuses the followed open
+                // (`IO_REPARSE_TAG_NOT_HANDLED`) — and the data under the point is
+                // still this file's own, in this folder, so the entry the host
+                // already holds is the right answer rather than a refusal.
+                open_relative(directory, name, FILE_GENERIC_READ, Reparse::Following).or(Ok(entry))
+            }
+            _ => Ok(entry),
+        }
     }
 
     /// Opens for attributes only, which is not "opening" in any of the senses a
@@ -657,7 +724,64 @@ mod windows_relative {
     /// entry some program holds exclusively is still describable, exactly as a
     /// mode-000 file is on Unix.
     pub(super) fn open_entry_for_facts(directory: &File, name: &str) -> io::Result<File> {
-        open_relative(directory, name, FILE_READ_ATTRIBUTES)
+        open_relative(directory, name, FILE_READ_ATTRIBUTES, Reparse::AsItself)
+    }
+
+    /// The reparse tag of an entry, or `None` when it is not a reparse point.
+    ///
+    /// Asked of the handle rather than of the directory entry, and asked only when
+    /// the attribute says there is one to ask about.
+    pub(super) fn reparse_tag(handle: &File) -> io::Result<Option<u32>> {
+        let mut tag_info = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::zeroed();
+        // Safety: an open handle, and an out-parameter whose class and size are
+        // declared together and which is only read once the call reports success.
+        let answered = unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle() as HANDLE,
+                FileAttributeTagInfo,
+                tag_info.as_mut_ptr().cast(),
+                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        if answered == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: the call reported success, so the structure is initialised.
+        let tag_info = unsafe { tag_info.assume_init() };
+        Ok(
+            (tag_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                .then_some(tag_info.ReparseTag),
+        )
+    }
+
+    /// The volume and the file, as wide as the filesystem makes them.
+    ///
+    /// `nFileIndexHigh`/`nFileIndexLow` from `GetFileInformationByHandle` is 64
+    /// bits, and on ReFS — which a Dev Drive is — a file's identifier is 128, so the
+    /// 64-bit index is a truncation with no uniqueness guarantee.
+    /// `FileIdInfo` is the whole of it, and it also widens the volume serial number
+    /// from 32 bits to 64.
+    pub(super) fn full_identity(handle: &File) -> io::Result<(u64, u128)> {
+        let mut identity = MaybeUninit::<FILE_ID_INFO>::zeroed();
+        // Safety: as above — a class, a matching size, and a structure read only
+        // after success.
+        let answered = unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle() as HANDLE,
+                FileIdInfo,
+                identity.as_mut_ptr().cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if answered == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: the call reported success.
+        let identity = unsafe { identity.assume_init() };
+        Ok((
+            identity.VolumeSerialNumber,
+            u128::from_le_bytes(identity.FileId.Identifier),
+        ))
     }
 
     /// Everything the host asks of a handle on Windows: kind, size, how many names
@@ -692,14 +816,36 @@ mod windows_relative {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectoryIdentity {
     volume: u64,
-    file_id: u64,
+    /// Wide enough for every filesystem Orivo runs on. A Unix inode is 64 bits and
+    /// an NTFS file index is too, but a ReFS identifier — which is what a Dev Drive
+    /// hands out — is 128, and the 64-bit index Windows also reports for it is a
+    /// truncation with no uniqueness guarantee.
+    file_id: u128,
 }
 
 #[allow(dead_code)]
 impl DirectoryIdentity {
     /// Rebuilds what grant storage kept. Deliberately not `Default`: an identity
     /// nobody recorded is [`None`], not zero.
+    /// From a 64-bit identifier: a Unix inode, or the file index NTFS reports.
+    /// Kept as the plain constructor because that is what every filesystem but
+    /// ReFS hands out, and what a caller reading two `u64`s back out of storage
+    /// has.
     pub fn new(volume: u64, file_id: u64) -> Self {
+        Self {
+            volume,
+            file_id: u128::from(file_id),
+        }
+    }
+
+    /// From a filesystem whose identifiers need all 128 bits — ReFS, and therefore
+    /// a Dev Drive.
+    ///
+    /// A wide identity never compares equal to a 64-bit one for the same file, and
+    /// that is the safe direction: a comparison is only ever used to *refuse*, so
+    /// the two disagreeing costs a grant that has to be re-approved rather than a
+    /// folder that should not have been accepted.
+    pub fn wide(volume: u64, file_id: u128) -> Self {
         Self { volume, file_id }
     }
 
@@ -707,7 +853,7 @@ impl DirectoryIdentity {
         self.volume
     }
 
-    pub fn file_id(&self) -> u64 {
+    pub fn file_id(&self) -> u128 {
         self.file_id
     }
 
@@ -720,19 +866,28 @@ impl DirectoryIdentity {
         {
             use std::os::unix::fs::MetadataExt;
             let metadata = handle.metadata().ok()?;
-            Some(Self {
-                volume: metadata.dev(),
-                file_id: metadata.ino(),
-            })
+            Some(Self::new(metadata.dev(), metadata.ino()))
         }
         #[cfg(not(unix))]
         {
+            if let Ok((volume, file_id)) = windows_relative::full_identity(handle) {
+                return Some(Self::wide(volume, file_id));
+            }
+            // The fallback, and the reason it is a safe one: `FileIdInfo` is the
+            // query NTFS and ReFS have both answered since Windows 8, so a failure
+            // here means a filesystem that implements neither — an SMB share, an
+            // unusual driver — where the 64-bit index is the only identity on offer
+            // at all. The volume whose identifiers actually need 128 bits is the one
+            // that would have answered above. Recorded as documented rather than
+            // silently truncated: a comparison is only ever used to *refuse*, so a
+            // collision here would be a false accept, which is why the reasoning has
+            // to hold rather than be convenient.
             let information = windows_relative::information(handle).ok()?;
-            Some(Self {
-                volume: u64::from(information.dwVolumeSerialNumber),
-                file_id: (u64::from(information.nFileIndexHigh) << 32)
+            Some(Self::new(
+                u64::from(information.dwVolumeSerialNumber),
+                (u64::from(information.nFileIndexHigh) << 32)
                     | u64::from(information.nFileIndexLow),
-            })
+            ))
         }
     }
 }
@@ -1759,17 +1914,20 @@ impl EntryFacts {
         }
         #[cfg(not(unix))]
         {
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-            };
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 
             let information = windows_relative::information(handle)?;
             let directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-            let symlink = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            // A reparse point is only a redirection when its tag says it names
+            // another object. The rest — a OneDrive placeholder, a deduplicated or
+            // WOF-compressed file — are ordinary files that happen to keep their
+            // bytes somewhere else, and Documents and Desktop are OneDrive-managed
+            // on a great many machines.
+            let symlink = windows_relative::reparse_tag(handle)?.is_some_and(reparse_tag_redirects);
             Ok(Self {
-                // A junction and a symbolic link are both reparse points, and
-                // neither is a file the host will read: the grant covers what is
-                // inside the folder, not wherever a reparse point leads.
+                // A symbolic link and a junction are not files the host will read:
+                // the grant covers what is inside the folder, not wherever a
+                // redirection leads.
                 file: !directory && !symlink,
                 directory,
                 symlink,
@@ -4275,6 +4433,56 @@ mod tests {
         ));
     }
 
+    /// The rule itself, against the tags that actually occur. It runs on every
+    /// platform because the tags that matter most cannot be produced on any CI
+    /// runner: nobody's runner has OneDrive, and the whole point is what happens to
+    /// a folder OneDrive manages.
+    ///
+    /// Before the one-bit test, `EntryFacts` called every reparse point a link, so
+    /// each of the second group below was a file the host refused to list or read.
+    #[test]
+    fn a_reparse_tag_is_a_redirection_only_when_it_names_one() {
+        // Tags that stand for another named object. These are the redirections a
+        // grant has to refuse, and both are things an unprivileged account can
+        // make.
+        for (tag, what) in [
+            (0xA000_000Cu32, "IO_REPARSE_TAG_SYMLINK"),
+            (0xA000_0003, "IO_REPARSE_TAG_MOUNT_POINT"),
+            (0xA000_0018, "IO_REPARSE_TAG_GLOBAL_REPARSE"),
+            (0xA000_001D, "IO_REPARSE_TAG_LX_SYMLINK"),
+        ] {
+            assert!(
+                reparse_tag_redirects(tag),
+                "{what} names another object and was not treated as a redirection"
+            );
+        }
+
+        // Tags that say where a file's bytes live and nothing about which file it
+        // is. Every one of these is an ordinary file to a user, and the first four
+        // are how OneDrive represents a file it has not downloaded — on Documents
+        // and Desktop, by default, on a great many machines.
+        for (tag, what) in [
+            (0x9000_001Au32, "IO_REPARSE_TAG_CLOUD"),
+            (0x9000_101A, "IO_REPARSE_TAG_CLOUD_1"),
+            (0x9000_901A, "IO_REPARSE_TAG_CLOUD_9"),
+            (0x9000_F01A, "IO_REPARSE_TAG_CLOUD_F"),
+            (0x8000_0013, "IO_REPARSE_TAG_DEDUP"),
+            (0x8000_0017, "IO_REPARSE_TAG_WOF"),
+            (0x8000_001E, "IO_REPARSE_TAG_STORAGE_SYNC"),
+            (0x8000_0014, "IO_REPARSE_TAG_NFS"),
+        ] {
+            assert!(
+                !reparse_tag_redirects(tag),
+                "{what} describes storage, not a name, and was treated as a redirection"
+            );
+        }
+
+        // And the bit, stated once so the two lists above are examples rather than
+        // the rule: `IsReparseTagNameSurrogate`, `ntifs.h`.
+        assert!(reparse_tag_redirects(0x2000_0000));
+        assert!(!reparse_tag_redirects(0xDFFF_FFFF));
+    }
+
     /// Not every reparse point is a redirection, and treating them alike loses the
     /// user their library.
     ///
@@ -4285,40 +4493,20 @@ mod tests {
     /// point shows the plugin an empty folder and refuses every read in it, and the
     /// user is told nothing.
     ///
-    /// Windows' own test is one bit — `IsReparseTagNameSurrogate`, `ntifs.h` — and
-    /// it separates the tags that stand for another named object from the tags that
-    /// only describe where the bytes are.
-    ///
-    /// This drives it end to end with the one non-surrogate reparse point a CI
-    /// runner can be asked for: `compact /c /exe:LZX`, which turns a file into a
-    /// WOF reparse point. If the environment declines to produce one, the property
-    /// is left to `a_reparse_tag_is_a_redirection_only_when_it_names_one`, which
-    /// carries the rule itself and runs everywhere.
+    /// The rule is one bit — `IsReparseTagNameSurrogate`, `ntifs.h` — and it is
+    /// checked against the real tags in
+    /// `a_reparse_tag_is_a_redirection_only_when_it_names_one`. This is the wiring:
+    /// that `EntryFacts` consults the tag at all, and that a read gets the file's
+    /// bytes rather than a stub.
     #[cfg(not(unix))]
     #[test]
     fn a_reparse_point_that_is_not_a_redirection_is_read_like_any_file() {
-        use std::os::windows::fs::MetadataExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-        let library = FixtureLibrary::new("wof");
-        let cloudish = library.games.join("delta.rom");
-        // Compressible enough that WOF is worth the filter driver's while.
-        fs::write(&cloudish, "Delta Drift\n".repeat(4096).as_bytes()).unwrap();
-
-        let compacted = std::process::Command::new("compact")
-            .args(["/c", "/exe:LZX"])
-            .arg(&cloudish)
-            .output()
-            .expect("compact is on PATH");
-        let attributes = fs::metadata(&cloudish).unwrap().file_attributes();
-        if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-            println!(
-                "this volume produced no reparse point, so the end-to-end half is \
-                 not exercised here: compact said {}",
-                String::from_utf8_lossy(&compacted.stdout).trim()
-            );
-            return;
-        }
+        let library = FixtureLibrary::new("storage-reparse");
+        let unusual = library.games.join("delta.rom");
+        // Compressible, in case WOF is what ends up being used.
+        fs::write(&unusual, "Delta Drift\n".repeat(4096).as_bytes()).unwrap();
+        let mechanism = plant_storage_reparse_point(&unusual);
+        println!("reparse point planted as {mechanism}");
 
         let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
@@ -4333,14 +4521,127 @@ mod tests {
         };
         assert!(
             page.games.iter().any(|game| game.external_id == "delta"),
-            "a file whose only peculiarity is where its bytes live was left out of the listing"
+            "a file whose only peculiarity is where its bytes live was left out of \
+             the listing ({mechanism})"
         );
-        // And its contents come back, which is the half a listing cannot prove:
-        // opening the reparse point itself would hand back the placeholder.
+        // And its contents come back, which a listing cannot prove: a driver-backed
+        // placeholder has to be opened *following* the reparse point, and a tag no
+        // driver owns has to fall back to the data under it. Both are this one
+        // assertion.
         assert!(
             harness.prepare("fixture:read-delta").is_ok(),
-            "a file behind a storage filter could not be read"
+            "a file behind a storage reparse point could not be read ({mechanism})"
         );
+    }
+
+    /// Plants a reparse point that is **not** a redirection, and says how.
+    ///
+    /// Two mechanisms, because one of them is faithful and the other is certain.
+    /// `compact /c /exe:LZX` produces a WOF reparse point, which a real filter
+    /// driver owns — the same shape as a OneDrive placeholder, and it exercises the
+    /// *followed* open. It also silently declines on some volumes, and the CI
+    /// runner's is one of them. So if it does, the test sets a reparse point itself
+    /// with a non-Microsoft tag whose name-surrogate bit is clear: no driver owns
+    /// it, which means the followed open is refused and the host has to fall back
+    /// to the data under the point. Either way the file must be listed and read.
+    #[cfg(not(unix))]
+    fn plant_storage_reparse_point(path: &Path) -> &'static str {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        let is_reparse_point = |path: &Path| {
+            fs::metadata(path)
+                .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                .unwrap_or(false)
+        };
+
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:LZX"])
+            .arg(path)
+            .output()
+            .expect("compact is on PATH");
+        if is_reparse_point(path) {
+            return "WOF, through `compact /c /exe:LZX`";
+        }
+        println!(
+            "compact produced no reparse point here, so one is set by hand: {}",
+            String::from_utf8_lossy(&compacted.stdout).trim()
+        );
+
+        /// `FSCTL_SET_REPARSE_POINT`, from `winioctl.h`.
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        /// A tag of this test's own. Bit 31 clear marks it non-Microsoft, which is
+        /// what makes a GUID buffer legal; bit 29 clear is the whole point — this
+        /// names no other object, exactly as a OneDrive placeholder names none.
+        const TAG: u32 = 0x0000_1234;
+
+        /// `REPARSE_GUID_DATA_BUFFER`, with a payload of this test's size.
+        #[repr(C)]
+        struct ReparseGuidDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            reparse_guid: [u8; 16],
+            data: [u8; 8],
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        assert!(!reparse_tag_redirects(TAG), "the test's own tag redirects");
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .expect("the test can open its own file for writing");
+        let buffer = ReparseGuidDataBuffer {
+            reparse_tag: TAG,
+            reparse_data_length: 8,
+            reserved: 0,
+            reparse_guid: *b"orivo-w2-fixture",
+            data: *b"nodriver",
+        };
+        let mut returned = 0u32;
+        // Safety: an open handle with write access, one input buffer whose declared
+        // length matches its `data` field, and no output buffer — which is what
+        // `FSCTL_SET_REPARSE_POINT` takes.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_SET_REPARSE_POINT,
+                (&raw const buffer).cast(),
+                size_of::<ReparseGuidDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            answered != 0,
+            "FSCTL_SET_REPARSE_POINT failed: {}",
+            std::io::Error::last_os_error()
+        );
+        drop(handle);
+        assert!(
+            is_reparse_point(path),
+            "the reparse point was set and the attribute did not appear"
+        );
+        "a non-Microsoft tag, through FSCTL_SET_REPARSE_POINT"
     }
 
     /// A redirection *inside* the granted folder is skipped rather than followed,
