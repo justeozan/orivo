@@ -18,7 +18,7 @@ use crate::plugin_manifest::{
     CompatibleVersionInfo, HostCompatibility, PluginExtension, PluginManifest,
     ValidatedPluginManifest,
 };
-use crate::plugin_runtime::{PluginRuntime, PluginRuntimeError, RunnerCheck};
+use crate::plugin_runtime::{PluginHealth, PluginRuntime, PluginRuntimeError, RunnerCheck};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -176,6 +176,55 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// Grade one package tree the way discovery grades an installed plugin,
+    /// and say so with a sentence instead of a row.
+    ///
+    /// This is the installer's smoke test. It takes `expected_id` rather than
+    /// reading the folder's name because a candidate is verified twice: once in
+    /// staging, where the directory is called `<id>~new`, and once at its final
+    /// path, where the name *is* the identity and discovery will check it.
+    ///
+    /// [`VerifyDepth::Contract`] compiles and type-checks without running guest
+    /// code — enough to refuse a package before it displaces anything.
+    /// [`VerifyDepth::Smoke`] also asks the component who it is and whether it
+    /// is ready, under the host's probe budget and with none of the user's
+    /// grants, which is the only question worth answering *after* a swap.
+    pub fn verify_package(
+        &self,
+        runtime: &PluginRuntime,
+        directory: &Path,
+        expected_id: &str,
+        depth: VerifyDepth,
+    ) -> Result<(), PackageRefusal> {
+        let plugin = self.inspect_plugin_directory(directory.to_path_buf(), expected_id.into());
+        if plugin.record.state != PluginState::Ready {
+            return Err(PackageRefusal::Refused(plugin.record.message));
+        }
+        let check = match depth {
+            VerifyDepth::Contract => RunnerCheck::ContractOnly,
+            VerifyDepth::Smoke => RunnerCheck::ContractAndHealth,
+        };
+        let health = plugin
+            .preflight_reporting_health(runtime, check)
+            .map_err(PackageRefusal::from_runner)?;
+        match health {
+            // A component that answers "not ready" has answered. Discovery
+            // still lists such a plugin — showing the reason is E2's row — but
+            // an *update* that lands on one is precisely what a rollback is
+            // for, so here it is a refusal.
+            Some(health) if !health.ready => Err(PackageRefusal::Refused(
+                health
+                    .message
+                    .filter(|message| !message.trim().is_empty())
+                    .map_or_else(
+                        || "This plugin reports that it is not ready to run.".to_string(),
+                        |message| sanitised(&message),
+                    ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     fn inspect_plugin_directory(
         &self,
         directory: PathBuf,
@@ -286,33 +335,133 @@ impl DiscoveredPlugin {
         }
     }
 
+    fn preflight(&self, runtime: &PluginRuntime, check: RunnerCheck) -> Result<(), &'static str> {
+        self.preflight_reporting_health(runtime, check)
+            .map(|_| ())
+            .map_err(PreflightError::message)
+    }
+
     /// Re-read and re-hash the component immediately before Wasmtime sees its
     /// bytes. This closes the discovery-to-compile race without exposing a
     /// plugin path beyond this backend module.
-    fn preflight(&self, runtime: &PluginRuntime, check: RunnerCheck) -> Result<(), &'static str> {
+    ///
+    /// The health answer is returned rather than dropped because the installer
+    /// acts on it — discovery does not, and both callers reading the same code
+    /// is what keeps a package from passing one and failing the other.
+    fn preflight_reporting_health(
+        &self,
+        runtime: &PluginRuntime,
+        check: RunnerCheck,
+    ) -> Result<Option<PluginHealth>, PreflightError> {
         let component = self
             .component
             .as_ref()
-            .ok_or("The plugin component is unavailable.")?;
+            .ok_or(PreflightError::Tree("The plugin component is unavailable."))?;
         let bytes = read_bounded_file(&component.path, component.byte_size)
-            .map_err(|_| "The plugin component changed before validation.")?;
+            .map_err(|_| PreflightError::Tree("The plugin component changed before validation."))?;
         if sha256_bytes(&bytes) != component.sha256 {
-            return Err("The plugin component changed before validation.");
+            return Err(PreflightError::Tree(
+                "The plugin component changed before validation.",
+            ));
         }
         let prepared = runtime
             .prepare_component(&bytes, &component.sha256)
-            .map_err(|_| "The plugin component did not pass WebAssembly validation.")?;
+            .map_err(|_| {
+                PreflightError::Tree("The plugin component did not pass WebAssembly validation.")
+            })?;
         // Source, metadata and installer packages stay compile-only: this host
         // slice implements the runner world, and judging a contract Orivo cannot
         // yet invoke would refuse a package for a reason it cannot be sure of.
         let Some(manifest) = self.runner_manifest.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         runtime
             .verify_runner(&prepared, manifest, check)
-            .map(|_| ())
-            .map_err(runner_refusal)
+            .map_err(PreflightError::Host)
     }
+}
+
+/// Why a preflight stopped. Split because the *host* half carries a typed error
+/// the installer has to read, while the tree half is already a sentence.
+#[derive(Debug, Clone)]
+enum PreflightError {
+    Tree(&'static str),
+    Host(PluginRuntimeError),
+}
+
+impl PreflightError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Tree(message) => message,
+            Self::Host(error) => runner_refusal(error),
+        }
+    }
+}
+
+/// Why the installer will not take a package — and, crucially, whether that is
+/// a statement about the package.
+///
+/// A smoke test runs through the scheduler, which allows one job at a time per
+/// plugin. A discovery page already in flight for the same plugin can push the
+/// probe past its bounded wait, and treating *that* as a verdict would roll back
+/// a perfectly good update because the machine was busy. The two cases have to
+/// be told apart before anything is undone.
+#[derive(Debug, Clone)]
+pub enum PackageRefusal {
+    /// The package is wrong, and asking again will say the same.
+    Refused(String),
+    /// No answer was obtained. Queued behind another job, cancelled, paused,
+    /// out of wall clock. Says nothing about the package.
+    Inconclusive(String),
+}
+
+impl PackageRefusal {
+    fn from_runner(error: PreflightError) -> Self {
+        match error {
+            PreflightError::Tree(message) => Self::Refused(message.to_string()),
+            PreflightError::Host(host) => Self::from_host(host),
+        }
+    }
+
+    /// Whether a host error says anything about the package.
+    pub fn from_host(host: PluginRuntimeError) -> Self {
+        match host {
+            // Load-sensitive, every one of them. Fuel is deliberately not here:
+            // it is deterministic, so a component that runs out of it runs out
+            // of it on an idle machine too.
+            PluginRuntimeError::DeadlineExceeded
+            | PluginRuntimeError::Busy
+            | PluginRuntimeError::Paused
+            | PluginRuntimeError::Cancelled
+            | PluginRuntimeError::HostMemoryExhausted
+            | PluginRuntimeError::EngineUnavailable => {
+                Self::Inconclusive(runner_refusal(host).to_string())
+            }
+            _ => Self::Refused(runner_refusal(host).to_string()),
+        }
+    }
+}
+
+/// How far [`PluginRegistry::verify_package`] goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyDepth {
+    /// Compile and type-check. No guest code runs.
+    Contract,
+    /// Also ask the component who it is and whether it is ready.
+    Smoke,
+}
+
+/// A component's own words, on their way to a dialog. Bounded and stripped of
+/// control characters, because the only thing the host knows about this string
+/// is that a plugin chose it.
+fn sanitised(message: &str) -> String {
+    message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(200)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Whether the package at this position in a discovery pass is called or only
@@ -824,6 +973,49 @@ mod tests {
         assert_eq!(runner.state, PluginState::Invalid);
         assert!(runner.message.contains("does not match the package"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The smoke test is the one caller that acts on a refusal by undoing an
+    /// update, so it has to know which refusals are about the package. The
+    /// scheduler allows one job at a time per plugin: a probe queued behind a
+    /// discovery page can run out of wall clock on a loaded machine, and
+    /// reading that as "this package is broken" rolls back a good update.
+    #[test]
+    fn a_refusal_the_host_never_reached_a_verdict_on_is_not_a_verdict() {
+        for error in [
+            PluginRuntimeError::DeadlineExceeded,
+            PluginRuntimeError::Busy,
+            PluginRuntimeError::Paused,
+            PluginRuntimeError::Cancelled,
+            PluginRuntimeError::HostMemoryExhausted,
+            PluginRuntimeError::EngineUnavailable,
+        ] {
+            assert!(
+                matches!(
+                    PackageRefusal::from_host(error.clone()),
+                    PackageRefusal::Inconclusive(_)
+                ),
+                "{error:?} says nothing about the package"
+            );
+        }
+        for error in [
+            PluginRuntimeError::MissingWorld,
+            PluginRuntimeError::UnknownImport,
+            PluginRuntimeError::IdentityMismatch,
+            PluginRuntimeError::Trapped,
+            PluginRuntimeError::InvalidComponent,
+            // Deterministic, so a component that runs out of fuel runs out of
+            // it on an idle machine too.
+            PluginRuntimeError::FuelExhausted,
+        ] {
+            assert!(
+                matches!(
+                    PackageRefusal::from_host(error.clone()),
+                    PackageRefusal::Refused(_)
+                ),
+                "{error:?} is a verdict"
+            );
+        }
     }
 
     #[test]

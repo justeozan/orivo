@@ -58,6 +58,69 @@ s’affiche comme non signé partout. Un paquet ne peut pas transporter de binai
 natif : `blocked_payload_path` refuse `.exe`, `.dylib`, `.so`, `.dll` et les
 scripts, et toute entrée non déclarée dans le manifeste invalide l’archive.
 
+L’étape 3.1 est faite pour sa première moitié. Un **index de registry signé**
+(`plugin_index.rs`) complète le registre compilé dans le binaire : enveloppe
+versionnée dont la signature Ed25519 couvre les octets exacts du document,
+récupération HTTPS limitée à une allowlist compilée et revérifiée à chaque
+redirection, cache ETag/TTL sur disque, et un numéro de séquence qui ne recule
+jamais — parce qu’une signature reste valide pour toujours et que rejouer un
+index ancien est la façon dont un registre cache une mise à jour. Le chemin
+d’affichage ne lit que le cache ; rafraîchir est une commande séparée et
+annulable. Un document *vérifié* repasse malgré tout la même grammaire qu’un
+document inconnu : une signature dit qui a écrit, jamais que ce qui est écrit
+est sensé.
+
+Trois choses que la signature ne donne pas, et qu’il a fallu ajouter. Le
+**plancher anti-rejeu** ne vient jamais d’un champ du fichier de cache — une
+valeur écrite là se réécrit, à zéro pour laisser passer un vieil index, ou à
+`u64::MAX` pour geler le client sur celui qu’il a. Il vient d’une constante
+compilée et de l’index en cache *qui vérifie encore*. Le document porte une
+**date d’expiration signée** : sans elle, qui contrôle le réseau ou le dépôt
+tient tous les clients sur une seule vue du registry, et le plancher ne voit
+rien puisque rien ne recule ; passé ce délai, Orivo revient au registre
+compilé. Et l’index est haché derrière une **étiquette de domaine** : un paquet
+et un index étaient signés de la même façon avec la même clé, si bien que le
+`signature.ed25519` livré dans chaque paquet était une signature valide sur un
+« document d’index » — seuls des champs JSON obligatoires différents séparaient
+les deux rôles.
+
+La jonction entre les deux est désormais faite. Le registre de grants ne demande
+plus si un fichier existe à côté du plugin : il demande à l’installateur si
+*ces octets-là* sont ceux pour lesquels la transaction a accepté une signature.
+Et une permission ne survit à un changement de paquet que si la chaîne de
+consentement tient — même signataire, et strictement en avant : une
+rétrogradation est signée elle aussi, et c’est justement la version dont le
+`validate-profile` ou la découverte étaient peut-être plus faibles. Tout le
+reste — désinstallation, remplacement, rollback, retour à un build de
+développement — révoque les permissions et renvoie les profils à « à
+revalider », en gardant les dossiers choisis et tous les jeux importés.
+
+L’installateur expose enfin **l’identité du paquet** : pour la version vivante
+d’un plugin, sa version, le SHA-256 du composant qui tournera réellement, et
+quelle clé l’a signé. Un grant, comme un profil de runner jugé valide, est un
+accord avec un *paquet* et non avec un identifiant : un observateur enregistré
+depuis `lib.rs` est prévenu à chaque fois que ce paquet change — mise à jour,
+rollback, reprise après coupure — et à la désinstallation. Le marqueur de canal
+nomme l’empreinte pour laquelle il a été écrit, donc remplacer le composant sous
+un plugin installé coûte le badge officiel au lieu d’en hériter, et un build de
+développement ne peut pas remplacer un paquet signé sans une désinstallation
+faite par l’utilisateur.
+
+L’installation, la mise à jour et le rollback sont devenus **une transaction**
+(`plugin_update.rs`). Le candidat est déballé dans un répertoire de staging,
+noté une première fois hors du chemin — contrat et empreintes, sans exécuter le
+composant —, puis la version vivante est *archivée* au lieu d’être supprimée, le
+candidat est basculé, et le host le sonde à son emplacement définitif : identité
+et `health-check` sous budget de sonde, sans aucun grant. Un refus là déclenche
+le rollback automatiquement ; un rollback manuel rejoue la même séquence à
+l’envers. Chaque étape est un `rename`, et un fichier de journal écrit avant la
+première dit laquelle était en cours : au démarrage suivant, une coupure à
+n’importe quelle étape laisse soit l’ancienne version intacte, soit la nouvelle
+complète et sondée. Le point de non-retour est un seul `rename` du journal sur
+`previous.json`, qui est aussi la description de la version conservée. Orivo ne
+garde qu’**une** version précédente : une mise à jour annulée dépense le
+créneau, jamais la version qui tourne.
+
 Une extension `installer` complète le contrat v1. Le plugin ne fournit que des
 données — un catalogue borné de titres avec URL, empreinte et tailles — et le
 host exécute lui-même chaque étape privilégiée : téléchargement HTTPS restreint
@@ -160,7 +223,10 @@ v8). Les grants, les profils et les références externes y vivent, parce
 qu’accorder un dossier et enregistrer la permission de le lire doivent réussir ou
 échouer ensemble ; l’état des jobs reste dans le scheduler et le journal reste un
 anneau borné en mémoire, parce que rien de ce que le host en tire n’avait besoin
-de survivre au processus. Révoquer écrit une date au lieu de supprimer une ligne,
+de survivre au processus. Ce que l’installateur persiste en propre — la version
+conservée, le journal de transaction, le marqueur de canal et le cache d’index —
+vit en fichiers sous la racine des plugins, dans des répertoires pointés que la
+découverte ignore. Révoquer écrit une date au lieu de supprimer une ligne,
 de sorte que « ce plugin pouvait lire ce dossier entre ces deux dates » reste une
 question à laquelle le registre répond.
 

@@ -1,35 +1,53 @@
-//! Installing and removing plugin packages.
+//! Installing, updating and removing plugin packages.
 //!
 //! A plugin arrives as a signed `.orivo-plugin` archive. The host reads it
 //! wholly in memory, re-derives every digest, checks the package against the
-//! v1 policy in [`crate::plugin_manifest`], and only then materialises it on
-//! disk — into a staging directory that is renamed into place, so a failed or
-//! cancelled install can never leave a half-written plugin for the registry to
-//! discover.
+//! v1 policy in [`crate::plugin_manifest`], asks the runtime whether the
+//! component can actually run — and only then hands it to
+//! [`crate::plugin_update`], which makes it the live version through a
+//! transaction that survives being killed at any step.
 //!
-//! Two channels, two signature policies. A package pulled from the embedded
-//! registry must carry a signature made by Orivo's own key. A package the user
-//! picks by hand may be unsigned; it installs as `Development` and every
-//! surface that shows it says so.
+//! Two channels, two signature policies. A package pulled from the registry
+//! must carry a signature made by Orivo's own key; it may be updated
+//! automatically once the user has consented once. A package the user picks by
+//! hand may be unsigned; it installs as `Development`, every surface that shows
+//! it says so, and nothing updates it but the user.
+//!
+//! Where the checks live is deliberate. The *package* is judged before anything
+//! is written: format, digests, signature, ABI, and — new here — whether a
+//! runner component really implements the runner contract, which is the gap
+//! that let a package install and then appear as a broken row. The *plugin* is
+//! judged again after the swap, at its final path, because that is the only
+//! place the identity check discovery runs can be run: a staged directory is
+//! not named after the plugin. A refusal there rolls the update back.
 
+use crate::plugin_index::{
+    IndexCache, IndexEntry, REGISTRY_INDEX_URL, download_entry, is_upgrade, refresh_index,
+};
 use crate::plugin_manifest::{
     HostCompatibility, PackageEntry, PackageInspection, PackageSignatureStatus, PluginManifest,
     ValidatedPluginPackage, validate_plugin_package,
 };
-use crate::plugin_registry::{PLUGINS_DIRECTORY, PluginRegistry, PluginState};
+use crate::plugin_registry::{
+    PLUGINS_DIRECTORY, PackageRefusal, PluginRegistry, PluginState, VerifyDepth,
+};
 use crate::plugin_runtime::PluginRuntime;
+use crate::plugin_update::{
+    Checkpoint, IdentityObserver, PackageChannel, PackageFiles, PluginStore, RecoveryOutcome,
+    valid_plugin_id,
+};
 use ed25519_dalek::{Signature, VerifyingKey};
 use flate2::read::GzDecoder;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     fs,
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -40,12 +58,12 @@ const REGISTRY_JSON: &str = include_str!("../resources/plugin-registry.json");
 const MANIFEST_FILE: &str = "manifest.json";
 const COMPONENT_FILE: &str = "component.wasm";
 const SIGNATURE_FILE: &str = "signature.ed25519";
-const STAGING_DIRECTORY: &str = ".staging";
 /// Mirrors `MAX_PACKAGE_BYTES` in the manifest policy, with headroom for the
 /// signature and the archive's own framing.
 const MAX_PACKAGE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_PACKAGE_ENTRIES: usize = 64;
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+const POLICY_FILE: &str = ".cache/update-policy.json";
 
 /// Orivo's release signing key. A registry package that is not signed by this
 /// key is refused: the registry is a distribution channel, not a trust
@@ -56,36 +74,23 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 /// compromised signing key cannot be replaced by anything a package says.
 const RELEASE_PUBLIC_KEY_BASE64: &str = "OX9NRNeAEL2tEyS54qUTJ14cFS6smfLu6JoPzbiXG9w=";
 
-// ---------------------------------------------------------------------------
-// Embedded registry
-// ---------------------------------------------------------------------------
+/// The name recorded beside a plugin that arrived release-signed. It is written
+/// down rather than implied so that rotating the key above shows up in the
+/// record as a different signer, instead of silently reinterpreting every
+/// package already installed.
+pub const ORIVO_RELEASE_SIGNER: &str = "orivo-release-v1";
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RegistryEntry {
-    id: String,
-    name: String,
-    version: String,
-    #[serde(default)]
-    summary: String,
-    url: String,
-    sha256: String,
-    size_bytes: u64,
-}
-
-fn registry_entries() -> Vec<RegistryEntry> {
-    serde_json::from_str::<Vec<RegistryEntry>>(REGISTRY_JSON)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| {
-            entry.url.starts_with("https://")
-                && entry.sha256.len() == 64
-                && entry.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-                && entry.size_bytes > 0
-                && entry.size_bytes <= MAX_PACKAGE_BYTES
-        })
-        .collect()
-}
+/// How many times a smoke test that gave no answer is asked again before the
+/// update is undone.
+///
+/// The realistic cause is contention, not a bad package: the scheduler runs one
+/// job at a time per plugin, so a discovery page already in flight can push the
+/// probe past its bounded wait. Three tries a quarter of a second apart outlast
+/// that without turning a genuinely wedged plugin into a long stall — and a
+/// failure after them still rolls back, it just says which kind of failure it
+/// was.
+const SMOKE_TEST_ATTEMPTS: usize = 3;
+const SMOKE_TEST_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 // ---------------------------------------------------------------------------
 // IPC views
@@ -101,6 +106,13 @@ pub struct InstalledPluginView {
     pub state: PluginState,
     pub message: String,
     pub trusted: bool,
+    /// The version Orivo kept when this one was installed, if any. It is the
+    /// only thing "Go back to the previous version" can mean, so it is a fact
+    /// about disk rather than a button that might do nothing.
+    pub rollback_to: Option<String>,
+    /// A newer release in the registry, from the cached index only. Resolving
+    /// it never touches the network.
+    pub update_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -121,6 +133,14 @@ pub struct PluginCatalogView {
     pub available: Vec<AvailablePluginView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginUpdatePolicy {
+    /// Off until the user says otherwise, once, for the whole official channel.
+    /// A development build is never included whatever this says.
+    pub automatic: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PluginInstallProgress {
@@ -138,14 +158,58 @@ struct PluginInstallProgress {
 pub struct PluginInstallerService {
     plugin_root: PathBuf,
     host_version: &'static str,
+    store: PluginStore,
+    index: IndexCache,
+    /// One flag for the one network operation a user can see at a time. It is
+    /// cleared when an operation starts, so `cancel_plugin_update` abandons
+    /// what is running rather than poisoning what comes next.
+    cancelled: AtomicBool,
 }
 
 impl PluginInstallerService {
     pub fn new(plugin_root: PathBuf, host_version: &'static str) -> Self {
         Self {
+            store: PluginStore::new(plugin_root.clone()),
+            index: IndexCache::new(&plugin_root),
+            cancelled: AtomicBool::new(false),
             plugin_root,
             host_version,
         }
+    }
+
+    fn registry(&self) -> PluginRegistry {
+        PluginRegistry::new(
+            self.plugin_root.clone(),
+            HostCompatibility::v1(self.host_version),
+        )
+    }
+
+    /// Everything the registry offers this build: the list compiled into the
+    /// binary, overlaid by the cached signed index. No network, ever — this is
+    /// read on a path that renders.
+    fn available_entries(&self) -> Vec<IndexEntry> {
+        let mut entries = crate::plugin_index::parse_unsigned_entries(REGISTRY_JSON.as_bytes());
+        if let Some(index) = self.index.load() {
+            for entry in index.entries {
+                match entries.iter_mut().find(|known| known.id == entry.id) {
+                    Some(known) => *known = entry,
+                    None => entries.push(entry),
+                }
+            }
+        }
+        entries.retain(|entry| self.host_can_run(entry));
+        entries.sort_by(|left, right| left.id.cmp(&right.id));
+        entries
+    }
+
+    /// A release that needs a newer Orivo is not an update, it is a reason to
+    /// update Orivo. Hiding it is better than offering an install that the
+    /// manifest check would refuse after the download.
+    fn host_can_run(&self, entry: &IndexEntry) -> bool {
+        entry
+            .min_orivo_version
+            .as_deref()
+            .is_none_or(|minimum| !is_upgrade(minimum, self.host_version))
     }
 
     fn installed(&self) -> Vec<InstalledPluginView> {
@@ -154,48 +218,35 @@ impl PluginInstallerService {
         let Ok(runtime) = PluginRuntime::shared() else {
             return Vec::new();
         };
-        PluginRegistry::new(
-            self.plugin_root.clone(),
-            HostCompatibility::v1(self.host_version),
-        )
-        .installed_plugins(&runtime)
-        .into_iter()
-        .map(|record| InstalledPluginView {
-            trusted: trust_marker_path(&self.plugin_root, &record.id).is_file(),
-            id: record.id,
-            name: record.name,
-            version: record.version,
-            extensions: record.extension_names,
-            state: record.state,
-            message: record.message,
-        })
-        .collect()
+        let available = self.available_entries();
+        self.registry()
+            .installed_plugins(&runtime)
+            .into_iter()
+            .map(|record| InstalledPluginView {
+                trusted: self.store.is_trusted(&record.id),
+                rollback_to: self
+                    .store
+                    .rollback_target(&record.id)
+                    .map(|target| target.version),
+                update_to: available
+                    .iter()
+                    .find(|entry| entry.id == record.id)
+                    .filter(|entry| is_upgrade(&entry.version, &record.version))
+                    .map(|entry| entry.version.clone()),
+                id: record.id,
+                name: record.name,
+                version: record.version,
+                extensions: record.extension_names,
+                state: record.state,
+                message: record.message,
+            })
+            .collect()
     }
-}
 
-/// A one-byte marker the installer writes beside a plugin it accepted with a
-/// release signature. It is host-owned state about *how* a plugin arrived, so
-/// it deliberately lives outside the plugin's own directory, where a package
-/// could otherwise declare itself trusted.
-fn trust_marker_path(plugin_root: &Path, plugin_id: &str) -> PathBuf {
-    plugin_root
-        .join(STAGING_DIRECTORY)
-        .join("trusted")
-        .join(plugin_id)
-}
-
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-pub async fn get_plugin_catalog(
-    service: State<'_, Arc<PluginInstallerService>>,
-) -> Result<PluginCatalogView, String> {
-    let service = Arc::clone(&service);
-    tauri::async_runtime::spawn_blocking(move || {
-        let installed = service.installed();
-        let available = registry_entries()
+    fn catalog(&self) -> PluginCatalogView {
+        let installed = self.installed();
+        let available = self
+            .available_entries()
             .into_iter()
             .map(|entry| AvailablePluginView {
                 installed: installed.iter().any(|plugin| plugin.id == entry.id),
@@ -210,9 +261,134 @@ pub async fn get_plugin_catalog(
             installed,
             available,
         }
-    })
-    .await
-    .map_err(|_| "The plugin catalogue could not be read.".to_string())
+    }
+
+    /// Settle anything a previous run was in the middle of. Called before the
+    /// first read and before every write, because a journal left by a crash
+    /// must never be overwritten by the next transaction.
+    pub fn recover_interrupted_updates(&self) -> Vec<RecoveryOutcome> {
+        self.store.recover()
+    }
+
+    /// Remove a plugin and everything the host kept about it. The command is
+    /// this, on a blocking worker.
+    pub(crate) fn uninstall(&self, plugin_id: &str) -> Result<(), String> {
+        self.store.remove(plugin_id)
+    }
+
+    /// Go back to the version Orivo kept, returning which one that was.
+    pub(crate) fn roll_back(&self, plugin_id: &str) -> Result<String, String> {
+        self.store.rollback(plugin_id).map(|target| target.version)
+    }
+
+    /// Be told when an installed plugin becomes a different package, or stops
+    /// being installed.
+    ///
+    /// Registered from `lib.rs` so the installer never has to know who is
+    /// listening. The consumer this exists for is the one the plan names next:
+    /// a capability grant, and a runner profile marked valid, are agreements
+    /// with a *package* — the component behind the id — so they have to be
+    /// re-asked for when that package changes and dropped when it goes away.
+    pub fn observe_identity(&self, observer: IdentityObserver) {
+        self.store.observe(observer);
+    }
+
+    /// What the live version of a plugin is: its version, the SHA-256 of the
+    /// component that will actually run, and which key signed it. The stable
+    /// answer to "is this still the package that grant was given to".
+    ///
+    /// Unused in this build on purpose: it is the read half of the seam E2
+    /// wires itself to once third-party runners have profiles to invalidate.
+    /// Landing it with the write half is the point — an interface that arrives
+    /// after the code meant to consume it is one nobody designed against.
+    #[allow(dead_code)]
+    pub fn package_identity(
+        &self,
+        plugin_id: &str,
+    ) -> Option<crate::plugin_update::PackageIdentity> {
+        self.store.identity(plugin_id)
+    }
+
+    fn policy_path(&self) -> PathBuf {
+        self.plugin_root.join(POLICY_FILE)
+    }
+
+    fn policy(&self) -> PluginUpdatePolicy {
+        fs::read(self.policy_path())
+            .ok()
+            .filter(|bytes| bytes.len() < 4096)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or(PluginUpdatePolicy { automatic: false })
+    }
+
+    fn set_policy(&self, policy: &PluginUpdatePolicy) -> Result<(), String> {
+        let path = self.policy_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|_| "The plugin folder is unavailable.".to_string())?;
+        }
+        let encoded = serde_json::to_vec(policy)
+            .map_err(|_| "That setting could not be saved.".to_string())?;
+        fs::write(&path, encoded).map_err(|_| "That setting could not be saved.".to_string())
+    }
+
+    fn begin_network_operation(&self) {
+        self.cancelled.store(false, Ordering::Release);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_plugin_catalog(
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<PluginCatalogView, String> {
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || service.catalog())
+        .await
+        .map_err(|_| "The plugin catalogue could not be read.".to_string())
+}
+
+/// Ask the registry what it has. Separate from [`get_plugin_catalog`] on
+/// purpose: the catalogue renders, and a path that renders never waits on a
+/// socket. Cancellable, because a user who closes the panel has answered.
+#[tauri::command]
+pub async fn refresh_plugin_registry(
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<PluginCatalogView, String> {
+    let service = Arc::clone(&service);
+    service.begin_network_operation();
+    // A registry that cannot be reached is not an error the catalogue has to
+    // carry: the compiled-in list and the last cached index are still the
+    // truth, and saying so would turn a flaky network into a broken Store.
+    let _ = refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await;
+    tauri::async_runtime::spawn_blocking(move || service.catalog())
+        .await
+        .map_err(|_| "The plugin catalogue could not be read.".to_string())
+}
+
+#[tauri::command]
+pub fn cancel_plugin_update(service: State<'_, Arc<PluginInstallerService>>) {
+    service.cancelled.store(true, Ordering::Release);
+}
+
+#[tauri::command]
+pub async fn get_plugin_update_policy(
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<PluginUpdatePolicy, String> {
+    Ok(service.policy())
+}
+
+#[tauri::command]
+pub async fn set_plugin_update_policy(
+    automatic: bool,
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<PluginUpdatePolicy, String> {
+    let policy = PluginUpdatePolicy { automatic };
+    service.set_policy(&policy)?;
+    Ok(policy)
 }
 
 #[tauri::command]
@@ -222,40 +398,55 @@ pub async fn install_plugin_from_registry(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<(), String> {
     let service = Arc::clone(&service);
-    let entry = registry_entries()
+    let entry = service
+        .available_entries()
         .into_iter()
         .find(|entry| entry.id == plugin_id)
         .ok_or_else(|| "This plugin is not in Orivo's registry.".to_string())?;
+    // Installing and updating are the same transaction, so they need the same
+    // guard. Without it, "install" was the door a replayed registry entry could
+    // walk an installed plugin backwards through, while "update" refused.
+    refuse_a_downgrade(
+        installed_version(&service, &plugin_id).as_deref(),
+        &entry.version,
+    )?;
+    acquire_and_install(&app, &service, &entry).await
+}
 
-    publish(&app, &entry.id, "downloading", 0, "Downloading…");
-    let bytes = download_package(&app, &entry).await?;
+/// Replace an installed plugin with a newer release from the registry.
+///
+/// Refuses anything that is not strictly newer. A signature stays valid
+/// forever, so "install whatever the registry names" would let a replayed
+/// entry walk a plugin backwards onto a version whose bug is already known.
+#[tauri::command]
+pub async fn update_plugin(
+    app: AppHandle,
+    plugin_id: String,
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<(), String> {
+    let service = Arc::clone(&service);
+    let entry = service
+        .available_entries()
+        .into_iter()
+        .find(|entry| entry.id == plugin_id)
+        .ok_or_else(|| "This plugin is not in Orivo's registry.".to_string())?;
+    let installed = installed_version(&service, &plugin_id)
+        .ok_or_else(|| "That plugin is not installed.".to_string())?;
+    refuse_a_downgrade(Some(&installed), &entry.version)?;
+    acquire_and_install(&app, &service, &entry).await
+}
 
-    publish(&app, &entry.id, "verifying", 100, "Verifying…");
-    let service_for_install = Arc::clone(&service);
-    let id_for_install = entry.id.clone();
-    let installed = tauri::async_runtime::spawn_blocking(move || {
-        // The registry is a distribution channel, not a trust decision the
-        // user is asked to make per download: a release signature is required.
-        install_package(&service_for_install, &bytes, SignaturePolicy::ReleaseOnly)
-    })
-    .await
-    .map_err(|_| "The installation did not finish.".to_string())?;
-
-    match installed {
-        Ok(id) if id == id_for_install => {
-            publish(&app, &id, "installed", 100, "Installed.");
-            Ok(())
-        }
-        Ok(_) => {
-            let message = "The package does not contain the plugin the registry names.";
-            publish(&app, &id_for_install, "failed", 0, message);
-            Err(message.into())
-        }
-        Err(error) => {
-            publish(&app, &id_for_install, "failed", 0, &error);
-            Err(error)
-        }
-    }
+/// Go back to the version Orivo kept. The manual half of the same transaction
+/// the smoke test runs automatically.
+#[tauri::command]
+pub async fn rollback_plugin(
+    plugin_id: String,
+    service: State<'_, Arc<PluginInstallerService>>,
+) -> Result<String, String> {
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || service.roll_back(&plugin_id))
+        .await
+        .map_err(|_| "The rollback did not finish.".to_string())?
 }
 
 /// Synchronous on purpose: macOS requires the native picker on the main
@@ -284,7 +475,7 @@ pub fn install_plugin_from_file(
             .map_err(|_| "This package could not be read.".to_string())?;
         // A package the user picked by hand may be unsigned. It installs as a
         // development build and every surface that lists it says so.
-        install_package(&service, &bytes, SignaturePolicy::AllowUnsigned).map(Some)
+        install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None).map(Some)
     }
 }
 
@@ -294,25 +485,121 @@ pub async fn uninstall_plugin(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<(), String> {
     let service = Arc::clone(&service);
-    tauri::async_runtime::spawn_blocking(move || {
-        if !valid_plugin_directory_name(&plugin_id) {
-            return Err("That is not a plugin Orivo installed.".to_string());
+    tauri::async_runtime::spawn_blocking(move || service.uninstall(&plugin_id))
+        .await
+        .map_err(|_| "The removal did not finish.".to_string())?
+}
+
+/// Everything the host does to the plugin folder without a user waiting for it:
+/// settle an interrupted transaction, then — only with consent — look for
+/// releases and take them.
+///
+/// Spawned rather than awaited at startup. The plan's first promise is that the
+/// shell appears without a plugin, and a registry that is slow to answer must
+/// not be able to delay it.
+pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstallerService>) {
+    tauri::async_runtime::spawn(async move {
+        let recovering = Arc::clone(&service);
+        let _ =
+            tauri::async_runtime::spawn_blocking(move || recovering.recover_interrupted_updates())
+                .await;
+        if !service.policy().automatic {
+            return;
         }
-        let directory = service.plugin_root.join(&plugin_id);
-        // `symlink_metadata` never follows: a symlink planted in the plugin
-        // root must not turn a removal into a delete somewhere else.
-        let metadata = fs::symlink_metadata(&directory)
-            .map_err(|_| "That plugin is not installed.".to_string())?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            return Err("That is not a plugin Orivo installed.".into());
+        service.begin_network_operation();
+        if refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled)
+            .await
+            .is_err()
+        {
+            return;
         }
-        fs::remove_dir_all(&directory)
-            .map_err(|_| "The plugin could not be removed.".to_string())?;
-        let _ = fs::remove_file(trust_marker_path(&service.plugin_root, &plugin_id));
-        Ok(())
+        for entry in pending_automatic_updates(&service) {
+            if service.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = acquire_and_install(&app, &service, &entry).await;
+        }
+    });
+}
+
+/// The releases consent covers: an installed plugin, on the official channel,
+/// with a strictly newer entry in the registry.
+///
+/// A development build is absent by construction — it carries no trust marker,
+/// and a sideloaded package silently becoming an official one is exactly the
+/// impersonation the two channels exist to prevent.
+fn pending_automatic_updates(service: &PluginInstallerService) -> Vec<IndexEntry> {
+    let available = service.available_entries();
+    service
+        .installed()
+        .into_iter()
+        .filter(|plugin| plugin.trusted)
+        .filter_map(|plugin| {
+            available
+                .iter()
+                .find(|entry| entry.id == plugin.id)
+                .filter(|entry| is_upgrade(&entry.version, &plugin.version))
+                .cloned()
+        })
+        .collect()
+}
+
+async fn acquire_and_install(
+    app: &AppHandle,
+    service: &Arc<PluginInstallerService>,
+    entry: &IndexEntry,
+) -> Result<(), String> {
+    service.begin_network_operation();
+    publish(app, &entry.id, "downloading", 0, "Downloading…");
+    let size = entry.size_bytes.max(1);
+    let mut on_progress = |read: u64| {
+        publish(
+            app,
+            &entry.id,
+            "downloading",
+            ((read as f64 / size as f64) * 100.0) as u8,
+            "Downloading…",
+        );
+    };
+    let bytes = match download_entry(entry, &service.cancelled, &mut on_progress).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            publish(app, &entry.id, "failed", 0, &error);
+            return Err(error);
+        }
+    };
+
+    publish(app, &entry.id, "verifying", 100, "Verifying…");
+    let service_for_install = Arc::clone(service);
+    let expected_id = entry.id.clone();
+    let promise = PackagePromise {
+        id: entry.id.clone(),
+        version: entry.version.clone(),
+    };
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        // The registry is a distribution channel, not a trust decision the
+        // user is asked to make per download: a release signature is required,
+        // and the package has to be the one the entry named.
+        install_package(
+            &service_for_install,
+            &bytes,
+            SignaturePolicy::ReleaseOnly,
+            Some(&promise),
+        )
     })
     .await
-    .map_err(|_| "The removal did not finish.".to_string())?
+    .map_err(|_| "The installation did not finish.".to_string())?;
+
+    match installed {
+        Ok(id) => {
+            publish(app, &id, "installed", 100, "Installed.");
+            Ok(())
+        }
+        Err(error) => {
+            publish(app, &expected_id, "failed", 0, &error);
+            Err(error)
+        }
+    }
 }
 
 fn publish(app: &AppHandle, plugin_id: &str, phase: &'static str, percent: u8, message: &str) {
@@ -328,64 +615,14 @@ fn publish(app: &AppHandle, plugin_id: &str, phase: &'static str, percent: u8, m
     );
 }
 
-// ---------------------------------------------------------------------------
-// Download
-// ---------------------------------------------------------------------------
-
-async fn download_package(app: &AppHandle, entry: &RegistryEntry) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(DOWNLOAD_TIMEOUT)
-        .build()
-        .map_err(|_| "The download client could not start.".to_string())?;
-    let response = client
-        .get(&entry.url)
-        .send()
-        .await
-        .map_err(|_| "The plugin could not be downloaded.".to_string())?;
-    if !response.status().is_success() {
-        // A 404 here is not a server refusing us: it is a registry entry whose
-        // release has not been published yet. Saying so is the difference
-        // between a user retrying forever and a user reaching for sideload.
-        return Err(if response.status().as_u16() == 404 {
-            "This plugin has not been published yet. Install it from a .orivo-plugin file."
-                .to_string()
-        } else {
-            format!(
-                "The plugin source rejected the request ({}).",
-                response.status().as_u16()
-            )
-        });
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length != entry.size_bytes)
-    {
-        return Err("The package size does not match the registry.".into());
-    }
-
-    let mut bytes = Vec::with_capacity(entry.size_bytes as usize);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "The download was interrupted.".to_string())?;
-        if bytes.len() as u64 + chunk.len() as u64 > entry.size_bytes {
-            return Err("The package is larger than the registry declares.".into());
-        }
-        bytes.extend_from_slice(&chunk);
-        publish(
-            app,
-            &entry.id,
-            "downloading",
-            ((bytes.len() as f64 / entry.size_bytes as f64) * 100.0) as u8,
-            "Downloading…",
-        );
-    }
-    if bytes.len() as u64 != entry.size_bytes {
-        return Err("The package size does not match the registry.".into());
-    }
-    if hex_digest(&bytes) != entry.sha256.to_ascii_lowercase() {
-        return Err("The package failed its integrity check.".into());
-    }
-    Ok(bytes)
+fn installed_version(service: &PluginInstallerService, plugin_id: &str) -> Option<String> {
+    let bytes = read_bounded_file(
+        &service.plugin_root.join(plugin_id).join(MANIFEST_FILE),
+        64 * 1024,
+    )
+    .ok()?;
+    let manifest = serde_json::from_slice::<PluginManifest>(&bytes).ok()?;
+    Some(manifest.version)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,13 +638,19 @@ enum SignaturePolicy {
     AllowUnsigned,
 }
 
-/// Every entry of the archive, already bounded and read into memory.
-type PackageFiles = BTreeMap<String, Vec<u8>>;
+/// What the registry promised. `None` for a package the user picked by hand:
+/// there is no third party making a claim to hold it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackagePromise {
+    id: String,
+    version: String,
+}
 
 fn install_package(
     service: &PluginInstallerService,
     bytes: &[u8],
     policy: SignaturePolicy,
+    expected: Option<&PackagePromise>,
 ) -> Result<String, String> {
     let files = read_package(bytes)?;
     let manifest_bytes = files
@@ -471,66 +714,116 @@ fn install_package(
         .map_err(|_| "The plugin component did not pass WebAssembly validation.".to_string())?;
 
     let plugin_id = validated.manifest.id().to_string();
-    if !valid_plugin_directory_name(&plugin_id) {
+    if !valid_plugin_id(&plugin_id) {
         return Err("The plugin identity is not usable as a directory.".into());
     }
-    materialise(service, &plugin_id, &files, signature)?;
-    Ok(plugin_id)
+    let version = validated.manifest.manifest().version.clone();
+    // What the registry said it was sending, checked against what arrived.
+    //
+    // Only the id was compared before, and the id is not the part a downgrade
+    // changes. "Is this an upgrade" is decided from the *index entry*, so an
+    // entry announcing 2.0.0 that serves a 0.0.1 package — a stale asset, a
+    // swapped release, a mirror that kept the old file under the new name —
+    // walked the plugin backwards while every check passed.
+    if let Some(expected) = expected {
+        if expected.id != plugin_id || expected.version != version {
+            return Err("The package does not contain the plugin the registry names.".into());
+        }
+    }
+    let channel = match signature {
+        PackageSignatureStatus::Trusted => PackageChannel::Official {
+            signer: ORIVO_RELEASE_SIGNER.to_string(),
+        },
+        _ => PackageChannel::Development,
+    };
+    install_verified(service, &plugin_id, &version, channel, &files)
+        .map(|outcome| outcome.plugin_id)
 }
 
-/// Unpack into a staging directory and rename it into place. A reader that
-/// walks the plugin root during an install sees either the previous plugin or
-/// the new one, never a directory being filled in.
-fn materialise(
+/// The transaction, with the host's verdict wired into both of its checkpoints.
+///
+/// Separate from [`install_package`] because the channel is decided there by
+/// the signature policy, and the junction tests need to drive a *signed*
+/// install without holding Orivo's private key. Everything the transaction
+/// actually does — staging, grading, the swap, the smoke test, the automatic
+/// rollback — is this call, so those tests exercise the production path instead
+/// of a re-creation of it.
+pub(crate) fn install_verified(
     service: &PluginInstallerService,
     plugin_id: &str,
+    version: &str,
+    channel: PackageChannel,
     files: &PackageFiles,
-    signature: PackageSignatureStatus,
-) -> Result<(), String> {
-    let staging_root = service.plugin_root.join(STAGING_DIRECTORY);
-    let staging = staging_root.join(plugin_id);
-    fs::create_dir_all(&staging_root)
-        .map_err(|_| "The plugin folder is unavailable.".to_string())?;
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|_| "The plugin folder is unavailable.".to_string())?;
+) -> Result<crate::plugin_update::InstallOutcome, String> {
+    let runtime =
+        PluginRuntime::shared().map_err(|_| "The plugin runtime is unavailable.".to_string())?;
+    let registry = service.registry();
+    service.store.install(
+        plugin_id,
+        version,
+        channel,
+        files,
+        &|directory, checkpoint| {
+            // Staging cannot ask the component who it is: the directory is not
+            // named after the plugin, and that name is half the question.
+            // Everything else is cheaper to refuse there.
+            let depth = match checkpoint {
+                Checkpoint::Staged => VerifyDepth::Contract,
+                Checkpoint::Live => VerifyDepth::Smoke,
+            };
+            verify_until_conclusive(|| {
+                registry.verify_package(&runtime, directory, plugin_id, depth)
+            })
+        },
+    )
+}
 
-    for (path, contents) in files {
-        if path == SIGNATURE_FILE {
-            continue;
+/// Ask the host for a verdict, and keep asking while it says it has none.
+///
+/// A refusal is final on the first answer. An *inconclusive* result is not an
+/// answer at all — the probe was queued behind another job of the same plugin,
+/// or the wall clock ran out on a loaded machine — and undoing a good update
+/// because of it is the failure mode this exists to avoid. After the attempts
+/// are spent the update is still rolled back, safely, but the message says the
+/// host could not reach the plugin rather than that the plugin is broken.
+fn verify_until_conclusive(ask: impl Fn() -> Result<(), PackageRefusal>) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..SMOKE_TEST_ATTEMPTS {
+        match ask() {
+            Ok(()) => return Ok(()),
+            Err(PackageRefusal::Refused(message)) => return Err(message),
+            Err(PackageRefusal::Inconclusive(message)) => {
+                last = message;
+                if attempt + 1 < SMOKE_TEST_ATTEMPTS {
+                    std::thread::sleep(SMOKE_TEST_RETRY_DELAY);
+                }
+            }
         }
-        let target = staging.join(path);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|_| "The plugin folder is unavailable.".to_string())?;
-        }
-        fs::write(&target, contents)
-            .map_err(|_| "The plugin could not be written to disk.".to_string())?;
     }
+    Err(format!(
+        "Orivo could not check this plugin, so the version that was working was kept. ({last})"
+    ))
+}
 
-    let destination = service.plugin_root.join(plugin_id);
-    let _ = fs::remove_dir_all(&destination);
-    fs::rename(&staging, &destination)
-        .map_err(|_| "The plugin could not be installed.".to_string())?;
-
-    let marker = trust_marker_path(&service.plugin_root, plugin_id);
-    if let Some(parent) = marker.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    match signature {
-        PackageSignatureStatus::Trusted => {
-            let _ = fs::write(&marker, b"1");
+/// Refuse a package the registry offers that is not newer than what is
+/// installed.
+///
+/// Shared by both doors into the registry channel. They used to differ — only
+/// `update_plugin` checked — and "install" was therefore the door a replayed
+/// entry could walk a plugin backwards through.
+fn refuse_a_downgrade(installed: Option<&str>, offered: &str) -> Result<(), String> {
+    match installed {
+        Some(installed) if !is_upgrade(offered, installed) => {
+            Err("This plugin is already up to date.".into())
         }
-        _ => {
-            let _ = fs::remove_file(&marker);
-        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Read the gzipped tar wholly in memory, bounded on entry count, per-entry
 /// size and total size. Nothing is written to disk until the whole archive has
 /// been read and accepted.
-fn read_package(bytes: &[u8]) -> Result<PackageFiles, String> {
+pub(crate) fn read_package(bytes: &[u8]) -> Result<PackageFiles, String> {
     if bytes.len() as u64 > MAX_PACKAGE_BYTES {
         return Err("This package is larger than Orivo allows.".into());
     }
@@ -589,18 +882,6 @@ fn safe_entry_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
-}
-
-fn valid_plugin_directory_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.split('.').count() >= 3
-        && value.split('.').all(|segment| {
-            !segment.is_empty()
-                && segment
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        })
 }
 
 /// The signature covers the SHA-256 digest of `manifest.json`, which in turn
@@ -680,23 +961,57 @@ pub fn plugin_root_for(app_data: &Path) -> PathBuf {
     app_data.join(PLUGINS_DIRECTORY)
 }
 
+/// Whether *this component* is the one the install transaction accepted a
+/// release signature for.
+///
+/// The runner host asks this the moment before it will invoke a package, with
+/// the digest it has just re-derived from disk. It used to read
+/// `.staging/trusted/<id>` for existence, which answers a weaker question — is
+/// there a marker beside this plugin — and would still have said yes after
+/// somebody dropped a different `component.wasm` into an installed one. The
+/// answer here is about bytes, because that is what a grant is given to.
+///
+/// Free function rather than a method: the caller has a plugin root and not the
+/// service, and every path it needs is derived from that root.
+pub fn component_channel(
+    plugin_root: &Path,
+    plugin_id: &str,
+    component_sha256: &str,
+) -> PackageChannel {
+    PluginStore::new(plugin_root.to_path_buf()).channel_for_component(plugin_id, component_sha256)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+    use std::sync::atomic::AtomicU64;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const EMPTY_COMPONENT: &[u8] = &[0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+    /// The reference runner from `src-tauri/fixtures`. A runner package is only
+    /// installable if its component really implements the contract, so a test
+    /// about runners needs the real thing rather than an empty component.
+    const RUNNER_COMPONENT: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
+    /// Must be the identity the fixture component reports.
+    const RUNNER_ID: &str = "com.orivo.fixture-runner";
+    const RUNNER_VERSION: &str = "1.0.0";
 
+    /// A root no other test can land in. These run in parallel and write the
+    /// same plugin directory names, so the clock alone is not enough.
     fn temporary_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "orivo-plugin-installer-{label}-{}-{}",
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "orivo-plugin-installer-{label}-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
-        ))
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 
     fn manifest_json(id: &str, catalog: &[u8]) -> Vec<u8> {
@@ -719,6 +1034,31 @@ mod tests {
             EMPTY_COMPONENT.len(),
             hex_digest(catalog),
             catalog.len(),
+        )
+        .into_bytes()
+    }
+
+    /// A runner package, whose manifest version the caller chooses. The fixture
+    /// component always reports `1.0.0`, so any other version is a package
+    /// whose component was not rebuilt — the realistic way an update fails its
+    /// smoke test.
+    fn runner_manifest_json(version: &str, capabilities: &str) -> Vec<u8> {
+        format!(
+            r#"{{
+              "id": "{RUNNER_ID}",
+              "name": "Fixture Runner",
+              "version": "{version}",
+              "sdk": "orivo-plugin@1",
+              "minOrivoVersion": "0.3.0",
+              "extensions": ["runner"],
+              "capabilities": [{capabilities}],
+              "networkDomains": [],
+              "artifacts": [
+                {{"path":"component.wasm","kind":"component","sha256":"{}","byteSize":{}}}
+              ]
+            }}"#,
+            hex_digest(RUNNER_COMPONENT),
+            RUNNER_COMPONENT.len(),
         )
         .into_bytes()
     }
@@ -746,6 +1086,16 @@ mod tests {
         ])
     }
 
+    fn runner_package(version: &str) -> Vec<u8> {
+        package(&[
+            (
+                "manifest.json",
+                runner_manifest_json(version, r#""runner_prepare","files_read""#),
+            ),
+            ("component.wasm", RUNNER_COMPONENT.to_vec()),
+        ])
+    }
+
     fn service(root: &Path) -> PluginInstallerService {
         PluginInstallerService::new(root.to_path_buf(), "0.3.0")
     }
@@ -753,31 +1103,29 @@ mod tests {
     #[test]
     fn an_unsigned_package_installs_only_through_the_sideload_channel() {
         let root = temporary_root("sideload");
-        fs::create_dir_all(&root).unwrap();
         let service = service(&root);
         let bytes = valid_package("com.orivo.quiky");
 
         assert_eq!(
-            install_package(&service, &bytes, SignaturePolicy::ReleaseOnly),
+            install_package(&service, &bytes, SignaturePolicy::ReleaseOnly, None),
             Err("This package is not signed by Orivo.".into())
         );
         assert!(!root.join("com.orivo.quiky").exists());
 
-        let installed =
-            install_package(&service, &bytes, SignaturePolicy::AllowUnsigned).expect("installs");
+        let installed = install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None)
+            .expect("installs");
         assert_eq!(installed, "com.orivo.quiky");
         assert!(root.join("com.orivo.quiky/manifest.json").is_file());
         assert!(root.join("com.orivo.quiky/component.wasm").is_file());
         assert!(root.join("com.orivo.quiky/assets/catalog.json").is_file());
         // A sideloaded package is never marked trusted.
-        assert!(!trust_marker_path(&root, "com.orivo.quiky").exists());
+        assert!(!service.store.is_trusted("com.orivo.quiky"));
         fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn a_package_whose_artifact_bytes_changed_is_refused() {
         let root = temporary_root("tampered");
-        fs::create_dir_all(&root).unwrap();
         let service = service(&root);
         let catalog = br#"{"version":1,"titles":[]}"#.to_vec();
         let bytes = package(&[
@@ -791,7 +1139,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            install_package(&service, &bytes, SignaturePolicy::AllowUnsigned),
+            install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None),
             Err("A package artifact does not match its manifest entry.".into())
         );
         assert!(!root.join("com.orivo.quiky").exists());
@@ -801,7 +1149,6 @@ mod tests {
     #[test]
     fn a_package_carrying_an_undeclared_payload_is_refused() {
         let root = temporary_root("payload");
-        fs::create_dir_all(&root).unwrap();
         let service = service(&root);
         let catalog = br#"{"version":1,"titles":[]}"#.to_vec();
         let bytes = package(&[
@@ -812,7 +1159,7 @@ mod tests {
         ]);
 
         assert!(
-            install_package(&service, &bytes, SignaturePolicy::AllowUnsigned)
+            install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None)
                 .is_err_and(|error| error.contains("plugin contract"))
         );
         assert!(!root.join("com.orivo.quiky").exists());
@@ -862,10 +1209,9 @@ mod tests {
             return;
         };
         let root = temporary_root("real-package");
-        fs::create_dir_all(&root).unwrap();
         let service = service(&root);
 
-        let id = install_package(&service, &bytes, SignaturePolicy::ReleaseOnly)
+        let id = install_package(&service, &bytes, SignaturePolicy::ReleaseOnly, None)
             .expect("the released package installs through the strict channel");
         assert_eq!(id, "com.orivo.quiky");
         assert!(root.join("com.orivo.quiky/manifest.json").is_file());
@@ -873,7 +1219,7 @@ mod tests {
         // The signature file itself is never written into the plugin tree.
         assert!(!root.join("com.orivo.quiky/signature.ed25519").exists());
         assert!(
-            trust_marker_path(&root, "com.orivo.quiky").is_file(),
+            service.store.is_trusted("com.orivo.quiky"),
             "marked trusted"
         );
 
@@ -891,18 +1237,10 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         assert_eq!(
-            install_package(&service, &repacked, SignaturePolicy::ReleaseOnly),
+            install_package(&service, &repacked, SignaturePolicy::ReleaseOnly, None),
             Err("This package is not signed by Orivo.".into())
         );
         fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn uninstalling_removes_only_a_real_plugin_directory() {
-        assert!(valid_plugin_directory_name("com.orivo.quiky"));
-        assert!(!valid_plugin_directory_name("../../etc"));
-        assert!(!valid_plugin_directory_name("quiky"));
-        assert!(!valid_plugin_directory_name("com.Orivo.quiky"));
     }
 
     #[test]
@@ -910,5 +1248,501 @@ mod tests {
         assert_eq!(decode_base64("QUJD").as_deref(), Some(&b"ABC"[..]));
         assert_eq!(decode_base64(""), None);
         assert_eq!(decode_base64("!!!!"), None);
+    }
+
+    /// P1's open follow-up, closed: the installer used to accept any package
+    /// whose component merely compiled, and discovery then showed it as a
+    /// broken row.
+    ///
+    /// Two refusals, and what matters is *where* each lands. Both are contract
+    /// failures, so both are caught in staging — before the running plugin is
+    /// displaced and before the rollback slot is spent. Asserting the slot
+    /// survives is the only way to tell that from a refusal that swapped, was
+    /// rejected at the final path, and rolled itself back: the user-visible
+    /// error is identical either way.
+    #[test]
+    fn a_runner_package_that_fails_the_contract_is_refused_before_it_displaces_anything() {
+        let broken_component = String::from_utf8(runner_manifest_json(
+            RUNNER_VERSION,
+            r#""runner_prepare","files_read""#,
+        ))
+        .unwrap()
+        .replace(&hex_digest(RUNNER_COMPONENT), &hex_digest(EMPTY_COMPONENT))
+        .replace(
+            &format!(r#""byteSize":{}"#, RUNNER_COMPONENT.len()),
+            &format!(r#""byteSize":{}"#, EMPTY_COMPONENT.len()),
+        );
+        let cases: [(&str, Vec<u8>, &str); 2] = [
+            (
+                "not-a-runner",
+                package(&[
+                    ("manifest.json", broken_component.into_bytes()),
+                    ("component.wasm", EMPTY_COMPONENT.to_vec()),
+                ]),
+                "This plugin does not implement Orivo's runner contract.",
+            ),
+            (
+                // A component needing a capability its manifest never listed
+                // was agreed to under a false description.
+                "undeclared",
+                package(&[
+                    (
+                        "manifest.json",
+                        runner_manifest_json(RUNNER_VERSION, r#""runner_prepare""#),
+                    ),
+                    ("component.wasm", RUNNER_COMPONENT.to_vec()),
+                ]),
+                "This plugin needs more permissions than its manifest declares.",
+            ),
+        ];
+
+        for (label, bytes, refusal) in cases {
+            let root = temporary_root(label);
+            let service = service(&root);
+            // Nothing installed yet: the package is refused outright.
+            assert_eq!(
+                install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None),
+                Err(refusal.into()),
+                "{label}"
+            );
+            assert!(!root.join(RUNNER_ID).exists(), "{label}");
+
+            // And with a working plugin in place, it stays in place — with the
+            // way back to its own predecessor intact.
+            for _ in 0..2 {
+                install_package(
+                    &service,
+                    &runner_package(RUNNER_VERSION),
+                    SignaturePolicy::AllowUnsigned,
+                    None,
+                )
+                .expect("the fixture runner installs");
+            }
+            assert_eq!(
+                install_package(&service, &bytes, SignaturePolicy::AllowUnsigned, None),
+                Err(refusal.into()),
+                "{label}"
+            );
+            assert_eq!(
+                installed_version(&service, RUNNER_ID).as_deref(),
+                Some(RUNNER_VERSION),
+                "{label}"
+            );
+            assert_eq!(
+                service
+                    .store
+                    .rollback_target(RUNNER_ID)
+                    .map(|target| target.version),
+                Some(RUNNER_VERSION.into()),
+                "{label}: the transaction started for a package it could refuse in staging"
+            );
+            fs::remove_dir_all(&root).ok();
+        }
+    }
+
+    /// The whole point of the transaction, through the real host: an update
+    /// whose component no longer matches its manifest fails the smoke test at
+    /// its final path, and the version that worked comes back.
+    #[test]
+    fn an_update_that_fails_the_hosts_smoke_test_restores_the_previous_version() {
+        let root = temporary_root("smoke-rollback");
+        let service = service(&root);
+        install_package(
+            &service,
+            &runner_package(RUNNER_VERSION),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect("the fixture runner installs");
+        assert_eq!(
+            installed_version(&service, RUNNER_ID).as_deref(),
+            Some(RUNNER_VERSION)
+        );
+
+        // A release whose manifest was bumped and whose component was not. It
+        // passes every package check and the contract check, and only the
+        // component's own account of itself gives it away.
+        let refusal = install_package(
+            &service,
+            &runner_package("2.0.0"),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect_err("the smoke test refuses it");
+        assert!(
+            refusal.contains("does not match the package"),
+            "unexpected refusal: {refusal}"
+        );
+
+        assert_eq!(
+            installed_version(&service, RUNNER_ID).as_deref(),
+            Some(RUNNER_VERSION),
+            "the working version was not restored"
+        );
+        // And discovery agrees: the plugin is usable, not a broken row.
+        let runtime = PluginRuntime::shared().unwrap();
+        let plugins = service.registry().runner_plugins(&runtime);
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].state, PluginState::Ready);
+        assert_eq!(plugins[0].version, RUNNER_VERSION);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The registry entry is what "is this an upgrade" is decided from, and
+    /// nothing used to bind the package that arrived to what the entry said. A
+    /// stale asset, a swapped release or a mirror still serving the old file
+    /// under the new name walked the plugin backwards with every check passing.
+    #[test]
+    fn a_package_that_is_not_what_the_registry_named_is_refused() {
+        let root = temporary_root("promise");
+        let service = service(&root);
+        let bytes = valid_package("com.orivo.quiky");
+
+        // The right id, an older version than the entry announced.
+        assert_eq!(
+            install_package(
+                &service,
+                &bytes,
+                SignaturePolicy::AllowUnsigned,
+                Some(&PackagePromise {
+                    id: "com.orivo.quiky".into(),
+                    version: "0.9.0".into(),
+                }),
+            ),
+            Err("The package does not contain the plugin the registry names.".into())
+        );
+        // The right version, another plugin entirely.
+        assert_eq!(
+            install_package(
+                &service,
+                &bytes,
+                SignaturePolicy::AllowUnsigned,
+                Some(&PackagePromise {
+                    id: "com.orivo.other".into(),
+                    version: "0.1.0".into(),
+                }),
+            ),
+            Err("The package does not contain the plugin the registry names.".into())
+        );
+        assert!(!root.join("com.orivo.quiky").exists());
+
+        // What the entry actually named installs.
+        assert_eq!(
+            install_package(
+                &service,
+                &bytes,
+                SignaturePolicy::AllowUnsigned,
+                Some(&PackagePromise {
+                    id: "com.orivo.quiky".into(),
+                    version: "0.1.0".into(),
+                }),
+            ),
+            Ok("com.orivo.quiky".into())
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Installing and updating are the same transaction, so they need the same
+    /// guard. Only `update_plugin` had one, which made "install" the door a
+    /// replayed registry entry could walk an installed plugin backwards through.
+    #[test]
+    fn neither_door_into_the_registry_channel_accepts_a_downgrade() {
+        assert!(refuse_a_downgrade(None, "0.1.0").is_ok());
+        assert!(refuse_a_downgrade(Some("0.1.0"), "0.2.0").is_ok());
+        assert_eq!(
+            refuse_a_downgrade(Some("0.2.0"), "0.1.0"),
+            Err("This plugin is already up to date.".into())
+        );
+        assert_eq!(
+            refuse_a_downgrade(Some("0.2.0"), "0.2.0"),
+            Err("This plugin is already up to date.".into())
+        );
+        // Unorderable on either side is not an upgrade either.
+        assert_eq!(
+            refuse_a_downgrade(Some("0.2.0"), "latest"),
+            Err("This plugin is already up to date.".into())
+        );
+    }
+
+    /// A smoke test runs through the scheduler, which allows one job at a time
+    /// per plugin. A discovery page already in flight can push the probe past
+    /// its bounded wait, and undoing a good update for that would make an
+    /// update's success depend on how busy the machine is.
+    #[test]
+    fn an_inconclusive_smoke_test_is_asked_again_before_anything_is_undone() {
+        use std::cell::Cell;
+
+        // Contention that clears: the first answer is no answer, the second is.
+        let attempts = Cell::new(0);
+        assert_eq!(
+            verify_until_conclusive(|| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 2 {
+                    Err(PackageRefusal::Inconclusive("busy".into()))
+                } else {
+                    Ok(())
+                }
+            }),
+            Ok(())
+        );
+        assert_eq!(attempts.get(), 2);
+
+        // A verdict is final on the first answer; retrying a real refusal would
+        // only make a broken package slow to refuse.
+        let attempts = Cell::new(0);
+        assert_eq!(
+            verify_until_conclusive(|| {
+                attempts.set(attempts.get() + 1);
+                Err(PackageRefusal::Refused("this is not a runner".into()))
+            }),
+            Err("this is not a runner".into())
+        );
+        assert_eq!(attempts.get(), 1);
+
+        // Contention that does not clear still rolls back — safely — but says
+        // which kind of failure it was rather than blaming the package.
+        let attempts = Cell::new(0);
+        let exhausted = verify_until_conclusive(|| {
+            attempts.set(attempts.get() + 1);
+            Err(PackageRefusal::Inconclusive("busy".into()))
+        })
+        .expect_err("gives up in the end");
+        assert_eq!(attempts.get(), SMOKE_TEST_ATTEMPTS);
+        assert!(exhausted.contains("could not check"), "{exhausted}");
+    }
+
+    /// The interface E2 wires itself to after this merges: for the live version
+    /// of a plugin, what package it actually is. A grant is an agreement with
+    /// this, not with the id.
+    #[test]
+    fn the_package_identity_names_the_component_that_will_run() {
+        let root = temporary_root("identity");
+        let service = service(&root);
+        install_package(
+            &service,
+            &runner_package(RUNNER_VERSION),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .unwrap();
+
+        let identity = service
+            .package_identity(RUNNER_ID)
+            .expect("an installed plugin has an identity");
+        assert_eq!(identity.plugin_id, RUNNER_ID);
+        assert_eq!(identity.version, RUNNER_VERSION);
+        assert_eq!(identity.component_sha256, hex_digest(RUNNER_COMPONENT));
+        assert_eq!(identity.channel, PackageChannel::Development);
+
+        service.uninstall(RUNNER_ID).unwrap();
+        assert_eq!(service.package_identity(RUNNER_ID), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The plan's exit test for this step, at the level this module owns: a
+    /// plugin that goes forward and back leaves the version the user can return
+    /// to, and the catalogue keeps telling the truth about both.
+    #[test]
+    fn an_update_and_a_rollback_are_both_visible_in_the_catalogue() {
+        let root = temporary_root("rollback-view");
+        let service = service(&root);
+        install_package(
+            &service,
+            &valid_package("com.orivo.quiky"),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .unwrap();
+        let installed = service.installed();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].rollback_to, None);
+
+        // The same identity at a later version: an ordinary update.
+        let catalog = br#"{"version":1,"titles":[]}"#.to_vec();
+        let manifest = String::from_utf8(manifest_json("com.orivo.quiky", &catalog))
+            .unwrap()
+            .replace(r#""version": "0.1.0""#, r#""version": "0.2.0""#);
+        let newer = package(&[
+            ("manifest.json", manifest.into_bytes()),
+            ("component.wasm", EMPTY_COMPONENT.to_vec()),
+            ("assets/catalog.json", catalog),
+        ]);
+        install_package(&service, &newer, SignaturePolicy::AllowUnsigned, None).unwrap();
+
+        let installed = service.installed();
+        assert_eq!(installed[0].version, "0.2.0");
+        assert_eq!(installed[0].rollback_to.as_deref(), Some("0.1.0"));
+
+        assert_eq!(
+            service.store.rollback(&installed[0].id).unwrap().version,
+            "0.1.0"
+        );
+        let installed = service.installed();
+        assert_eq!(installed[0].version, "0.1.0");
+        assert_eq!(installed[0].rollback_to, None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The plan's exit test for step 3.1, in full: *a plugin rollback keeps the
+    /// imported games and the compatible profiles.*
+    ///
+    /// It is a structural property — the library, the runner profiles and the
+    /// preferences are Orivo's own files, and the plugin transaction only ever
+    /// renames directories inside the plugin root — but structural properties
+    /// are exactly the ones that quietly stop holding. So this exercises the
+    /// real `Catalog` and the real `PreferencesService` over the same app-data
+    /// directory the plugin root lives in, and compares the whole record.
+    #[test]
+    fn an_update_and_a_rollback_keep_the_imported_games_and_the_profiles() {
+        use crate::catalog::{Catalog, WineGraphicsOptions, WineProfile};
+        use crate::preferences::{PreferencesService, PreferencesUpdate};
+
+        let app_data = temporary_root("user-data");
+        let plugin_root = plugin_root_for(&app_data);
+        fs::create_dir_all(&plugin_root).unwrap();
+        let service = PluginInstallerService::new(plugin_root, "0.3.0");
+
+        let catalog_path = app_data.join("catalog.json");
+        let mut catalog = Catalog::default();
+        catalog
+            .add(
+                crate::catalog::Game::from_executable(
+                    "/Games/Nightfall/Nightfall.app/Contents/MacOS/Nightfall",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            catalog
+                .upsert_wine_profile(WineProfile {
+                    id: "wine-profile-1".into(),
+                    display_name: "Windows classics".into(),
+                    wine_binary: PathBuf::from("/Applications/Wine.app/Contents/bin/wine"),
+                    prefix: app_data.join("wine-prefixes/wine-profile-1"),
+                    game_directories: vec![PathBuf::from("/Games/Windows")],
+                    graphics: WineGraphicsOptions::default(),
+                    dxmt_engine_supported: None,
+                    macos_retina_mode_enabled: None,
+                    enabled: true,
+                    last_imported_at: Some(1_721_553_600_000),
+                })
+                .unwrap()
+        );
+        catalog.save_atomically(&catalog_path).unwrap();
+
+        let preferences = PreferencesService::new(app_data.clone(), app_data.join("cache"));
+        let chosen = preferences
+            .update(PreferencesUpdate {
+                beta_features: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+
+        install_package(
+            &service,
+            &runner_package(RUNNER_VERSION),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect("the fixture runner installs");
+        // An update that works, the rollback a user asks for, and the one the
+        // host performs itself when a component fails its smoke test.
+        install_package(
+            &service,
+            &runner_package(RUNNER_VERSION),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect("reinstalling is an update like any other");
+        assert_eq!(
+            service.store.rollback(RUNNER_ID).unwrap().version,
+            RUNNER_VERSION
+        );
+        install_package(
+            &service,
+            &runner_package("2.0.0"),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect_err("the smoke test refuses a component that was not rebuilt");
+        assert_eq!(
+            installed_version(&service, RUNNER_ID).as_deref(),
+            Some(RUNNER_VERSION)
+        );
+
+        assert_eq!(
+            Catalog::load(&catalog_path).unwrap(),
+            catalog,
+            "the library or a runner profile changed under a plugin transaction"
+        );
+        assert_eq!(preferences.load().unwrap(), chosen);
+        fs::remove_dir_all(&app_data).ok();
+    }
+
+    /// Automatic updates are opt-in and cover the official channel only. A
+    /// sideloaded package has no trust marker, so consent can never be what
+    /// lets an unsigned build replace itself behind the user's back.
+    #[test]
+    fn consent_is_required_and_never_reaches_the_developer_channel() {
+        let root = temporary_root("policy");
+        let service = service(&root);
+        assert!(!service.policy().automatic);
+        service
+            .set_policy(&PluginUpdatePolicy { automatic: true })
+            .unwrap();
+        assert!(service.policy().automatic);
+
+        install_package(
+            &service,
+            &valid_package("com.orivo.quiky"),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .unwrap();
+        // The compiled-in registry lists a newer Quiky than the fixture
+        // package, and this install is a development build all the same.
+        assert!(!service.store.is_trusted("com.orivo.quiky"));
+        assert_eq!(pending_automatic_updates(&service), Vec::new());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The display path must never reach the network, so the catalogue is built
+    /// from the compiled-in list and the cache alone. The compiled-in list is
+    /// held to the same grammar as a downloaded one.
+    #[test]
+    fn the_catalogue_is_served_without_a_network_call() {
+        let root = temporary_root("catalogue");
+        let service = service(&root);
+        let catalog = service.catalog();
+        assert!(catalog.installed.is_empty());
+        assert!(
+            catalog
+                .available
+                .iter()
+                .any(|entry| entry.id == "com.orivo.quiky"),
+            "the compiled-in registry survived validation"
+        );
+        assert!(
+            catalog
+                .available
+                .iter()
+                .all(|entry| entry.size_bytes > 0 && !entry.id.is_empty())
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// An artefact of the plugin project, not of this crate: if the compiled-in
+    /// registry stops parsing, the Store silently loses its only entry. The
+    /// grammar that rejects a downloaded index rejects this one too.
+    #[test]
+    fn the_compiled_in_registry_passes_the_same_grammar_as_a_downloaded_one() {
+        let entries = crate::plugin_index::parse_unsigned_entries(REGISTRY_JSON.as_bytes());
+        assert_eq!(
+            entries.len(),
+            serde_json::from_str::<Vec<serde_json::Value>>(REGISTRY_JSON)
+                .unwrap()
+                .len(),
+            "an entry of resources/plugin-registry.json was dropped by validation"
+        );
     }
 }
