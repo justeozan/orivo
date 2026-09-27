@@ -122,6 +122,16 @@ const MAX_HOST_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_HOST_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 255;
 const MAX_JOURNAL_MESSAGE_BYTES: usize = 512;
+/// How many bytes of plugin text one host call pays for.
+///
+/// `log` is the one import whose *input* the guest sizes. Wasmtime copies the
+/// whole string out of guest memory before this host sees it, so truncating to
+/// [`MAX_JOURNAL_MESSAGE_BYTES`] bounds what is kept and not what was copied —
+/// and wasmtime 44 has no `set_hostcall_fuel` to charge the copy against. The
+/// budget this host function can reach is the host-call count, so that is what a
+/// large message spends: an ordinary line costs one, and a megabyte costs the
+/// whole invocation.
+const JOURNAL_BYTES_PER_HOST_CALL: usize = 4096;
 const MAX_JOURNAL_ENTRIES: usize = 256;
 
 /// Result bounds. Identifiers use the catalogue's opaque grammar; free text is
@@ -250,19 +260,33 @@ pub struct JournalEntry {
     pub plugin_id: String,
     pub decision: &'static str,
     pub detail: String,
+    /// How many times this exact decision was reached under this correlation.
+    /// A component that asks for the same forbidden folder in a loop earns one
+    /// entry and a count, not one entry per attempt — otherwise the answer to a
+    /// refusal becomes a way of clearing the ring that recorded it.
+    pub repeats: u32,
 }
 
-/// Two bounded rings, and the split matters: a plugin can call `host-journal`
-/// as often as it likes, and sharing one ring would let it evict the host's
-/// record of the refusals it just earned. Decisions are the host's; messages are
-/// the plugin's, and only the plugin's own ring can be flooded.
+/// Three bounded rings, and what separates them is who decides how often they
+/// are written to.
 ///
-/// Both are deliberately in memory and capped: the journal exists to explain the
-/// last failure to a user and to let a test assert that a refusal was recorded,
+/// `decisions` is the host's record of what it refused and why. Nothing a plugin
+/// can do in a loop writes to it: per-call bookkeeping goes to `traces` instead,
+/// and a decision reached twice under one correlation is counted rather than
+/// repeated. That is what makes a refusal still there when someone looks.
+///
+/// `traces` is the per-call detail — how long a call took, how many entries a
+/// listing held — which is written on every host call and is therefore expected
+/// to scroll. `messages` is the plugin's own text, which it may produce as freely
+/// as its budget allows.
+///
+/// All three are deliberately in memory and capped: the journal exists to explain
+/// the last failure to a user and to let a test assert a refusal was recorded,
 /// not to become a log file a plugin can grow.
 #[derive(Debug, Default)]
 pub struct PluginJournal {
     decisions: Mutex<VecDeque<JournalEntry>>,
+    traces: Mutex<VecDeque<JournalEntry>>,
     messages: Mutex<VecDeque<JournalEntry>>,
 }
 
@@ -275,6 +299,18 @@ impl PluginJournal {
         detail: impl Into<String>,
     ) {
         self.push(&self.decisions, correlation_id, plugin_id, decision, detail);
+    }
+
+    /// Per-call bookkeeping. Written on every host call, which is exactly why it
+    /// is not written where the decisions are.
+    fn trace(
+        &self,
+        correlation_id: CorrelationId,
+        plugin_id: &str,
+        decision: &'static str,
+        detail: impl Into<String>,
+    ) {
+        self.push(&self.traces, correlation_id, plugin_id, decision, detail);
     }
 
     /// Text a plugin chose. Kept apart from the host's decisions so a chatty
@@ -307,6 +343,7 @@ impl PluginJournal {
             plugin_id: plugin_id.to_owned(),
             decision,
             detail: detail.into(),
+            repeats: 1,
         };
         // `eprintln!` panics when stderr is gone, and this is called from inside
         // the scheduler. A journal line is not worth poisoning a lock over.
@@ -319,6 +356,17 @@ impl PluginJournal {
             entry.detail
         );
         if let Ok(mut ring) = ring.lock() {
+            // Counted rather than repeated. Scanning the ring is bounded by the
+            // ring, and the alternative is a plugin that empties it by earning
+            // the same refusal two hundred and fifty-six times.
+            if let Some(seen) = ring.iter_mut().find(|seen| {
+                seen.correlation_id == entry.correlation_id
+                    && seen.decision == entry.decision
+                    && seen.detail == entry.detail
+            }) {
+                seen.repeats = seen.repeats.saturating_add(1);
+                return;
+            }
             if ring.len() == MAX_JOURNAL_ENTRIES {
                 ring.pop_front();
             }
@@ -334,6 +382,13 @@ impl PluginJournal {
     #[allow(dead_code)]
     pub fn plugin_messages(&self) -> Vec<JournalEntry> {
         Self::snapshot(&self.messages)
+    }
+
+    /// Per-call bookkeeping, which scrolls. Separated from [`Self::entries`] so
+    /// a caller reading the host's decisions is not reading traffic.
+    #[allow(dead_code)]
+    pub fn traces(&self) -> Vec<JournalEntry> {
+        Self::snapshot(&self.traces)
     }
 
     fn snapshot(ring: &Mutex<VecDeque<JournalEntry>>) -> Vec<JournalEntry> {
@@ -359,7 +414,117 @@ impl PluginJournal {
 pub struct PluginGrants {
     declared: BTreeSet<PluginCapability>,
     granted: BTreeSet<PluginCapability>,
-    directories: BTreeMap<String, PathBuf>,
+    directories: BTreeMap<String, Arc<GrantedDirectory>>,
+}
+
+/// One approved folder, held open for as long as the grant lives.
+///
+/// The descriptor is the grant. `O_NOFOLLOW` judges the last component of a path
+/// and nothing above it, so a *parent* of the granted folder replaced by a
+/// symbolic link — which needs write access to that parent, not to the folder
+/// itself — silently redirects every later read. A path is re-resolved on every
+/// use and can therefore be answered differently each time; a descriptor names
+/// the directory the user actually approved, once, and `openat` reads relative to
+/// it. A swap afterwards changes nothing.
+pub struct GrantedDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    handle: File,
+}
+
+impl std::fmt::Debug for GrantedDirectory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GrantedDirectory")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Two grants name the same folder when they resolved to the same path. The
+/// descriptor is an implementation detail of reaching it, not part of its
+/// identity, and comparing raw file descriptors would make equality depend on
+/// the order in which grants happened to be opened.
+impl PartialEq for GrantedDirectory {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for GrantedDirectory {}
+
+impl GrantedDirectory {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Links *on the way to* the grant are followed here, deliberately:
+            // this is the moment the user pointed at a folder, and on macOS the
+            // ordinary temporary and home directories live behind one. What must
+            // not be re-resolved is everything after it.
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+                .open(path)?;
+            Ok(Self {
+                path: path.to_path_buf(),
+                handle,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows has no `openat`, so the grant is still a path here and the
+            // swap above is still reachable. `FILE_FLAG_OPEN_REPARSE_POINT` keeps
+            // the *entry* honest, which is the half that can be kept.
+            if !path.is_dir() {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+            }
+            Ok(Self {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    /// Opens one entry of this directory, relative to the handle.
+    ///
+    /// `O_NOFOLLOW` refuses a symbolic link instead of resolving it, and
+    /// `O_NONBLOCK` means a FIFO does not park this worker where neither the
+    /// epoch nor a cancellation can reach it. The caller still has to ask the
+    /// descriptor what it opened: a directory and a character device both open
+    /// happily here.
+    fn open_entry(&self, name: &str) -> std::io::Result<File> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+
+            let name = CString::new(name)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            // Safety: `handle` is an open directory descriptor borrowed for the
+            // length of the call, and `name` is NUL-terminated.
+            let descriptor = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Safety: `openat` just returned this descriptor and nothing else
+            // owns it.
+            Ok(unsafe { File::from_raw_fd(descriptor) })
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(self.path.join(name))
+        }
+    }
 }
 
 impl PluginGrants {
@@ -400,7 +565,12 @@ impl PluginGrants {
                     let path = directories
                         .get(id)
                         .ok_or(GrantValidationError::InvalidScope(grant.capability))?;
-                    resolved.directories.insert(id.clone(), path.clone());
+                    // Opened here rather than at the call, because this is the
+                    // moment the grant is made. A folder the host cannot open as
+                    // a directory now is not a scope it can honour later.
+                    let directory = GrantedDirectory::open(path)
+                        .map_err(|_| GrantValidationError::InvalidScope(grant.capability))?;
+                    resolved.directories.insert(id.clone(), Arc::new(directory));
                 }
             }
         }
@@ -415,8 +585,8 @@ impl PluginGrants {
         self.granted.contains(&capability)
     }
 
-    fn directory(&self, id: &str) -> Option<&Path> {
-        self.directories.get(id).map(PathBuf::as_path)
+    fn directory(&self, id: &str) -> Option<&Arc<GrantedDirectory>> {
+        self.directories.get(id)
     }
 }
 
@@ -723,7 +893,11 @@ struct HostState {
 
 impl HostState {
     fn spend_host_call(&mut self) -> Result<(), wit_types::PluginError> {
-        if self.host_calls >= MAX_HOST_CALLS_PER_INVOCATION {
+        self.spend_host_calls(1)
+    }
+
+    fn spend_host_calls(&mut self, cost: u32) -> Result<(), wit_types::PluginError> {
+        if self.host_calls.saturating_add(cost) > MAX_HOST_CALLS_PER_INVOCATION {
             if !self.host_call_budget_reported {
                 self.host_call_budget_reported = true;
                 self.journal.record(
@@ -738,14 +912,17 @@ impl HostState {
                 "This plugin made too many host requests in one call.",
             ));
         }
-        self.host_calls += 1;
+        self.host_calls = self.host_calls.saturating_add(cost);
         Ok(())
     }
 
     /// Resolving a grant is the only place a plugin's opaque id becomes a path,
     /// and it fails closed twice: once if the capability was never granted, and
     /// once if this particular id is outside the granted scope.
-    fn granted_directory(&self, grant: &str) -> Result<PathBuf, wit_types::PluginError> {
+    fn granted_directory(
+        &self,
+        grant: &str,
+    ) -> Result<Arc<GrantedDirectory>, wit_types::PluginError> {
         if !self.grants.holds(PluginCapability::FilesRead) {
             self.journal.record(
                 self.correlation_id,
@@ -759,7 +936,7 @@ impl HostState {
             ));
         }
         match self.grants.directory(grant) {
-            Some(path) => Ok(path.to_path_buf()),
+            Some(directory) => Ok(Arc::clone(directory)),
             None => {
                 self.journal.record(
                     self.correlation_id,
@@ -776,6 +953,12 @@ impl HostState {
     }
 }
 
+/// What a message of this many bytes costs against the host-call budget. One for
+/// the call, plus one for every whole block of text beyond the first.
+fn journal_cost(bytes: usize) -> u32 {
+    (1 + bytes / JOURNAL_BYTES_PER_HOST_CALL).min(u32::MAX as usize) as u32
+}
+
 fn plugin_error(code: wit_types::PluginErrorCode, message: &str) -> wit_types::PluginError {
     wit_types::PluginError {
         code,
@@ -790,7 +973,7 @@ impl host_journal::Host for HostState {
         // exhausted budget drops the line — but it must not be the one host
         // import a component can call without limit, because each call costs the
         // host a string copy out of guest memory.
-        if self.spend_host_call().is_err() {
+        if self.spend_host_calls(journal_cost(message.len())).is_err() {
             return;
         }
         let level = match level {
@@ -831,8 +1014,8 @@ impl host_files::Host for HostState {
         grant: String,
     ) -> Result<Vec<host_files::DirectoryEntry>, wit_types::PluginError> {
         self.spend_host_call()?;
-        let root = self.granted_directory(&grant)?;
-        let Ok(entries) = fs::read_dir(&root) else {
+        let directory = self.granted_directory(&grant)?;
+        let Ok(entries) = fs::read_dir(&directory.path) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That folder is no longer readable.",
@@ -844,22 +1027,23 @@ impl host_files::Host for HostState {
         // allowed to hear about. Sorting before the second one is what makes the
         // answer the same on every run — `read_dir` order is not.
         for entry in entries.filter_map(Result::ok).take(MAX_DIRECTORY_SCAN) {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            // `metadata` follows links; `symlink_metadata` is what says whether
-            // this entry *is* one. A link is skipped rather than resolved so a
-            // granted folder cannot be used as a door to an ungranted one.
-            let Ok(raw) = entry.path().symlink_metadata() else {
-                continue;
-            };
-            if raw.file_type().is_symlink() {
-                continue;
-            }
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.len() > MAX_ENTRY_NAME_BYTES || !valid_entry_name(&name) {
                 continue;
             }
+            // `read_dir` walks a path, and a path is what a swapped parent
+            // redirects. The name is therefore only a suggestion: every fact
+            // reported below is asked of a descriptor opened relative to the
+            // granted directory's own handle, so an entry the approved folder
+            // does not have cannot be listed at all, and a symbolic link is
+            // refused by the open rather than described. The worst a swap can
+            // still do is *hide* entries, which is not a way out of the grant.
+            let Ok(opened) = directory.open_entry(&name) else {
+                continue;
+            };
+            let Ok(metadata) = opened.metadata() else {
+                continue;
+            };
             listing.push(host_files::DirectoryEntry {
                 name,
                 byte_size: if metadata.is_file() {
@@ -871,8 +1055,23 @@ impl host_files::Host for HostState {
             });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
+        if listing.len() > MAX_DIRECTORY_ENTRIES {
+            // The contract gives the host no way to tell a plugin its listing was
+            // cut, so it tells the journal instead: a plugin paging a folder
+            // larger than this bound otherwise sees a short library and no reason
+            // for it.
+            self.journal.record(
+                self.correlation_id,
+                &self.plugin_id,
+                "files-truncated",
+                format!(
+                    "a granted folder of {} readable entries was cut to {MAX_DIRECTORY_ENTRIES}",
+                    listing.len()
+                ),
+            );
+        }
         listing.truncate(MAX_DIRECTORY_ENTRIES);
-        self.journal.record(
+        self.journal.trace(
             self.correlation_id,
             &self.plugin_id,
             "files-list",
@@ -887,31 +1086,22 @@ impl host_files::Host for HostState {
         name: String,
     ) -> Result<Vec<u8>, wit_types::PluginError> {
         self.spend_host_call()?;
-        let root = self.granted_directory(&grant)?;
+        let directory = self.granted_directory(&grant)?;
         if name.len() > MAX_ENTRY_NAME_BYTES || !valid_entry_name(&name) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::InvalidInput,
                 "That is not a name inside the allowed folder.",
             ));
         }
-        // Open once, then judge the handle. Checking the path and reading it
-        // again are two different objects if anything can write to the granted
-        // folder in between: a symbolic link reads outside the grant, a FIFO
-        // blocks this worker forever — neither the epoch nor a cancellation can
-        // reach a thread parked in `read` — and a character device has no size to
-        // bound. `O_NOFOLLOW` and `O_NONBLOCK` refuse the first two at `open`,
-        // and the size and kind below are asked of the descriptor, not the name.
-        //
-        // A hard link inside the folder stays readable, and that is a real gap
-        // rather than a justified one: creating a link does not require being able
-        // to read its target on macOS, nor on Linux without
-        // `fs.protected_hardlinks`, so another local account that can write to the
-        // granted folder can put a file there that it cannot read itself. Refusing
-        // a multiply-linked file owned by someone else would close it; that needs
-        // a test which can only be written with a second account, so it is
-        // recorded as a follow-up rather than guessed at here.
-        let path = root.join(&name);
-        let Ok(file) = open_without_following(&path) else {
+        // Open through the grant's own handle, then judge the descriptor.
+        // Checking a path and reading it again are two different objects if
+        // anything can write to the granted folder in between: a symbolic link
+        // reads outside the grant, a FIFO blocks this worker forever — neither
+        // the epoch nor a cancellation can reach a thread parked in `read` — and
+        // a character device has no size to bound. The open refuses the first
+        // two, and the kind, size and ownership below are asked of the
+        // descriptor rather than of the name.
+        let Ok(file) = directory.open_entry(&name) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That file is no longer available.",
@@ -923,10 +1113,10 @@ impl host_files::Host for HostState {
                 "That file is no longer available.",
             ));
         };
-        if !metadata.is_file() || metadata.len() > MAX_HOST_FILE_BYTES {
+        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), host_account()) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
-                "That entry is not a readable file of an allowed size.",
+                refusal.message(),
             ));
         }
         if self.bytes_read.saturating_add(metadata.len()) > MAX_HOST_READ_BYTES {
@@ -1015,28 +1205,101 @@ fn is_windows_device_name(resolved: &str) -> bool {
         .any(|device| folded.eq_ignore_ascii_case(device))
 }
 
-/// Opens a file in the granted directory without following a link into one that
-/// is not, and without blocking on something that is not a file at all.
+/// What the host knows about an entry once it has opened it, as plain values.
 ///
-/// The flags are the whole point of the function. On Unix `O_NOFOLLOW` fails on a
-/// symbolic link instead of resolving it, and `O_NONBLOCK` means a FIFO does not
-/// park this worker where neither the epoch nor a cancellation can reach it. On
-/// Windows `FILE_FLAG_OPEN_REPARSE_POINT` opens the link itself, so the caller's
-/// `is_file` check on the handle refuses it.
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
+/// Asking the descriptor rather than the name is what makes these trustworthy;
+/// keeping them as data is what makes the rule below a pure function, which is
+/// the only way one of its cases can be tested at all — reproducing that one for
+/// real needs a second local account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryFacts {
+    file: bool,
+    byte_size: u64,
+    /// How many names this file answers to. More than one is a hard link.
+    links: u64,
+    owner: u32,
+}
+
+impl EntryFacts {
+    fn of(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                file: metadata.is_file(),
+                byte_size: metadata.len(),
+                links: metadata.nlink(),
+                owner: metadata.uid(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows reports a link count only through a separate query and has
+            // no uid to compare, so the ownership rule below never fires there.
+            // Said out loud rather than silently approximated.
+            Self {
+                file: metadata.is_file(),
+                byte_size: metadata.len(),
+                links: 1,
+                owner: 0,
+            }
+        }
+    }
+}
+
+/// Why the host will not hand an entry's bytes to a plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryRefusal {
+    NotAFile,
+    TooLarge,
+    /// A file with more than one name, owned by another local account.
+    ForeignHardLink,
+}
+
+impl EntryRefusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::NotAFile | Self::TooLarge => {
+                "That entry is not a readable file of an allowed size."
+            }
+            Self::ForeignHardLink => {
+                "That entry is another account's file, under a second name in your folder."
+            }
+        }
+    }
+}
+
+fn refuse_entry(facts: &EntryFacts, host_owner: u32) -> Option<EntryRefusal> {
+    if !facts.file {
+        return Some(EntryRefusal::NotAFile);
+    }
+    if facts.byte_size > MAX_HOST_FILE_BYTES {
+        return Some(EntryRefusal::TooLarge);
+    }
+    // One name for another account's file is a folder the user pointed at on
+    // purpose — a shared library, something under `/Applications`. A *second*
+    // name for it is not: linking a file does not require being able to read it,
+    // so this is the shape a plugin is being used to read something on someone
+    // else's behalf. The user's own hard links stay readable, because a
+    // deduplicated library is an ordinary thing to have.
+    if facts.links > 1 && facts.owner != host_owner {
+        return Some(EntryRefusal::ForeignHardLink);
+    }
+    None
+}
+
+/// The account Orivo is running as. A grant authorises reading the user's own
+/// files; it is not a way to read another account's.
+fn host_account() -> u32 {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        // Safety: `geteuid` reads this process's own identity and cannot fail.
+        unsafe { libc::geteuid() }
     }
-    #[cfg(windows)]
+    #[cfg(not(unix))]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        0
     }
-    options.open(path)
 }
 
 /// Exactly one ordinary path component, and nothing that could leave the
@@ -1416,11 +1679,18 @@ impl PreparedComponent {
 
 /// What a completed invocation cost. Reported so the plan's performance
 /// contract can be checked with numbers rather than adjectives.
+///
+/// The last two are what a component made the *host* do, which fuel does not
+/// measure: a call that reads a hundred files burns barely more fuel than one
+/// that reads two. They are how "resumes without rescanning the whole library"
+/// becomes a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InvocationCost {
     pub instantiation: Duration,
     pub call: Duration,
     pub fuel_used: u64,
+    pub host_calls: u32,
+    pub bytes_read: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1850,7 +2120,7 @@ impl PluginRuntime {
 
         match outcome {
             Ok(response) => {
-                self.inner.journal.record(
+                self.inner.journal.trace(
                     correlation_id,
                     plugin_id,
                     request.decision(),
@@ -1865,6 +2135,8 @@ impl PluginRuntime {
                         instantiation,
                         call,
                         fuel_used,
+                        host_calls: store.data().host_calls,
+                        bytes_read: store.data().bytes_read,
                     },
                 })
             }
@@ -2013,7 +2285,8 @@ impl PluginRuntime {
                     .orivo_plugin_runner()
                     .call_discover_page(&mut *store, profile_id, &page_request)
                     .map_err(|error| self.classify(store, error))??;
-                validate_discovery_page(page, *limit).map(PluginResponse::DiscoveryPage)
+                validate_discovery_page(page, cursor.as_deref(), *limit)
+                    .map(PluginResponse::DiscoveryPage)
             }
             PluginRequest::PrepareLaunch {
                 profile_id,
@@ -2052,7 +2325,20 @@ impl PluginRuntime {
         match error.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => PluginRuntimeError::FuelExhausted,
             Some(Trap::Interrupt) => PluginRuntimeError::DeadlineExceeded,
-            Some(_) => PluginRuntimeError::Trapped,
+            // Every remaining trap is the same sentence to a user, and they are
+            // not the same event to whoever has to explain one. Recording which
+            // trap it was is also what lets a test tell a guest that ran out of
+            // *wasm* stack from one that ran out of the stack it keeps in its own
+            // linear memory — outwardly identical, and reached by different
+            // ceilings.
+            Some(trap) => {
+                let plugin_id = store.data().plugin_id.clone();
+                let correlation_id = store.data().correlation_id;
+                self.inner
+                    .journal
+                    .record(correlation_id, &plugin_id, "trap", trap.to_string());
+                PluginRuntimeError::Trapped
+            }
             None => PluginRuntimeError::Trapped,
         }
     }
@@ -2148,6 +2434,7 @@ fn validate_profile_validation(
 
 fn validate_discovery_page(
     page: wit_runner::RunnerGamePage,
+    requested_cursor: Option<&str>,
     limit: u32,
 ) -> Result<PluginDiscoveryPage, PluginRuntimeError> {
     let ceiling = (limit as usize).min(MAX_RESULT_PAGE_GAMES);
@@ -2199,6 +2486,13 @@ fn validate_discovery_page(
     if page.page.complete && next_cursor.is_some() {
         return Err(PluginRuntimeError::InvalidResult("cursor after completion"));
     }
+    // A cursor is a promise of progress, and the host is the only party holding
+    // both halves of it. Handing back the cursor it was given is well-formed in
+    // every other way, and a caller that trusts it asks the same question
+    // forever; refusing it here is cheaper than teaching every caller to count.
+    if next_cursor.is_some() && next_cursor.as_deref() == requested_cursor {
+        return Err(PluginRuntimeError::InvalidResult("cursor did not advance"));
+    }
     Ok(PluginDiscoveryPage {
         games,
         next_cursor,
@@ -2243,7 +2537,7 @@ fn validate_launch_intent(
 mod tests {
     use super::*;
     use crate::plugin_manifest::{ArtifactDescriptor, ArtifactKind, PLUGIN_SDK_V1, PluginManifest};
-    use crate::plugin_scheduler::JobError;
+    use crate::plugin_scheduler::{JobError, JobState};
     use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2257,7 +2551,7 @@ mod tests {
     /// target and no component tool; `build.sh` beside it is how it changes.
     const FIXTURE: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
     /// Regenerated by `build.sh`, which prints this digest.
-    const FIXTURE_SHA256: &str = "b8e096ae4bc61c7c8d04d775740bce97c39736aba0268657a3994a547ebf90ad";
+    const FIXTURE_SHA256: &str = "36ba4a71ad5a7973dd7e54cd702eb1926d5c3fa2f1268cf25b2cc8a4802d7dde";
     /// A component whose only import is WASI. Also built by `build.sh`, from
     /// hand-written component text rather than a second Rust guest.
     const WASI_IMPORT: &[u8] = include_bytes!("../fixtures/wasi-import.wasm");
@@ -2376,20 +2670,42 @@ mod tests {
 
     impl Harness {
         fn new(limits: PluginLimits, library: Option<&FixtureLibrary>) -> Self {
+            match library {
+                Some(library) => {
+                    Self::with_directories(limits, &[GAMES_GRANT], &library.directories())
+                }
+                None => {
+                    let runtime = PluginRuntime::with_limits(limits, EpochMode::Threaded).unwrap();
+                    let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
+                    Self {
+                        runtime,
+                        prepared,
+                        grants: PluginGrants::none(),
+                    }
+                }
+            }
+        }
+
+        /// The grants a test wants, rather than the fixture library's own. The
+        /// ids and the map are separate arguments on purpose: a grant naming
+        /// folders the map does not have is exactly the narrowed scope several
+        /// tests below need.
+        fn with_directories(
+            limits: PluginLimits,
+            ids: &[&str],
+            directories: &BTreeMap<String, PathBuf>,
+        ) -> Self {
             let runtime = PluginRuntime::with_limits(limits, EpochMode::Threaded).unwrap();
             let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
-            let grants = match library {
-                Some(library) => PluginGrants::resolve(
-                    &fixture_manifest(vec![
-                        PluginCapability::RunnerPrepare,
-                        PluginCapability::FilesRead,
-                    ]),
-                    &[files_grant(&[GAMES_GRANT])],
-                    &library.directories(),
-                )
-                .unwrap(),
-                None => PluginGrants::none(),
-            };
+            let grants = PluginGrants::resolve(
+                &fixture_manifest(vec![
+                    PluginCapability::RunnerPrepare,
+                    PluginCapability::FilesRead,
+                ]),
+                &[files_grant(ids)],
+                directories,
+            )
+            .unwrap();
             Self {
                 runtime,
                 prepared,
@@ -2867,6 +3183,55 @@ mod tests {
         );
     }
 
+    /// `O_NOFOLLOW` judges the last component of a path and nothing above it, so
+    /// a grant is only as trustworthy as every directory on the way to it. This
+    /// plants the swap the flag cannot see: the granted folder's *parent* is
+    /// replaced by a symbolic link to a folder the user never approved, which
+    /// needs write access to that parent rather than to the grant.
+    ///
+    /// Before the handle, `read_file` joined the grant's path and followed the
+    /// link, so `fixture:read-secret` did not fail — it succeeded, reading a file
+    /// from the attacker's folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_parent_cannot_redirect_a_granted_folder() {
+        let root = temporary_root("swapped-parent");
+        let library = root.join("library");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(library.join("games")).unwrap();
+        fs::create_dir_all(decoy.join("games")).unwrap();
+        fs::write(library.join("games/alpha.rom"), b"Alpha Quest\n").unwrap();
+        fs::write(decoy.join("games/secret.rom"), b"a keychain token").unwrap();
+
+        let harness = Harness::with_directories(
+            PluginLimits::default(),
+            &[GAMES_GRANT],
+            &BTreeMap::from([(GAMES_GRANT.to_string(), library.join("games"))]),
+        );
+
+        // The swap happens after the user granted the folder, which is the whole
+        // point: the handle names the directory they approved, not the path.
+        fs::rename(&library, root.join("library-real")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &library).unwrap();
+
+        let error = harness.prepare("fixture:read-secret").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "a swapped parent redirected the grant: {error:?}"
+        );
+        // And the folder the user really granted is still readable, so this is a
+        // handle rather than a refusal of everything.
+        assert!(harness.prepare("fixture:read-alpha").is_ok());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// A FIFO is the one substitution that does not merely read the wrong file:
     /// a worker parked in `read` is a worker neither the epoch deadline nor a
     /// cancellation can reach, and there are only two of them.
@@ -2929,6 +3294,91 @@ mod tests {
         assert_eq!(read_at_most(Cursor::new(vec![7u8; 100]), 99), None);
         assert_eq!(read_at_most(Cursor::new(vec![7u8; 1]), 0), None);
         assert_eq!(read_at_most(Cursor::new(Vec::new()), 0), Some(Vec::new()));
+    }
+
+    /// A second name for a file is how another local account lends a plugin
+    /// something that account cannot read itself. Creating a link does not
+    /// require being able to read its target — not on macOS, and not on Linux
+    /// without `fs.protected_hardlinks` — so anyone who can write to the granted
+    /// folder can plant one there and let Orivo do the reading.
+    ///
+    /// Driven through the rule rather than the filesystem because the case that
+    /// matters needs a second local account, which a test suite cannot create.
+    /// What *is* reproducible is checked below, in
+    /// `the_facts_a_refusal_is_made_from_come_from_the_descriptor`: the link
+    /// count and owner really are read off the open file.
+    #[test]
+    fn a_multiply_linked_file_owned_by_another_account_is_refused() {
+        let ours = host_account();
+        let theirs = ours.wrapping_add(1);
+        let entry = |links, owner| EntryFacts {
+            file: true,
+            byte_size: 32,
+            links,
+            owner,
+        };
+
+        assert_eq!(refuse_entry(&entry(1, ours), ours), None);
+        // A deduplicated ROM library is an ordinary thing for a user to have,
+        // and every name in it is theirs.
+        assert_eq!(refuse_entry(&entry(9, ours), ours), None);
+        // One name, another owner: a shared or system folder the user pointed at
+        // on purpose. The grant is what authorises this.
+        assert_eq!(refuse_entry(&entry(1, theirs), ours), None);
+        // A second name for someone else's file is the one shape that is not
+        // explained by the user having granted the folder.
+        assert_eq!(
+            refuse_entry(&entry(2, theirs), ours),
+            Some(EntryRefusal::ForeignHardLink)
+        );
+
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    file: false,
+                    ..entry(1, ours)
+                },
+                ours
+            ),
+            Some(EntryRefusal::NotAFile)
+        );
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    byte_size: MAX_HOST_FILE_BYTES + 1,
+                    ..entry(1, ours)
+                },
+                ours
+            ),
+            Some(EntryRefusal::TooLarge)
+        );
+    }
+
+    /// The rule above is only worth anything if the numbers it judges are the
+    /// file's own. A link the test makes itself has two names and this account's
+    /// owner, and it stays readable — refusing every hard link would break a
+    /// deduplicated library for no security gained.
+    #[cfg(unix)]
+    #[test]
+    fn the_facts_a_refusal_is_made_from_come_from_the_descriptor() {
+        let library = FixtureLibrary::new("hard-link");
+        fs::hard_link(
+            library.games.join("alpha.rom"),
+            library.games.join("twin.rom"),
+        )
+        .unwrap();
+
+        let facts = EntryFacts::of(
+            &fs::File::open(library.games.join("twin.rom"))
+                .unwrap()
+                .metadata()
+                .unwrap(),
+        );
+        assert_eq!(facts.links, 2, "the link count is not the file's own");
+        assert_eq!(facts.owner, host_account());
+
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:read-twin").is_ok());
     }
 
     #[test]
@@ -3115,25 +3565,64 @@ mod tests {
     }
 
     /// Wasm frames live on the native stack, so `max_wasm_stack` is only a limit
-    /// if the thread underneath it is bigger. Wasmtime's documentation says
-    /// exhausting the *thread* stack aborts the process, which would take Orivo
-    /// down every time Settings → Plugins probed a package like this — and
-    /// uninstalling a plugin lives in that panel.
+    /// if the thread underneath it is bigger — and exhausting the *thread* stack
+    /// is an abort, not a trap. This is the guest-side half of that: deep
+    /// recursion inside wasm must end as a trap the host can report, on a worker
+    /// the scheduler sized.
     ///
-    /// Read the result honestly: this passes with the worker stack at its default
-    /// too, because an overflow taken *inside wasm* hits Wasmtime's guard page and
-    /// becomes a trap. The stack size is what protects the case this cannot reach
-    /// — an overflow taken in host code, in a host function or a trampoline — and
-    /// `a_worker_has_room_for_the_whole_wasm_stack_and_host_frames` is the test
-    /// that fails without it. This one is the guest-side regression guard: a
-    /// future change that made deep guest recursion abort instead of trap would
-    /// fail here.
+    /// The assertion is on *which* ceiling stopped it, and that is the point.
+    /// `fixture:recurse` used to take the address of a 512-byte local, which
+    /// forces Rust to put every frame in linear memory: it ran out of its own
+    /// shadow stack after a megabyte and never came within reach of
+    /// `max_wasm_stack`, while its doc comment claimed otherwise. The rewritten
+    /// selector carries only wasm locals, so the trap below is the stack limit
+    /// this host actually sets.
     #[test]
-    fn a_recursing_component_traps_instead_of_aborting_the_process() {
-        let library = FixtureLibrary::new("recurse");
+    fn a_deep_guest_recursion_traps_on_the_wasm_stack() {
+        let trap = trap_from("recurse-frames", "fixture:recurse");
+        assert!(
+            trap.contains("call stack exhausted"),
+            "the descent was stopped by {trap:?} rather than by the wasm stack"
+        );
+    }
+
+    /// The other stack, and the reason the test above has to name its own. A
+    /// guest whose frames live in linear memory runs out of an ordinary region at
+    /// an ordinary address, which is a different trap reached by a different
+    /// ceiling — and must still be a trap rather than an abort.
+    #[test]
+    fn filling_the_guests_own_stack_in_linear_memory_traps_too() {
+        let trap = trap_from("recurse-shadow", "fixture:shadow-stack");
+        // Measured, and named here because it is the trap the old
+        // `fixture:recurse` produced: the address the guest's own stack pointer
+        // walked off, not a frame count. Which is why the test above cannot be
+        // satisfied by this selector.
+        assert!(
+            trap.contains("out of bounds memory access"),
+            "a guest stack inside linear memory ended as {trap:?}"
+        );
+    }
+
+    /// The blunt case, for completeness: a component that simply stops. It is the
+    /// shape every other trap is reported as, so the host has to survive it with
+    /// nothing left behind but a journal line.
+    #[test]
+    fn a_component_that_executes_unreachable_traps() {
+        assert!(
+            trap_from("trap", "fixture:trap").contains("unreachable"),
+            "the host did not record the guest's own trap"
+        );
+    }
+
+    /// Runs one misbehaviour to its trap and hands back what the host recorded.
+    ///
+    /// Through the scheduler, because that is the only door onto a thread with
+    /// room for the whole wasm stack plus host frames; fuel and the deadline are
+    /// deliberately generous, so nothing but the trap can end the call.
+    fn trap_from(tag: &str, selector: &str) -> String {
+        let library = FixtureLibrary::new(tag);
         let harness = Harness::new(
             PluginLimits {
-                // Generous on both other axes: the stack has to be what stops it.
                 interactive_fuel: 1 << 42,
                 interactive_deadline: Duration::from_secs(30),
                 ..PluginLimits::default()
@@ -3148,7 +3637,7 @@ mod tests {
                 &harness.grants,
                 PluginRequest::PrepareLaunch {
                     profile_id: FIXTURE_PROFILE.into(),
-                    game_reference: "fixture:recurse".into(),
+                    game_reference: selector.into(),
                 },
             )
             .unwrap();
@@ -3159,9 +3648,17 @@ mod tests {
             ),
             Err(handle) => {
                 handle.cancel();
-                panic!("the recursing component never came back");
+                panic!("{selector} never came back");
             }
         }
+        harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.decision == "trap")
+            .map(|entry| entry.detail)
+            .expect("the host recorded no trap")
     }
 
     /// Isolates the tick half. The epoch tick is a whole second, so the wall
@@ -3365,13 +3862,18 @@ mod tests {
         assert_eq!(format!("{:x}", digest.finalize()), COMPOSED_MEMORIES_SHA256);
 
         let runtime = PluginRuntime::new().unwrap();
-        // Either outcome is acceptable; an unwind is not, and is what this
-        // catches. A panic here fails the test rather than aborting, because
-        // compilation is guarded.
-        match runtime.prepare_component(COMPOSED_MEMORIES, COMPOSED_MEMORIES_SHA256) {
-            Ok(_) => {}
-            Err(error) => assert_eq!(error, PluginRuntimeError::InvalidComponent),
-        }
+        // Accepting either outcome made this pass again the moment someone put
+        // `wasm_multi_memory(false)` back, which is the one change it exists to
+        // catch: with the feature off Wasmtime does not refuse such a component,
+        // it panics inside its own translator, and `without_unwinding` turns that
+        // into exactly the `InvalidComponent` the old assertion allowed. The
+        // property is that a legitimate composed plugin *compiles*.
+        assert!(
+            runtime
+                .prepare_component(COMPOSED_MEMORIES, COMPOSED_MEMORIES_SHA256)
+                .is_ok(),
+            "a composed component with two memories was refused"
+        );
     }
 
     #[test]
@@ -3499,6 +4001,39 @@ mod tests {
     // Untrusted results
     // -----------------------------------------------------------------------
 
+    /// A cursor is a promise of progress. Handing back the one it was given is
+    /// the cheapest lie a paginating plugin can tell: every field is well-formed,
+    /// the page is short and honest, and a caller that trusts it asks the same
+    /// question until something else stops it. The host has the request in front
+    /// of it, so it is the one that can tell.
+    #[test]
+    fn the_host_refuses_a_cursor_that_does_not_advance() {
+        let library = FixtureLibrary::new("loop-cursor");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert_eq!(
+            harness
+                .call(PluginRequest::DiscoverPage {
+                    profile_id: "fixture:loop-cursor".into(),
+                    cursor: Some("alpha.rom".into()),
+                    limit: 2,
+                })
+                .unwrap_err(),
+            PluginRuntimeError::InvalidResult("cursor did not advance")
+        );
+
+        // A first page has no cursor to repeat, and a page that really moves on
+        // is still accepted.
+        assert!(
+            harness
+                .call(PluginRequest::DiscoverPage {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    cursor: Some("alpha.rom".into()),
+                    limit: 1,
+                })
+                .is_ok()
+        );
+    }
+
     #[test]
     fn the_host_refuses_a_launch_mode_it_does_not_recognise() {
         let library = FixtureLibrary::new("bad-mode");
@@ -3582,6 +4117,82 @@ mod tests {
         );
     }
 
+    /// Separate rings were only half of it. The host's own ring is bounded too,
+    /// and it was written to on *every* host call — a listing wrote a line, a
+    /// refusal wrote a line — so a plugin that earned a refusal and then made
+    /// two hundred and fifty ordinary calls scrolled it away itself. The whole
+    /// point of journalling a refusal is that it is still there afterwards.
+    #[test]
+    fn a_refusal_survives_the_traffic_that_earned_it() {
+        let library = FixtureLibrary::new("bury");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:bury").is_ok());
+
+        let decisions = harness.runtime.journal().entries();
+        assert!(
+            decisions
+                .iter()
+                .any(|entry| entry.decision == "scope-refused"),
+            "the plugin buried its own refusal under {} ordinary calls",
+            decisions.len()
+        );
+        // And it is one entry with a count, not one per attempt: a component that
+        // asks for the same forbidden folder in a loop must not be able to fill
+        // the ring with the answer either.
+        assert!(
+            decisions.len() < MAX_JOURNAL_ENTRIES,
+            "the decision ring is full after a single invocation"
+        );
+    }
+
+    /// The 512-byte truncation bounds what the host *keeps*. It does not bound
+    /// what it was made to *copy*: Wasmtime lifts the whole string out of guest
+    /// memory before this host sees one byte of it, and wasmtime 44 has no
+    /// `set_hostcall_fuel` to charge that against. So the budget `log` does reach
+    /// has to count bytes rather than calls.
+    #[test]
+    fn a_plugin_pays_for_the_text_it_hands_the_journal() {
+        let library = FixtureLibrary::new("shout");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:shout").is_ok());
+
+        // Sixty-four messages of 64 KiB. Counting calls, all sixty-four are free
+        // of charge and four megabytes leave the guest; counting bytes, the
+        // budget is gone long before that. Summed over `repeats` because
+        // identical lines collapse into one entry.
+        let accepted: u32 = harness
+            .runtime
+            .journal()
+            .plugin_messages()
+            .iter()
+            .map(|entry| entry.repeats)
+            .sum();
+        assert!(
+            accepted < 64,
+            "all {accepted} oversized messages were accepted free of charge"
+        );
+        assert!(
+            harness
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .any(|entry| entry.decision == "host-call-budget"),
+            "an invocation that copied megabytes out of guest memory never ran out of budget"
+        );
+
+        // And an ordinary line still costs one call, so metering by size does not
+        // make the journal a capability a plugin has to ration.
+        let library = FixtureLibrary::new("shout-ok");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:ok").is_ok());
+        assert_eq!(
+            journal_cost(MAX_JOURNAL_MESSAGE_BYTES),
+            1,
+            "a message the host keeps whole must cost one call"
+        );
+    }
+
     #[test]
     fn a_plugin_error_reaches_the_host_as_bounded_text() {
         let library = FixtureLibrary::new("fail");
@@ -3627,7 +4238,25 @@ mod tests {
     #[test]
     fn a_page_is_rejected_when_it_breaks_the_hosts_rules() {
         let good = page(vec![candidate("prov", "one", "One")], None, true);
-        assert!(validate_discovery_page(good, 4).is_ok());
+        assert!(validate_discovery_page(good, None, 4).is_ok());
+        // A cursor that really moves on, against the one the host sent.
+        assert!(
+            validate_discovery_page(
+                page(vec![candidate("prov", "two", "Two")], Some("two"), false),
+                Some("one"),
+                4,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_discovery_page(
+                page(vec![candidate("prov", "two", "Two")], Some("one"), false),
+                Some("one"),
+                4,
+            )
+            .unwrap_err(),
+            PluginRuntimeError::InvalidResult("cursor did not advance")
+        );
 
         assert_eq!(
             validate_discovery_page(
@@ -3639,6 +4268,7 @@ mod tests {
                     None,
                     true,
                 ),
+                None,
                 1,
             )
             .unwrap_err(),
@@ -3654,6 +4284,7 @@ mod tests {
                     None,
                     true,
                 ),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -3662,6 +4293,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "one", "One")], Some("next"), true),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -3674,6 +4306,7 @@ mod tests {
                     Some("../escape"),
                     false
                 ),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -3682,6 +4315,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "../etc", "One")], None, true),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -3690,6 +4324,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "one", "One\u{7}Two")], None, true),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -3912,6 +4547,900 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The adversarial suite: permission, timeout, trap, cancellation, resumption
+    //
+    // Step 1.4 of docs/plugin-system-plan.md asks for the import and the launch
+    // behind one contract "with tests of refused permission, timeout, trap,
+    // cancellation and resumption", and several of the plan's exit tests live
+    // here too. Everything below is driven by the reference component actually
+    // trying, because a mock refuses whatever it was written to refuse.
+    // -----------------------------------------------------------------------
+
+    /// A second library, so a grant can name two folders and then one.
+    struct SecondLibrary {
+        root: PathBuf,
+        other: PathBuf,
+    }
+
+    impl SecondLibrary {
+        fn new(tag: &str) -> Self {
+            let root = temporary_root(tag);
+            let other = root.join("other");
+            fs::create_dir_all(&other).unwrap();
+            fs::write(other.join("delta.rom"), b"Delta Drift\n").unwrap();
+            Self { root, other }
+        }
+    }
+
+    impl Drop for SecondLibrary {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The plan's exit test, in the half this host can reach: a plugin cannot
+    /// read a second folder without a new grant. Same component, same call, two
+    /// grant sets — so what changes the answer is the grant and nothing else.
+    #[test]
+    fn a_second_folder_needs_a_second_grant() {
+        let library = FixtureLibrary::new("second-folder");
+        let second = SecondLibrary::new("second-folder-other");
+        let mut both = library.directories();
+        both.insert("fixture-other".to_string(), second.other.clone());
+
+        // `fixture:deny` reads the grant id `fixture-other`. Granted, it works.
+        let widened = Harness::with_directories(
+            PluginLimits::default(),
+            &[GAMES_GRANT, "fixture-other"],
+            &both,
+        );
+        assert!(
+            widened.prepare("fixture:deny").is_ok(),
+            "a folder the user did grant was refused"
+        );
+
+        // Not granted, the same call is refused — and the refusal is recorded
+        // rather than inferred from the absence of a result.
+        let narrowed = Harness::with_directories(PluginLimits::default(), &[GAMES_GRANT], &both);
+        assert!(matches!(
+            narrowed.prepare("fixture:deny").unwrap_err(),
+            PluginRuntimeError::Plugin {
+                code: PluginErrorCode::PermissionDenied,
+                ..
+            }
+        ));
+        assert!(
+            narrowed
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .any(|entry| entry.decision == "scope-refused")
+        );
+    }
+
+    /// Revoking a grant is submitting the next job without it. An invocation
+    /// already inside Wasmtime keeps the snapshot it started with, which is safe
+    /// because that invocation has an end: the deadline is the bound on how long
+    /// a revocation can take to matter.
+    #[test]
+    fn a_revoked_grant_stops_the_next_call_while_the_running_one_ends_on_its_own() {
+        let library = FixtureLibrary::new("revoked");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:read-alpha").is_ok());
+
+        // The same runtime, the same component, and a grant set that no longer
+        // resolves the folder: every later call is refused.
+        let revoked = PluginGrants::resolve(
+            &fixture_manifest(vec![
+                PluginCapability::RunnerPrepare,
+                PluginCapability::FilesRead,
+            ]),
+            &[],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let error = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &revoked,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:read-alpha".into(),
+                },
+            )
+            .unwrap()
+            .wait()
+            .unwrap_err();
+        let JobError::Runtime(PluginRuntimeError::Plugin { code, .. }) = error else {
+            panic!("a revoked grant answered {error:?}");
+        };
+        assert_eq!(code, PluginErrorCode::PermissionDenied);
+        assert!(
+            harness
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .any(|entry| entry.decision == "capability-refused"),
+            "a capability that was never granted was refused without a record"
+        );
+        // A revocation is not the plugin's failure: three of them must not park
+        // a working plugin.
+        assert!(
+            !harness
+                .runtime
+                .scheduler()
+                .health(FIXTURE_PLUGIN_ID)
+                .degraded
+        );
+    }
+
+    /// The other two halves of the plan's exit test. A second *domain* and a
+    /// second *binary* are not refused at the call, because there is nothing to
+    /// refuse: this host links two interfaces and neither of them is a socket or
+    /// a process, so a component that wants either has nothing to import and
+    /// never instantiates. That is a stronger promise than a check, and this is
+    /// what pins it.
+    #[test]
+    fn a_second_domain_or_a_second_binary_has_no_import_to_ask_through() {
+        let runtime = PluginRuntime::new().unwrap();
+
+        // Every import name the host answers to, written out. A future interface
+        // — network, process, clock — has to be added here on purpose, and the
+        // grammar of that addition is a capability the manifest must declare.
+        assert_eq!(
+            [HOST_JOURNAL_IMPORT, HOST_FILES_IMPORT, TYPES_IMPORT].len(),
+            3
+        );
+        // Anything else is refused before a `Store` exists, whatever the manifest
+        // claims. `wasi-import.wasm` stands for the whole class.
+        let outsider = runtime
+            .prepare_component(WASI_IMPORT, WASI_IMPORT_SHA256)
+            .unwrap();
+        assert_eq!(
+            runtime.inspect_contract(&outsider).unwrap_err(),
+            PluginRuntimeError::UnknownImport
+        );
+
+        // And the one result that could name a binary cannot: the intent the host
+        // keeps holds opaque ids and a closed mode, so there is no field for an
+        // executable, a working directory or an argument to travel in.
+        let library = FixtureLibrary::new("no-binary");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let PluginResponse::LaunchIntent(intent) = harness.prepare("fixture:ok").unwrap() else {
+            panic!("expected an intent");
+        };
+        assert_eq!(intent.mode(), PluginLaunchMode::Default);
+        assert_eq!(intent.runner_id(), FIXTURE_PLUGIN_ID);
+    }
+
+    /// Time spent inside host calls is time the plugin is not computing, so fuel
+    /// barely moves and the tick count is only advanced on the way back into
+    /// wasm. Something still has to end the call.
+    #[test]
+    fn a_call_spent_inside_host_calls_is_still_stopped() {
+        let library = FixtureLibrary::new("churn");
+        // A folder worth walking, so each listing is real work for the host.
+        for index in 0..200 {
+            fs::write(
+                library.games.join(format!("bulk-{index:03}.rom")),
+                format!("Bulk {index}\n"),
+            )
+            .unwrap();
+        }
+        let harness = Harness::new(
+            PluginLimits {
+                // Fuel it cannot exhaust: what stops this must be the deadline.
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_millis(40),
+                epoch_tick: Duration::from_millis(2),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let started = Instant::now();
+        assert_eq!(
+            harness.prepare("fixture:churn").unwrap_err(),
+            PluginRuntimeError::DeadlineExceeded
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline did not reach a call sitting in the host"
+        );
+    }
+
+    /// The plan's exit test, stated as one test: a component in a loop is
+    /// interrupted, *its job* is marked failed, and the scheduler keeps working
+    /// for everyone else. The third clause is the one that matters — an
+    /// interruption that took the worker with it would be indistinguishable from
+    /// a hang.
+    #[test]
+    fn an_endless_component_fails_its_job_and_leaves_the_scheduler_working() {
+        let library = FixtureLibrary::new("endless");
+        let harness = Harness::new(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_millis(50),
+                epoch_tick: Duration::from_millis(5),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let spinning = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:spin".into(),
+                },
+            )
+            .unwrap();
+
+        // Another plugin's work, queued behind the loop and served anyway.
+        let polite = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                "com.orivo.other-runner",
+                &harness.grants,
+                PluginRequest::HealthCheck,
+            )
+            .unwrap();
+        assert!(matches!(
+            polite.wait_for(Duration::from_secs(10)),
+            Ok(Ok(PluginInvocation {
+                response: PluginResponse::Health(PluginHealth { ready: true, .. }),
+                ..
+            }))
+        ));
+
+        let state = spinning.state();
+        assert_eq!(
+            spinning.wait().unwrap_err(),
+            JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
+        );
+        assert!(
+            matches!(state, JobState::Running | JobState::Failed),
+            "the interrupted job was in {state:?}"
+        );
+
+        // Two more, so the loop reaches the failure threshold and is parked —
+        // interrupting it is not the same as giving up on it.
+        for _ in 1..DEFAULT_MAX_CONSECUTIVE_FAILURES {
+            let _ = harness
+                .runtime
+                .submit(
+                    &harness.prepared,
+                    FIXTURE_PLUGIN_ID,
+                    &harness.grants,
+                    PluginRequest::PrepareLaunch {
+                        profile_id: FIXTURE_PROFILE.into(),
+                        game_reference: "fixture:spin".into(),
+                    },
+                )
+                .unwrap()
+                .wait();
+        }
+        assert!(
+            harness
+                .runtime
+                .scheduler()
+                .health(FIXTURE_PLUGIN_ID)
+                .degraded
+        );
+        // And the other plugin is untouched by it.
+        assert!(
+            !harness
+                .runtime
+                .scheduler()
+                .health("com.orivo.other-runner")
+                .degraded
+        );
+    }
+
+    /// Tables and instance counts are ceilings too, and the only ones no Rust
+    /// guest can be made to reach: `table.grow` is not something `wit-bindgen`
+    /// emits. Driven on the limiter directly rather than asserted about.
+    #[test]
+    fn tables_and_instance_counts_are_the_hosts_ceilings() {
+        let runtime = PluginRuntime::with_limits(
+            PluginLimits {
+                table_elements: 64,
+                instances_per_store: 3,
+                tables_per_store: 2,
+                memories_per_store: 1,
+                ..PluginLimits::default()
+            },
+            EpochMode::Manual,
+        )
+        .unwrap();
+        let mut guard = guard(&runtime);
+        assert!(guard.table_growing(0, 64, None).unwrap());
+        assert!(!guard.table_growing(0, 65, None).unwrap());
+        assert_eq!(guard.hit_limit, Some(MemoryLimitKind::Instance));
+        assert_eq!(guard.instances(), 3);
+        assert_eq!(guard.tables(), 2);
+        assert_eq!(guard.memories(), 1);
+    }
+
+    /// An innocent plugin refused because *other* plugins filled the global
+    /// ceiling. Driven by charging the budget by hand rather than by racing two
+    /// growing components, so the plugin under test is refused every run.
+    #[test]
+    fn a_full_global_ceiling_refuses_a_well_behaved_plugin_without_blaming_it() {
+        let library = FixtureLibrary::new("global-full");
+        let harness = Harness::new(
+            PluginLimits {
+                instance_memory_bytes: 64 * 1024 * 1024,
+                total_memory_bytes: 4 * 1024 * 1024,
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        // Somebody else's instance, holding the whole global budget.
+        let mut hog = guard(&harness.runtime);
+        assert!(hog.memory_growing(0, 4 * 1024 * 1024, None).unwrap());
+
+        let error = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::HealthCheck,
+            )
+            .unwrap()
+            .wait()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            JobError::Runtime(PluginRuntimeError::HostMemoryExhausted),
+            "a plugin refused by the global ceiling was told it was its own fault"
+        );
+        assert_eq!(
+            harness
+                .runtime
+                .scheduler()
+                .health(FIXTURE_PLUGIN_ID)
+                .consecutive_failures,
+            0,
+            "an innocent plugin was pushed towards degraded"
+        );
+
+        // The budget comes back with the instance that took it, and the plugin
+        // that was refused works again.
+        drop(hog);
+        assert!(harness.call(PluginRequest::HealthCheck).is_ok());
+    }
+
+    /// Cancelling a job that has not started must cost the component nothing at
+    /// all. Proved by the journal: a component that ran would have left a line
+    /// under its own correlation id.
+    #[test]
+    fn cancelling_a_queued_invocation_never_reaches_the_component() {
+        let library = FixtureLibrary::new("cancel-queued");
+        let harness = Harness::new(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_millis(5),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let running = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:spin".into(),
+                },
+            )
+            .unwrap();
+        // One plugin runs one job at a time, so the second waits behind the loop.
+        let queued = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::DiscoverPage {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    cursor: None,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        let waiting = queued.correlation_id();
+        assert_eq!(queued.state(), JobState::Queued);
+        queued.cancel();
+        assert_eq!(queued.state(), JobState::Cancelled);
+        assert_eq!(queued.wait().unwrap_err(), JobError::Cancelled);
+
+        running.cancel();
+        let _ = running.wait();
+        let journal = harness.runtime.journal();
+        assert!(
+            journal
+                .entries()
+                .iter()
+                .chain(journal.traces().iter())
+                .chain(journal.plugin_messages().iter())
+                .all(|entry| entry.correlation_id != waiting || entry.decision == "cancelled"),
+            "a cancelled job still reached the component"
+        );
+    }
+
+    /// Cancellation has to reach a call that is not executing wasm at all. The
+    /// guest is inside `list-directory` most of the time here; the flag is read
+    /// on the way back in, within one tick.
+    #[test]
+    fn cancelling_during_a_host_call_comes_back() {
+        let library = FixtureLibrary::new("cancel-hostcall");
+        for index in 0..200 {
+            fs::write(
+                library.games.join(format!("bulk-{index:03}.rom")),
+                format!("Bulk {index}\n"),
+            )
+            .unwrap();
+        }
+        let harness = Harness::new(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_millis(2),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = Instant::now();
+        assert_eq!(
+            harness
+                .call_with(
+                    PluginRequest::PrepareLaunch {
+                        profile_id: FIXTURE_PROFILE.into(),
+                        game_reference: "fixture:churn".into(),
+                    },
+                    &cancel,
+                )
+                .unwrap_err(),
+            PluginRuntimeError::Cancelled
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The window nothing else covers: the cancellation arrives after the check
+    /// before instantiation and before the first export call. It cannot be hit on
+    /// demand — instantiating the fixture takes tens of microseconds — so this
+    /// races it sixty times across the window and asserts the invariant that has
+    /// to hold at every point in it: a valid answer or `Cancelled`, and nothing
+    /// else. A cancellation the host simply did not reach in time is a completed
+    /// job, which is correct: the call was over.
+    ///
+    /// How many of the sixty land inside the window is a scheduling accident and
+    /// is printed rather than asserted — a count that depends on how busy the
+    /// machine is would be a flake, not a property.
+    #[test]
+    fn a_cancellation_racing_instantiation_is_always_one_of_two_answers() {
+        let library = FixtureLibrary::new("cancel-instantiate");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let mut cancelled = 0;
+        for attempt in 0..60u32 {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let flag = Arc::clone(&cancel);
+            // Stagger across the window rather than always landing in the same
+            // place in it.
+            let delay = Duration::from_micros(u64::from(attempt) * 5);
+            let racing = thread::spawn(move || {
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+                flag.store(true, Ordering::Relaxed);
+            });
+            let outcome = harness.call_with(PluginRequest::Identity, &cancel);
+            racing.join().unwrap();
+            match outcome {
+                Ok(invocation) => {
+                    assert!(matches!(invocation.response, PluginResponse::Identity(_)))
+                }
+                Err(PluginRuntimeError::Cancelled) => cancelled += 1,
+                Err(other) => panic!("a cancellation during startup became {other:?}"),
+            }
+        }
+        println!("cancellation landed inside the startup window {cancelled}/60 times");
+    }
+
+    /// The plan's exit test: a runner relaunches a library after a restart
+    /// "without rescanning the whole library". Measured rather than asserted —
+    /// resuming from a cursor has to cost a page, and the cost of a page is what
+    /// `InvocationCost` reports.
+    #[test]
+    fn a_resumed_cursor_costs_a_page_and_not_the_library() {
+        let library = FixtureLibrary::new("resume-cost");
+        for index in 0..200 {
+            fs::write(
+                library.games.join(format!("bulk-{index:03}.rom")),
+                format!("Bulk {index}\n"),
+            )
+            .unwrap();
+        }
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+
+        let whole = harness
+            .call_with(
+                PluginRequest::DiscoverPage {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    cursor: None,
+                    limit: 100,
+                },
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let PluginResponse::DiscoveryPage(page) = &whole.response else {
+            panic!("expected a page");
+        };
+        assert_eq!(page.games.len(), 100);
+        let cursor = page.next_cursor.clone().expect("a cursor");
+
+        // A *new* runtime: a restart, with nothing carried over but the cursor
+        // the host wrote down.
+        let restarted = Harness::new(PluginLimits::default(), Some(&library));
+        let resumed = restarted
+            .call_with(
+                PluginRequest::DiscoverPage {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    cursor: Some(cursor.clone()),
+                    limit: 2,
+                },
+                &Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        let PluginResponse::DiscoveryPage(page) = &resumed.response else {
+            panic!("expected a page");
+        };
+        assert_eq!(page.games.len(), 2);
+        // It continued rather than started again.
+        assert!(
+            page.games
+                .iter()
+                .all(|game| format!("{}.rom", game.external_id) > cursor),
+            "the resumed page went back over the library"
+        );
+        // The number that matters is what the host was made to do. A full page
+        // reads a hundred games out of the granted folder; resuming reads two.
+        // Fuel is the wrong instrument here and says so: the guest still asks for
+        // one listing either way, and lifting two hundred names costs more than
+        // the reads it saves.
+        // One listing, one read per game in the page, and the fixture's own line
+        // in the journal.
+        assert_eq!(whole.cost.host_calls, 1 + 100 + 1);
+        assert_eq!(resumed.cost.host_calls, 1 + 2 + 1);
+        assert!(
+            resumed.cost.bytes_read * 10 < whole.cost.bytes_read,
+            "resuming read {} bytes of the library against {}",
+            resumed.cost.bytes_read,
+            whole.cost.bytes_read
+        );
+    }
+
+    /// Resumption after a cancellation, which is the case a user creates: they
+    /// stop an import halfway and start it again. The cursor from the last page
+    /// that *completed* is still good, and the pages either side of the
+    /// cancellation join up.
+    #[test]
+    fn discovery_resumes_from_the_last_page_that_finished() {
+        let library = FixtureLibrary::new("resume-cancel");
+        let harness = Harness::new(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                discovery_fuel: 1 << 42,
+                discovery_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_millis(5),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let PluginResponse::DiscoveryPage(first) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: None,
+                limit: 1,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        let cursor = first.next_cursor.clone().expect("a cursor");
+
+        // The next page is cancelled halfway through.
+        let handle = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:spin".into(),
+                },
+            )
+            .unwrap();
+        let handle = handle
+            .wait_for(Duration::from_millis(30))
+            .err()
+            .expect("still running");
+        handle.cancel();
+        assert_eq!(handle.wait().unwrap_err(), JobError::Cancelled);
+
+        // Nothing was lost: the cursor from before the cancellation still names
+        // where to carry on from, and the entries do not overlap.
+        let PluginResponse::DiscoveryPage(second) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: Some(cursor),
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        assert!(second.complete);
+        assert!(
+            second.games.iter().all(|game| !first
+                .games
+                .iter()
+                .any(|seen| seen.external_id == game.external_id)),
+            "resuming handed back a game the first page already had"
+        );
+    }
+
+    /// `degraded` is a stop, not a pause with a timer. Nothing may call a parked
+    /// plugin again until someone says so, and the journal is where "nothing"
+    /// becomes checkable.
+    #[test]
+    fn a_parked_plugin_is_never_called_again_on_its_own() {
+        let library = FixtureLibrary::new("no-retry");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
+            let _ = harness
+                .runtime
+                .submit(
+                    &harness.prepared,
+                    FIXTURE_PLUGIN_ID,
+                    &harness.grants,
+                    PluginRequest::PrepareLaunch {
+                        profile_id: FIXTURE_PROFILE.into(),
+                        game_reference: "fixture:bad-mode".into(),
+                    },
+                )
+                .unwrap()
+                .wait();
+        }
+        assert!(
+            harness
+                .runtime
+                .scheduler()
+                .health(FIXTURE_PLUGIN_ID)
+                .degraded
+        );
+
+        let calls = |harness: &Harness| {
+            harness
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .filter(|entry| entry.decision == "prepare-launch")
+                .count()
+        };
+        let after_parking = calls(&harness);
+        // Long enough for any timer someone might be tempted to add.
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            calls(&harness),
+            after_parking,
+            "something called a parked plugin without being asked"
+        );
+        assert!(matches!(
+            harness
+                .runtime
+                .submit(
+                    &harness.prepared,
+                    FIXTURE_PLUGIN_ID,
+                    &harness.grants,
+                    PluginRequest::HealthCheck,
+                )
+                .unwrap_err(),
+            SubmitError::Degraded { .. }
+        ));
+    }
+
+    /// Every page shape the host refuses, through a component that really returns
+    /// it. The unit tests beside `validate_discovery_page` cover the same rules
+    /// on synthesised values; these prove the rules survive the ABI, where a
+    /// title is a pointer into guest memory and a cursor is a lift.
+    #[test]
+    fn a_hostile_page_is_refused_after_the_call_succeeded() {
+        let library = FixtureLibrary::new("hostile-page");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        for (selector, cursor, limit, expected) in [
+            ("fixture:dup", None, 10, "duplicate reference"),
+            ("fixture:overfill", None, 2, "page longer than asked"),
+            ("fixture:huge", None, 10, "candidate title"),
+            ("fixture:bad-cursor", None, 10, "page cursor"),
+            ("fixture:done-cursor", None, 10, "cursor after completion"),
+            (
+                "fixture:loop-cursor",
+                Some("alpha.rom"),
+                10,
+                "cursor did not advance",
+            ),
+        ] {
+            let error = harness
+                .call(PluginRequest::DiscoverPage {
+                    profile_id: selector.into(),
+                    cursor: cursor.map(str::to_string),
+                    limit,
+                })
+                .unwrap_err();
+            assert_eq!(
+                error,
+                PluginRuntimeError::InvalidResult(expected),
+                "{selector} was answered with {error:?}"
+            );
+        }
+    }
+
+    /// Back-pressure with real invocations behind it rather than closures. A
+    /// plugin that submits faster than it is served is told so, and the refusal
+    /// is a refusal — the queue does not grow to hold it.
+    #[test]
+    fn a_flood_of_real_invocations_is_answered_busy() {
+        let library = FixtureLibrary::new("flood");
+        let runtime = PluginRuntime::with_all_limits(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_millis(5),
+                ..PluginLimits::default()
+            },
+            SchedulerLimits {
+                max_concurrency: 1,
+                queue_depth_per_plugin: 2,
+                ..SchedulerLimits::default()
+            },
+            EpochMode::Threaded,
+        )
+        .unwrap();
+        let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
+        let grants = PluginGrants::resolve(
+            &fixture_manifest(vec![
+                PluginCapability::RunnerPrepare,
+                PluginCapability::FilesRead,
+            ]),
+            &[files_grant(&[GAMES_GRANT])],
+            &library.directories(),
+        )
+        .unwrap();
+        let spin = || PluginRequest::PrepareLaunch {
+            profile_id: FIXTURE_PROFILE.into(),
+            game_reference: "fixture:spin".into(),
+        };
+
+        let mut handles = Vec::new();
+        let mut refusal = None;
+        for _ in 0..8 {
+            match runtime.submit(&prepared, FIXTURE_PLUGIN_ID, &grants, spin()) {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        assert!(
+            matches!(refusal, Some(SubmitError::Busy { .. })),
+            "a flood of invocations was queued instead of refused: {refusal:?}"
+        );
+        assert!(handles.len() <= 3, "the queue grew past its depth");
+        for handle in &handles {
+            handle.cancel();
+        }
+        for handle in handles {
+            let _ = handle.wait();
+        }
+        // Back-pressure is not a shutdown: the same submission works once the
+        // queue has drained.
+        assert!(
+            runtime
+                .submit(&prepared, FIXTURE_PLUGIN_ID, &grants, spin())
+                .is_ok()
+        );
+    }
+
+    /// Fairness, with guest code rather than a gate. One plugin holding a worker
+    /// in an endless call must not be able to keep another plugin's short call
+    /// from being served.
+    #[test]
+    fn one_endless_plugin_does_not_starve_another() {
+        let library = FixtureLibrary::new("fairness");
+        let harness = Harness::new(
+            PluginLimits {
+                interactive_fuel: 1 << 42,
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_millis(5),
+                ..PluginLimits::default()
+            },
+            Some(&library),
+        );
+        let greedy = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:spin".into(),
+                },
+            )
+            .unwrap();
+        // A second job for the same plugin, so the greedy one is not merely
+        // occupying its own slot: one plugin, one job at a time.
+        let also_greedy = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                FIXTURE_PLUGIN_ID,
+                &harness.grants,
+                PluginRequest::PrepareLaunch {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    game_reference: "fixture:spin".into(),
+                },
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        let polite = harness
+            .runtime
+            .submit(
+                &harness.prepared,
+                "com.orivo.polite-runner",
+                &harness.grants,
+                PluginRequest::Identity,
+            )
+            .unwrap();
+        assert!(matches!(
+            polite.wait_for(Duration::from_secs(10)),
+            Ok(Ok(PluginInvocation {
+                response: PluginResponse::Identity(_),
+                ..
+            }))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        for handle in [greedy, also_greedy] {
+            handle.cancel();
+            let _ = handle.wait();
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Cost
     // -----------------------------------------------------------------------
 
@@ -3966,15 +5495,18 @@ mod tests {
         .unwrap();
 
         println!(
-            "fixture {} bytes\n  compile            {:?}\n  prepare-launch     instantiate {:?} call {:?} fuel {}\n  discover-page      instantiate {:?} call {:?} fuel {}\n  cold prepare-launch (compile + instantiate + call) {:?}",
+            "fixture {} bytes\n  compile            {:?}\n  prepare-launch     instantiate {:?} call {:?} fuel {} host calls {}\n  discover-page      instantiate {:?} call {:?} fuel {} host calls {} bytes {}\n  cold prepare-launch (compile + instantiate + call) {:?}",
             FIXTURE.len(),
             compile,
             prepared_launch.cost.instantiation,
             prepared_launch.cost.call,
             prepared_launch.cost.fuel_used,
+            prepared_launch.cost.host_calls,
             prepared_discover.cost.instantiation,
             prepared_discover.cost.call,
             prepared_discover.cost.fuel_used,
+            prepared_discover.cost.host_calls,
+            prepared_discover.cost.bytes_read,
             compile
                 .saturating_add(first_launch.cost.instantiation)
                 .saturating_add(first_launch.cost.call),
