@@ -45,7 +45,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "A vast world full of mystery and peril. What will you discover?",
     metadata: "Achievements 67/82",
     genre: "RPG",
-    heroUrl: hero("elden-ring-wallpaper.png"),
+    heroUrl: hero("elden-ring-wallpaper.jpg"),
     coverUrl: cover("elden-ring.jpg"),
     landscapeUrl: landscape("elden-ring.jpg"),
     lastPlayedAt: "2 days ago",

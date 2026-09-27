@@ -14,7 +14,6 @@ import {
   blockedRunsOnLabel,
   isBlockedForHost,
 } from "./game-detail-model";
-import { createGameDetailPage } from "./game-detail-page";
 import { hostDeviceLabel } from "./host-device";
 import { brandIcon, icon, type IconName } from "./icons";
 import {
@@ -77,7 +76,7 @@ import {
   sourceStatusLine,
   sourceSyncSummary,
 } from "./source-model";
-import { type AppPage, PageLifecycleHost } from "./page-lifecycle";
+import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
 import { HashRouter } from "./router";
 import {
   DEFAULT_PREFERENCES,
@@ -110,7 +109,6 @@ import {
   startDownload,
   updateProgressPercent,
 } from "./updater-model";
-import { createMePage } from "./me-page";
 import {
   createDefaultPluginManagerClient,
   createPluginManagerController,
@@ -124,14 +122,10 @@ import {
   type InstalledPluginView,
 } from "./plugin-manager";
 import { createDefaultQuikyClient } from "./quiky-install";
-import { createStorePage } from "./store-page";
 import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
 import { attachFeedbackTo, initErrorReporting } from "./sentry";
-import "./game-detail-page.css";
 import "./library-onboarding.css";
-import "./me-page.css";
-import "./store-page.css";
 
 type BackendRecord = Record<string, unknown>;
 
@@ -403,6 +397,12 @@ const INSTALL_WATCH_MS = 2500;
  * may take a while to actually start the transfer.
  */
 const INSTALL_WATCH_GRACE_TICKS = 48;
+/**
+ * How long the on-demand pages wait before being fetched anyway. Idle is the
+ * right moment, but a shell that never goes idle would otherwise leave the
+ * first visit to the Store paying for the download.
+ */
+const WARM_UP_DEADLINE_MS = 3_000;
 /** How long the automatic update check waits for the shell to go quiet. */
 const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
 /**
@@ -416,7 +416,7 @@ const NOTIFICATION_TICK_MS = 30_000;
  * app chrome rather than as a claim about anyone's library — the only screen
  * in Orivo whose backdrop is not a game the user owns.
  */
-const WELCOME_WALLPAPER = "/media/igdb/heroes/elden-ring-wallpaper.png";
+const WELCOME_WALLPAPER = "/media/igdb/heroes/elden-ring-wallpaper.jpg";
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";
@@ -5491,28 +5491,43 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     },
   };
 
-  const storePage =
-    options.storePage ?? createStorePage({ navigate: (route) => navigate(route) });
-  const gameDetailPage =
+  // The Store, the game page and Me are loaded on demand. Each one carries its
+  // own stylesheet and — for the Store — the whole generated catalogue, and the
+  // first screen is the Library, which needs none of it.
+  const storePage: AppPageSource =
+    options.storePage ??
+    (async () => {
+      const { createStorePage } = await import("./store-page");
+      return createStorePage({ navigate: (route) => navigate(route) });
+    });
+  const gameDetailPage: AppPageSource =
     options.gameDetailPage ??
-    createGameDetailPage({
-      navigate: (route) => navigate(route),
-      // A deep link opened without history still has somewhere to go back to.
-      back: () => router.back({ page: "library" }),
-      play: (gameId) => {
-        void launchGame(gameId);
-      },
-      // Home art, a refetched cover or a removed game changed the catalog; pull
-      // the library again so its cards and hero reflect it on the way back.
-      onLibraryChanged: () => {
-        void refreshLibrary();
-      },
-      // Debug overlay: when the Settings toggle is on, the detail page fills in
-      // sample achievements, friends and activity for games that ship none.
-      sampleSocialEnabled: () => state.preferences.debugSampleSocial,
+    (async () => {
+      const { createGameDetailPage } = await import("./game-detail-page");
+      return createGameDetailPage({
+        navigate: (route) => navigate(route),
+        // A deep link opened without history still has somewhere to go back to.
+        back: () => router.back({ page: "library" }),
+        play: (gameId) => {
+          void launchGame(gameId);
+        },
+        // Home art, a refetched cover or a removed game changed the catalog; pull
+        // the library again so its cards and hero reflect it on the way back.
+        onLibraryChanged: () => {
+          void refreshLibrary();
+        },
+        // Debug overlay: when the Settings toggle is on, the detail page fills in
+        // sample achievements, friends and activity for games that ship none.
+        sampleSocialEnabled: () => state.preferences.debugSampleSocial,
+      });
     });
 
-  const mePage = options.mePage ?? createMePage();
+  const mePage: AppPageSource =
+    options.mePage ??
+    (async () => {
+      const { createMePage } = await import("./me-page");
+      return createMePage();
+    });
 
   const pageHosts: Record<AppRoute["page"], PageLifecycleHost> = {
     library: new PageLifecycleHost(refs.libraryPage, libraryPage),
@@ -6013,25 +6028,44 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * Crash reports and the feedback form.
    *
    * Started before the router so an error thrown during the first render is
-   * still caught. Without a DSN this does nothing and the button stays hidden,
-   * which is the state every test and every source build runs in.
+   * still caught — the SDK arrives a chunk later, and `sentry.ts` holds what
+   * happened in between. Without a DSN this does nothing and the button stays
+   * hidden, which is the state every test and every source build runs in.
    */
   if (initErrorReporting(isTauriRuntime() ? "desktop" : "browser")) {
     // The page and the game on screen travel with the report: "the covers are
     // wrong" is a shrug, the same sentence tagged with a title is a lead.
-    const attached = attachFeedbackTo(refs.feedbackButton, () => ({
+    void attachFeedbackTo(refs.feedbackButton, () => ({
       page: currentRoute.page,
       // An empty library has no selection, and naming a fixture here would tag
       // the report with a game the reporter has never seen.
       game: libraryIsEmpty() ? "" : selectedGame().title,
-    }));
-    refs.feedbackButton.hidden = !attached;
+    })).then((attached) => {
+      // The button starts hidden in the markup, so it appears when it works
+      // rather than sitting there as a control that opens nothing.
+      if (root.isConnected) refs.feedbackButton.hidden = !attached;
+    });
   }
 
   router.start((route) => {
     dispatchRoute(route);
     spatialNav.enterPage();
   });
+  // Fetch the on-demand pages once the shell has nothing better to do. The
+  // download is the only thing a lazy page pays that a bundled one does not;
+  // spending it on an idle machine keeps the first visit as fast as before,
+  // and a page the router already opened is not fetched twice.
+  const warmDeferredPages = (): void => {
+    if (!root.isConnected) return;
+    for (const page of ["store", "game", "me"] as const) {
+      // A warm-up that fails must stay silent: the navigation that actually
+      // needs the page asks again and reports through the toast.
+      void pageHosts[page].load().catch(() => {});
+    }
+  };
+  const idleWarmUp = window.requestIdleCallback;
+  if (idleWarmUp) idleWarmUp(warmDeferredPages, { timeout: WARM_UP_DEADLINE_MS });
+  else window.setTimeout(warmDeferredPages, WARM_UP_DEADLINE_MS);
   void refreshLibrary();
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.

@@ -7688,7 +7688,7 @@ fn showcase_catalog() -> Catalog {
                 "2 days ago",
                 128,
                 "elden-ring.jpg",
-                Some("elden-ring-wallpaper.png"),
+                Some("elden-ring-wallpaper.jpg"),
             ),
             showcase_game(
                 "cyberpunk-2077",
@@ -7803,7 +7803,7 @@ fn showcase_game(
     // The selected card intentionally echoes the cinematic Elden Ring scene,
     // matching the reference selector rather than showing a logo-heavy box art.
     let cover_path = if id == "elden-ring" {
-        PathBuf::from("/media/igdb/heroes/elden-ring-wallpaper.png")
+        PathBuf::from("/media/igdb/heroes/elden-ring-wallpaper.jpg")
     } else {
         PathBuf::from(format!("/media/igdb/covers/{cover_file}"))
     };
@@ -8686,7 +8686,7 @@ mod tests {
         );
         assert_eq!(
             matched.artwork_path.as_deref(),
-            Some(Path::new("/media/igdb/heroes/elden-ring-wallpaper.png"))
+            Some(Path::new("/media/igdb/heroes/elden-ring-wallpaper.jpg"))
         );
         let unknown = presentation
             .games

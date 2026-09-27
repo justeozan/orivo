@@ -1695,7 +1695,7 @@ export function reduceGameDetailState(
 /* Browser-only fallback                                                       */
 /* -------------------------------------------------------------------------- */
 
-const FALLBACK_HERO = "/media/igdb/heroes/elden-ring-wallpaper.png";
+const FALLBACK_HERO = "/media/igdb/heroes/elden-ring-wallpaper.jpg";
 const FALLBACK_LANDSCAPE = "/media/igdb/landscapes/elden-ring.jpg";
 
 /**
@@ -1852,7 +1852,7 @@ export function createFallbackWallpaperSearch(
       ["Unrailed!", "/media/igdb/landscapes/unrailed.jpg"],
     ],
     background: [
-      ["Elden Ring", "/media/igdb/heroes/elden-ring-wallpaper.png"],
+      ["Elden Ring", "/media/igdb/heroes/elden-ring-wallpaper.jpg"],
       ["Cyberpunk 2077", "/media/igdb/heroes/cyberpunk-2077.webp"],
       [
         "Horizon Forbidden West",
@@ -1906,7 +1906,7 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     shortDescription:
       "A vast world full of mystery and peril. What will you discover?",
     coverUrl: "/media/igdb/covers/elden-ring.jpg",
-    heroUrl: "/media/igdb/heroes/elden-ring-wallpaper.png",
+    heroUrl: "/media/igdb/heroes/elden-ring-wallpaper.jpg",
     landscapeUrl: "/media/igdb/landscapes/elden-ring.jpg",
     genres: ["Action RPG"],
     tags: ["Open world", "Souls-like"],
