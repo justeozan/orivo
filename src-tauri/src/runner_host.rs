@@ -38,9 +38,9 @@ use crate::plugin_manifest::{
     ValidatedPluginManifest, valid_opaque_id,
 };
 use crate::plugin_runtime::{
-    PluginDiscoveryPage, PluginGrants, PluginLaunchIntent, PluginLaunchMode,
-    PluginProfileValidation, PluginRequest, PluginResponse, PluginRuntime, PluginRuntimeError,
-    PreparedComponent, RunnerCheck,
+    DirectoryIdentity, PinnedDirectory, PluginDiscoveryPage, PluginGrants, PluginLaunchIntent,
+    PluginLaunchMode, PluginProfileValidation, PluginRequest, PluginResponse, PluginRuntime,
+    PluginRuntimeError, PreparedComponent, RunnerCheck,
 };
 use crate::plugin_scheduler::{JobError, JobHandle, SubmitError};
 use sha2::{Digest, Sha256};
@@ -474,16 +474,23 @@ pub fn resolve_profile_grants(
     package: &RunnerPackage,
     profile: &RunnerProfile,
 ) -> Result<ResolvedProfileGrants, RunnerHostError> {
-    let mut directories = BTreeMap::new();
+    // Which folders can be opened at all, and still lead where they led when
+    // they were allowed. Whether each *is* the folder that was allowed is
+    // `resolve_pinned`'s answer below, because it checks the descriptor it
+    // opened rather than a path it looked up a second time.
+    let mut pinned = BTreeMap::new();
     let mut unavailable = BTreeSet::new();
     for directory in &profile.game_directories {
-        match verify_granted_directory(directory) {
-            Ok(path) => {
-                directories.insert(directory.id.clone(), path);
+        match open_granted_directory(directory, IdentityCheck::Skip) {
+            Ok(_) => {
+                pinned.insert(
+                    directory.id.clone(),
+                    PinnedDirectory {
+                        path: directory.path.clone(),
+                        identity: stored_identity(directory),
+                    },
+                );
             }
-            // Both reasons keep the folder out of the plugin's reach. They are
-            // told apart at the point of use, where the difference between "not
-            // plugged in" and "not the folder you allowed" is the whole message.
             Err(_) => {
                 unavailable.insert(directory.id.clone());
             }
@@ -505,18 +512,28 @@ pub fn resolve_profile_grants(
         let grant = record.to_capability_grant();
         match (&grant.capability, &grant.scope) {
             (PluginCapability::FilesRead, CapabilityScope::DirectoryGrants(keys)) => {
-                let slots = keys
+                // One folder at a time, so a folder that is no longer the one
+                // the user allowed is dropped instead of failing the whole
+                // resolution and taking every other game on the profile with it.
+                for slot in keys
                     .iter()
                     .filter_map(|key| directory_grant_slot(key, &profile.id))
-                    .filter(|slot| directories.contains_key(*slot))
-                    .map(str::to_owned)
-                    .collect::<BTreeSet<_>>();
-                if slots.is_empty() {
+                    .filter(|slot| pinned.contains_key(*slot))
+                {
+                    let one = CapabilityGrant {
+                        scope: CapabilityScope::DirectoryGrants(BTreeSet::from([slot.to_owned()])),
+                        ..grant.clone()
+                    };
+                    let only = BTreeMap::from([(slot.to_owned(), pinned[slot].clone())]);
+                    if PluginGrants::resolve_pinned(package.manifest(), &[one], &only).is_ok() {
+                        granted.insert(slot.to_owned());
+                    }
+                }
+                if granted.is_empty() {
                     continue;
                 }
-                granted = slots.clone();
                 grants.push(CapabilityGrant {
-                    scope: CapabilityScope::DirectoryGrants(slots),
+                    scope: CapabilityScope::DirectoryGrants(granted.clone()),
                     ..grant
                 });
             }
@@ -532,7 +549,8 @@ pub fn resolve_profile_grants(
             _ => grants.push(grant),
         }
     }
-    let grants = PluginGrants::resolve(package.manifest(), &grants, &directories)
+    pinned.retain(|slot, _| granted.contains(slot));
+    let grants = PluginGrants::resolve_pinned(package.manifest(), &grants, &pinned)
         .map_err(|_| RunnerHostError::GrantRefused)?;
     Ok(ResolvedProfileGrants {
         grants,
@@ -685,6 +703,7 @@ fn usable_profile<'catalog>(
 /// user picked.
 pub fn resolve_game_file(
     profile: &RunnerProfile,
+    granted: &BTreeSet<String>,
     external_id: &str,
 ) -> Result<(String, PathBuf), RunnerHostError> {
     if !valid_opaque_id(external_id, MAX_EXTERNAL_ID_LENGTH) {
@@ -692,9 +711,18 @@ pub fn resolve_game_file(
     }
     let mut matches = Vec::new();
     for directory in &profile.game_directories {
-        let Ok(root) = fs::canonicalize(&directory.path) else {
+        // A folder the permission no longer covers is not a folder to read. The
+        // launch path already refused an entry resolved in one; leaving the
+        // *resolution* free to look meant a revoked or swapped folder still
+        // decided what an import saw — and a name it happened to share could
+        // lose the game that was allowed.
+        if !granted.contains(&directory.id) {
+            continue;
+        }
+        let Ok(opened) = open_granted_directory(directory, IdentityCheck::Require) else {
             continue;
         };
+        let root = opened.canonical;
         let Ok(entries) = fs::read_dir(&root) else {
             continue;
         };
@@ -743,75 +771,116 @@ pub fn reverify_game_file(
     // The order is the message. A folder that is simply not plugged in is not
     // a permissions problem, and telling a user to allow a folder again when
     // the drive is in a drawer sends them looking in the wrong place.
-    let root = verify_granted_directory(directory)?;
+    let root = open_granted_directory(directory, IdentityCheck::Require)?;
     if !resolved.granted.contains(&entry.directory_grant_id) {
         return Err(resolved.missing());
     }
-    canonical_file_inside(&entry.game_path, &root)
+    canonical_file_inside(&entry.game_path, &root.canonical)
 }
 
-/// The folder the user allowed, or nothing.
+/// Whether an opened folder has to be the one a stored identity names.
 ///
-/// Two questions, because one answer is not enough. Re-canonicalising catches a
-/// parent swapped for a link, which would otherwise move the whole grant
-/// somewhere else while every later check kept agreeing with itself. The
-/// folder's own identity catches the case with no link in it at all: the
-/// directory renamed away and an ordinary one built where it stood, which
-/// canonicalises to exactly the same path.
-fn verify_granted_directory(
+/// The two callers want different things, and the difference matters. Resolving
+/// grants only needs to know which folders can be opened at all: pinning them is
+/// [`PluginGrants::resolve_pinned`]'s job, on the descriptor it opens itself, and
+/// a second check here would be a second answer that could disagree with it —
+/// which is the whole of the window a swapped folder needs. The launch path has
+/// no such authority to defer to, because it is about to hand a path to a
+/// process, so it asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityCheck {
+    Skip,
+    Require,
+}
+
+/// A granted folder, opened.
+///
+/// The descriptor is held for as long as the value lives, and the identity is
+/// read from it rather than from a second lookup by path: a folder swapped
+/// between two path lookups is exactly how a check and the thing it checked come
+/// apart.
+struct OpenGrantedDirectory {
+    canonical: PathBuf,
+    #[cfg(unix)]
+    _handle: fs::File,
+}
+
+fn open_granted_directory(
     directory: &crate::catalog::RunnerGrantedDirectory,
-) -> Result<PathBuf, RunnerHostError> {
-    let canonical =
-        fs::canonicalize(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
-    if canonical != directory.path {
-        return Err(RunnerHostError::GameOutsideScope);
+    check: IdentityCheck,
+) -> Result<OpenGrantedDirectory, RunnerHostError> {
+    #[cfg(unix)]
+    {
+        let handle =
+            fs::File::open(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+        let metadata = handle
+            .metadata()
+            .map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+        if !metadata.is_dir() {
+            return Err(RunnerHostError::GameOutsideScope);
+        }
+        // Re-canonicalising catches a parent swapped for a link, which would
+        // otherwise move the whole grant somewhere else while every later check
+        // kept agreeing with itself.
+        let canonical =
+            fs::canonicalize(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+        if canonical != directory.path {
+            return Err(RunnerHostError::GameOutsideScope);
+        }
+        if check == IdentityCheck::Require
+            && let Some(expected) = stored_identity(directory)
+        {
+            use std::os::unix::fs::MetadataExt;
+            if DirectoryIdentity::new(metadata.dev(), metadata.ino()) != expected {
+                return Err(RunnerHostError::GameOutsideScope);
+            }
+        }
+        Ok(OpenGrantedDirectory {
+            canonical,
+            _handle: handle,
+        })
     }
-    let metadata = fs::metadata(&canonical).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
-    if !metadata.is_dir() {
-        return Err(RunnerHostError::GameOutsideScope);
+    #[cfg(not(unix))]
+    {
+        // Windows needs `FILE_FLAG_BACKUP_SEMANTICS` to open a directory at all,
+        // and its identity needs `GetFileInformationByHandle`. Until that unsafe
+        // block is written once — with the plugin read path, not twice — this is
+        // the canonical-path half on its own, and a stored identity is refused
+        // rather than waved through.
+        let metadata =
+            fs::metadata(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+        if !metadata.is_dir() {
+            return Err(RunnerHostError::GameOutsideScope);
+        }
+        let canonical =
+            fs::canonicalize(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+        if canonical != directory.path {
+            return Err(RunnerHostError::GameOutsideScope);
+        }
+        if check == IdentityCheck::Require && stored_identity(directory).is_some() {
+            return Err(RunnerHostError::GameOutsideScope);
+        }
+        Ok(OpenGrantedDirectory { canonical })
     }
-    if !directory_identity_matches(directory, &metadata) {
-        return Err(RunnerHostError::GameOutsideScope);
-    }
-    Ok(canonical)
 }
 
-#[cfg(unix)]
-fn directory_identity_matches(
+/// What the grant recorded, in the shape the plugin host pins against.
+fn stored_identity(
     directory: &crate::catalog::RunnerGrantedDirectory,
-    metadata: &fs::Metadata,
-) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    // A grant written before the identity was recorded has only its canonical
-    // path to stand on. That is the weaker half of the check, not none of it.
-    directory
-        .device
-        .is_none_or(|device| device == metadata.dev())
-        && directory.inode.is_none_or(|inode| inode == metadata.ino())
+) -> Option<DirectoryIdentity> {
+    Some(DirectoryIdentity::new(directory.device?, directory.inode?))
 }
 
-/// Windows publishes a volume serial and a file index, but only through a
-/// handle and an unstable API. Until that is worth the unsafe block, the
-/// canonical-path half of the check stands alone there.
-#[cfg(not(unix))]
-fn directory_identity_matches(
-    _directory: &crate::catalog::RunnerGrantedDirectory,
-    _metadata: &fs::Metadata,
-) -> bool {
-    true
-}
-
-/// The identity to record when a folder is granted, so a later launch has
-/// something to compare against.
+/// The identity to record when a folder is granted, read from a descriptor on
+/// the folder rather than from its name.
 pub fn directory_identity(path: &Path) -> (Option<u64>, Option<u64>) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
 
-        match fs::metadata(path) {
-            Ok(metadata) => (Some(metadata.dev()), Some(metadata.ino())),
-            Err(_) => (None, None),
+        match fs::File::open(path).and_then(|handle| handle.metadata()) {
+            Ok(metadata) if metadata.is_dir() => (Some(metadata.dev()), Some(metadata.ino())),
+            Ok(_) | Err(_) => (None, None),
         }
     }
     #[cfg(not(unix))]
@@ -1153,7 +1222,8 @@ pub fn import_runner_games(
         // Resolved before the lease is taken, and the profile's folders travel
         // with the result so the commit can refuse a page resolved against a
         // grant that has since changed.
-        let (entries, skipped) = resolve_page_candidates(&profile, profile_id, &page, imported_at);
+        let (entries, skipped) =
+            resolve_page_candidates(&profile, profile_id, &resolved.granted, &page, imported_at);
         let committed = commit_resolved_page(
             store,
             package.plugin_id(),
@@ -1232,6 +1302,7 @@ pub struct CommittedPage {
 fn resolve_page_candidates(
     profile: &RunnerProfile,
     profile_id: &str,
+    granted: &BTreeSet<String>,
     page: &PluginDiscoveryPage,
     imported_at: u64,
 ) -> (Vec<RunnerGameInventoryEntry>, usize) {
@@ -1239,7 +1310,7 @@ fn resolve_page_candidates(
     let mut skipped = 0;
     for candidate in &page.games {
         let Ok((directory_grant_id, game_path)) =
-            resolve_game_file(profile, &candidate.external_id)
+            resolve_game_file(profile, granted, &candidate.external_id)
         else {
             skipped += 1;
             continue;
@@ -1439,15 +1510,28 @@ mod tests {
         root
     }
 
+    /// Every slot this profile records. A test that is not about permissions
+    /// says so by allowing all of them.
+    fn all_slots(profile: &RunnerProfile) -> BTreeSet<String> {
+        profile
+            .game_directories
+            .iter()
+            .map(|directory| directory.id.clone())
+            .collect()
+    }
+
     fn profile_over(root: &Path) -> RunnerProfile {
         RunnerProfile {
             id: "fixture-profile-1".into(),
             plugin_id: "com.orivo.fixture-runner".into(),
             display_name: "Fixture".into(),
             application: root.join("Emulator"),
+            // Canonical, as the grant command stores it: every later check
+            // compares against it, and a temporary directory on macOS lives
+            // behind a link that would otherwise make the two disagree.
             game_directories: vec![RunnerGrantedDirectory {
                 id: "fixture-games".into(),
-                path: root.join("games"),
+                path: fs::canonicalize(root.join("games")).unwrap_or_else(|_| root.join("games")),
                 device: None,
                 inode: None,
             }],
@@ -1470,11 +1554,14 @@ mod tests {
         fs::write(root.join("games/beta"), b"Beta").unwrap();
         let profile = profile_over(&root);
 
-        let (grant, path) = resolve_game_file(&profile, "alpha").unwrap();
+        let (grant, path) = resolve_game_file(&profile, &all_slots(&profile), "alpha").unwrap();
         assert_eq!(grant, "fixture-games");
         assert_eq!(path.file_name().unwrap(), "alpha.rom");
         assert_eq!(
-            resolve_game_file(&profile, "beta").unwrap().1.file_name(),
+            resolve_game_file(&profile, &all_slots(&profile), "beta")
+                .unwrap()
+                .1
+                .file_name(),
             Some(std::ffi::OsStr::new("beta"))
         );
 
@@ -1492,7 +1579,11 @@ mod tests {
         fs::write(root.join("games/alpha.bin"), b"Alpha").unwrap();
 
         assert_eq!(
-            resolve_game_file(&profile_over(&root), "alpha"),
+            resolve_game_file(
+                &profile_over(&root),
+                &all_slots(&profile_over(&root)),
+                "alpha",
+            ),
             Err(RunnerHostError::GameUnresolvable)
         );
         fs::remove_dir_all(root).unwrap();
@@ -1509,7 +1600,7 @@ mod tests {
 
         for external_id in ["../secret.txt", "..", "games/alpha", "/etc/passwd", ""] {
             assert_eq!(
-                resolve_game_file(&profile, external_id),
+                resolve_game_file(&profile, &all_slots(&profile), external_id),
                 Err(RunnerHostError::GameUnresolvable),
                 "{external_id} should not resolve"
             );
@@ -1528,7 +1619,7 @@ mod tests {
 
         // The listing half: a link is not a file the host will import.
         assert_eq!(
-            resolve_game_file(&profile, "escape"),
+            resolve_game_file(&profile, &all_slots(&profile), "escape"),
             Err(RunnerHostError::GameUnresolvable)
         );
         // And the launch half, where the entry already exists and the file was
@@ -1560,19 +1651,28 @@ mod tests {
             device,
             inode,
         };
-        assert_eq!(verify_granted_directory(&granted).unwrap(), granted.path);
+        assert_eq!(
+            open_granted_directory(&granted, IdentityCheck::Require)
+                .unwrap()
+                .canonical,
+            granted.path
+        );
 
         fs::rename(&games, root.join("games-real")).unwrap();
         fs::create_dir_all(&games).unwrap();
         assert_eq!(
-            verify_granted_directory(&granted),
-            Err(RunnerHostError::GameOutsideScope)
+            open_granted_directory(&granted, IdentityCheck::Require)
+                .err()
+                .expect("a folder that took the name is not the folder"),
+            RunnerHostError::GameOutsideScope
         );
 
         fs::remove_dir_all(&games).unwrap();
         assert_eq!(
-            verify_granted_directory(&granted),
-            Err(RunnerHostError::DirectoryUnavailable)
+            open_granted_directory(&granted, IdentityCheck::Require)
+                .err()
+                .expect("a folder that is gone cannot be opened"),
+            RunnerHostError::DirectoryUnavailable
         );
         fs::remove_dir_all(root).unwrap();
     }

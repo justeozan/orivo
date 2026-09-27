@@ -1261,11 +1261,15 @@ mod tests {
     /// `discover-page`; going through the catalog keeps the test's filenames
     /// portable.
     fn plant_entry(harness: &Harness, game_ref: &str, file: &str) {
+        let catalog = harness.catalog();
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
         let (directory_grant_id, game_path) = resolve_game_file(
-            harness
-                .catalog()
-                .runner_profile(ACCEPTED_PROFILE_ID)
-                .unwrap(),
+            profile,
+            &profile
+                .game_directories
+                .iter()
+                .map(|directory| directory.id.clone())
+                .collect(),
             file,
         )
         .unwrap();
@@ -2257,5 +2261,113 @@ mod tests {
                 .unwrap_err(),
             RunnerHostError::GrantRefused
         );
+    }
+    // -----------------------------------------------------------------------
+    // An import may only look where it is still allowed to look
+    // -----------------------------------------------------------------------
+
+    /// A launch refuses an entry whose folder was revoked, but the import was
+    /// still walking every folder the profile records. Contents the plugin has
+    /// no permission to reach therefore reached the resolution — here by making
+    /// a name ambiguous and losing the game that *was* allowed.
+    #[test]
+    fn a_revoked_folder_does_not_take_part_in_an_import() {
+        let harness = Harness::new("revoked-import", THREE_ROMS);
+        harness.configured_profile();
+        let extra = harness.root.join("extra");
+        fs::create_dir_all(&extra).unwrap();
+        fs::write(extra.join("alpha.bin"), b"Not your game").unwrap();
+        fs::write(extra.join("zeta.rom"), b"Zeta Zone").unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some("extra"), &extra)
+            .unwrap();
+        harness
+            .service
+            .revoke_directory(ACCEPTED_PROFILE_ID, "extra")
+            .unwrap();
+
+        let outcome = harness.import();
+        assert_eq!(
+            outcome.progress.skipped, 0,
+            "a revoked folder made a name ambiguous"
+        );
+        assert_eq!(outcome.progress.imported, 3);
+        // And nothing from the revoked folder became a library card.
+        let catalog = harness.catalog();
+        assert!(
+            catalog
+                .runner_inventory
+                .iter()
+                .all(|entry| entry.directory_grant_id == FIXTURE_SLOT),
+            "an entry was resolved inside a revoked folder"
+        );
+    }
+
+    /// The same for a folder that is no longer the folder the user allowed: the
+    /// import must not read out of it either.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_folder_does_not_take_part_in_an_import() {
+        let harness = Harness::new("swapped-import", THREE_ROMS);
+        harness.configured_profile();
+        let extra = harness.root.join("extra");
+        fs::create_dir_all(&extra).unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some("extra"), &extra)
+            .unwrap();
+        // Renamed away, and an ordinary folder built where it stood.
+        fs::rename(&extra, harness.root.join("extra-real")).unwrap();
+        fs::create_dir_all(&extra).unwrap();
+        fs::write(extra.join("alpha.bin"), b"Not your game").unwrap();
+
+        let outcome = harness.import();
+        assert_eq!(outcome.progress.skipped, 0);
+        assert_eq!(outcome.progress.imported, 3);
+        assert!(
+            harness
+                .catalog()
+                .runner_inventory
+                .iter()
+                .all(|entry| entry.directory_grant_id == FIXTURE_SLOT)
+        );
+    }
+
+    /// The plugin's own reads are pinned by the grant resolution, on the
+    /// descriptor it opens, and not by a check of ours beside it.
+    ///
+    /// The difference is a window, not a rule: a folder swapped between a
+    /// path-based check and the open that follows it is the folder the plugin
+    /// reads. Asking `resolve_pinned` means the answer is about the descriptor
+    /// actually handed over, so there is nothing in between to race.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_folder_is_refused_by_the_grant_resolution_itself() {
+        let harness = Harness::new("pinned", THREE_ROMS);
+        harness.configured_profile();
+        let package = harness.service.package(FIXTURE_PLUGIN_ID).unwrap();
+        let catalog = harness.catalog();
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
+        let resolved =
+            crate::runner_host::resolve_profile_grants(&catalog, &package, profile).unwrap();
+        assert!(resolved.granted.contains(FIXTURE_SLOT));
+        assert!(resolved.grants.holds(PluginCapability::FilesRead));
+
+        // Renamed away, and an ordinary folder built where it stood: the path
+        // still canonicalises to itself, so only the folder's own identity —
+        // read from the descriptor the resolution opened — can tell them apart.
+        fs::rename(&harness.games, harness.root.join("games-real")).unwrap();
+        fs::create_dir_all(&harness.games).unwrap();
+
+        let catalog = harness.catalog();
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
+        let resolved =
+            crate::runner_host::resolve_profile_grants(&catalog, &package, profile).unwrap();
+        assert!(
+            !resolved.granted.contains(FIXTURE_SLOT),
+            "the grant resolution accepted a folder that is not the one allowed"
+        );
+        assert!(!resolved.grants.holds(PluginCapability::FilesRead));
     }
 }

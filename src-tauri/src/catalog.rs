@@ -3266,7 +3266,15 @@ pub(crate) fn resolve_executable(path: &Path) -> Result<PathBuf, CatalogError> {
         // bundle names one ordinary entry of its own `MacOS` folder or nothing.
         if let Some(executable_name) = executable_name.filter(|name| is_single_component(name)) {
             let executable = path.join("Contents/MacOS").join(executable_name);
-            if executable.is_file() {
+            // A name inside the bundle is still only a name. `Contents/MacOS`
+            // may hold a symbolic link, and following one out is the same escape
+            // as spelling a path in the plist, so what comes back has to be a
+            // regular file that still lives in this bundle.
+            if let Ok(canonical) = fs::canonicalize(&executable)
+                && fs::symlink_metadata(&executable)
+                    .is_ok_and(|metadata| metadata.file_type().is_file())
+                && fs::canonicalize(path).is_ok_and(|bundle| canonical.starts_with(&bundle))
+            {
                 return Ok(executable);
             }
         }
@@ -5906,6 +5914,28 @@ mod tests {
             resolve_executable(&bundle).unwrap(),
             bundle.join("Contents/MacOS/Escape")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+    /// A name inside the bundle is still only a name: `Contents/MacOS` may hold
+    /// a symbolic link, and following it out of the bundle is the same escape as
+    /// spelling a path in the plist.
+    #[cfg(unix)]
+    #[test]
+    fn a_bundle_executable_that_links_out_of_the_bundle_is_refused() {
+        let root = temporary_migration_directory("bundle-link");
+        let bundle = root.join("Linked.app");
+        fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        fs::write(root.join("elsewhere"), b"").unwrap();
+        std::os::unix::fs::symlink(root.join("elsewhere"), bundle.join("Contents/MacOS/Linked"))
+            .unwrap();
+        fs::write(
+            bundle.join("Contents/Info.plist"),
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>Linked</string></dict></plist>",
+        )
+        .unwrap();
+
+        assert!(resolve_executable(&bundle).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }
