@@ -43,6 +43,19 @@ jamais une commande, jamais un shell, et testable sur l’hôte. Ce que Winlator
 expose réellement, quelles distributions sont lançables et pourquoi, est consigné
 dans [`docs/winlator-runner.md`](winlator-runner.md).
 
+Deux autres adapters natifs suivent le même précédent : les **émulateurs de
+consoles** sur Android. RetroArch et PPSSPP sont des applications déjà installées
+par le joueur, donc là encore le profil Orivo n’est qu’une référence — l’émulateur,
+la console, et les dossiers de ROM accordés — et le lancement est une Intent
+Android explicite construite par une fonction pure dont les clés d’extra sont des
+constantes de compilation. La nouveauté est la *forme du passage* : PPSSPP déclare
+le schéma `content` et lit `intent.getData()`, donc il reçoit le document même
+qu’Orivo a lu, avec `FLAG_GRANT_READ_URI_PERMISSION` — jamais un chemin. RetroArch
+prend un chemin, donc la même règle `primary:` stricte que Winlator s’applique, et
+elle est *réutilisée* plutôt que réécrite. Ce que chaque émulateur expose
+réellement, lesquels sont écartés et pourquoi, est consigné dans
+[`docs/console-emulators.md`](console-emulators.md).
+
 L’installateur de packages est désormais implémenté. Un plugin arrive sous
 forme d’archive `.orivo-plugin` (tar gzippé) contenant `manifest.json`,
 `component.wasm`, ses assets déclarés et une signature Ed25519 optionnelle. Le

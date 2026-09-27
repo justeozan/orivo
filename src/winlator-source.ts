@@ -14,8 +14,12 @@
  * only the references that come back from this list.
  */
 
-/** Whose name a found shortcut is also using, as the host judged it. */
-export type WinlatorTitleCollision = "none" | "library" | "folder";
+import {
+  type SourceReviewEntry,
+  type TitleCollision,
+  normaliseTitleCollision,
+  sourceReviewList,
+} from "./source-review";
 
 /** One shortcut the host found in the connected folder. */
 export interface WinlatorShortcut {
@@ -25,17 +29,8 @@ export interface WinlatorShortcut {
   fileName: string;
   /** The folders between the connected one and the file, `/`-joined. */
   folderPath: string;
-  duplicateTitle: WinlatorTitleCollision;
+  duplicateTitle: TitleCollision;
   alreadyImported: boolean;
-}
-
-/** One line of the confirmation: what it is called, where it is, who else has that name. */
-export interface WinlatorReviewEntry {
-  title: string;
-  /** The connected folder, the folders under it, and the file. Never an absolute path. */
-  origin: string;
-  /** A sentence, or `null` when this name is nobody else's. */
-  collision: string | null;
 }
 
 /** What `connect_winlator_export_folder` answers. */
@@ -51,9 +46,6 @@ export interface WinlatorImportResult {
   importedIds: string[];
   message: string;
 }
-
-/** At most this many titles are listed before the rest become a count. */
-export const MAX_LISTED_WINLATOR_SHORTCUTS = 6;
 
 /**
  * Is this the platform Winlator runs on?
@@ -99,16 +91,11 @@ function normaliseWinlatorShortcuts(payload: unknown): WinlatorShortcut[] {
       title: record.title,
       fileName: record.fileName,
       folderPath: typeof record.folderPath === "string" ? record.folderPath : "",
-      duplicateTitle: normaliseWinlatorTitleCollision(record.duplicateTitle),
+      duplicateTitle: normaliseTitleCollision(record.duplicateTitle),
       alreadyImported: record.alreadyImported === true,
     });
   }
   return shortcuts;
-}
-
-/** A value outside the closed set is read as no collision, never rendered. */
-function normaliseWinlatorTitleCollision(payload: unknown): WinlatorTitleCollision {
-  return payload === "library" || payload === "folder" ? payload : "none";
 }
 
 export function normaliseWinlatorImportResult(payload: unknown): WinlatorImportResult | null {
@@ -152,19 +139,8 @@ export function winlatorReviewPrompt(shortcuts: WinlatorShortcut[]): string {
 export function winlatorReviewList(
   shortcuts: WinlatorShortcut[],
   folderLabel: string | null,
-): { entries: WinlatorReviewEntry[]; remaining: number } {
-  const entries = shortcuts.slice(0, MAX_LISTED_WINLATOR_SHORTCUTS).map((shortcut) => ({
-    title: shortcut.title,
-    origin: [folderLabel, shortcut.folderPath, shortcut.fileName].filter((part) => part).join("/"),
-    collision: winlatorCollisionSentence(shortcut.duplicateTitle),
-  }));
-  return { entries, remaining: Math.max(0, shortcuts.length - entries.length) };
-}
-
-function winlatorCollisionSentence(collision: WinlatorTitleCollision): string | null {
-  if (collision === "library") return "A game already in your library uses this name";
-  if (collision === "folder") return "Another file in this folder uses this name";
-  return null;
+): { entries: SourceReviewEntry[]; remaining: number } {
+  return sourceReviewList(shortcuts, folderLabel);
 }
 
 /**

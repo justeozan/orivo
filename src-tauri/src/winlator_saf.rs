@@ -421,8 +421,15 @@ mod desktop {
 /// The JNI half. Every call attaches the calling thread to the JVM rather than
 /// hopping to the main thread: a folder listing and a handful of file reads have
 /// no business on the thread that draws the library.
+///
+/// Four things in here are not about Winlator at all — the process-lived VM
+/// handle, attaching one call's thread, turning a pending Java exception into an
+/// error rather than leaving it armed for the next call, and reaching the
+/// `ContentResolver` — so `console_saf` uses them instead of writing them again.
+/// They would be better placed in a module named after neither reader; that move
+/// is a refactor, and this is a feature branch.
 #[cfg(target_os = "android")]
-mod android {
+pub(crate) mod android {
     use super::{DocumentRows, DocumentTree, LOCAL_REFERENCES_PER_ROW, TreeDocument, collect_rows};
     use crate::winlator_runner::WinlatorRunnerError;
     use jni::{
@@ -481,7 +488,7 @@ mod android {
     /// Run one JNI unit of work on the calling thread, turning any pending Java
     /// exception into an Orivo error instead of leaving it armed for the next
     /// call on this thread.
-    fn with_env<T>(
+    pub(crate) fn with_env<T>(
         work: impl FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> jni::errors::Result<T>,
     ) -> Result<T, WinlatorRunnerError> {
         let context = android_context()?;
@@ -528,7 +535,7 @@ mod android {
             .map(|name| name.to_string_lossy().into_owned())
     }
 
-    fn java_string(env: &mut JNIEnv<'_>, value: &JObject<'_>) -> Option<String> {
+    pub(crate) fn java_string(env: &mut JNIEnv<'_>, value: &JObject<'_>) -> Option<String> {
         if value.is_null() {
             return None;
         }
@@ -538,7 +545,7 @@ mod android {
             .map(|value| value.to_string_lossy().into_owned())
     }
 
-    fn content_resolver<'local>(
+    pub(crate) fn content_resolver<'local>(
         env: &mut JNIEnv<'local>,
         activity: &JObject<'_>,
     ) -> jni::errors::Result<JObject<'local>> {
@@ -551,7 +558,7 @@ mod android {
         .l()
     }
 
-    fn parse_uri<'local>(
+    pub(crate) fn parse_uri<'local>(
         env: &mut JNIEnv<'local>,
         value: &str,
     ) -> jni::errors::Result<JObject<'local>> {

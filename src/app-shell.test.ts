@@ -311,11 +311,16 @@ describe("application shell", () => {
   // Winlator's entry point is Android's. On a desktop it must not be in the
   // menu at all — not disabled, not present-and-explaining — because this menu
   // is one of the reference screenshots.
-  it("keeps the Winlator folder entry off a desktop", () => {
+  it("keeps the Android emulator entries off a desktop", () => {
     root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
     const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
     expect(menu.querySelector("[data-library-action='winlator-folder']")).toBeNull();
+    expect(menu.querySelector("[data-library-action='console-folder']")).toBeNull();
     expect(menu.textContent).not.toContain("Winlator");
+    // These are Android applications; a desktop row for them would be a dead end,
+    // and this menu is one of the reference screenshots.
+    expect(menu.textContent).not.toContain("RetroArch");
+    expect(menu.textContent).not.toContain("PPSSPP");
   });
 });
 
@@ -995,7 +1000,7 @@ describe("application shell against the desktop backend", () => {
  * shared storage into something one tap from running, so what it says about that
  * file is load-bearing. Android only, which is why it gets its own harness.
  */
-describe("the Winlator confirmation on Android", () => {
+describe("the Android source confirmations", () => {
   let root: HTMLElement;
   let userAgent: ReturnType<typeof vi.spyOn>;
 
@@ -1020,6 +1025,34 @@ describe("the Winlator confirmation on Android", () => {
           return {};
         case "get_steam_account_status":
           return { connected: false, steamId: "", method: "" };
+        case "connect_console_rom_folder":
+          return {
+            connected: true,
+            emulator: "retroarch",
+            emulatorLabel: "RetroArch",
+            folderLabel: "Roms",
+            message: "Connected Roms.",
+            found: [
+              {
+                gameRef: "rom:aa",
+                title: "Alter Ego",
+                systemLabel: "NES",
+                fileName: "Alter Ego.nes",
+                folderPath: "",
+                duplicateTitle: "none",
+                alreadyImported: false,
+              },
+              {
+                gameRef: "rom:bb",
+                title: "Alter Ego",
+                systemLabel: "NES",
+                fileName: "Free Coins.nes",
+                folderPath: "new",
+                duplicateTitle: "folder",
+                alreadyImported: false,
+              },
+            ],
+          };
         case "connect_winlator_export_folder":
           return {
             connected: true,
@@ -1072,6 +1105,30 @@ describe("the Winlator confirmation on Android", () => {
     // file, its folder and the collision are all on the row.
     expect(items[0]).toContain("Frontend/Celeste.desktop");
     expect(items[1]).toContain("Frontend/new/Free Coins.desktop");
+    expect(items[1]).toContain("Another file in this folder uses this name");
+  });
+
+  it("offers one row per emulator and asks about the folder that row connects", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const rows = Array.from(
+      root.querySelectorAll<HTMLButtonElement>("[data-library-action='console-folder']"),
+    ).map((row) => row.dataset.consoleEmulator);
+    expect(rows).toEqual(["retroarch", "ppsspp"]);
+
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='console-folder'][data-console-emulator='retroarch']")!
+      .click();
+    await settle();
+
+    expect(tauri.invoke).toHaveBeenCalledWith("connect_console_rom_folder", {
+      emulator: "retroarch",
+    });
+    const items = reviewItems();
+    expect(items).toHaveLength(2);
+    // The console, the file and the folder — the title alone is the file's own
+    // claim about itself.
+    expect(items[0]).toContain("NES · Roms/Alter Ego.nes");
+    expect(items[1]).toContain("NES · Roms/new/Free Coins.nes");
     expect(items[1]).toContain("Another file in this folder uses this name");
   });
 
