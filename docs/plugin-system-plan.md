@@ -219,25 +219,53 @@ que l’import de ROMs par métadonnées et les runners GPTK/CrossOver.
 Le contrat de performance a gagné sa première optimisation. Un composant n'est
 plus recompilé à chaque ouverture : `plugin_compile_cache.rs` garde l'artefact
 que Wasmtime sait sérialiser dans un dossier de cache appartenant à l'hôte, et
-ouvrir une surface qui découvre vingt composants passe de 646 ms à 37 ms
+ouvrir une surface qui découvre vingt composants passe de 646 ms à 36 ms
 ([`docs/performance.md`](performance.md), section 3 bis). Ce module est aussi le
 seul endroit du dépôt où une erreur ne refuse pas un plugin mais exécute du code
 natif : `Component::deserialize` est `unsafe` parce qu'il fait confiance à ses
 octets — ils *sont* du code machine, et il les rend exécutables sans revalider ce
-qu'un compilateur aurait validé. Un fichier de cache qu'un autre processus du
-même utilisateur pourrait écrire serait donc une exécution de code arbitraire
-dans Orivo, avec l'autorité d'Orivo et hors de tout bac à sable — pire que tout
-ce qu'un plugin peut faire, justement parce qu'un plugin est derrière un bac à
-sable et que ceci ne le serait pas. La règle est donc étroite et absolue : un
-artefact n'est désérialisé que si un HMAC-SHA256 sous une clé par installation,
-née au premier usage et conservée dans le trousseau système — jamais dans un
-fichier, jamais dans la WebView — prouve qu'Orivo l'a écrit, pour *ce* composant
-et *ce* moteur. Tout le reste découle de « un artefact est régénérable » :
-absent, altéré, étranger, illisible ou produit par un autre moteur, c'est une
-recompilation silencieuse depuis les octets que le registre a déjà vérifiés —
-jamais une erreur que l'utilisateur voit, jamais un chargement douteux. Le cache
-est borné, écrit par `rename`, réclame ce qu'une version précédente de Wasmtime a
-laissé, et se purge en entier : la sixième promesse, enfin munie d'une porte.
+qu'un compilateur aurait validé. Un fichier de cache venu d'ailleurs que d'Orivo
+serait donc une exécution de code arbitraire dans Orivo, avec l'autorité d'Orivo
+et hors de tout bac à sable — pire que tout ce qu'un plugin peut faire, justement
+parce qu'un plugin est derrière un bac à sable et que ceci ne le serait pas. La
+règle est donc étroite : un artefact n'est désérialisé que si un HMAC-SHA256 sous
+une clé de 256 bits conservée dans le trousseau système dit qu'Orivo l'a écrit,
+pour *ce* composant et *ce* moteur.
+
+**Ce que cette clé est, et ce qu'elle n'est pas.** C'est un stockage
+confidentiel, pas un canal authentifié, et la différence décide de ce que le
+cache peut promettre. Elle refuse ce qui arrive réellement : un artefact corrompu
+ou tronqué, un artefact laissé par une version antérieure de Wasmtime ou par une
+autre configuration d'`Engine`, un artefact venu d'une **autre installation ou
+d'un autre compte** — dossier copié, sauvegarde restaurée, dossier synchronisé —,
+un artefact emprunté au créneau d'un autre composant, et **un plugin qui
+essaierait d'en forger un** : un plugin n'a que `files.read` sur des dossiers
+choisis par l'utilisateur et aucune écriture, donc il ne peut ni déposer le
+fichier ni atteindre la clé. Elle ne refuse pas, sur aucune plateforme, **un
+autre programme lancé par le même utilisateur** : sous Linux (Secret Service) et
+Windows (Credential Manager) le secret est lisible par tout processus du même
+utilisateur ; sur macOS la recherche ne vise que le trousseau *par défaut*, donc
+un programme peut créer l'élément avant Orivo, ou faire de son propre trousseau
+le trousseau par défaut, et un build signé ad hoc n'offre de toute façon aucune
+identité de code qu'une ACL pourrait nommer. C'est dit plutôt que maquillé parce
+que le même attaquant peut déjà remplacer Orivo lui-même — les builds macOS n'ont
+ni signature Developer ID ni runtime durci, et l'installation Windows est par
+utilisateur. Le cache n'est donc pas le maillon faible aujourd'hui, et il ne doit
+pas le devenir : dès que les builds macOS seront signés Developer ID avec le
+runtime durci, cette clé devra passer dans le trousseau « data protection »
+derrière un groupe d'accès.
+
+Tout le reste découle de « un artefact est régénérable » : absent, altéré,
+étranger, trop gros, pas même un fichier ordinaire, ou produit par un autre
+moteur, c'est une recompilation silencieuse depuis les octets que le registre a
+déjà vérifiés — jamais une erreur que l'utilisateur voit, jamais un chargement
+douteux. Le cache est borné, écrit par `rename`, réclame ce qu'une version
+précédente de Wasmtime a laissé, et se purge en entier : la sixième promesse,
+enfin munie d'une porte. Et il n'est jamais ouvert au démarrage : nommer le
+dossier est tout ce que fait la configuration, et un cache n'existe qu'après
+qu'une surface ouverte par l'utilisateur l'a explicitement permis — parce que la
+tâche de maintenance du lancement demandait au registre ce qui est installé, et
+que ce passage atteignait le même `prepare_component` qu'un panneau de réglages.
 
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
 bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune

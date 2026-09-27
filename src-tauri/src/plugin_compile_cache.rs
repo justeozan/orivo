@@ -11,38 +11,81 @@
 //! It is also the one place in this repository where a mistake is native code
 //! execution rather than a refused plugin. `Component::deserialize` is `unsafe`
 //! because it trusts its input completely: the bytes *are* machine code, and it
-//! maps them executable without validating anything a compiler would have
-//! validated. A cache file that any other process of this user could write
-//! would therefore be a way to run arbitrary native code inside Orivo, with all
-//! of Orivo's authority — worse than anything a plugin can do, because a plugin
-//! is behind a sandbox and this would not be.
+//! maps them executable without revalidating anything a compiler would have
+//! validated. A cache file that arrives from anywhere but Orivo would therefore
+//! be a way to run arbitrary native code inside Orivo, with all of Orivo's
+//! authority — worse than anything a plugin can do, because a plugin is behind a
+//! sandbox and this would not be.
 //!
 //! So the rule here is narrow and absolute: **an artifact is deserialised only
-//! when a secret only Rust holds proves Orivo wrote it.** The proof is an
-//! HMAC-SHA256 tag over the artifact, the digest of the source component and a
-//! fingerprint of the `Engine` that compiled it, keyed by a 256-bit key created
-//! on first use and kept in the system keychain — never in a file, never in the
-//! WebView, never in a Tauri command's return type.
+//! when an HMAC-SHA256 tag, keyed by a 256-bit value kept in the system
+//! keychain, says Orivo wrote it — for this component and this engine.** The tag
+//! covers a domain string, a fingerprint of the `Engine`, the SHA-256 of the
+//! source component and the artifact itself.
 //!
-//! What that buys, precisely. A process that can *write* to this directory but
-//! cannot read that keychain item — a downloaded archive unpacked into the
-//! wrong place, a restored backup, a synchronised folder, a helper of some other
-//! application, a plugin itself, which has `files.read` on folders the user
-//! picked and no write anywhere — cannot produce bytes this module will load.
-//! Neither can a copy of *another* installation's cache directory, because its
-//! artifacts are tagged with another key. What it does not buy: a process that
-//! can already read the keychain item without a prompt, attach to Orivo, or
-//! replace Orivo's binary is not stopped by anything here, and does not need to
-//! be — it already has everything the cache could give it. The asymmetry this
-//! removes is the one that matters: being able to write one file should not be
-//! enough.
+//! ## What that key is, and what it is not
 //!
-//! Everything else follows from "an artifact is regenerable". A missing,
-//! corrupted, truncated, foreign, or stale artifact is a silent recompilation
-//! from the source bytes the registry already verified — never an error the user
-//! sees, and never a doubtful load. The cache is bounded, written atomically,
-//! and can be purged whole at any time, which is the plugin plan's sixth
-//! promise: a plugin's caches are the only thing Orivo may delete.
+//! It is **confidential storage, not an authenticated channel**, and the
+//! difference decides what this cache can promise.
+//!
+//! What the tag does refuse, and these are the failures that actually happen:
+//!
+//! * an artifact corrupted, truncated or half-written;
+//! * an artifact left by a previous Wasmtime or a changed `Engine` configuration,
+//!   which would otherwise be loaded by a version that cannot run it;
+//! * an artifact carried in from **another installation or another user account**
+//!   — a copied cache directory, a restored backup, a synchronised folder — since
+//!   it is tagged with another key, and across accounts the keychain item is not
+//!   readable at all;
+//! * an artifact one component's slot borrowed from another's;
+//! * **a plugin forging one.** A plugin gets `files.read` on folders the user
+//!   picked and no write anywhere, so it cannot even place the file — and if it
+//!   could, it has no way to reach the key.
+//!
+//! What it does **not** refuse, on any platform: **another program running as
+//! this user.**
+//!
+//! * On Linux the Secret Service and on Windows the Credential Manager hand a
+//!   stored secret to any process of the same user. The key is simply readable.
+//! * On macOS the keyring crate looks in the user's *default* keychain only
+//!   (`apple-native-keyring-store`, `keychain.rs`), so a program of this user can
+//!   create `io.orivo.desktop.plugin-compile-cache.v1` before Orivo ever runs —
+//!   `security add-generic-password -A` — and know the key Orivo will read; or
+//!   make its own keychain the default (`security default-keychain -s`, no
+//!   administrator rights) and receive the item Orivo creates. An ad-hoc-signed
+//!   build has no stable code identity for a keychain ACL to name, so the ACL is
+//!   not a boundary either.
+//!
+//! This is stated rather than papered over because the same attacker can already
+//! replace Orivo itself: macOS builds ship without a Developer ID signature or
+//! the hardened runtime, and the Windows installation is per-user. A program that
+//! can write to this directory *and* read that keychain item can already edit the
+//! binary that reads both. The cache is therefore not the weakest link today, and
+//! it must not become one: when macOS builds are Developer ID signed with the
+//! hardened runtime, this key has to move to the data-protection keychain behind
+//! an access group, or it will be. That is recorded as a follow-up on the pull
+//! request that introduced this module, not as a comment nobody will find.
+//!
+//! One thing in that shape *was* a defect of this module rather than of the
+//! platform, and is fixed: replacing a damaged entry now deletes it and creates a
+//! new one. `SecKeychain::set_generic_password` finds an existing item and
+//! rewrites its password in place, keeping that item's access control list, so an
+//! item planted with garbage and an "any application" ACL would have been handed
+//! Orivo's real key. See [`create_key`].
+//!
+//! ## Everything else follows from "an artifact is regenerable"
+//!
+//! Missing, corrupted, truncated, foreign, oversized, not even a regular file, or
+//! from another engine is a silent recompilation from the source bytes the
+//! registry already verified — never an error the user sees, and never a doubtful
+//! load. The cache is bounded, written atomically, reclaims what a previous
+//! engine generation left behind, and can be purged whole at any time, which is
+//! the plugin plan's sixth promise: a plugin's caches are the only thing Orivo
+//! may delete.
+//!
+//! And it is never opened on the startup path. Naming the directory is all
+//! `configure` does; a cache exists only after a user-initiated plugin surface
+//! calls [`permit`]. See there for what went wrong before that latch existed.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -52,7 +95,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -136,8 +179,9 @@ pub struct CacheCounts {
     pub hits: u64,
     pub misses: u64,
     pub stores: u64,
-    /// Refused before Wasmtime was asked: wrong format, or a tag this
-    /// installation did not write for this component and this engine.
+    /// Refused before Wasmtime was asked: not a regular file, larger than any
+    /// artifact may be, the wrong format, or a tag this installation did not
+    /// write for this component and this engine.
     pub unauthenticated: u64,
     /// Authenticated, and Wasmtime still would not load it. Should be
     /// unreachable — the tag binds the engine fingerprint — so it is counted
@@ -157,7 +201,6 @@ struct Counters {
 
 /// A directory of compiled components, authenticated for one installation and
 /// one `Engine` configuration.
-#[derive(Debug)]
 pub struct ComponentCache {
     engine: Engine,
     directory: PathBuf,
@@ -167,6 +210,21 @@ pub struct ComponentCache {
     engine_fingerprint: [u8; 32],
     limits: CacheLimits,
     counters: Counters,
+}
+
+/// Written by hand because `derive` would print [`ComponentCache::key`]. The key
+/// is the whole boundary this module rests on, and `{:?}` on a struct that holds
+/// one is how it reaches a log line, a panic message or a test snapshot.
+impl std::fmt::Debug for ComponentCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ComponentCache")
+            .field("directory", &self.directory)
+            .field("generation", &self.generation())
+            .field("limits", &self.limits)
+            .field("counters", &self.counters)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ComponentCache {
@@ -282,8 +340,13 @@ impl ComponentCache {
 
     fn load(&self, digest: &[u8; 32]) -> Option<Component> {
         let path = self.directory.join(self.slot_name(digest));
-        let stored =
-            read_regular_file(&path, self.limits.max_artifact_bytes + HEADER_BYTES as u64)?;
+        let stored = match read_slot(&path, self.limits.max_artifact_bytes + HEADER_BYTES as u64) {
+            Stored::Bytes(stored) => stored,
+            // Nothing to count and nothing to remove: the next store puts an
+            // artifact at this name.
+            Stored::Absent => return None,
+            Stored::Unusable => return self.refuse(&path, &self.counters.unauthenticated),
+        };
         if stored.len() < HEADER_BYTES || !stored.starts_with(ARTIFACT_MAGIC) {
             return self.refuse(&path, &self.counters.unauthenticated);
         }
@@ -307,11 +370,13 @@ impl ComponentCache {
         //   `read_regular_file` opens with `O_NOFOLLOW` and asks the descriptor
         //   what it is, so the artifact cannot have been swapped for a link, a
         //   device or a directory between choosing the name and reading it.
-        // * Orivo wrote them, in this installation. The tag is HMAC-SHA256 under
-        //   a key that exists only in the system keychain, over the artifact,
-        //   the source digest and the engine fingerprint — so a process that can
-        //   write here but not read that key cannot produce bytes that reach
-        //   this line, and another installation's artifact does not verify.
+        // * Orivo wrote them, in this installation, for this component. The tag
+        //   is HMAC-SHA256 over the artifact, the source digest and the engine
+        //   fingerprint, under a key held in the system keychain — so corruption,
+        //   another installation's cache, another component's slot and a plugin's
+        //   forgery all stop here. A program running as this user and able to
+        //   read that keychain item is *not* stopped, on any platform; the module
+        //   header says why that is stated rather than claimed otherwise.
         // * This engine can load them. The tag binds the engine fingerprint,
         //   which includes the Wasmtime crate version and every `Config` field
         //   Wasmtime itself considers compilation-relevant; `deserialize` then
@@ -340,9 +405,17 @@ impl ComponentCache {
     /// Forget one artifact and say why it will be recompiled. Removing it is the
     /// point: an artifact that cannot be used must not be re-read and re-refused
     /// on every open, and it costs a compile to replace either way.
+    ///
+    /// `remove_dir` is the second attempt because a *directory* can be sitting at
+    /// a slot name, and `rename` will not replace one. Without the fallback the
+    /// slot stays occupied by something that can never be an artifact, and the
+    /// component behind it is recompiled on every open for the rest of the
+    /// installation's life.
     fn refuse(&self, path: &Path, counter: &AtomicU64) -> Option<Component> {
         counter.fetch_add(1, Ordering::Relaxed);
-        let _ = fs::remove_file(path);
+        if fs::remove_file(path).is_err() {
+            let _ = fs::remove_dir(path);
+        }
         None
     }
 
@@ -357,10 +430,9 @@ impl ComponentCache {
         if artifact.len() as u64 > self.limits.max_artifact_bytes {
             return;
         }
-        if fs::create_dir_all(&self.directory).is_err() {
+        if !self.prepare_directory() {
             return;
         }
-        restrict_to_owner(&self.directory);
 
         let temporary = self.directory.join(format!(
             "{TEMPORARY_PREFIX}{}.{}",
@@ -368,10 +440,7 @@ impl ComponentCache {
             unique_suffix()
         ));
         let written = (|| -> io::Result<()> {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
+            let mut file = create_exclusive(&temporary)?;
             file.write_all(ARTIFACT_MAGIC)?;
             file.write_all(&self.tag(digest, &artifact))?;
             file.write_all(&artifact)?;
@@ -388,6 +457,50 @@ impl ComponentCache {
         }
         self.counters.stores.fetch_add(1, Ordering::Relaxed);
         self.enforce_ceiling();
+    }
+
+    /// Make the cache directory exist, prove it is a directory and not something
+    /// standing in for one, and leave it readable only by its owner.
+    ///
+    /// A link in place of the cache directory is not a way to beat this module —
+    /// the tag still decides what runs — but two things here act on a *path*
+    /// rather than on a descriptor, and a link would aim them elsewhere:
+    /// permissions, and the eviction sweep's `remove_file`. The permissions half
+    /// is closed by construction, because `fchmod` names the directory the
+    /// descriptor already is and `O_NOFOLLOW` means the kernel refused a link
+    /// rather than this function checking for one. The sweep is gated by this
+    /// call and bounded by its name filter, which is weaker: a swap between the
+    /// two is a race with a program of this user, and that is not a race this
+    /// module claims to win — see the module header.
+    fn prepare_directory(&self) -> bool {
+        if fs::create_dir_all(&self.directory).is_err() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+
+            let Ok(handle) = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&self.directory)
+            else {
+                return false;
+            };
+            // SAFETY: an open descriptor this function owns and has not closed.
+            // Nobody but this user needs to read compiled components, and the
+            // tag is not an excuse to publish them.
+            unsafe { libc::fchmod(handle.as_raw_fd(), 0o700) };
+            true
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows has no `O_NOFOLLOW` for a directory open and the app data
+            // tree is already per-user, so the check is the weaker one: refuse a
+            // reparse point by name.
+            fs::symlink_metadata(&self.directory)
+                .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        }
     }
 
     /// Bring the directory back under its ceiling, oldest artifact first — and
@@ -506,19 +619,49 @@ fn digest_of(bytes: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Read a path that must be a regular file, without following a link.
+/// What was found at a slot name.
+enum Stored {
+    /// Nothing usable is there, and nothing was learned about why. A plain miss:
+    /// the next store puts an artifact at this name, whatever is there now,
+    /// because `rename` replaces the name rather than the object.
+    Absent,
+    /// Something is there and it cannot be an artifact of Orivo's: not a regular
+    /// file, or bigger than any artifact is allowed to be. Removed and counted,
+    /// like a corrupt one — an object that can never be loaded must not be
+    /// re-examined on every open.
+    ///
+    /// Neither of the two checks that produce this can be isolated by a test, and
+    /// that is worth saying rather than hiding: every object an unprivileged
+    /// program of this user can put at a slot name is *also* refused by
+    /// `O_NONBLOCK` plus the header check or by the tag, so removing either check
+    /// leaves the suite green. They earn their place by refusing earlier — before
+    /// a device that never ends is read up to the ceiling, and before a
+    /// sixty-four-megabyte HMAC is computed over something that was never an
+    /// artifact — not by being the only thing that refuses.
+    Unusable,
+    Bytes(Vec<u8>),
+}
+
+/// Read a slot, which must be a regular file, without following a link and
+/// without blocking.
 ///
 /// `symlink_metadata` followed by a read would check one object and read
 /// another; the descriptor is asked instead, the same way `plugin_runtime.rs`
 /// reads a file inside a granted folder. `take(ceiling + 1)` is what makes an
 /// oversized file visible rather than silently truncated.
-fn read_regular_file(path: &Path, ceiling: u64) -> Option<Vec<u8>> {
+fn read_slot(path: &Path, ceiling: u64) -> Stored {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        // `O_NOFOLLOW` refuses a link planted at this name instead of resolving
+        // it. `O_NONBLOCK` is the other half, and it is not optional: opening a
+        // FIFO for reading *blocks until someone writes to it*, so without this
+        // the `is_file` check below never runs and a named pipe dropped into the
+        // cache directory parks every discovery pass for the rest of the
+        // session. #35 fixed exactly this one directory over, in `read_file`.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     }
     #[cfg(windows)]
     {
@@ -528,28 +671,49 @@ fn read_regular_file(path: &Path, ceiling: u64) -> Option<Vec<u8>> {
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = options.open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
+    // A refused open — a link (`ELOOP`), a permission, a device that will not
+    // answer — is `Absent` rather than `Unusable`, because telling those apart
+    // needs a second syscall that would itself be racing whatever made the first
+    // one fail. The next store overwrites the name either way.
+    let Ok(file) = options.open(path) else {
+        return Stored::Absent;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Stored::Absent;
+    };
+    if !metadata.is_file() {
+        return Stored::Unusable;
     }
     let mut bytes = Vec::new();
-    file.take(ceiling.saturating_add(1))
+    if file
+        .take(ceiling.saturating_add(1))
         .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= ceiling).then_some(bytes)
+        .is_err()
+    {
+        return Stored::Unusable;
+    }
+    if bytes.len() as u64 > ceiling {
+        return Stored::Unusable;
+    }
+    Stored::Bytes(bytes)
 }
 
-/// Nobody but this user needs to read compiled components, and the tag is not an
-/// excuse to publish them. Windows inherits the app data ACL, which is already
-/// per-user.
-fn restrict_to_owner(directory: &Path) {
+/// Create a file that must not already exist, and never through a link.
+///
+/// `create_new` is what refuses an object somebody else put at this name —
+/// `O_EXCL` fails on a symbolic link rather than following it — and `O_NOFOLLOW`
+/// says the same thing twice on purpose, because the consequence of writing
+/// through a link here is a file Orivo believes it owns somewhere it does not.
+/// The name is unpredictable as well, but unpredictable is not a check.
+fn create_exclusive(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o700));
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
-    #[cfg(not(unix))]
-    let _ = directory;
+    options.open(path)
 }
 
 fn unique_suffix() -> String {
@@ -584,52 +748,133 @@ fn decode_key(stored: &str) -> Option<[u8; KEY_BYTES]> {
     Some(key)
 }
 
-/// The per-installation key, read once and memoised.
+/// Where the install key lives, behind a seam.
 ///
-/// Lazily, and this matters: macOS asks for the keychain password every time an
-/// application whose code signature it does not recognise reads an item, which
-/// is why `sources.rs` keeps a secret-free directory of connected stores. The
-/// cache is opened by the first component compilation, and nothing on the
-/// startup, navigation or search path compiles a component — so a session that
-/// never opens a plugin surface never touches the keychain for this.
-fn install_key() -> Option<[u8; KEY_BYTES]> {
-    static KEY: OnceLock<Option<[u8; KEY_BYTES]>> = OnceLock::new();
-    *KEY.get_or_init(read_or_create_install_key)
+/// Not an abstraction for its own sake. The branches below — a missing entry, a
+/// damaged one, a store that will not write, a value that does not read back as
+/// what was written — are the whole of this module's key handling, and the real
+/// implementation cannot be driven from a test: a `cargo test` binary asking
+/// macOS for a keychain item asks it to trust code it has never seen, which is a
+/// password prompt on a machine nobody is watching. With the seam, every branch
+/// has a test and the platform call has one shape to get right.
+trait KeyStore {
+    /// `Ok(None)` is "there is no entry"; `Err` is "this store could not be
+    /// asked", which are very different answers and must not collapse.
+    fn read(&self) -> Result<Option<String>, KeyStoreUnavailable>;
+    fn write(&self, value: &str) -> Result<(), KeyStoreUnavailable>;
+    fn delete(&self) -> Result<(), KeyStoreUnavailable>;
 }
 
-fn read_or_create_install_key() -> Option<[u8; KEY_BYTES]> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).ok()?;
-    match entry.get_password() {
-        Ok(stored) => match decode_key(&stored) {
-            Some(key) => Some(key),
-            // A damaged entry is replaced rather than refused. Everything it
-            // authenticated is regenerable, and refusing would leave the cache
-            // off until someone deleted a keychain item by hand.
-            None => create_install_key(&entry),
-        },
-        Err(keyring::Error::NoEntry) => create_install_key(&entry),
-        Err(error) => {
-            // The value is never logged. That it could not be read is enough to
-            // explain a locked keychain or a denied ACL.
-            eprintln!(
-                "orivo: the plugin compile cache key is unavailable ({error}); components will be compiled on every open"
-            );
-            None
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyStoreUnavailable;
+
+struct SystemKeyStore;
+
+impl SystemKeyStore {
+    fn entry(&self) -> Result<keyring::Entry, KeyStoreUnavailable> {
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|_| KeyStoreUnavailable)
+    }
+}
+
+impl KeyStore for SystemKeyStore {
+    fn read(&self) -> Result<Option<String>, KeyStoreUnavailable> {
+        match self.entry()?.get_password() {
+            Ok(value) => Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => {
+                // The value is never logged. That it could not be read is enough
+                // to explain a locked keychain or a denied ACL.
+                eprintln!("orivo: the plugin compile cache key could not be read ({error})");
+                Err(KeyStoreUnavailable)
+            }
+        }
+    }
+
+    fn write(&self, value: &str) -> Result<(), KeyStoreUnavailable> {
+        self.entry()?.set_password(value).map_err(|error| {
+            eprintln!("orivo: the plugin compile cache key could not be stored ({error})");
+            KeyStoreUnavailable
+        })
+    }
+
+    fn delete(&self) -> Result<(), KeyStoreUnavailable> {
+        match self.entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(KeyStoreUnavailable),
         }
     }
 }
 
-fn create_install_key(entry: &keyring::Entry) -> Option<[u8; KEY_BYTES]> {
+/// The per-installation key, read once and memoised.
+///
+/// Lazily, and this matters twice. macOS asks for the keychain password every
+/// time an application whose code signature it does not recognise reads an item,
+/// which is why `sources.rs` keeps a secret-free directory of connected stores;
+/// and the plugin plan forbids anything on the startup path from depending on a
+/// plugin. So this is reached only by [`shared`], which answers `None` until a
+/// user-initiated plugin surface has called [`permit`] — see there.
+///
+/// A store that could not be read once stays unread for the session. The
+/// alternative is asking again, which on macOS means a second password prompt
+/// for a cache the user did not ask about.
+fn install_key() -> Option<[u8; KEY_BYTES]> {
+    static KEY: OnceLock<Option<[u8; KEY_BYTES]>> = OnceLock::new();
+    *KEY.get_or_init(|| read_or_create_key(&SystemKeyStore))
+}
+
+fn read_or_create_key(store: &impl KeyStore) -> Option<[u8; KEY_BYTES]> {
+    match store.read() {
+        Ok(Some(stored)) => {
+            if let Some(key) = decode_key(&stored) {
+                return Some(key);
+            }
+            // A damaged entry is replaced rather than refused: everything it
+            // authenticated is regenerable, and refusing would leave the cache
+            // off until someone deleted a keychain item by hand.
+        }
+        Ok(None) => {}
+        // A store that cannot be asked must not be *written* either. Creating a
+        // key here would be a prompt, or an overwrite, on a path where the user
+        // asked for neither.
+        Err(KeyStoreUnavailable) => return None,
+    }
+    create_key(store)
+}
+
+fn create_key(store: &impl KeyStore) -> Option<[u8; KEY_BYTES]> {
     let mut key = [0u8; KEY_BYTES];
     if getrandom::fill(&mut key).is_err() {
         return None;
     }
-    // A key that does not survive the session is worse than none: every artifact
-    // written under it would be refused and deleted on the next run, so the cache
-    // would never pay for itself and the directory would churn.
-    if let Err(error) = entry.set_password(&encode_key(&key)) {
+    let encoded = encode_key(&key);
+
+    // Delete first, and never update in place. On macOS
+    // `SecKeychain::set_generic_password` *finds* an existing item and rewrites
+    // its password — `security-framework/src/os/macos/passwords.rs:275-277`,
+    // `Ok((_, mut item)) => item.set_password(password)` — which keeps that
+    // item's access control list. Another program of this user can create
+    // `io.orivo.desktop.plugin-compile-cache.v1` before Orivo ever runs, with
+    // garbage in it and an ACL that lets any application read it; an in-place
+    // update would then hand Orivo's real key to whoever planted it. Deleting
+    // means the item holding the key is one this process created.
+    //
+    // It does not make the item *Orivo's* in any sense a signature would: an
+    // ad-hoc-signed build has no stable code identity for an ACL to name, and a
+    // program that makes its own keychain the default gets the new item anyway.
+    // The module header says what that leaves protected and what it does not.
+    let _ = store.delete();
+    if store.write(&encoded).is_err() {
+        return None;
+    }
+
+    // And read it back. This catches a write that landed where the read does not
+    // resolve to — another keychain, another item shadowing this one — which
+    // would otherwise leave every artifact written this session unverifiable on
+    // the next run, and the cache churning forever. It proves nothing about who
+    // else can read the item.
+    if store.read().ok().flatten().as_deref() != Some(encoded.as_str()) {
         eprintln!(
-            "orivo: the plugin compile cache key could not be stored ({error}); components will be compiled on every open"
+            "orivo: the plugin compile cache key did not read back as written; components will be compiled on every open"
         );
         return None;
     }
@@ -641,6 +886,7 @@ fn create_install_key(entry: &keyring::Entry) -> Option<[u8; KEY_BYTES]> {
 // ---------------------------------------------------------------------------
 
 static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+static PERMITTED: AtomicBool = AtomicBool::new(false);
 
 /// Names the cache directory, once, from `lib.rs` during setup.
 ///
@@ -651,11 +897,39 @@ pub fn configure(directory: PathBuf) {
     let _ = DIRECTORY.set(directory);
 }
 
-/// The cache for `engine`, or `None` when no directory was configured or the
-/// install key is unavailable. `None` is the whole feature off: every caller
-/// behaves exactly as it did before this module existed.
+/// The user has opened something that discovers or runs plugins, so the cache
+/// may be used from here on.
+///
+/// This latch exists because being configured is not the same as being wanted.
+/// Orivo's startup task asks the registry what is installed — to see whether a
+/// consented automatic update is pending — and that pass reaches the same
+/// `prepare_component` a settings panel does. Opening the cache there means
+/// reading the install key at launch, which on an ad-hoc-signed build is an
+/// unsolicited keychain prompt, and the plan forbids the startup path from
+/// touching a plugin's cache at all.
+///
+/// So the switch is off by default and every caller that does not turn it on
+/// gets exactly the behaviour that predates this module: a compile. Fail-closed
+/// in the direction that costs milliseconds rather than the one that costs a
+/// prompt, which also means a background path added later is cacheless until
+/// someone says otherwise, instead of quietly inheriting a key.
+pub fn permit() {
+    PERMITTED.store(true, Ordering::Release);
+}
+
+/// Whether a cache may be opened at all, given the two things that decide it.
+/// Split out so both halves of the rule have a test that does not need
+/// process-wide state.
+fn cache_directory(configured: Option<&PathBuf>, permitted: bool) -> Option<PathBuf> {
+    permitted.then(|| configured.cloned()).flatten()
+}
+
+/// The cache for `engine`, or `None` when no directory was configured, no
+/// user-initiated surface has permitted one, or the install key is unavailable.
+/// `None` is the whole feature off: every caller behaves exactly as it did
+/// before this module existed.
 pub fn shared(engine: &Engine) -> Option<ComponentCache> {
-    let directory = DIRECTORY.get()?.clone();
+    let directory = cache_directory(DIRECTORY.get(), PERMITTED.load(Ordering::Acquire))?;
     Some(ComponentCache::open(
         engine.clone(),
         directory,
@@ -677,10 +951,22 @@ pub fn purge() -> Result<usize, String> {
     purge_directory(directory)
 }
 
+/// A cache directory that is a link is not one Orivo made, and this function
+/// deletes files. Refusing by name is weaker than the descriptor check
+/// [`ComponentCache::prepare_directory`] does, and it is the strongest thing a
+/// free function without a descriptor can do.
+fn is_plain_directory(directory: &Path) -> bool {
+    fs::symlink_metadata(directory)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
 /// Only this module's own files, by name. The directory belongs to Orivo, but a
 /// purge that removed whatever it found there would be a purge that could be
 /// pointed at something else by a future mistake in [`configure`].
 fn purge_directory(directory: &Path) -> Result<usize, String> {
+    if directory.exists() && !is_plain_directory(directory) {
+        return Err("Orivo's plugin cache is not a directory it wrote.".into());
+    }
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
@@ -1498,6 +1784,496 @@ mod tests {
         ] {
             assert_eq!(decode_key(damaged), None, "{damaged:?} decoded to a key");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The tag's own construction
+    // -----------------------------------------------------------------------
+
+    /// The domain string cannot be shown to matter by planting a file, because
+    /// this key tags exactly one kind of thing today. What can be pinned is that
+    /// it is *in* the input — and #42 is why it has to be: one key signed a
+    /// package and an index, and the package's signature turned out to be a valid
+    /// index signature. The next thing this key authenticates must not inherit
+    /// that.
+    #[test]
+    fn the_tag_covers_its_domain_string() {
+        let scratch = Scratch::new("tag-domain");
+        let runtime = runtime();
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        let digest = digest_of(FIXTURE);
+
+        let mut undomained = <ArtifactTag as Mac>::new_from_slice(&KEY_A).unwrap();
+        undomained.update(&cache.engine_fingerprint);
+        undomained.update(&digest);
+        undomained.update(FIXTURE);
+        let undomained: [u8; TAG_BYTES] = undomained.finalize().into_bytes().into();
+
+        assert_ne!(
+            cache.tag(&digest, FIXTURE),
+            undomained,
+            "the domain string is not part of the tag"
+        );
+    }
+
+    /// Same argument one layer out: the slot digest is domain-separated too, so a
+    /// second thing ever hashed into a name under this scheme cannot collide with
+    /// an artifact slot.
+    #[test]
+    fn a_slot_name_covers_its_domain_string() {
+        let scratch = Scratch::new("slot-domain");
+        let runtime = runtime();
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        let digest = digest_of(FIXTURE);
+
+        let mut undomained = Sha256::new();
+        undomained.update(digest);
+        let undomained = format!(
+            "{}-{:x}{ARTIFACT_SUFFIX}",
+            cache.generation(),
+            undomained.finalize()
+        );
+        assert_ne!(
+            cache.slot_name(&digest),
+            undomained,
+            "the slot digest is not domain-separated"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What the cache will not read, write or print
+    // -----------------------------------------------------------------------
+
+    /// A named pipe in a slot used to park the caller forever. `O_RDONLY` on a
+    /// FIFO blocks until somebody writes to it, so the `is_file` check that would
+    /// have refused it never ran — and the caller is a discovery pass behind
+    /// Settings › Plugins.
+    ///
+    /// This covers the class. `O_NONBLOCK` is what it isolates; `is_file` is not
+    /// isolable on its own, for the reason given on [`Stored::Unusable`].
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_in_a_slot_does_not_park_the_caller() {
+        let scratch = Scratch::new("fifo");
+        let runtime = runtime();
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        fs::create_dir_all(scratch.cache_dir()).unwrap();
+        let slot = scratch
+            .cache_dir()
+            .join(cache.slot_name(&digest_of(FIXTURE)));
+        let raw = std::ffi::CString::new(slot.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a path this process owns, in a directory it just created.
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
+
+        // Bounded, and on another thread, so a regression fails this test instead
+        // of hanging the suite with no message.
+        let (report, answer) = std::sync::mpsc::channel();
+        let engine = runtime.engine().clone();
+        std::thread::spawn(move || {
+            let outcome = cache.component(FIXTURE, || {
+                Component::new(&engine, FIXTURE).map_err(|error| error.to_string())
+            });
+            let _ = report.send((outcome.is_ok(), cache.counts()));
+        });
+        let (compiled, counts) = answer
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the caller is still parked on a named pipe");
+        assert!(compiled);
+        assert_eq!(counts.hits, 0);
+        assert_eq!(counts.unauthenticated, 1);
+
+        // Removed rather than met again on the next open — and the slot now holds
+        // the artifact the recompilation produced, which the next cache reuses.
+        use std::os::unix::fs::FileTypeExt;
+        assert!(
+            !fs::symlink_metadata(&slot).unwrap().file_type().is_fifo(),
+            "the pipe was left in the cache"
+        );
+        let compiler = Compiler::new(&runtime);
+        let after = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        after
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .unwrap();
+        assert_eq!(after.counts().hits, 1);
+    }
+
+    /// The ceiling's job is refusing *early*: the tag would catch an oversized
+    /// slot too, after hashing all of it. So this test pins the promise — refused,
+    /// removed, and the caller still served — rather than the branch, which no
+    /// test can isolate. See [`Stored::Unusable`].
+    #[test]
+    fn a_file_larger_than_an_artifact_may_be_is_refused_without_being_read_whole() {
+        let scratch = Scratch::new("oversized");
+        let runtime = runtime();
+        let cache = ComponentCache::open(
+            runtime.engine().clone(),
+            scratch.cache_dir(),
+            KEY_A,
+            CacheLimits {
+                max_artifact_bytes: 4096,
+                max_total_bytes: 64 * 1024 * 1024,
+            },
+        );
+        fs::create_dir_all(scratch.cache_dir()).unwrap();
+        let slot = scratch
+            .cache_dir()
+            .join(cache.slot_name(&digest_of(FIXTURE)));
+        fs::write(&slot, vec![0x5a; 4096 + HEADER_BYTES + 1]).unwrap();
+
+        let compiler = Compiler::new(&runtime);
+        cache
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .unwrap();
+        assert_eq!(cache.counts().hits, 0);
+        assert_eq!(
+            cache.counts().unauthenticated,
+            1,
+            "an oversized slot was not refused"
+        );
+        // Removed rather than re-read on every open: nothing this large can ever
+        // become an artifact of ours.
+        assert!(!slot.exists(), "the oversized file was left to be re-read");
+    }
+
+    /// A directory at a slot name is the one obstruction `rename` cannot clear, so
+    /// without the `remove_dir` fallback in [`ComponentCache::refuse`] the slot
+    /// stays occupied and its component is recompiled on every open, forever.
+    #[test]
+    fn a_directory_planted_at_a_slot_name_is_refused_and_cleared() {
+        let scratch = Scratch::new("slot-dir");
+        let runtime = runtime();
+        let compiler = Compiler::new(&runtime);
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        fs::create_dir_all(scratch.cache_dir()).unwrap();
+        let slot = scratch
+            .cache_dir()
+            .join(cache.slot_name(&digest_of(FIXTURE)));
+        fs::create_dir(&slot).unwrap();
+
+        cache
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .expect("an obstructed slot is not a failure");
+        assert_eq!(cache.counts().hits, 0);
+        assert_eq!(compiler.calls(), 1);
+
+        // The proof that it was cleared: the next cache finds an artifact there.
+        let after = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        after
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .unwrap();
+        assert_eq!(
+            after.counts().hits,
+            1,
+            "the slot is still occupied, so this component recompiles forever"
+        );
+    }
+
+    #[test]
+    fn the_install_key_is_not_in_the_caches_debug_output() {
+        let scratch = Scratch::new("debug");
+        let runtime = runtime();
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        let printed = format!("{cache:?}");
+        assert!(
+            !printed.contains(&encode_key(&KEY_A)),
+            "the key is in Debug output: {printed}"
+        );
+        // A byte of it, in the shape a `[u8; 32]` would print, is enough to fail.
+        assert!(
+            !printed.contains("17, 17, 17"),
+            "the key bytes leak: {printed}"
+        );
+        assert!(printed.contains("ComponentCache"));
+    }
+
+    /// A link where the cache directory should be would aim two things somewhere
+    /// else: the mode change, and the eviction sweep's `remove_file`. The mode
+    /// change is the sharp one — a `chmod 0700` on a directory Orivo does not own.
+    #[test]
+    fn a_cache_directory_that_is_a_link_is_refused() {
+        let scratch = Scratch::new("dir-link");
+        let runtime = runtime();
+        let compiler = Compiler::new(&runtime);
+        let elsewhere = scratch.path.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        let bystander = elsewhere.join("keep-me");
+        fs::write(&bystander, b"not ours").unwrap();
+        redirect_directory(&scratch.cache_dir(), &elsewhere);
+
+        let cache = open_cache(&runtime, scratch.cache_dir(), KEY_A);
+        cache
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .expect("a refused directory is not a failure");
+        assert_eq!(
+            cache.counts().stores,
+            0,
+            "an artifact was written through a link"
+        );
+        assert!(bystander.is_file());
+        assert!(
+            fs::read_dir(&elsewhere)
+                .unwrap()
+                .flatten()
+                .all(|entry| entry.file_name() == "keep-me"),
+            "something was written into the link's target"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_ne!(
+                fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "the link's target was chmodded"
+            );
+        }
+        assert!(
+            purge_directory(&scratch.cache_dir()).is_err(),
+            "purge followed the link"
+        );
+        remove_directory_redirect(&scratch.cache_dir());
+    }
+
+    /// A directory redirection in the form each platform lets an unprivileged
+    /// program create: a symbolic link on Unix, a junction on Windows. Copied from
+    /// `plugin_runtime.rs`, which needed the same distinction in #47.
+    fn redirect_directory(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+
+            // `raw_arg`, because `cmd /C` applies its own quote-stripping and
+            // Rust's ordinary escaping produces a form it mangles.
+            let output = std::process::Command::new("cmd")
+                .raw_arg(format!(
+                    "/C mklink /J \"{}\" \"{}\"",
+                    link.display(),
+                    target.display()
+                ))
+                .output()
+                .expect("cmd is on PATH");
+            assert!(
+                output.status.success(),
+                "mklink /J did not create the junction: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    fn remove_directory_redirect(link: &Path) {
+        #[cfg(unix)]
+        let _ = fs::remove_file(link);
+        #[cfg(windows)]
+        let _ = fs::remove_dir(link);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cache_directory_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = Scratch::new("mode");
+        let runtime = runtime();
+        let compiler = Compiler::new(&runtime);
+        // Created wide open first, so the assertion is about this module setting
+        // the mode and not about whatever the umask happened to be.
+        fs::create_dir_all(scratch.cache_dir()).unwrap();
+        fs::set_permissions(scratch.cache_dir(), fs::Permissions::from_mode(0o755)).unwrap();
+
+        open_cache(&runtime, scratch.cache_dir(), KEY_A)
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .unwrap();
+        assert_eq!(
+            fs::metadata(scratch.cache_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn a_temporary_file_is_never_written_through_a_name_that_exists() {
+        let scratch = Scratch::new("exclusive");
+        let occupied = scratch.path.join("occupied");
+        fs::write(&occupied, b"someone else's").unwrap();
+        assert!(create_exclusive(&occupied).is_err());
+        assert_eq!(fs::read(&occupied).unwrap(), b"someone else's");
+
+        #[cfg(unix)]
+        {
+            let target = scratch.path.join("target");
+            fs::write(&target, b"outside the cache").unwrap();
+            let planted = scratch.path.join("planted");
+            std::os::unix::fs::symlink(&target, &planted).unwrap();
+            assert!(create_exclusive(&planted).is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"outside the cache");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // When a cache may open at all
+    // -----------------------------------------------------------------------
+
+    /// Configured is not the same as wanted. Orivo's startup task asks the
+    /// registry what is installed, and that used to reach the same
+    /// `prepare_component` a settings panel does — which with a cache behind it
+    /// means reading the install key at launch, and on an ad-hoc-signed macOS
+    /// build that is an unsolicited password prompt.
+    #[test]
+    fn a_cache_opens_only_once_a_user_surface_has_permitted_one() {
+        let configured = PathBuf::from("/tmp/orivo-cache-rule");
+        assert_eq!(
+            cache_directory(Some(&configured), true),
+            Some(configured.clone())
+        );
+        assert_eq!(
+            cache_directory(Some(&configured), false),
+            None,
+            "a configured cache opened before anything asked for it"
+        );
+        assert_eq!(cache_directory(None, true), None);
+        assert_eq!(cache_directory(None, false), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // The install key
+    // -----------------------------------------------------------------------
+
+    /// A key store that records what was asked of it, in order.
+    ///
+    /// The order is the point of two of the tests below: the macOS keychain
+    /// rewrites an existing item's password *in place*, keeping that item's access
+    /// control list, so replacing a damaged entry has to be a delete followed by a
+    /// create and not a write.
+    #[derive(Default)]
+    struct FakeStore {
+        value: std::sync::Mutex<Option<String>>,
+        log: std::sync::Mutex<Vec<&'static str>>,
+        read_fails: bool,
+        write_fails: bool,
+        /// What the store keeps when asked to write, if not what it was given.
+        writes_instead: Option<String>,
+    }
+
+    impl FakeStore {
+        fn holding(value: Option<&str>) -> Self {
+            Self {
+                value: std::sync::Mutex::new(value.map(str::to_owned)),
+                ..Self::default()
+            }
+        }
+
+        fn log(&self) -> Vec<&'static str> {
+            self.log.lock().unwrap().clone()
+        }
+
+        fn stored(&self) -> Option<String> {
+            self.value.lock().unwrap().clone()
+        }
+    }
+
+    impl KeyStore for FakeStore {
+        fn read(&self) -> Result<Option<String>, KeyStoreUnavailable> {
+            self.log.lock().unwrap().push("read");
+            if self.read_fails {
+                return Err(KeyStoreUnavailable);
+            }
+            Ok(self.stored())
+        }
+
+        fn write(&self, value: &str) -> Result<(), KeyStoreUnavailable> {
+            self.log.lock().unwrap().push("write");
+            if self.write_fails {
+                return Err(KeyStoreUnavailable);
+            }
+            *self.value.lock().unwrap() = Some(
+                self.writes_instead
+                    .clone()
+                    .unwrap_or_else(|| value.to_owned()),
+            );
+            Ok(())
+        }
+
+        fn delete(&self) -> Result<(), KeyStoreUnavailable> {
+            self.log.lock().unwrap().push("delete");
+            *self.value.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_absent_entry_becomes_a_new_key() {
+        let store = FakeStore::holding(None);
+        let key = read_or_create_key(&store).expect("a key is created");
+        assert_eq!(store.stored().as_deref(), Some(encode_key(&key).as_str()));
+        assert_eq!(store.log(), vec!["read", "delete", "write", "read"]);
+    }
+
+    #[test]
+    fn an_existing_key_is_used_as_it_is() {
+        let existing = encode_key(&KEY_B);
+        let store = FakeStore::holding(Some(&existing));
+        assert_eq!(read_or_create_key(&store), Some(KEY_B));
+        assert_eq!(store.log(), vec!["read"], "an existing key was rewritten");
+        assert_eq!(store.stored().as_deref(), Some(existing.as_str()));
+    }
+
+    /// The (c) of the security review: `SecKeychain::set_generic_password` finds an
+    /// existing item and rewrites its password, keeping its ACL. A program of this
+    /// user can plant `io.orivo.desktop.plugin-compile-cache.v1` with garbage and
+    /// an "any application" ACL before Orivo first runs; an in-place update would
+    /// then hand it Orivo's real key. The item that holds the key has to be one
+    /// this process created, which means the delete comes first.
+    #[test]
+    fn a_damaged_entry_is_deleted_before_a_new_key_is_written() {
+        let store = FakeStore::holding(Some("not a key"));
+        let key = read_or_create_key(&store).expect("a key replaces the damaged entry");
+        assert_eq!(
+            store.log(),
+            vec!["read", "delete", "write", "read"],
+            "the damaged entry was updated in place"
+        );
+        assert_eq!(store.stored().as_deref(), Some(encode_key(&key).as_str()));
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_read_disables_the_cache_without_writing() {
+        let store = FakeStore {
+            read_fails: true,
+            ..FakeStore::holding(None)
+        };
+        assert_eq!(read_or_create_key(&store), None);
+        assert_eq!(
+            store.log(),
+            vec!["read"],
+            "a store that could not be read was written to anyway"
+        );
+    }
+
+    #[test]
+    fn a_store_that_cannot_be_written_disables_the_cache() {
+        let store = FakeStore {
+            write_fails: true,
+            ..FakeStore::holding(None)
+        };
+        assert_eq!(read_or_create_key(&store), None);
+    }
+
+    /// A write that lands where the read does not resolve to — another keychain,
+    /// another item shadowing this one — would leave every artifact written this
+    /// session unverifiable on the next run, and the cache churning forever.
+    #[test]
+    fn a_key_that_does_not_read_back_as_written_is_not_used() {
+        let store = FakeStore {
+            writes_instead: Some(encode_key(&KEY_A)),
+            ..FakeStore::holding(None)
+        };
+        assert_eq!(read_or_create_key(&store), None);
+        assert_eq!(store.log(), vec!["read", "delete", "write", "read"]);
     }
 
     /// The keychain is the one thing these tests do not touch. Reading or writing
