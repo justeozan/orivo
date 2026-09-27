@@ -1,0 +1,18 @@
+{
+  "id": "com.orivo.ryujinx",
+  "name": "Ryujinx",
+  "version": "1.0.0",
+  "sdk": "orivo-plugin@1",
+  "minOrivoVersion": "0.3.0",
+  "extensions": ["runner"],
+  "capabilities": ["runner_prepare", "files_read"],
+  "networkDomains": [],
+  "artifacts": [
+    {
+      "path": "component.wasm",
+      "kind": "component",
+      "sha256": "371d5b142b26265e67323b3b2797e2b4b0177098905d3c109232f771dcfaa0c4",
+      "byteSize": 45383
+    }
+  ]
+}
