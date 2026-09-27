@@ -416,7 +416,7 @@ const NOTIFICATION_TICK_MS = 30_000;
  * app chrome rather than as a claim about anyone's library — the only screen
  * in Orivo whose backdrop is not a game the user owns.
  */
-const WELCOME_WALLPAPER = "/media/igdb/heroes/elden-ring-wallpaper.png";
+const WELCOME_WALLPAPER = "/media/igdb/heroes/elden-ring-wallpaper.jpg";
 const STEAM_ACCOUNT_CONNECTED_EVENT = "steam-account-authenticated";
 const STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT = "steam-account-login-cancelled";
 const STEAM_ACCOUNT_LOGIN_FAILED_EVENT = "steam-account-login-failed";

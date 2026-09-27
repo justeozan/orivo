@@ -109,7 +109,7 @@ test.describe("game detail wallpaper rail", () => {
     await openRoute(page, DETAIL_ROUTE, "game");
 
     const heroImage = page.locator(`${detailHost} .gd-hero__image`);
-    await expect(heroImage).toHaveAttribute("src", "/media/igdb/heroes/elden-ring-wallpaper.png");
+    await expect(heroImage).toHaveAttribute("src", "/media/igdb/heroes/elden-ring-wallpaper.jpg");
 
     const landscapeTile = page.locator(`${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}']`);
     await landscapeTile.click();
@@ -127,7 +127,7 @@ test.describe("game detail wallpaper rail", () => {
 
     await expect(page.locator(`${detailHost} .gd-hero__image`)).toHaveAttribute(
       "src",
-      "/media/igdb/heroes/elden-ring-wallpaper.png",
+      "/media/igdb/heroes/elden-ring-wallpaper.jpg",
     );
     await expect(page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`)).toHaveClass(
       /gd-gallery__tile--selected/,
