@@ -122,6 +122,16 @@ const MAX_HOST_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_HOST_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 255;
 const MAX_JOURNAL_MESSAGE_BYTES: usize = 512;
+/// How many bytes of plugin text one host call pays for.
+///
+/// `log` is the one import whose *input* the guest sizes. Wasmtime copies the
+/// whole string out of guest memory before this host sees it, so truncating to
+/// [`MAX_JOURNAL_MESSAGE_BYTES`] bounds what is kept and not what was copied —
+/// and wasmtime 44 has no `set_hostcall_fuel` to charge the copy against. The
+/// budget this host function can reach is the host-call count, so that is what a
+/// large message spends: an ordinary line costs one, and a megabyte costs the
+/// whole invocation.
+const JOURNAL_BYTES_PER_HOST_CALL: usize = 4096;
 const MAX_JOURNAL_ENTRIES: usize = 256;
 
 /// Result bounds. Identifiers use the catalogue's opaque grammar; free text is
@@ -883,7 +893,11 @@ struct HostState {
 
 impl HostState {
     fn spend_host_call(&mut self) -> Result<(), wit_types::PluginError> {
-        if self.host_calls >= MAX_HOST_CALLS_PER_INVOCATION {
+        self.spend_host_calls(1)
+    }
+
+    fn spend_host_calls(&mut self, cost: u32) -> Result<(), wit_types::PluginError> {
+        if self.host_calls.saturating_add(cost) > MAX_HOST_CALLS_PER_INVOCATION {
             if !self.host_call_budget_reported {
                 self.host_call_budget_reported = true;
                 self.journal.record(
@@ -898,7 +912,7 @@ impl HostState {
                 "This plugin made too many host requests in one call.",
             ));
         }
-        self.host_calls += 1;
+        self.host_calls = self.host_calls.saturating_add(cost);
         Ok(())
     }
 
@@ -939,6 +953,12 @@ impl HostState {
     }
 }
 
+/// What a message of this many bytes costs against the host-call budget. One for
+/// the call, plus one for every whole block of text beyond the first.
+fn journal_cost(bytes: usize) -> u32 {
+    (1 + bytes / JOURNAL_BYTES_PER_HOST_CALL).min(u32::MAX as usize) as u32
+}
+
 fn plugin_error(code: wit_types::PluginErrorCode, message: &str) -> wit_types::PluginError {
     wit_types::PluginError {
         code,
@@ -953,7 +973,7 @@ impl host_journal::Host for HostState {
         // exhausted budget drops the line — but it must not be the one host
         // import a component can call without limit, because each call costs the
         // host a string copy out of guest memory.
-        if self.spend_host_call().is_err() {
+        if self.spend_host_calls(journal_cost(message.len())).is_err() {
             return;
         }
         let level = match level {
@@ -4006,6 +4026,54 @@ mod tests {
         assert!(
             decisions.len() < MAX_JOURNAL_ENTRIES,
             "the decision ring is full after a single invocation"
+        );
+    }
+
+    /// The 512-byte truncation bounds what the host *keeps*. It does not bound
+    /// what it was made to *copy*: Wasmtime lifts the whole string out of guest
+    /// memory before this host sees one byte of it, and wasmtime 44 has no
+    /// `set_hostcall_fuel` to charge that against. So the budget `log` does reach
+    /// has to count bytes rather than calls.
+    #[test]
+    fn a_plugin_pays_for_the_text_it_hands_the_journal() {
+        let library = FixtureLibrary::new("shout");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:shout").is_ok());
+
+        // Sixty-four messages of 64 KiB. Counting calls, all sixty-four are free
+        // of charge and four megabytes leave the guest; counting bytes, the
+        // budget is gone long before that. Summed over `repeats` because
+        // identical lines collapse into one entry.
+        let accepted: u32 = harness
+            .runtime
+            .journal()
+            .plugin_messages()
+            .iter()
+            .map(|entry| entry.repeats)
+            .sum();
+        assert!(
+            accepted < 64,
+            "all {accepted} oversized messages were accepted free of charge"
+        );
+        assert!(
+            harness
+                .runtime
+                .journal()
+                .entries()
+                .iter()
+                .any(|entry| entry.decision == "host-call-budget"),
+            "an invocation that copied megabytes out of guest memory never ran out of budget"
+        );
+
+        // And an ordinary line still costs one call, so metering by size does not
+        // make the journal a capability a plugin has to ration.
+        let library = FixtureLibrary::new("shout-ok");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:ok").is_ok());
+        assert_eq!(
+            journal_cost(MAX_JOURNAL_MESSAGE_BYTES),
+            1,
+            "a message the host keeps whole must cost one call"
         );
     }
 
