@@ -113,7 +113,8 @@ These exist so a suite can be adversarial without reaching into private state.
   each of them: a grant is a descriptor, not a path, so a test can swap the folder
   or a parent afterwards and watch the grant hold.
 - **Grants that outlive the value.** A descriptor pins a folder for as long as a
-  `PluginGrants` lives, and nothing longer. Whatever persists grants stores a
+  `PluginGrants` lives, and nothing longer. `DirectoryIdentity` is a device and an
+  inode on Unix and a volume serial number and a file index on Windows. Whatever persists grants stores a
   *path*, and a path is answered by whatever is at it on the next start, so the
   approval also records `PluginGrants::directory_identity` — the folder's device
   and inode, as two plain integers — and `PluginGrants::resolve_pinned` refuses
@@ -145,25 +146,37 @@ These exist so a suite can be adversarial without reaching into private state.
 
 ### Gaps, and where they are
 
-Three of these are open, and this section exists so nobody reads the code as
-closing them.
+Windows used to be three gaps and is now one. `plugin_runtime`'s tests run on
+`windows-latest` in CI (`Test the plugin host (Windows)`), so what is described
+here as closed has been *executed* there rather than reasoned about.
 
-- **Windows does not pin a grant.** `openat` has an equivalent there —
-  `NtCreateFile` with a directory handle as `RootDirectory`, which is what `std`'s
-  unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`) — so the
-  swapped-parent and junction redirection *is* closable; it is not closed. Neither
-  is the folder identity, which needs `GetFileInformationByHandle`. Both need code
-  that cannot be type-checked on the machine this was written on: `cargo check
-  --target x86_64-pc-windows-msvc` stops in `ring`'s build script for want of a
-  Windows C toolchain, and Orivo's CI only `cargo check`s Windows. A stored
-  identity is therefore *refused* on Windows rather than waved through, which is
-  the direction that fails safe.
-- **The hard-link rule does not fire on Windows.** `EntryFacts` cannot count links
-  there without the same handle query, so it reports one name and the rule never
-  triggers. `FolderTrust` is unknown there too, for want of a DACL read.
-- **A listing enumerates through a path.** Names come from `read_dir`; every fact
-  comes from the handle. An attacker who swaps a parent can hide entries, never
-  reveal one. Enumerating from the descriptor needs `fdopendir`/`readdir`.
+Closed, and asserted on the runner:
+
+- **A granted folder is a handle on Windows too.** `NtCreateFile` with the
+  directory handle as `RootDirectory` is the `openat` equivalent, the same pattern
+  `std`'s unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`). A
+  junction re-pointed at a folder the user never approved — which `mklink /J`
+  makes with no privilege at all — no longer redirects a read or a listing.
+- **The link count and the folder's identity** come from
+  `GetFileInformationByHandle`, so the hard-link rule fires on Windows and a
+  stored grant is pinned there rather than refused for want of an identity.
+- **A listing still opens nothing that matters.** Entries are opened for
+  `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
+  another opener's share mode.
+
+Still open:
+
+- **`FolderTrust` is unknown on Windows**, because telling a private folder from a
+  shared one means reading the DACL — `GetSecurityInfo`, walking the ACEs, and then
+  deciding which well-known SIDs count as somebody else, which is security policy
+  rather than a query. Unknown means not private, so the consequence is a *stricter*
+  rule than Unix's: every multiply-linked file in a granted folder is refused
+  there, including the user's own. Nothing is exposed by it; a deduplicated library
+  loses entries it should keep.
+- **A listing enumerates through a path on both platforms.** Names come from
+  `read_dir`; every fact comes from the handle. An attacker who redirects a parent
+  can hide entries, never reveal one. Enumerating from the handle needs
+  `fdopendir`/`readdir` on Unix and `NtQueryDirectoryFile` on Windows.
 
 A listing cut at 256 entries leaves a `files-truncated` decision behind. The
 contract has no field for it — see the ABI note in the PR that added this — so the
