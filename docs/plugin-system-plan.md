@@ -70,6 +70,31 @@ annulable. Un document *vérifié* repasse malgré tout la même grammaire qu’
 document inconnu : une signature dit qui a écrit, jamais que ce qui est écrit
 est sensé.
 
+Trois choses que la signature ne donne pas, et qu’il a fallu ajouter. Le
+**plancher anti-rejeu** ne vient jamais d’un champ du fichier de cache — une
+valeur écrite là se réécrit, à zéro pour laisser passer un vieil index, ou à
+`u64::MAX` pour geler le client sur celui qu’il a. Il vient d’une constante
+compilée et de l’index en cache *qui vérifie encore*. Le document porte une
+**date d’expiration signée** : sans elle, qui contrôle le réseau ou le dépôt
+tient tous les clients sur une seule vue du registry, et le plancher ne voit
+rien puisque rien ne recule ; passé ce délai, Orivo revient au registre
+compilé. Et l’index est haché derrière une **étiquette de domaine** : un paquet
+et un index étaient signés de la même façon avec la même clé, si bien que le
+`signature.ed25519` livré dans chaque paquet était une signature valide sur un
+« document d’index » — seuls des champs JSON obligatoires différents séparaient
+les deux rôles.
+
+L’installateur expose enfin **l’identité du paquet** : pour la version vivante
+d’un plugin, sa version, le SHA-256 du composant qui tournera réellement, et
+quelle clé l’a signé. Un grant, comme un profil de runner jugé valide, est un
+accord avec un *paquet* et non avec un identifiant : un observateur enregistré
+depuis `lib.rs` est prévenu à chaque fois que ce paquet change — mise à jour,
+rollback, reprise après coupure — et à la désinstallation. Le marqueur de canal
+nomme l’empreinte pour laquelle il a été écrit, donc remplacer le composant sous
+un plugin installé coûte le badge officiel au lieu d’en hériter, et un build de
+développement ne peut pas remplacer un paquet signé sans une désinstallation
+faite par l’utilisateur.
+
 L’installation, la mise à jour et le rollback sont devenus **une transaction**
 (`plugin_update.rs`). Le candidat est déballé dans un répertoire de staging,
 noté une première fois hors du chemin — contrat et empreintes, sans exécuter le
