@@ -43,6 +43,7 @@
 //! from — an id of `..` would have made `remove_dir_all` climb out of the plugin
 //! root and take the whole application data directory with it.
 
+use crate::plugin_index::is_upgrade;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -633,7 +634,48 @@ impl PluginStore {
         verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
     ) -> Result<InstallOutcome, String> {
         self.announcing(plugin_id, || {
-            self.install_stopping_before(None, plugin_id, version, channel.clone(), files, verify)
+            self.install_stopping_before(
+                None,
+                plugin_id,
+                version,
+                channel.clone(),
+                files,
+                verify,
+                false,
+            )
+        })
+    }
+
+    /// Same as [`Self::install`], refusing a version that is not strictly newer
+    /// than the one already live.
+    ///
+    /// The registry doors (`plugin_installer.rs`) already refuse a downgrade
+    /// before they ever reach the gate — but two concurrent requests offering
+    /// the *same* release both pass that earlier check, since neither has
+    /// committed yet when the other reads the live version. This asks the same
+    /// question again here, under the gate, against the version the gate just
+    /// made current: the first request to actually run sees the old version and
+    /// proceeds; the second sees what the first just installed and has nothing
+    /// left to upgrade, so it is refused before it can archive that result over
+    /// the rollback slot the first one just wrote.
+    pub fn install_refusing_downgrade(
+        &self,
+        plugin_id: &str,
+        version: &str,
+        channel: PackageChannel,
+        files: &PackageFiles,
+        verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
+    ) -> Result<InstallOutcome, String> {
+        self.announcing(plugin_id, || {
+            self.install_stopping_before(
+                None,
+                plugin_id,
+                version,
+                channel.clone(),
+                files,
+                verify,
+                true,
+            )
         })
     }
 
@@ -645,6 +687,7 @@ impl PluginStore {
         channel: PackageChannel,
         files: &PackageFiles,
         verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
+        guard_against_downgrade: bool,
     ) -> Result<InstallOutcome, String> {
         if !valid_plugin_id(plugin_id) {
             return Err("The plugin identity is not usable as a directory.".into());
@@ -671,6 +714,15 @@ impl PluginStore {
                 "This plugin is installed from Orivo's registry. Remove it first to replace it with an unsigned build."
                     .into(),
             );
+        }
+
+        // Read fresh, under the gate the caller's own pre-check ran without.
+        // Costs nothing to check first: nothing has been staged yet.
+        if guard_against_downgrade
+            && let Some(displaced) = displaced_version.as_deref()
+            && !is_upgrade(version, displaced)
+        {
+            return Err("This plugin is already up to date.".into());
         }
 
         if cut(Step::Stage) {
@@ -1688,6 +1740,7 @@ mod tests {
                 official(),
                 &files("2.0.0", "two"),
                 &passes,
+                false,
             );
             assert!(cut.is_err(), "{step:?} should have been interrupted");
 
@@ -1753,6 +1806,7 @@ mod tests {
                     official(),
                     &files("1.0.0", "one"),
                     &passes,
+                    false,
                 )
                 .expect_err("interrupted");
 
@@ -1857,6 +1911,7 @@ mod tests {
                 official(),
                 &files("2.0.0", "two"),
                 &passes,
+                false,
             )
             .expect_err("interrupted");
 
@@ -1894,6 +1949,7 @@ mod tests {
                 official(),
                 &files("2.0.0", "two"),
                 &passes,
+                false,
             )
             .expect_err("interrupted");
 
@@ -1921,6 +1977,7 @@ mod tests {
                 official(),
                 &files("2.0.0", "two"),
                 &passes,
+                false,
             )
             .expect_err("interrupted");
 
@@ -2057,6 +2114,74 @@ mod tests {
         assert!(!store.journal_path(PLUGIN).exists());
         assert!(!is_directory(&store.staged_directory(PLUGIN)));
         assert!(!is_directory(&store.discard_directory(PLUGIN)));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The registry doors check "is this an upgrade" before they ever reach the
+    /// gate above — against whatever was live *then*. Two callers offering the
+    /// same release both read the same old version and both pass that check;
+    /// only one of them can actually be first through the gate, and the second
+    /// must not be allowed to archive the first one's result over the rollback
+    /// slot the first one just wrote, discarding the version that was there
+    /// before either of them ran.
+    #[test]
+    fn two_concurrent_updates_to_the_same_version_do_not_lose_the_rollback_target() {
+        let root = temporary_root();
+        let store = PluginStore::new(root.clone());
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+
+        let outcomes: Vec<Result<InstallOutcome, String>> = std::thread::scope(|scope| {
+            [
+                scope.spawn({
+                    let store = store.clone();
+                    move || {
+                        store.install_refusing_downgrade(
+                            PLUGIN,
+                            "2.0.0",
+                            official(),
+                            &files("2.0.0", "race-a"),
+                            &passes,
+                        )
+                    }
+                }),
+                scope.spawn({
+                    let store = store.clone();
+                    move || {
+                        store.install_refusing_downgrade(
+                            PLUGIN,
+                            "2.0.0",
+                            official(),
+                            &files("2.0.0", "race-b"),
+                            &passes,
+                        )
+                    }
+                }),
+            ]
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect()
+        });
+
+        // Whichever thread the gate let through first, the other must have
+        // been refused rather than silently repeating the same install.
+        let succeeded = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+        let refused = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Err(message) if message == "This plugin is already up to date."))
+            .count();
+        assert_eq!((succeeded, refused), (1, 1));
+
+        assert_eq!(live_version(&store).as_deref(), Some("2.0.0"));
+        assert_eq!(
+            store.rollback_target(PLUGIN),
+            Some(RollbackTarget {
+                version: "1.0.0".into(),
+                channel: official(),
+            }),
+            "the version that was live before either update ran must still be the way back"
+        );
         fs::remove_dir_all(root).ok();
     }
 
