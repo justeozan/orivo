@@ -34,6 +34,7 @@ function installed(overrides: Partial<InstalledPluginView> = {}): InstalledPlugi
     message: "",
     trusted: true,
     rollbackTo: null,
+    rollbackTrusted: null,
     updateTo: null,
     ...overrides,
   };
@@ -99,10 +100,6 @@ function createFakePluginManager(
     async refreshCatalog(signal) {
       calls.push("refreshCatalog");
       return overrides.refreshCatalog ? overrides.refreshCatalog(signal) : catalog();
-    },
-    cancelRefresh() {
-      calls.push("cancelRefresh");
-      overrides.cancelRefresh?.();
     },
     async update(pluginId, signal) {
       calls.push(`update:${pluginId}`);
@@ -275,6 +272,7 @@ describe("readPluginCatalog", () => {
       message: "",
       trusted: false,
       rollbackTo: null,
+      rollbackTrusted: null,
       updateTo: null,
     });
     expect(formatPluginStatus(view.installed[0])).toBe("Invalid · unsigned");
@@ -572,7 +570,7 @@ describe("createPluginManagerController", () => {
     expect(controller.catalog().installed[0].updateTo).toBeNull();
   });
 
-  it("turns a refused update into a failed phase carrying the host's message", async () => {
+  it("turns a refused update into a failed phase carrying the host's message, and rejects", async () => {
     const fake = createFakePluginManager({
       update: async () => {
         throw "Ce plugin n'est plus dans le registre.";
@@ -581,10 +579,32 @@ describe("createPluginManagerController", () => {
     const controller = createPluginManagerController(fake.client);
     await controller.load(liveSignal());
 
-    await controller.update("com.orivo.dolphin");
+    // Rejects, so a caller cannot mistake this for success and toast one —
+    // the row is where the failure is said, in a phrase.
+    await expect(controller.update("com.orivo.dolphin")).rejects.toBe(
+      "Ce plugin n'est plus dans le registre.",
+    );
     const failed = controller.progressFor("com.orivo.dolphin");
     expect(failed?.phase).toBe("failed");
     expect(failed?.message).toBe("Ce plugin n'est plus dans le registre.");
+  });
+
+  it("ignores a second update while one is already in flight for the same plugin", async () => {
+    let calls = 0;
+    const fake = createFakePluginManager({
+      update: async () => {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      },
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    const first = controller.update("com.orivo.dolphin");
+    const second = controller.update("com.orivo.dolphin");
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(1);
   });
 
   it("reloads the catalogue after a rollback", async () => {
@@ -619,11 +639,29 @@ describe("createPluginManagerController", () => {
     expect(controller.catalog()).toEqual(before);
   });
 
-  it("cancels a refresh in flight through the client", () => {
-    const fake = createFakePluginManager();
+  it("puts the automatic-updates toggle back and rejects when the host cannot save it", async () => {
+    const fake = createFakePluginManager({
+      setUpdatePolicy: async () => {
+        throw "That setting could not be saved.";
+      },
+    });
     const controller = createPluginManagerController(fake.client);
-    controller.cancelRefresh();
-    expect(fake.calls).toEqual(["cancelRefresh"]);
+    await controller.load(liveSignal());
+    expect(controller.updatePolicy()).toEqual({ automatic: false });
+
+    let changes = 0;
+    controller.onChange(() => {
+      changes += 1;
+    });
+    await expect(controller.setAutomaticUpdates(true)).rejects.toBe(
+      "That setting could not be saved.",
+    );
+
+    // The write failed, so the toggle must still read what the host holds —
+    // never the value the user just clicked to.
+    expect(controller.updatePolicy()).toEqual({ automatic: false });
+    // Still repaints once, so a stale checkbox does not linger checked.
+    expect(changes).toBe(1);
   });
 });
 

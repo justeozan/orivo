@@ -25,6 +25,13 @@ export interface InstalledPluginView {
   trusted: boolean;
   /** The version Orivo kept when this one was installed, if any. */
   rollbackTo: string | null;
+  /**
+   * Whether that version is signed by Orivo's release key. `null` when there
+   * is no rollback target at all. A rollback can put a development build back
+   * in place of a signed one — the host allows it, since it is a version the
+   * user had — so this is what a confirmation warns from before it happens.
+   */
+  rollbackTrusted: boolean | null;
   /** A newer release the cached registry index knows about. */
   updateTo: string | null;
 }
@@ -74,9 +81,8 @@ export interface PluginManagerClient {
   /** Opens a native picker. Resolves to the installed id, or null if cancelled. */
   installFromFile(signal: AbortSignal): Promise<string | null>;
   uninstall(pluginId: string, signal: AbortSignal): Promise<void>;
-  /** Asks the registry over the network for anything newer. Cancellable. */
+  /** Asks the registry over the network for anything newer. */
   refreshCatalog(signal: AbortSignal): Promise<PluginCatalogView>;
-  cancelRefresh(): void;
   update(pluginId: string, signal: AbortSignal): Promise<void>;
   /** Resolves to the version that is live again. */
   rollback(pluginId: string, signal: AbortSignal): Promise<string>;
@@ -95,14 +101,23 @@ export interface PluginManagerController {
   installFromFile(): Promise<string | null>;
   /** Rejects with the host's message; the catalogue reloads on success. */
   uninstall(pluginId: string): Promise<void>;
-  /** Rejects with the host's message; the catalogue reloads either way. */
+  /** Never rejects: a registry that cannot be reached keeps the cached catalogue. */
   refreshCatalog(): Promise<void>;
-  cancelRefresh(): void;
-  /** Rejects with the host's message; the catalogue reloads on success. */
+  /**
+   * Rejects with the host's message; the catalogue reloads on success. Also
+   * records the failure as progress on the plugin's own row (the same way
+   * `installFromRegistry` does), so a caller does not need to also toast it.
+   * A second call while one is already in flight for this plugin is a no-op.
+   */
   update(pluginId: string): Promise<void>;
   /** Rejects with the host's message; the catalogue reloads on success. */
   rollback(pluginId: string): Promise<void>;
   updatePolicy(): PluginUpdatePolicy;
+  /**
+   * Rejects with the host's message if the setting could not be saved.
+   * Either way, `updatePolicy()` reflects what the host actually holds
+   * afterwards — a rejection never leaves the toggle disagreeing with it.
+   */
   setAutomaticUpdates(automatic: boolean): Promise<void>;
   onChange(callback: () => void): () => void;
   dispose(): void;
@@ -184,6 +199,7 @@ function readInstalled(value: unknown): InstalledPluginView[] {
       // Trust is opt-in: anything that is not an explicit `true` is unsigned.
       trusted: raw.trusted === true,
       rollbackTo: typeof raw.rollbackTo === "string" && raw.rollbackTo ? raw.rollbackTo : null,
+      rollbackTrusted: typeof raw.rollbackTrusted === "boolean" ? raw.rollbackTrusted : null,
       updateTo: typeof raw.updateTo === "string" && raw.updateTo ? raw.updateTo : null,
     },
   ];
@@ -287,11 +303,6 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
       assertActive(signal);
       const view = await invoke<PluginCatalogView>("refresh_plugin_registry");
       return readPluginCatalog(view);
-    },
-
-    cancelRefresh() {
-      if (!isTauriRuntime()) return;
-      void invoke("cancel_plugin_update").catch(() => {});
     },
 
     async update(pluginId, signal) {
@@ -555,19 +566,22 @@ export function createPluginManagerController(
       notify();
     },
 
-    cancelRefresh() {
-      client.cancelRefresh();
-    },
-
     async update(pluginId) {
       if (disposed) return;
+      // A second click while one is already running for this plugin must not
+      // start a second transaction: the host's own downgrade guard closes the
+      // race under its lock, but there is no reason to invite it — and a
+      // reload mid-download would spend the row's progress on nothing.
+      if (isPluginInstallBusy(progress.get(pluginId) ?? null)) return;
       record({ pluginId, phase: "downloading", percent: 0, message: "" });
       try {
         await client.update(pluginId, lifetime.signal);
       } catch (error) {
         if (disposed) return;
         record(failure(pluginId, error));
-        return;
+        // The row already shows this via progressFor; rejecting too is what
+        // stops a caller from also printing a success toast over it.
+        throw error;
       }
       if (disposed) return;
       record({ pluginId, phase: "installed", percent: 100, message: "" });
@@ -585,9 +599,15 @@ export function createPluginManagerController(
 
     async setAutomaticUpdates(automatic) {
       if (disposed) return;
-      policy = await client.setUpdatePolicy(automatic, lifetime.signal);
-      if (disposed) return;
-      notify();
+      try {
+        policy = await client.setUpdatePolicy(automatic, lifetime.signal);
+      } finally {
+        // On success this repaints the toggle in its new state; on failure it
+        // repaints the toggle back to whatever the host still has, so the
+        // control never shows a consent the write did not actually save. The
+        // rejection still propagates past this block either way.
+        if (!disposed) notify();
+      }
     },
 
     onChange(callback) {
