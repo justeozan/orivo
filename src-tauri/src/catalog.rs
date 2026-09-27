@@ -1,23 +1,27 @@
 use crate::game_detail::{GameDetailError, StagedGameState};
+use crate::plugin_manifest::{CapabilityGrant, CapabilityScope, PluginCapability};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
-/// Schema v7 replaces path-bearing Direct-game ids with opaque, deterministic
-/// `local:<sha256>` identities and updates every typed Wine association in the
-/// same in-memory migration. Paths remain private launch data and never cross
-/// the WebView identity boundary.
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+/// Schema v8 adds the three host-private tables a third-party runner needs to
+/// become usable: a validated `RunnerProfile`, the private inventory that maps
+/// an opaque game reference to a file inside a granted folder, and the grant
+/// ledger the plugin host resolves before every invocation. All three are
+/// additive, so a v7 document is read as one with all three empty.
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 const SCHEMA_VERSION_V1: u32 = 1;
 const SCHEMA_VERSION_V2: u32 = 2;
 const SCHEMA_VERSION_V3: u32 = 3;
 const SCHEMA_VERSION_V4: u32 = 4;
 const SCHEMA_VERSION_V5: u32 = 5;
 const SCHEMA_VERSION_V6: u32 = 6;
+const SCHEMA_VERSION_V7: u32 = 7;
 
 /// The stable identity for Orivo's first official Wine runner. It is an
 /// opaque runner identifier, never a Wine executable path or command.
@@ -33,6 +37,10 @@ fn default_wine_profile_enabled() -> bool {
 }
 
 fn default_winlator_profile_enabled() -> bool {
+    true
+}
+
+fn default_runner_profile_enabled() -> bool {
     true
 }
 
@@ -216,6 +224,20 @@ pub struct Catalog {
     /// exported shortcut file Orivo hands back to Winlator at launch.
     #[serde(default)]
     pub winlator_inventory: Vec<WinlatorShortcutInventoryEntry>,
+    /// Host-private profiles for runners provided by third-party plugin
+    /// components. Unlike the two native adapters above, nothing here is
+    /// launchable until the owning plugin has accepted the profile.
+    #[serde(default)]
+    pub runner_profiles: Vec<RunnerProfile>,
+    /// Host-private mapping from opaque third-party game references to the
+    /// game file the host resolved inside a granted folder.
+    #[serde(default)]
+    pub runner_inventory: Vec<RunnerGameInventoryEntry>,
+    /// The grant ledger. It is persisted beside the profiles it scopes because
+    /// granting a folder and recording the permission to read it have to land
+    /// or fail together.
+    #[serde(default)]
+    pub plugin_grants: Vec<PluginGrantRecord>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -244,7 +266,60 @@ impl LoadedCatalog {
     /// state rewrite is staged and fsynced first, then published with a single
     /// rename, and if the catalog write still fails the previous state document
     /// is put back, so the pair can never end up one migrated and one not.
+    /// Publish without anything to fall back on. Production always takes a
+    /// backup first; this is the door the tests use when what they are asserting
+    /// on is the raw failure rather than the recovery.
+    #[cfg(test)]
     pub fn commit_migration(
+        &self,
+        catalog_path: &Path,
+        game_state_path: &Path,
+    ) -> Result<(), CatalogError> {
+        self.publish(catalog_path, game_state_path, None)
+    }
+
+    /// The same publication, with the pre-migration catalog to fall back on.
+    ///
+    /// A migration has three ways to go wrong, and the backup answers all
+    /// three: the migrated document can fail validation, the dependent
+    /// `game-state.json` rewrite can fail, and the file that comes back from
+    /// disk can disagree with the one that was written. Whichever it is, the
+    /// catalog the user had is put back and the error says whether that
+    /// succeeded — a library must never end up readable only by the build that
+    /// migrated it.
+    pub fn commit_migration_with_backup(
+        &self,
+        catalog_path: &Path,
+        game_state_path: &Path,
+        backup_path: &Path,
+    ) -> Result<(), CatalogError> {
+        self.publish(catalog_path, game_state_path, Some(backup_path))
+    }
+
+    fn publish(
+        &self,
+        catalog_path: &Path,
+        game_state_path: &Path,
+        backup_path: Option<&Path>,
+    ) -> Result<(), CatalogError> {
+        let failure = match self.publish_once(catalog_path, game_state_path) {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+        let Some(backup_path) = backup_path else {
+            return Err(failure);
+        };
+        match restore_catalog_backup(backup_path, catalog_path) {
+            Ok(()) => Err(CatalogError::Invalid(format!(
+                "the catalog migration failed ({failure}) and the previous catalog was restored"
+            ))),
+            Err(restore_error) => Err(CatalogError::Invalid(format!(
+                "the catalog migration failed ({failure}) and the previous catalog could not be restored ({restore_error})"
+            ))),
+        }
+    }
+
+    fn publish_once(
         &self,
         catalog_path: &Path,
         game_state_path: &Path,
@@ -253,16 +328,77 @@ impl LoadedCatalog {
         let staged = StagedGameState::stage(game_state_path, &self.rewritten_game_ids)
             .map_err(state_error)?;
         staged.commit().map_err(state_error)?;
-        match self.catalog.save_atomically(catalog_path) {
+        match self
+            .catalog
+            .save_atomically(catalog_path)
+            .and_then(|()| self.verify_published(catalog_path))
+        {
             Ok(()) => Ok(()),
+            // The game-state rewrite is keyed to the ids this migration
+            // invented, so it goes back with the catalog or the pair ends up one
+            // migrated and one not.
             Err(error) => match staged.restore() {
                 Ok(()) => Err(error),
                 Err(restore_error) => Err(CatalogError::Invalid(format!(
-                    "the catalog migration failed ({error}) and the previous game state could not be restored ({restore_error})"
+                    "{error} and the previous game state could not be restored ({restore_error})"
                 ))),
             },
         }
     }
+
+    /// Read back what was just published. The rename is atomic, but the bytes
+    /// under it are not guaranteed to be the host's: a file-syncing client, a
+    /// restored snapshot, or a write that never reached the device would all
+    /// leave a catalog that no longer says what the migration decided, and
+    /// noticing that while the backup still exists is the whole point of taking
+    /// one.
+    fn verify_published(&self, catalog_path: &Path) -> Result<(), CatalogError> {
+        let published = Self::verify_load(catalog_path)?;
+        if published != self.catalog {
+            return Err(CatalogError::Invalid(
+                "the published catalog does not match the migrated one".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_load(catalog_path: &Path) -> Result<Catalog, CatalogError> {
+        let loaded = Catalog::load_with_migration(catalog_path)?;
+        if loaded.migrated_from.is_some() {
+            return Err(CatalogError::Invalid(
+                "the published catalog still reports an older schema".into(),
+            ));
+        }
+        Ok(loaded.catalog)
+    }
+}
+
+/// Put a pre-migration catalog back, atomically. The staged copy is written and
+/// fsynced before the rename, so a crash in the middle leaves the migrated file
+/// rather than a half-restored one.
+pub fn restore_catalog_backup(backup_path: &Path, catalog_path: &Path) -> Result<(), CatalogError> {
+    let bytes = fs::read(backup_path)?;
+    if bytes.is_empty() {
+        return Err(CatalogError::Invalid("the catalog backup is empty".into()));
+    }
+    let staging = catalog_path.with_extension("json.restoring");
+    let outcome = (|| -> Result<(), io::Error> {
+        // `remove_file` unlinks a symlink instead of following it, and
+        // `create_new` refuses anything that reappears underneath us.
+        let _ = fs::remove_file(&staging);
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staging)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&staging, catalog_path)
+    })();
+    if outcome.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    outcome.map_err(CatalogError::Io)
 }
 
 fn state_error(error: GameDetailError) -> CatalogError {
@@ -566,6 +702,172 @@ pub struct WinlatorShortcutInventoryEntry {
     pub imported_at: Option<u64>,
 }
 
+/// One folder the user handed to a third-party runner profile through a native
+/// picker, and the opaque id the plugin knows it by.
+///
+/// The plugin never receives `path`. It asks `host-files` for `id`, and the host
+/// is the only side that can turn that into a directory. The id is stored rather
+/// than derived because the component chooses it: the v1 `runner` world gives a
+/// plugin no way to *declare* the directory grants it will ask for, so the host
+/// records the slot the folder was granted under and hands back exactly that.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerGrantedDirectory {
+    pub id: String,
+    pub path: PathBuf,
+}
+
+/// Whether the plugin that owns a profile has accepted it.
+///
+/// `Unvalidated` is not a soft `Valid`: a profile only becomes launchable once
+/// the component itself answered `validate-profile` with `valid`. A profile the
+/// plugin refused is kept, with its reason, so the user can see what to change
+/// rather than losing the folders they picked.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerProfileStatus {
+    #[default]
+    Unvalidated,
+    Valid,
+    Rejected,
+}
+
+/// The launch shape a validated profile authorises. It is an enum and not a
+/// template because the host builds the process: a plugin that could name the
+/// mode as free text would be naming an argument list.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerLaunchMode {
+    /// The emulation application is started with the resolved game file as its
+    /// single argument, in the application's own directory.
+    #[default]
+    Default,
+}
+
+/// The settings half of a profile — everything a `validate-profile` round trip
+/// is about. It stays a closed record: a JSON blob here would be the one place
+/// a plugin's answer could grow into launch configuration.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerProfileSettings {
+    #[serde(default)]
+    pub launch_mode: RunnerLaunchMode,
+}
+
+/// A third-party runner the user configured: which installed plugin prepares
+/// its launches, which emulation application the host will start, which folders
+/// it may look in, and how far its last import got.
+///
+/// Like every runner record in this file it is host-private. The emulation
+/// application and the granted folders are launch data; only ids, labels and
+/// status ever reach a view model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerProfile {
+    /// Opaque, stable Orivo profile identifier. It is also what the host passes
+    /// to `validate-profile`, `discover-page` and `prepare-launch`.
+    pub id: String,
+    /// The installed runner plugin that owns this profile. It is the same value
+    /// a `LaunchTarget::Runner` carries as its `runner_id`.
+    pub plugin_id: String,
+    /// User-facing label, and the second half of the WIT `runner-profile`
+    /// record the plugin validates.
+    pub display_name: String,
+    /// The emulation application the user chose through a native picker. The
+    /// host canonicalises and rechecks it immediately before a launch; storing
+    /// it is not an authorisation to run it.
+    pub application: PathBuf,
+    #[serde(default)]
+    pub game_directories: Vec<RunnerGrantedDirectory>,
+    #[serde(default)]
+    pub settings: RunnerProfileSettings,
+    #[serde(default)]
+    pub status: RunnerProfileStatus,
+    /// The sentence the plugin gave for refusing this profile, already
+    /// bounded and stripped by the host before it was written here.
+    #[serde(default)]
+    pub status_message: Option<String>,
+    /// Disabled profiles and their games stay persisted and visible, but
+    /// cannot be launched until the user enables them again.
+    #[serde(default = "default_runner_profile_enabled")]
+    pub enabled: bool,
+    /// Where the last `discover-page` stopped. This is what lets an import
+    /// resume after a cancellation or a restart instead of walking a whole
+    /// library again; it is the plugin's own opaque cursor, revalidated by the
+    /// host before it was stored.
+    #[serde(default)]
+    pub import_cursor: Option<String>,
+    /// Set once the plugin reported a page as the last one. A completed import
+    /// starts again from the beginning rather than from a spent cursor.
+    #[serde(default)]
+    pub import_complete: bool,
+    /// Unix milliseconds of the last completed import page, if one has landed.
+    #[serde(default)]
+    pub last_imported_at: Option<u64>,
+}
+
+/// The private inventory behind a third-party runner game. `game_ref` is the
+/// only value copied into `LaunchTarget::Runner`; `game_path` never crosses the
+/// WebView boundary and is never taken from a plugin.
+///
+/// The host resolved that path itself, from the candidate's external id, inside
+/// one named granted folder — which is why the grant it was resolved under is
+/// recorded beside it. A launch re-checks both.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerGameInventoryEntry {
+    pub profile_id: String,
+    pub game_ref: String,
+    pub title: String,
+    /// The provider half of the plugin's stable external reference. Together
+    /// with `external_id` it is what makes a repeated import idempotent.
+    pub provider_id: String,
+    pub external_id: String,
+    /// The game file the host resolved, canonical at import time.
+    pub game_path: PathBuf,
+    /// Which of the profile's granted folders `game_path` was resolved in.
+    pub directory_grant_id: String,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub imported_at: Option<u64>,
+}
+
+/// One row of the grant ledger: what a plugin was allowed, for which scope,
+/// when, and when it stopped being allowed.
+///
+/// Revoking writes `revoked_at` instead of deleting the row, so "this plugin
+/// could read that folder between these two dates" stays answerable. Nothing
+/// else in the catalog depends on a grant: revoking one takes a permission
+/// away and leaves the profile and the imported games exactly where they were.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginGrantRecord {
+    pub plugin_id: String,
+    pub capability: PluginCapability,
+    pub scope: CapabilityScope,
+    /// Unix milliseconds. A grant with no time is not a grant the host can
+    /// audit, so zero is refused.
+    pub granted_at: u64,
+    #[serde(default)]
+    pub revoked_at: Option<u64>,
+}
+
+impl PluginGrantRecord {
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+
+    /// The manifest-checkable form of this row. `validate_grant` is what
+    /// refuses a persisted grant whose plugin stopped declaring the capability
+    /// between one launch and the next, so the conversion is deliberately not
+    /// a `From` that could be used without that check.
+    pub fn to_capability_grant(&self) -> CapabilityGrant {
+        CapabilityGrant {
+            plugin_id: self.plugin_id.clone(),
+            capability: self.capability,
+            scope: self.scope.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Game {
     pub id: String,
@@ -676,6 +978,9 @@ impl Default for Catalog {
             wine_inventory: Vec::new(),
             winlator_profiles: Vec::new(),
             winlator_inventory: Vec::new(),
+            runner_profiles: Vec::new(),
+            runner_inventory: Vec::new(),
+            plugin_grants: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -695,19 +1000,26 @@ impl Catalog {
         let mut rewritten_game_ids = BTreeMap::new();
         let migrated_from = match catalog.schema_version {
             CURRENT_SCHEMA_VERSION => None,
+            SCHEMA_VERSION_V7 => {
+                migrate_v7_to_v8(&mut catalog);
+                Some(SCHEMA_VERSION_V7)
+            }
             SCHEMA_VERSION_V6 => {
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V6)
             }
             SCHEMA_VERSION_V5 => {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V5)
             }
             SCHEMA_VERSION_V4 => {
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V4)
             }
             SCHEMA_VERSION_V3 => {
@@ -715,6 +1027,7 @@ impl Catalog {
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V3)
             }
             SCHEMA_VERSION_V2 => {
@@ -723,6 +1036,7 @@ impl Catalog {
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V2)
             }
             SCHEMA_VERSION_V1 => {
@@ -732,6 +1046,7 @@ impl Catalog {
                 migrate_v4_to_v5(&mut catalog);
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
+                migrate_v7_to_v8(&mut catalog);
                 Some(SCHEMA_VERSION_V1)
             }
             found => {
@@ -1177,6 +1492,353 @@ impl Catalog {
         Ok(true)
     }
 
+    /// Return a third-party runner profile by its opaque host identifier.
+    /// Callers must not project this value or any of its paths into a WebView
+    /// response.
+    pub fn runner_profile(&self, profile_id: &str) -> Option<&RunnerProfile> {
+        self.runner_profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+    }
+
+    pub fn runner_profiles_for_plugin(&self, plugin_id: &str) -> Vec<&RunnerProfile> {
+        self.runner_profiles
+            .iter()
+            .filter(|profile| profile.plugin_id == plugin_id)
+            .collect()
+    }
+
+    /// Return the private inventory entry for a typed third-party runner
+    /// reference.
+    pub fn runner_inventory_entry(
+        &self,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Option<&RunnerGameInventoryEntry> {
+        self.runner_inventory
+            .iter()
+            .find(|entry| entry.profile_id == profile_id && entry.game_ref == game_ref)
+    }
+
+    /// The entry a candidate's external reference already maps to, if any.
+    /// This is the lookup that makes a repeated import a refresh rather than a
+    /// second card: the plugin's title may change, its reference may not.
+    pub fn runner_inventory_by_external_ref(
+        &self,
+        profile_id: &str,
+        provider_id: &str,
+        external_id: &str,
+    ) -> Option<&RunnerGameInventoryEntry> {
+        self.runner_inventory.iter().find(|entry| {
+            entry.profile_id == profile_id
+                && entry.provider_id == provider_id
+                && entry.external_id == external_id
+        })
+    }
+
+    /// Insert or replace a third-party runner profile after structural
+    /// validation. Narrowing a profile's granted folders cannot strand an
+    /// inventory entry outside them: the whole candidate catalog is validated
+    /// before it is adopted.
+    pub fn upsert_runner_profile(
+        &mut self,
+        mut profile: RunnerProfile,
+    ) -> Result<bool, CatalogError> {
+        profile.validate()?;
+        if let Some(index) = self
+            .runner_profiles
+            .iter()
+            .position(|existing| existing.id == profile.id)
+        {
+            let existing = &self.runner_profiles[index];
+            if existing.plugin_id != profile.plugin_id {
+                return Err(CatalogError::Invalid(
+                    "a runner profile cannot change owner plugin".into(),
+                ));
+            }
+            if profile.last_imported_at.is_none() {
+                profile.last_imported_at = existing.last_imported_at;
+            }
+            let mut candidate = self.clone();
+            candidate.runner_profiles[index] = profile;
+            candidate.validate()?;
+            *self = candidate;
+            return Ok(false);
+        }
+
+        let mut candidate = self.clone();
+        candidate.runner_profiles.push(profile);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
+    /// Insert or refresh a private third-party inventory entry. The entry is
+    /// scoped to an existing profile and its file must remain inside the
+    /// granted folder it names.
+    pub fn upsert_runner_inventory(
+        &mut self,
+        mut entry: RunnerGameInventoryEntry,
+    ) -> Result<bool, CatalogError> {
+        entry.validate()?;
+        let profile = self.runner_profile(&entry.profile_id).ok_or_else(|| {
+            CatalogError::Invalid("runner inventory entry references an unknown profile".into())
+        })?;
+        validate_runner_inventory_scope(&entry, profile)?;
+        // An external reference belongs to exactly one game reference. Letting
+        // a second one claim it is how a re-import would quietly split a game
+        // in two, so it is refused here rather than at whole-catalog validation.
+        if let Some(existing) = self.runner_inventory_by_external_ref(
+            &entry.profile_id,
+            &entry.provider_id,
+            &entry.external_id,
+        ) && existing.game_ref != entry.game_ref
+        {
+            return Err(CatalogError::Invalid(
+                "runner external reference already belongs to another game reference".into(),
+            ));
+        }
+
+        if let Some(index) = self.runner_inventory.iter().position(|existing| {
+            existing.profile_id == entry.profile_id && existing.game_ref == entry.game_ref
+        }) {
+            if entry.imported_at.is_none() {
+                entry.imported_at = self.runner_inventory[index].imported_at;
+            }
+            self.runner_inventory[index] = entry;
+            return Ok(false);
+        }
+
+        self.runner_inventory.push(entry);
+        Ok(true)
+    }
+
+    /// Remove a third-party runner profile, its private inventory and the
+    /// cards that depend on it, atomically.
+    ///
+    /// Grants are deliberately left behind as revoked rows rather than
+    /// deleted: the ledger is what makes "this plugin could read that folder"
+    /// answerable afterwards, and a deleted row answers nothing.
+    pub fn remove_runner_profile(
+        &mut self,
+        profile_id: &str,
+        revoked_at: u64,
+    ) -> Result<bool, CatalogError> {
+        validate_opaque_runner_token("profile id", profile_id, MAX_PROFILE_ID_LENGTH)?;
+        let Some(profile) = self.runner_profile(profile_id).cloned() else {
+            return Ok(false);
+        };
+
+        let mut candidate = self.clone();
+        candidate
+            .runner_profiles
+            .retain(|entry| entry.id != profile_id);
+        candidate
+            .runner_inventory
+            .retain(|entry| entry.profile_id != profile_id);
+        candidate.games.retain(|game| {
+            !matches!(
+                &game.launch_target,
+                LaunchTarget::Runner {
+                    runner_id,
+                    profile_id: target_profile_id,
+                    ..
+                } if runner_id == &profile.plugin_id && target_profile_id == profile_id
+            )
+        });
+        // Whatever this profile was the last to authorise stops being
+        // reachable with it, so the ledger records that rather than keeping an
+        // active row over a scope nothing resolves any more.
+        candidate.narrow_grants_to_existing(&profile.plugin_id, revoked_at)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
+    /// The grant row currently in force for one plugin capability, if any.
+    pub fn active_plugin_grant(
+        &self,
+        plugin_id: &str,
+        capability: PluginCapability,
+    ) -> Option<&PluginGrantRecord> {
+        self.plugin_grants.iter().find(|grant| {
+            grant.plugin_id == plugin_id && grant.capability == capability && grant.is_active()
+        })
+    }
+
+    /// Put one capability in force with a new scope, retiring whatever was in
+    /// force before it. Granting is therefore always a complete statement of
+    /// what the plugin may reach, and the row it replaced keeps its dates.
+    pub fn grant_plugin_capability(
+        &mut self,
+        record: PluginGrantRecord,
+    ) -> Result<(), CatalogError> {
+        record.validate()?;
+        let mut candidate = self.clone();
+        for grant in &mut candidate.plugin_grants {
+            if grant.plugin_id == record.plugin_id
+                && grant.capability == record.capability
+                && grant.is_active()
+            {
+                grant.revoked_at = Some(record.granted_at.max(grant.granted_at));
+            }
+        }
+        candidate.plugin_grants.push(record);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Take one capability out of force. Nothing else moves: the profile, its
+    /// granted folders and every game already imported stay exactly as they
+    /// are, and only the plugin's permission to use them stops.
+    pub fn revoke_plugin_capability(
+        &mut self,
+        plugin_id: &str,
+        capability: PluginCapability,
+        revoked_at: u64,
+    ) -> Result<bool, CatalogError> {
+        validate_opaque_runner_token("plugin id", plugin_id, MAX_RUNNER_ID_LENGTH)?;
+        let mut candidate = self.clone();
+        let mut revoked = false;
+        for grant in &mut candidate.plugin_grants {
+            if grant.plugin_id == plugin_id && grant.capability == capability && grant.is_active() {
+                grant.revoked_at = Some(revoked_at.max(grant.granted_at));
+                revoked = true;
+            }
+        }
+        if !revoked {
+            return Ok(false);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
+    /// Narrow one plugin's grants to what the catalog still holds.
+    ///
+    /// This can only ever take away. Each row in force is intersected with the
+    /// profiles and folders that still exist, so a grant cannot silently widen
+    /// to something the user never allowed, and a row left with nothing to point
+    /// at is revoked instead of kept as an empty permission.
+    fn narrow_grants_to_existing(
+        &mut self,
+        plugin_id: &str,
+        revoked_at: u64,
+    ) -> Result<(), CatalogError> {
+        let profiles = self.runner_profiles_for_plugin(plugin_id);
+        let directories = profiles
+            .iter()
+            .flat_map(|profile| profile.game_directories.iter())
+            .map(|directory| directory.id.clone())
+            .collect::<BTreeSet<_>>();
+        let profile_ids = profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect::<BTreeSet<_>>();
+        self.narrow_grant(
+            plugin_id,
+            PluginCapability::FilesRead,
+            &directories,
+            revoked_at,
+        )?;
+        self.narrow_grant(
+            plugin_id,
+            PluginCapability::RunnerPrepare,
+            &profile_ids,
+            revoked_at,
+        )
+    }
+
+    fn narrow_grant(
+        &mut self,
+        plugin_id: &str,
+        capability: PluginCapability,
+        remaining: &BTreeSet<String>,
+        revoked_at: u64,
+    ) -> Result<(), CatalogError> {
+        let Some(active) = self.active_plugin_grant(plugin_id, capability) else {
+            return Ok(());
+        };
+        let (ids, granted_at) = match &active.scope {
+            CapabilityScope::DirectoryGrants(ids) | CapabilityScope::RunnerProfiles(ids) => {
+                (ids.clone(), active.granted_at)
+            }
+            _ => return Ok(()),
+        };
+        let narrowed = ids
+            .intersection(remaining)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if narrowed.len() == ids.len() {
+            return Ok(());
+        }
+        if narrowed.is_empty() {
+            self.revoke_plugin_capability(plugin_id, capability, revoked_at)?;
+            return Ok(());
+        }
+        let scope = match capability {
+            PluginCapability::FilesRead => CapabilityScope::DirectoryGrants(narrowed),
+            PluginCapability::RunnerPrepare => CapabilityScope::RunnerProfiles(narrowed),
+            _ => return Ok(()),
+        };
+        self.grant_plugin_capability(PluginGrantRecord {
+            plugin_id: plugin_id.to_owned(),
+            capability,
+            scope,
+            granted_at: revoked_at.max(granted_at),
+            revoked_at: None,
+        })
+    }
+
+    /// Withdraw one granted folder without touching anything it produced. The
+    /// folder stays recorded on the profile — the games inside it are still the
+    /// user's — and only the permission to reach it is taken away.
+    pub fn revoke_runner_directory(
+        &mut self,
+        profile_id: &str,
+        directory_id: &str,
+        revoked_at: u64,
+    ) -> Result<bool, CatalogError> {
+        let Some(profile) = self.runner_profile(profile_id).cloned() else {
+            return Ok(false);
+        };
+        if profile.granted_directory(directory_id).is_none() {
+            return Ok(false);
+        }
+        // A folder another profile of the same plugin also grants stays
+        // reachable: this revokes one profile's permission, not a slot.
+        let remaining = self
+            .runner_profiles_for_plugin(&profile.plugin_id)
+            .into_iter()
+            .flat_map(|candidate| candidate.game_directories.iter())
+            .map(|directory| directory.id.clone())
+            .filter(|id| {
+                id != directory_id
+                    || self
+                        .runner_profiles_for_plugin(&profile.plugin_id)
+                        .iter()
+                        .any(|candidate| {
+                            candidate.id != profile_id
+                                && candidate.granted_directory(directory_id).is_some()
+                        })
+            })
+            .collect::<BTreeSet<_>>();
+        let mut candidate = self.clone();
+        candidate.narrow_grant(
+            &profile.plugin_id,
+            PluginCapability::FilesRead,
+            &remaining,
+            revoked_at,
+        )?;
+        if candidate == *self {
+            return Ok(false);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
     /// Associate a pre-existing local Direct Windows executable with a Wine
     /// inventory entry. The original direct card remains untouched so this is
     /// reversible: removing the Wine profile reveals it again. The caller
@@ -1352,6 +2014,64 @@ impl Catalog {
             }
         }
 
+        let mut runner_profiles = BTreeMap::new();
+        for profile in &self.runner_profiles {
+            profile.validate()?;
+            if runner_profiles
+                .insert(profile.id.as_str(), profile)
+                .is_some()
+            {
+                return Err(CatalogError::Invalid("duplicate runner profile id".into()));
+            }
+        }
+
+        let mut runner_inventory = BTreeSet::new();
+        let mut runner_external_refs = BTreeSet::new();
+        for entry in &self.runner_inventory {
+            entry.validate()?;
+            let profile = runner_profiles
+                .get(entry.profile_id.as_str())
+                .ok_or_else(|| {
+                    CatalogError::Invalid(
+                        "runner inventory entry references an unknown profile".into(),
+                    )
+                })?;
+            validate_runner_inventory_scope(entry, profile)?;
+            if !runner_inventory.insert((entry.profile_id.as_str(), entry.game_ref.as_str())) {
+                return Err(CatalogError::Invalid(
+                    "duplicate runner inventory game reference for profile".into(),
+                ));
+            }
+            // The external reference is what makes a re-import idempotent, so
+            // two entries claiming the same one would make it ambiguous.
+            if !runner_external_refs.insert((
+                entry.profile_id.as_str(),
+                entry.provider_id.as_str(),
+                entry.external_id.as_str(),
+            )) {
+                return Err(CatalogError::Invalid(
+                    "duplicate runner external reference for profile".into(),
+                ));
+            }
+        }
+
+        // Grant rows are checked for shape only. A grant deliberately outlives
+        // the profile or the plugin it names — that is what makes "this plugin
+        // could read that folder until this date" answerable after an
+        // uninstall — so a dangling scope id is resolved away at invocation
+        // time rather than making the whole library unreadable here.
+        let mut active_grants = BTreeSet::new();
+        for grant in &self.plugin_grants {
+            grant.validate()?;
+            if grant.is_active()
+                && !active_grants.insert((grant.plugin_id.as_str(), grant.capability))
+            {
+                return Err(CatalogError::Invalid(
+                    "a plugin capability cannot be granted twice at once".into(),
+                ));
+            }
+        }
+
         let mut ids = BTreeSet::new();
         let mut source_ids = BTreeSet::new();
         let mut runner_targets = BTreeSet::new();
@@ -1401,6 +2121,26 @@ impl Catalog {
                         ));
                     }
                     profile.validate()?;
+                }
+                // A third-party runner card whose profile is gone is kept, not
+                // refused: uninstalling a plugin or deleting its profile must
+                // not cost the user the games it imported, and an orphan simply
+                // reports why it cannot start. What is refused is a card
+                // pointing at a profile that exists and disagrees with it.
+                if runner_id != WINE_STAGING_RUNNER_ID
+                    && runner_id != WINLATOR_RUNNER_ID
+                    && let Some(profile) = runner_profiles.get(profile_id)
+                {
+                    if profile.plugin_id != runner_id {
+                        return Err(CatalogError::Invalid(
+                            "runner game names a profile that belongs to another plugin".into(),
+                        ));
+                    }
+                    if !runner_inventory.contains(&(profile_id, game_ref)) {
+                        return Err(CatalogError::Invalid(
+                            "runner game is missing its private inventory entry".into(),
+                        ));
+                    }
                 }
             }
             if matches!(&game.launch_target, LaunchTarget::Direct) {
@@ -1653,6 +2393,174 @@ fn validate_winlator_inventory_scope(
     }
 }
 
+const MAX_RUNNER_PROFILE_NAME_LENGTH: usize = 120;
+const MAX_RUNNER_GAME_TITLE_LENGTH: usize = 512;
+const MAX_RUNNER_PLATFORM_LENGTH: usize = 64;
+const MAX_RUNNER_STATUS_MESSAGE_LENGTH: usize = 512;
+/// The `host-files` grant-id and cursor grammars the plugin host already
+/// applies to a component's answers. Persisting anything looser would let the
+/// catalog be the weak side of a boundary the host checks twice.
+const MAX_DIRECTORY_GRANT_ID_LENGTH: usize = 256;
+const MAX_RUNNER_EXTERNAL_ID_LENGTH: usize = 256;
+const MAX_RUNNER_CURSOR_LENGTH: usize = 512;
+/// More folders than any emulator library needs, and few enough that a
+/// per-invocation grant resolution stays a small map.
+const MAX_RUNNER_GRANTED_DIRECTORIES: usize = 32;
+/// A scope naming more ids than this is not a scope. It is the same bound on
+/// every scope kind because the point is the size, not the meaning.
+const MAX_GRANT_SCOPE_VALUES: usize = 64;
+
+impl RunnerProfile {
+    /// Validate only the durable shape of a profile. Whether the application
+    /// still exists, whether a granted folder is still readable and whether the
+    /// owning plugin is still installed are all live questions: the host asks
+    /// them again immediately before an import or a launch, because a catalog
+    /// that refused to load over an unplugged drive would take the whole
+    /// library with it.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.id, MAX_PROFILE_ID_LENGTH)?;
+        validate_opaque_runner_token("plugin id", &self.plugin_id, MAX_RUNNER_ID_LENGTH)?;
+        validate_display_text(
+            "runner profile name",
+            &self.display_name,
+            MAX_RUNNER_PROFILE_NAME_LENGTH,
+        )?;
+        validate_private_absolute_path("runner application", &self.application)?;
+        if self.game_directories.len() > MAX_RUNNER_GRANTED_DIRECTORIES {
+            return Err(CatalogError::Invalid(
+                "runner profile has more granted folders than Orivo will hold".into(),
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        for directory in &self.game_directories {
+            validate_opaque_runner_token(
+                "directory grant id",
+                &directory.id,
+                MAX_DIRECTORY_GRANT_ID_LENGTH,
+            )?;
+            validate_private_absolute_path("runner game directory", &directory.path)?;
+            if !ids.insert(directory.id.as_str()) {
+                return Err(CatalogError::Invalid(
+                    "runner profile has duplicate directory grant ids".into(),
+                ));
+            }
+            if !paths.insert(directory.path.as_path()) {
+                return Err(CatalogError::Invalid(
+                    "runner profile has duplicate granted folders".into(),
+                ));
+            }
+        }
+        if let Some(message) = self.status_message.as_deref() {
+            validate_display_text(
+                "runner profile status message",
+                message,
+                MAX_RUNNER_STATUS_MESSAGE_LENGTH,
+            )?;
+        }
+        if let Some(cursor) = self.import_cursor.as_deref() {
+            validate_opaque_runner_token("import cursor", cursor, MAX_RUNNER_CURSOR_LENGTH)?;
+        }
+        Ok(())
+    }
+
+    pub fn granted_directory(&self, id: &str) -> Option<&RunnerGrantedDirectory> {
+        self.game_directories
+            .iter()
+            .find(|directory| directory.id == id)
+    }
+}
+
+impl RunnerGameInventoryEntry {
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.profile_id, MAX_PROFILE_ID_LENGTH)?;
+        validate_opaque_runner_token("game reference", &self.game_ref, MAX_GAME_REF_LENGTH)?;
+        validate_opaque_runner_token(
+            "external provider id",
+            &self.provider_id,
+            MAX_RUNNER_ID_LENGTH,
+        )?;
+        validate_opaque_runner_token(
+            "external id",
+            &self.external_id,
+            MAX_RUNNER_EXTERNAL_ID_LENGTH,
+        )?;
+        validate_opaque_runner_token(
+            "directory grant id",
+            &self.directory_grant_id,
+            MAX_DIRECTORY_GRANT_ID_LENGTH,
+        )?;
+        validate_display_text(
+            "runner game title",
+            &self.title,
+            MAX_RUNNER_GAME_TITLE_LENGTH,
+        )?;
+        validate_private_absolute_path("runner game file", &self.game_path)?;
+        if let Some(platform) = self.platform.as_deref() {
+            validate_display_text("runner game platform", platform, MAX_RUNNER_PLATFORM_LENGTH)?;
+        }
+        Ok(())
+    }
+}
+
+impl PluginGrantRecord {
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("plugin id", &self.plugin_id, MAX_RUNNER_ID_LENGTH)?;
+        if self.granted_at == 0 {
+            return Err(CatalogError::Invalid(
+                "a plugin grant must record when it was granted".into(),
+            ));
+        }
+        if self.revoked_at.is_some_and(|at| at < self.granted_at) {
+            return Err(CatalogError::Invalid(
+                "a plugin grant cannot be revoked before it was granted".into(),
+            ));
+        }
+        // The pairing is checked again against the manifest before any
+        // invocation. It is checked here too so a hand-edited catalog cannot
+        // persist a shape the resolver has never been asked to reason about.
+        let values = match (&self.capability, &self.scope) {
+            (PluginCapability::LibraryRead, CapabilityScope::LibraryGames(ids))
+            | (PluginCapability::FilesRead, CapabilityScope::DirectoryGrants(ids))
+            | (PluginCapability::Secrets, CapabilityScope::SecretNames(ids))
+            | (PluginCapability::RunnerPrepare, CapabilityScope::RunnerProfiles(ids))
+            | (PluginCapability::NetworkFetch, CapabilityScope::Domains(ids)) => ids.len(),
+            (PluginCapability::Notifications, CapabilityScope::Notifications) => 0,
+            _ => {
+                return Err(CatalogError::Invalid(
+                    "plugin grant scope does not match its capability".into(),
+                ));
+            }
+        };
+        if values > MAX_GRANT_SCOPE_VALUES {
+            return Err(CatalogError::Invalid(
+                "plugin grant scope names more values than Orivo will hold".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_runner_inventory_scope(
+    entry: &RunnerGameInventoryEntry,
+    profile: &RunnerProfile,
+) -> Result<(), CatalogError> {
+    let directory = profile
+        .granted_directory(&entry.directory_grant_id)
+        .ok_or_else(|| {
+            CatalogError::Invalid(
+                "runner game was resolved under a folder this profile no longer grants".into(),
+            )
+        })?;
+    if entry.game_path != directory.path && entry.game_path.starts_with(&directory.path) {
+        Ok(())
+    } else {
+        Err(CatalogError::Invalid(
+            "runner game file is outside the folder it was granted under".into(),
+        ))
+    }
+}
+
 /// A legacy direct game id may be a canonical path from an older catalog. It
 /// is used solely as an exact catalog lookup key, never passed to a process or
 /// interpreted as a new filesystem path from the WebView.
@@ -1899,8 +2807,18 @@ fn migrate_v6_to_v7(catalog: &mut Catalog) -> Result<BTreeMap<String, String>, C
             *origin = rewritten.clone();
         }
     }
-    catalog.schema_version = CURRENT_SCHEMA_VERSION;
+    catalog.schema_version = SCHEMA_VERSION_V7;
     Ok(rewritten_ids)
+}
+
+/// v8's three tables — runner profiles, the private runner inventory and the
+/// grant ledger — all deserialise from serde defaults, so a v7 document already
+/// reads as one with no third-party runner configured. Nothing existing is
+/// rewritten: Direct, Steam, provider and native-runner records are left
+/// byte-for-byte, and a v7 card pointing at a third-party runner stays a card
+/// whose profile has yet to be created.
+fn migrate_v7_to_v8(catalog: &mut Catalog) {
+    catalog.schema_version = CURRENT_SCHEMA_VERSION;
 }
 
 /// Salted retries exist only to break an identity collision, and a SHA-256
@@ -2187,7 +3105,10 @@ fn validate_opaque_runner_token(
     }
 }
 
-fn resolve_executable(path: &Path) -> Result<PathBuf, CatalogError> {
+/// Turn a user-picked application into the file a process can actually be
+/// started from. Shared with the third-party runner host, which is handed a
+/// macOS bundle by the native picker exactly as local game import is.
+pub(crate) fn resolve_executable(path: &Path) -> Result<PathBuf, CatalogError> {
     if path.is_file() {
         return Ok(path.to_path_buf());
     }
@@ -3967,5 +4888,569 @@ mod tests {
         assert_eq!(game.title, "Unrailed!");
         assert_eq!(game.executable_path, Some(macos.join("UnrailedGame")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+    // -----------------------------------------------------------------------
+    // Schema v8: third-party runner profiles, inventory and the grant ledger
+    // -----------------------------------------------------------------------
+
+    const FIXTURE_PLUGIN: &str = "com.orivo.fixture-runner";
+
+    fn runner_profile() -> RunnerProfile {
+        RunnerProfile {
+            id: "fixture-profile-1".into(),
+            plugin_id: FIXTURE_PLUGIN.into(),
+            display_name: "Fixture Runner".into(),
+            application: PathBuf::from("/Applications/Fixture Emulator.app"),
+            game_directories: vec![RunnerGrantedDirectory {
+                id: "fixture-games".into(),
+                path: PathBuf::from("/Games/Roms"),
+            }],
+            settings: RunnerProfileSettings::default(),
+            status: RunnerProfileStatus::Valid,
+            status_message: None,
+            enabled: true,
+            import_cursor: None,
+            import_complete: false,
+            last_imported_at: None,
+        }
+    }
+
+    fn runner_inventory_entry(game_ref: &str) -> RunnerGameInventoryEntry {
+        RunnerGameInventoryEntry {
+            profile_id: "fixture-profile-1".into(),
+            game_ref: game_ref.into(),
+            title: "Alpha Quest".into(),
+            provider_id: FIXTURE_PLUGIN.into(),
+            external_id: game_ref.into(),
+            game_path: PathBuf::from(format!("/Games/Roms/{game_ref}.rom")),
+            directory_grant_id: "fixture-games".into(),
+            platform: Some("fixture".into()),
+            imported_at: Some(1_721_553_600_000),
+        }
+    }
+
+    fn third_party_runner_game(game_ref: &str) -> Game {
+        Game {
+            id: format!("runner:{FIXTURE_PLUGIN}:fixture-profile-1:{game_ref}"),
+            title: "Alpha Quest".into(),
+            executable_path: None,
+            source: GameSource::Local,
+            source_id: None,
+            launch_target: LaunchTarget::Runner {
+                runner_id: FIXTURE_PLUGIN.into(),
+                game_ref: game_ref.into(),
+                profile_id: "fixture-profile-1".into(),
+            },
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: None,
+            metadata: None,
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
+            logo_path: None,
+            hidden: false,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    fn files_grant(ids: &[&str], granted_at: u64) -> PluginGrantRecord {
+        PluginGrantRecord {
+            plugin_id: FIXTURE_PLUGIN.into(),
+            capability: PluginCapability::FilesRead,
+            scope: CapabilityScope::DirectoryGrants(
+                ids.iter().map(|id| (*id).to_string()).collect(),
+            ),
+            granted_at,
+            revoked_at: None,
+        }
+    }
+
+    fn catalog_with_runner_game() -> Catalog {
+        let mut catalog = Catalog::default();
+        assert!(catalog.upsert_runner_profile(runner_profile()).unwrap());
+        assert!(
+            catalog
+                .upsert_runner_inventory(runner_inventory_entry("alpha"))
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .upsert_runner(third_party_runner_game("alpha"))
+                .unwrap()
+        );
+        catalog.validate().unwrap();
+        catalog
+    }
+
+    /// A v7 document as the previous build wrote them: opaque `local:` ids, a
+    /// Wine profile with its private inventory, a Steam record and a native
+    /// runner card. This is the input the v8 migration has to leave alone.
+    fn v7_catalog() -> Catalog {
+        let mut direct = direct_windows_game();
+        direct.id = migrated_direct_id();
+        Catalog {
+            schema_version: SCHEMA_VERSION_V7,
+            games: vec![
+                direct,
+                steam_game("Spacewar"),
+                wine_runner_game("rom:sha256:abc123", "Windows Example"),
+            ],
+            wine_profiles: vec![wine_profile()],
+            wine_inventory: vec![wine_inventory_entry("rom:sha256:abc123")],
+            ..Catalog::default()
+        }
+    }
+
+    fn write_catalog(path: &Path, catalog: &Catalog) {
+        fs::write(path, serde_json::to_string_pretty(catalog).unwrap() + "\n").unwrap();
+    }
+
+    /// The migration is additive, so the one thing worth asserting is that it
+    /// took nothing with it: every record a v7 build wrote comes back identical,
+    /// and the three new tables arrive empty rather than invented.
+    #[test]
+    fn a_v7_catalog_reaches_v8_without_changing_anything_it_already_held() {
+        let directory = temporary_migration_directory("v8-additive");
+        let path = directory.join("catalog.json");
+        let source = v7_catalog();
+        write_catalog(&path, &source);
+
+        let loaded = Catalog::load_with_migration(&path).unwrap();
+        assert_eq!(loaded.migrated_from, Some(SCHEMA_VERSION_V7));
+        assert!(loaded.rewritten_game_ids.is_empty());
+        assert_eq!(loaded.catalog.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(loaded.catalog.games, source.games);
+        assert_eq!(loaded.catalog.wine_profiles, source.wine_profiles);
+        assert_eq!(loaded.catalog.wine_inventory, source.wine_inventory);
+        assert!(loaded.catalog.runner_profiles.is_empty());
+        assert!(loaded.catalog.runner_inventory.is_empty());
+        assert!(loaded.catalog.plugin_grants.is_empty());
+        loaded.catalog.validate().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_v6_catalog_still_reaches_v8_in_one_load() {
+        let directory = temporary_migration_directory("v8-chain");
+        let path = directory.join("catalog.json");
+        write_v6_catalog(&path);
+
+        let loaded = Catalog::load_with_migration(&path).unwrap();
+        assert_eq!(loaded.migrated_from, Some(SCHEMA_VERSION_V6));
+        assert_eq!(loaded.catalog.schema_version, CURRENT_SCHEMA_VERSION);
+        // The v7 id rewrite still happens on the way through.
+        assert_eq!(loaded.catalog.games[0].id, migrated_direct_id());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_migrated_v7_catalog_is_published_with_its_backup_and_reloads_as_v8() {
+        let directory = temporary_migration_directory("v8-publish");
+        let path = directory.join("catalog.json");
+        let state_path = directory.join("game-state.json");
+        let backup = directory.join("catalog.json.v7.bak");
+        write_catalog(&path, &v7_catalog());
+        fs::copy(&path, &backup).unwrap();
+
+        let loaded = Catalog::load_with_migration(&path).unwrap();
+        loaded
+            .commit_migration_with_backup(&path, &state_path, &backup)
+            .unwrap();
+
+        let reloaded = Catalog::load_with_migration(&path).unwrap();
+        assert_eq!(reloaded.migrated_from, None);
+        assert_eq!(reloaded.catalog, loaded.catalog);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The plan's exit test for the migration. A build that cannot publish what
+    /// it migrated must leave the library exactly as the build that wrote it did,
+    /// and say so — a catalog readable only by the version that migrated it is
+    /// worse than one that never migrated.
+    ///
+    /// The failure is injected where a migration can really fail once the
+    /// document itself is sound: the dependent `game-state.json` rewrite. It
+    /// lives in its own read-only directory here, so staging it fails while the
+    /// catalog beside it is still recoverable.
+    #[cfg(unix)]
+    #[test]
+    fn a_migration_that_cannot_be_published_is_restored_from_its_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_migration_directory("v8-restore");
+        let path = directory.join("catalog.json");
+        let state_directory = directory.join("state");
+        let state_path = state_directory.join("game-state.json");
+        let backup = directory.join("catalog.json.v6.bak");
+        // A v6 document, because only a migration that rewrites game ids has a
+        // game-state rewrite to fail at.
+        write_v6_catalog(&path);
+        fs::copy(&path, &backup).unwrap();
+        fs::create_dir_all(&state_directory).unwrap();
+        let state = GameStateStore::load(state_path.clone()).unwrap();
+        state.set_wishlist("local-blue-prince", true).unwrap();
+        drop(state);
+        let state_before = fs::read(&state_path).unwrap();
+        let before = fs::read(&path).unwrap();
+        fs::set_permissions(&state_directory, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let error = Catalog::load_with_migration(&path)
+            .unwrap()
+            .commit_migration_with_backup(&path, &state_path, &backup)
+            .expect_err("the game state cannot be staged in a read-only directory");
+        assert!(
+            error.to_string().contains("previous catalog was restored"),
+            "{error}"
+        );
+
+        // Byte for byte what the older build wrote, on both sides of the pair.
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let on_disk: Catalog = serde_json::from_slice(&before).unwrap();
+        assert_eq!(on_disk.schema_version, SCHEMA_VERSION_V6);
+        assert_eq!(fs::read(&state_path).unwrap(), state_before);
+
+        fs::set_permissions(&state_directory, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A document v8 refuses is refused while reading it, before a backup is
+    /// even taken — which is the earliest and safest place to stop. The file is
+    /// left exactly as it was found.
+    #[test]
+    fn a_v7_document_v8_cannot_validate_is_refused_before_anything_is_written() {
+        let directory = temporary_migration_directory("v8-invalid");
+        let path = directory.join("catalog.json");
+        // A runner inventory entry with no profile behind it: the shape a
+        // half-applied rollback between a v8 build and a v7 one leaves.
+        let source = Catalog {
+            runner_inventory: vec![runner_inventory_entry("alpha")],
+            ..v7_catalog()
+        };
+        write_catalog(&path, &source);
+        let before = fs::read(&path).unwrap();
+
+        assert!(
+            Catalog::load_with_migration(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("references an unknown profile")
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The restore itself, against a catalog that really was replaced. The
+    /// commit path cannot leave a half-written file — the publish is a rename —
+    /// so this is where the recovery is proven to move bytes.
+    #[test]
+    fn restoring_a_backup_puts_the_previous_catalog_back() {
+        let directory = temporary_migration_directory("v8-restore-bytes");
+        let path = directory.join("catalog.json");
+        let backup = directory.join("catalog.json.v7.bak");
+        let source = v7_catalog();
+        write_catalog(&path, &source);
+        fs::copy(&path, &backup).unwrap();
+
+        fs::write(&path, b"{ this is not a catalog").unwrap();
+        assert!(Catalog::load(&path).is_err());
+
+        restore_catalog_backup(&backup, &path).unwrap();
+        let restored: Catalog = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored, source);
+        assert!(!directory.join("catalog.json.restoring").exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn an_empty_backup_is_not_something_to_restore_from() {
+        let directory = temporary_migration_directory("v8-empty-backup");
+        let path = directory.join("catalog.json");
+        let backup = directory.join("catalog.json.v7.bak");
+        write_catalog(&path, &v7_catalog());
+        fs::write(&backup, b"").unwrap();
+
+        assert!(restore_catalog_backup(&backup, &path).is_err());
+        // Read the document rather than loading it: `load` migrates, and what
+        // matters here is that the bytes on disk were left alone.
+        let on_disk: Catalog = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk.schema_version, SCHEMA_VERSION_V7);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// Promise 6: removing a plugin keeps the games it imported. A card whose
+    /// profile is gone is an orphan that explains itself, not a catalog that
+    /// refuses to load.
+    #[test]
+    fn a_third_party_runner_card_survives_the_loss_of_its_profile() {
+        let mut catalog = catalog_with_runner_game();
+        catalog.runner_profiles.clear();
+        catalog.runner_inventory.clear();
+
+        catalog.validate().unwrap();
+        assert_eq!(catalog.games.len(), 1);
+    }
+
+    #[test]
+    fn a_runner_card_whose_profile_exists_needs_its_private_inventory_entry() {
+        let mut catalog = catalog_with_runner_game();
+        catalog.runner_inventory.clear();
+
+        assert!(
+            catalog
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("missing its private inventory entry")
+        );
+    }
+
+    #[test]
+    fn a_runner_card_cannot_borrow_another_plugins_profile() {
+        let mut catalog = catalog_with_runner_game();
+        catalog.games[0].launch_target = LaunchTarget::Runner {
+            runner_id: "com.orivo.other-runner".into(),
+            game_ref: "alpha".into(),
+            profile_id: "fixture-profile-1".into(),
+        };
+
+        assert!(
+            catalog
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("belongs to another plugin")
+        );
+    }
+
+    #[test]
+    fn an_inventory_entry_outside_its_granted_folder_is_refused() {
+        let mut catalog = Catalog::default();
+        catalog.upsert_runner_profile(runner_profile()).unwrap();
+        let mut entry = runner_inventory_entry("alpha");
+        entry.game_path = PathBuf::from("/Games/Elsewhere/alpha.rom");
+
+        assert!(
+            catalog
+                .upsert_runner_inventory(entry)
+                .unwrap_err()
+                .to_string()
+                .contains("outside the folder it was granted under")
+        );
+    }
+
+    #[test]
+    fn an_inventory_entry_naming_a_folder_the_profile_does_not_grant_is_refused() {
+        let mut catalog = Catalog::default();
+        catalog.upsert_runner_profile(runner_profile()).unwrap();
+        let mut entry = runner_inventory_entry("alpha");
+        entry.directory_grant_id = "other-games".into();
+
+        assert!(
+            catalog
+                .upsert_runner_inventory(entry)
+                .unwrap_err()
+                .to_string()
+                .contains("no longer grants")
+        );
+    }
+
+    /// The external reference is the key an idempotent import relies on, so two
+    /// game references cannot claim the same one.
+    #[test]
+    fn two_game_references_cannot_claim_one_external_reference() {
+        let mut catalog = catalog_with_runner_game();
+        let mut second = runner_inventory_entry("beta");
+        second.external_id = "alpha".into();
+
+        assert!(
+            catalog
+                .upsert_runner_inventory(second)
+                .unwrap_err()
+                .to_string()
+                .contains("already belongs to another game reference")
+        );
+    }
+
+    #[test]
+    fn a_profile_cannot_change_the_plugin_that_owns_it() {
+        let mut catalog = catalog_with_runner_game();
+        let stolen = RunnerProfile {
+            plugin_id: "com.orivo.other-runner".into(),
+            ..runner_profile()
+        };
+
+        assert!(
+            catalog
+                .upsert_runner_profile(stolen)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot change owner plugin")
+        );
+    }
+
+    /// The ledger is an account of what was allowed and when, so putting a new
+    /// scope in force retires the previous row rather than editing it.
+    #[test]
+    fn granting_a_capability_again_retires_the_row_it_replaces() {
+        let mut catalog = Catalog::default();
+        catalog
+            .grant_plugin_capability(files_grant(&["a"], 10))
+            .unwrap();
+        catalog
+            .grant_plugin_capability(files_grant(&["a", "b"], 20))
+            .unwrap();
+
+        assert_eq!(catalog.plugin_grants.len(), 2);
+        assert_eq!(catalog.plugin_grants[0].revoked_at, Some(20));
+        assert!(catalog.plugin_grants[1].is_active());
+        assert_eq!(
+            catalog
+                .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+                .map(|grant| grant.granted_at),
+            Some(20)
+        );
+    }
+
+    #[test]
+    fn revoking_a_capability_keeps_its_row_and_its_dates() {
+        let mut catalog = Catalog::default();
+        catalog
+            .grant_plugin_capability(files_grant(&["a"], 10))
+            .unwrap();
+
+        assert!(
+            catalog
+                .revoke_plugin_capability(FIXTURE_PLUGIN, PluginCapability::FilesRead, 30)
+                .unwrap()
+        );
+        assert_eq!(catalog.plugin_grants.len(), 1);
+        assert_eq!(catalog.plugin_grants[0].granted_at, 10);
+        assert_eq!(catalog.plugin_grants[0].revoked_at, Some(30));
+        assert!(
+            catalog
+                .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_grant_whose_scope_does_not_match_its_capability_is_refused() {
+        let mut catalog = Catalog::default();
+        let mismatched = PluginGrantRecord {
+            scope: CapabilityScope::Notifications,
+            ..files_grant(&["a"], 10)
+        };
+
+        assert!(
+            catalog
+                .grant_plugin_capability(mismatched)
+                .unwrap_err()
+                .to_string()
+                .contains("does not match its capability")
+        );
+    }
+
+    #[test]
+    fn a_grant_that_records_no_date_is_refused() {
+        let mut catalog = Catalog::default();
+
+        assert!(
+            catalog
+                .grant_plugin_capability(files_grant(&["a"], 0))
+                .unwrap_err()
+                .to_string()
+                .contains("when it was granted")
+        );
+    }
+
+    /// Revoking one folder is not deleting it. The profile keeps it, the games
+    /// inside it stay in the library, and only the permission changes.
+    #[test]
+    fn revoking_one_folder_leaves_the_profile_and_its_games_intact() {
+        let mut catalog = catalog_with_runner_game();
+        catalog
+            .grant_plugin_capability(files_grant(&["fixture-games"], 10))
+            .unwrap();
+
+        assert!(
+            catalog
+                .revoke_runner_directory("fixture-profile-1", "fixture-games", 40)
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+                .is_none()
+        );
+        assert_eq!(
+            catalog
+                .runner_profile("fixture-profile-1")
+                .unwrap()
+                .game_directories
+                .len(),
+            1
+        );
+        assert_eq!(catalog.runner_inventory.len(), 1);
+        assert_eq!(catalog.games.len(), 1);
+    }
+
+    /// Narrowing can only ever take away. A folder another profile of the same
+    /// plugin still grants stays reachable when this one's profile is deleted.
+    #[test]
+    fn deleting_a_profile_narrows_the_ledger_to_what_is_left() {
+        let mut catalog = catalog_with_runner_game();
+        let second = RunnerProfile {
+            id: "fixture-profile-2".into(),
+            game_directories: vec![RunnerGrantedDirectory {
+                id: "other-games".into(),
+                path: PathBuf::from("/Games/MoreRoms"),
+            }],
+            ..runner_profile()
+        };
+        catalog.upsert_runner_profile(second).unwrap();
+        catalog
+            .grant_plugin_capability(files_grant(&["fixture-games", "other-games"], 10))
+            .unwrap();
+
+        assert!(
+            catalog
+                .remove_runner_profile("fixture-profile-1", 50)
+                .unwrap()
+        );
+        assert_eq!(catalog.runner_profiles.len(), 1);
+        assert!(catalog.runner_inventory.is_empty());
+        assert!(catalog.games.is_empty());
+        match &catalog
+            .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+            .expect("the other profile's folder is still allowed")
+            .scope
+        {
+            CapabilityScope::DirectoryGrants(ids) => {
+                assert_eq!(ids.iter().cloned().collect::<Vec<_>>(), vec!["other-games"]);
+            }
+            scope => panic!("unexpected scope {scope:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plugin_capability_cannot_be_in_force_twice() {
+        let mut catalog = Catalog::default();
+        catalog.plugin_grants = vec![files_grant(&["a"], 10), files_grant(&["b"], 20)];
+
+        assert!(
+            catalog
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("granted twice at once")
+        );
     }
 }
