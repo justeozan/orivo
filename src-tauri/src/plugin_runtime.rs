@@ -4989,15 +4989,21 @@ mod tests {
     }
 
     /// Writes a file large and repetitive enough that `compact` bothers, and
-    /// compacts it into a real WOF placeholder — asserted, not assumed:
-    /// `is_reparse_point` said twice, on two different queries, that this never
-    /// happened for a file exactly this size, when `compact`'s own output said
-    /// 32 to 1 both times. Fixed alongside this — see `is_reparse_point`'s own
-    /// comment for which query actually sees a filter-hidden attribute. The
-    /// placeholder test's own file stays small for a different reason — the
-    /// fixture turns its contents into a title — and takes the by-hand fallback
-    /// instead; these three tests need the real mechanism specifically, so they
-    /// get a file sized for it.
+    /// compacts it into a real WOF placeholder — asserted, not assumed.
+    ///
+    /// Two things had to be true for this to work, and getting either wrong
+    /// looked identical from here: `compact`'s own output reporting a ratio
+    /// with no reparse point to show for it. `is_reparse_point` needed a query
+    /// that survives the filter — see its own comment. And `/exe:` compresses
+    /// only `.exe`/`.dll` files by Microsoft's own documentation, so the caller
+    /// must hand this an executable-shaped name; a `.rom` here would compact
+    /// under a different, non-reparse mechanism and report a ratio for that
+    /// instead.
+    ///
+    /// The placeholder test's own file stays small for a different reason —
+    /// the fixture turns its contents into a title — and takes the by-hand
+    /// fallback instead; these three tests need the real mechanism
+    /// specifically, so they get a file shaped and sized for it.
     #[cfg(not(unix))]
     fn plant_real_wof_placeholder(path: &Path) -> Vec<u8> {
         let content = vec![b'A'; 128 * 1024];
@@ -5025,11 +5031,11 @@ mod tests {
     #[test]
     fn a_real_wof_placeholder_is_read_through_the_production_path() {
         let library = FixtureLibrary::new("reparse-wof-real");
-        let entry = library.games.join("real.rom");
+        let entry = library.games.join("real.exe");
         let content = plant_real_wof_placeholder(&entry);
 
         let directory = windows_relative::open_directory(&library.games).unwrap();
-        let mut file = windows_relative::open_entry_for_reading(&directory, "real.rom").unwrap();
+        let mut file = windows_relative::open_entry_for_reading(&directory, "real.exe").unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(
@@ -5046,12 +5052,12 @@ mod tests {
     #[test]
     fn a_reparse_point_left_alone_between_the_two_opens_reads_its_own_bytes() {
         let library = FixtureLibrary::new("reparse-witness");
-        let entry = library.games.join("witness.rom");
+        let entry = library.games.join("witness.exe");
         let content = plant_real_wof_placeholder(&entry);
 
         let directory = windows_relative::open_directory(&library.games).unwrap();
         let mut file =
-            windows_relative::open_entry_for_reading_racing(&directory, "witness.rom", || {})
+            windows_relative::open_entry_for_reading_racing(&directory, "witness.exe", || {})
                 .unwrap();
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).unwrap();
@@ -5085,14 +5091,14 @@ mod tests {
     #[test]
     fn a_reparse_point_swapped_for_a_symlink_between_the_two_opens_is_refused() {
         let library = FixtureLibrary::new("reparse-race");
-        let entry = library.games.join("swap.rom");
+        let entry = library.games.join("swap.exe");
         plant_real_wof_placeholder(&entry);
 
         let secret = library.root.join("secret.txt");
         let directory = windows_relative::open_directory(&library.games).unwrap();
         let fired = std::cell::Cell::new(false);
         let result =
-            windows_relative::open_entry_for_reading_racing(&directory, "swap.rom", || {
+            windows_relative::open_entry_for_reading_racing(&directory, "swap.exe", || {
                 fired.set(true);
                 fs::remove_file(&entry).unwrap();
                 redirect_file(&entry, &secret);
