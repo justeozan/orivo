@@ -15,7 +15,10 @@ than being hidden in JSON or a command string.
 - Wine-Staging is the first-party native reference adapter for this runner
   contract. It does not pretend to be a bundled Wasm plugin: its Rust host
   creates the equivalent typed launch intent from catalog-owned opaque IDs,
-  then applies the same no-path/no-shell boundary.
+  then applies the same no-path/no-shell boundary. Android's Winlator runner is
+  the second adapter built that way, and hands its typed intent to another
+  application instead of a process — see
+  [`docs/winlator-runner.md`](../docs/winlator-runner.md).
 - `discover-page` is cursor-based so a large library can be imported in bounded
   jobs and resumed after cancellation.
 - UI contributions are data. Plugins cannot inject HTML/CSS/JavaScript or gain

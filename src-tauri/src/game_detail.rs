@@ -10,6 +10,7 @@ use crate::catalog::{
     SOURCE_DEVELOPER_KEY, SOURCE_GENRE_KEY, SOURCE_HERO_URL_KEY, SOURCE_INSTALL_PERCENT_KEY,
     SOURCE_INSTALLED_KEY, SOURCE_INSTALLING_KEY, SOURCE_LANDSCAPE_URL_KEY, SOURCE_NATIVE_MAC_KEY,
     SOURCE_PLATFORMS_KEY, STEAM_STORE_GENRE_KEY, STEAM_STORE_PLATFORMS_KEY, WINE_STAGING_RUNNER_ID,
+    WINLATOR_RUNNER_ID,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -816,6 +817,18 @@ fn flag(game: &Game, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Everything Orivo can check about a Winlator card without leaving the
+/// catalog. The platform test stays at the call site, because the answer here
+/// is the same on every host and is therefore what a unit test can pin down.
+pub fn winlator_game_launchable(catalog: &Catalog, profile_id: &str, game_ref: &str) -> bool {
+    catalog
+        .winlator_profile(profile_id)
+        .is_some_and(|profile| profile.enabled)
+        && catalog
+            .winlator_inventory_entry(profile_id, game_ref)
+            .is_some()
+}
+
 fn project_catalog_game(
     game: &Game,
     catalog: &Catalog,
@@ -842,6 +855,13 @@ fn project_catalog_game(
                     .wine_profile(profile_id)
                     .is_some_and(|profile| profile.enabled)
                 && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
+        }
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if runner_id == WINLATOR_RUNNER_ID => {
+            cfg!(target_os = "android") && winlator_game_launchable(catalog, profile_id, game_ref)
         }
         LaunchTarget::Runner { .. } => false,
         // Epic tells us, through the launcher's own manifests, whether this
@@ -1487,6 +1507,68 @@ impl From<serde_json::Error> for GameDetailError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn winlator_catalog() -> Catalog {
+        let mut catalog = Catalog::default();
+        catalog
+            .upsert_winlator_profile(crate::catalog::WinlatorProfile {
+                id: "winlator-1".into(),
+                display_name: "Winlator".into(),
+                distribution: crate::catalog::WinlatorDistribution::Cmod,
+                container_id: None,
+                shortcut_directories: vec![std::path::PathBuf::from(
+                    "/storage/emulated/0/Download/Winlator/Frontend",
+                )],
+                enabled: true,
+                last_imported_at: None,
+            })
+            .unwrap();
+        catalog
+            .upsert_winlator_inventory(crate::catalog::WinlatorShortcutInventoryEntry {
+                profile_id: "winlator-1".into(),
+                game_ref: "shortcut:abc".into(),
+                title: "Celeste".into(),
+                shortcut_path: std::path::PathBuf::from(
+                    "/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop",
+                ),
+                fingerprint: "sha256:abc".into(),
+                container_id: Some(2),
+                imported_at: None,
+            })
+            .unwrap();
+        catalog
+    }
+
+    /// The detail projection is what turns Play on. A Winlator card needs both
+    /// halves of its host-private state, and a profile the user switched off
+    /// must take the button with it.
+    #[test]
+    fn a_winlator_card_is_launchable_only_with_a_live_profile_and_inventory_entry() {
+        let catalog = winlator_catalog();
+        assert!(winlator_game_launchable(
+            &catalog,
+            "winlator-1",
+            "shortcut:abc"
+        ));
+        assert!(!winlator_game_launchable(
+            &catalog,
+            "winlator-1",
+            "shortcut:missing"
+        ));
+        assert!(!winlator_game_launchable(
+            &catalog,
+            "winlator-2",
+            "shortcut:abc"
+        ));
+
+        let mut disabled = catalog;
+        disabled.winlator_profiles[0].enabled = false;
+        assert!(!winlator_game_launchable(
+            &disabled,
+            "winlator-1",
+            "shortcut:abc"
+        ));
+    }
 
     fn temporary_state_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
