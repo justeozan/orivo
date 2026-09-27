@@ -198,3 +198,47 @@ jobs:
         env:
           RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
         run: cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android
+
+  # Publishes reference numbers (docs/performance.md, "CI"), it does not gate a
+  # PR: a wall-clock budget that fails on a noisy shared runner would just make
+  # people re-run a job that never broke anything, which trains everyone to
+  # ignore red. `continue-on-error` keeps the check visible without letting it
+  # block a merge until docs/performance.md's proposed budgets are validated
+  # and this job has run on `main` long enough to know its own variance.
+  perf:
+    name: Perf (reference numbers, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the frontend
+        run: pnpm exec vite build
+
+      - name: Bundle size
+        run: node perf/bundle/measure-bundle.mjs | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Playwright's Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      # Desktop only: the Rust bench needs `--release` on every run to mean
+      # anything (docs/performance.md's "Reproduire ces mesures"), and the
+      # Android measurements need a real emulator — both cost more than a
+      # per-PR informational job should.
+      - name: Web performance bench
+        run: pnpm exec playwright test -c perf/web/playwright.perf.config.ts | tee -a "$GITHUB_STEP_SUMMARY"
