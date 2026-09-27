@@ -866,6 +866,35 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION"),
             ));
             app.manage(Arc::clone(&plugin_installer));
+            // Registered here rather than inside the installer so the dependency
+            // points one way: the installer announces that a plugin has become a
+            // different package, and this file decides who is told. The consumer
+            // the plan names next is grants and runner profiles — both are
+            // agreements with a component, not with an id — and they hook in
+            // beside this line without the installer learning about them.
+            plugin_installer.observe_identity(Arc::new(|change| {
+                let Ok(runtime) = plugin_runtime::PluginRuntime::shared() else {
+                    return;
+                };
+                let (plugin_id, detail) = match change {
+                    plugin_update::IdentityChange::Activated(identity) => (
+                        identity.plugin_id.as_str(),
+                        format!(
+                            "version {}, component {}, {}",
+                            identity.version, identity.component_sha256, identity.channel
+                        ),
+                    ),
+                    plugin_update::IdentityChange::Removed { plugin_id } => {
+                        (plugin_id.as_str(), "uninstalled".to_string())
+                    }
+                };
+                runtime.journal().record(
+                    plugin_runtime::next_correlation_id(),
+                    plugin_id,
+                    "package-identity",
+                    detail,
+                );
+            }));
             // A plugin update interrupted by a crash is settled here, and — only
             // with consent — the registry is asked what is new. Spawned, never
             // awaited: the first promise of the plugin plan is that the shell

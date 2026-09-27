@@ -27,11 +27,30 @@
 //!   permissions, which is the shape of every plugin rule this crate refuses.
 //! - **Every redirect hop is re-checked**, so a moved asset cannot pull bytes
 //!   from somewhere else.
-//! - **A sequence number only moves forward.** A signature stays valid forever;
-//!   replaying yesterday's signed index to hide a security update is the attack
-//!   a signature alone does not stop.
+//! - **A sequence number only moves forward, and the floor is not user state.**
+//!   A signature stays valid forever; replaying yesterday's signed index to hide
+//!   a security update is the attack a signature alone does not stop. The floor
+//!   is the larger of a minimum compiled into this build and the sequence of the
+//!   cached index *that still verifies* — never a number read out of the cache
+//!   file, which would let an edit reset the floor to zero, and never one read
+//!   out of an envelope that does not verify, which would let an edit freeze the
+//!   client forever.
+//! - **A signed index expires.** Without that, whoever controls the network or
+//!   the registry repository can hold every client on one version indefinitely,
+//!   because a replayed *current* index is not a replay at all. Past its
+//!   `expiresAtEpochMs` the document is refused and Orivo falls back to the
+//!   registry compiled into the binary.
 //! - **Nothing here runs on a display path.** The catalogue is served from the
 //!   cache; refreshing it is a separate, cancellable command.
+//!
+//! One more thing the signature does not give for free: **domain separation**.
+//! A package's `signature.ed25519` is Ed25519 over `sha256(manifest.json)`, and
+//! an index signature is Ed25519 over a hash of a document — same key, same
+//! construction. Every installed package therefore ships a valid signature over
+//! *some* blob, and only the two documents happening to need different JSON
+//! fields kept one from being presented as the other. An index is hashed with
+//! [`INDEX_SIGNATURE_CONTEXT`] in front of it, so the two hashes can never
+//! coincide: a package manifest is JSON and cannot begin with that tag.
 
 use crate::plugin_manifest::{MAX_PACKAGE_BYTES, valid_opaque_id};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -65,12 +84,33 @@ const REGISTRY_HOSTS: &[&str] = &[
 
 /// Orivo's release signing key, in the role of index signer.
 ///
-/// It is deliberately a *separate constant* with the same value. Signing an
-/// index and signing a package are different authorities — one says "this is
-/// what exists", the other "this is what it contains" — and giving them two
-/// names is what makes splitting them later a one-line change rather than an
-/// audit.
+/// It is deliberately a *separate constant*, holding the same value until the
+/// user decides otherwise. Signing an index and signing a package are different
+/// authorities — one says "this is what exists", the other "this is what it
+/// contains" — and giving them two names is what makes splitting them a
+/// one-line change rather than an audit. The domain tag below means the two
+/// roles cannot be confused even while the value is shared.
 const INDEX_PUBLIC_KEY_BASE64: &str = "OX9NRNeAEL2tEyS54qUTJ14cFS6smfLu6JoPzbiXG9w=";
+
+/// Prefixed to the document before it is hashed, so an index signature is not a
+/// package signature and vice versa.
+///
+/// It ends in a NUL byte and begins with a letter. `manifest.json` is JSON, so
+/// its first byte is `{` or whitespace and it contains no NUL — the two hashed
+/// inputs can therefore never be the same bytes, whatever either document says.
+/// The version in the tag is the *signing scheme's*, not the index format's:
+/// changing how a document is hashed has to invalidate old signatures.
+const INDEX_SIGNATURE_CONTEXT: &[u8] = b"orivo-plugin-registry-index-v1\0";
+
+/// The oldest index this build will accept, whatever is in the cache.
+///
+/// It exists for the three moments a cache cannot speak: a fresh install, a
+/// cleared cache, and a cache this build can no longer read. Without it the
+/// anti-replay floor in each of those is zero, and the next fetch would take any
+/// signed index however old. Raise it whenever an index is published that
+/// clients must not be walked back past; it is a host release, which is the
+/// point.
+pub const MINIMUM_INDEX_SEQUENCE: u64 = 1;
 
 pub const INDEX_FORMAT_VERSION: u32 = 1;
 pub const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -107,9 +147,15 @@ struct SignedEnvelope {
 #[serde(rename_all = "camelCase")]
 struct IndexDocument {
     schema_version: u32,
-    /// Monotonic across publications. The cache refuses to move backwards, so a
+    /// Monotonic across publications. The floor refuses to move backwards, so a
     /// replayed older index is inert even though its signature still verifies.
     sequence: u64,
+    /// When this document stops being believed. Required, and inside the
+    /// signature: a signature that never expires lets whoever controls the
+    /// network hold every client on one view of the registry for as long as
+    /// they like, which the sequence floor cannot see because nothing is going
+    /// backwards. Past it, Orivo shows the registry compiled into the binary.
+    expires_at_epoch_ms: u64,
     #[serde(default)]
     plugins: Vec<IndexEntryDocument>,
 }
@@ -163,6 +209,8 @@ pub enum IndexError {
     Rejected,
     /// Signed and well formed, but older than what is already cached.
     Replayed,
+    /// Signed and well formed, and past the expiry the signer put in it.
+    Expired,
 }
 
 impl IndexError {
@@ -173,6 +221,9 @@ impl IndexError {
     pub fn message(self) -> &'static str {
         match self {
             Self::Malformed | Self::Rejected => "Orivo's plugin registry could not be read.",
+            Self::Expired => {
+                "Orivo's copy of the plugin registry is out of date and could not be refreshed."
+            }
             Self::Unsigned | Self::Replayed => {
                 "Orivo's plugin registry is not signed by Orivo. Nothing was installed."
             }
@@ -186,8 +237,15 @@ impl IndexError {
 /// well formed — the publisher's own tooling can have a bug, and a signing key
 /// that has leaked signs whatever it is asked to. So the checks below run on a
 /// *verified* document exactly as they would on an unverified one.
-pub fn parse_signed_index(
+/// The verifying key is passed in rather than read from the constant so the
+/// suite can check a *genuinely signed* envelope end to end without holding
+/// Orivo's private key: a test generates its own pair and calls this, instead of
+/// re-implementing the four lines that concern the key and then testing its own
+/// re-implementation. The two production callers both supply
+/// [`index_public_key`].
+pub fn parse_signed_index_with_key(
     bytes: &[u8],
+    key: &VerifyingKey,
     minimum_sequence: u64,
 ) -> Result<RegistryIndex, IndexError> {
     if bytes.len() as u64 > MAX_INDEX_BYTES {
@@ -201,14 +259,21 @@ pub fn parse_signed_index(
     let signature = decode_base64(&envelope.signature)
         .and_then(|raw| <[u8; 64]>::try_from(raw.as_slice()).ok())
         .ok_or(IndexError::Unsigned)?;
-    let key = index_public_key().ok_or(IndexError::Unsigned)?;
     key.verify_strict(
-        &Sha256::digest(envelope.document.as_bytes()),
+        &index_digest(&envelope.document),
         &Signature::from_bytes(&signature),
     )
     .map_err(|_| IndexError::Unsigned)?;
 
     parse_signed_index_document(&envelope.document, minimum_sequence)
+}
+
+/// What an index signature covers: the domain tag, then the document's bytes.
+pub fn index_digest(document: &str) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(INDEX_SIGNATURE_CONTEXT);
+    digest.update(document.as_bytes());
+    digest.finalize().into()
 }
 
 /// Everything [`parse_signed_index`] does once the signature has verified.
@@ -226,6 +291,9 @@ fn parse_signed_index_document(
     }
     if document.sequence < minimum_sequence {
         return Err(IndexError::Replayed);
+    }
+    if document.expires_at_epoch_ms <= epoch_ms() {
+        return Err(IndexError::Expired);
     }
 
     let mut seen = BTreeSet::new();
@@ -321,17 +389,29 @@ pub fn url_host(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
+/// Whether a redirect hop may be followed.
+///
+/// A named function rather than a closure inside the policy, because the
+/// interesting cases are the hops *after* the first — a registry that answers
+/// 302 to somewhere else — and a test cannot reach those through a client
+/// without standing up a server that redirects. The policy below is the only
+/// caller, so what the test drives is what the client runs.
+fn redirect_is_allowed(url: &reqwest::Url, hops: usize) -> bool {
+    hops < MAX_REDIRECTS
+        && url.scheme() == "https"
+        // Credentials on a hop are an exfiltration channel exactly as they are
+        // on the original URL, and `host_allowed` alone would not see them.
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(host_allowed)
+}
+
 /// A client that refuses to leave the allowlist, hop by hop.
 fn allowlisted_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(FETCH_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.stop();
-            }
-            let allowed = attempt.url().scheme() == "https"
-                && attempt.url().host_str().is_some_and(host_allowed);
-            if allowed {
+            if redirect_is_allowed(attempt.url(), attempt.previous().len()) {
                 attempt.follow()
             } else {
                 attempt.stop()
@@ -357,10 +437,6 @@ struct CachedIndex {
     #[serde(default)]
     etag: Option<String>,
     fetched_at_epoch_ms: u64,
-    /// Kept beside the envelope so a tampered cache cannot *lower* the
-    /// anti-replay floor: the floor is the maximum of this and the sequence the
-    /// stored envelope itself carries.
-    sequence: u64,
     envelope: serde_json::Value,
 }
 
@@ -398,22 +474,37 @@ impl IndexCache {
     }
 
     /// The index the Store may show. Verified again on every read — a cache hit
-    /// must not be a shortcut past the signature.
+    /// must not be a shortcut past the signature, and the floor it is verified
+    /// against is this build's, never a number the cache file supplies.
     pub fn load(&self) -> Option<RegistryIndex> {
+        self.load_with_key(&index_public_key()?)
+    }
+
+    fn load_with_key(&self, key: &VerifyingKey) -> Option<RegistryIndex> {
         let cached = self.read()?;
         let bytes = serde_json::to_vec(&cached.envelope).ok()?;
-        parse_signed_index(&bytes, cached.sequence).ok()
+        parse_signed_index_with_key(&bytes, key, MINIMUM_INDEX_SEQUENCE).ok()
     }
 
     /// The sequence a freshly fetched index has to match or beat.
-    fn floor(&self) -> u64 {
-        self.read().map_or(0, |cached| cached.sequence)
+    ///
+    /// There is deliberately **no sequence field in the cache file**. A number
+    /// read out of user-writable state is a floor an edit can reset to zero, and
+    /// a number read out of an envelope that has *not* verified is a floor an
+    /// edit can raise to `u64::MAX` — one lets an old index through, the other
+    /// freezes the client on this one. Only two things can raise it: a constant
+    /// in this build, and an index that still verifies.
+    fn floor_with_key(&self, key: &VerifyingKey) -> u64 {
+        MINIMUM_INDEX_SEQUENCE.max(self.load_with_key(key).map_or(0, |index| index.sequence))
     }
 
+    /// Whether the network can be skipped entirely. The TTL is only half of it:
+    /// a cached document past its own expiry is not something to keep serving
+    /// quietly, it is a reason to go and ask.
     fn is_fresh(&self) -> bool {
         self.read().is_some_and(|cached| {
             epoch_ms().saturating_sub(cached.fetched_at_epoch_ms) < INDEX_TTL.as_millis() as u64
-        })
+        }) && self.load().is_some()
     }
 
     fn etag(&self) -> Option<String> {
@@ -422,17 +513,40 @@ impl IndexCache {
             .filter(|etag| !etag.is_empty() && etag.len() <= MAX_ETAG_LENGTH)
     }
 
-    fn store(&self, envelope: &[u8], etag: Option<String>, sequence: u64) -> Result<(), String> {
-        let envelope = serde_json::from_slice::<serde_json::Value>(envelope)
-            .map_err(|_| "The plugin registry could not be cached.".to_string())?;
+    /// Verify a freshly fetched envelope against this cache's own floor, and
+    /// keep it only if it passes.
+    ///
+    /// The floor is computed here rather than by the caller on purpose: it is
+    /// the one line that decides whether a replay is refused, and a caller that
+    /// forgot it — or passed a literal — would break the guarantee without
+    /// breaking anything a test of the pure parser can see.
+    fn accept(&self, envelope: &[u8], etag: Option<String>) -> Result<RegistryIndex, IndexError> {
+        self.accept_with_key(
+            envelope,
+            etag,
+            &index_public_key().ok_or(IndexError::Unsigned)?,
+        )
+    }
+
+    /// The same, with the verifying key passed in, so the suite drives the real
+    /// floor-and-store path with a key it owns instead of a literal.
+    fn accept_with_key(
+        &self,
+        envelope: &[u8],
+        etag: Option<String>,
+        key: &VerifyingKey,
+    ) -> Result<RegistryIndex, IndexError> {
+        let index = parse_signed_index_with_key(envelope, key, self.floor_with_key(key))?;
+        let value = serde_json::from_slice::<serde_json::Value>(envelope)
+            .map_err(|_| IndexError::Malformed)?;
         let cached = CachedIndex {
             format_version: INDEX_FORMAT_VERSION,
             etag: etag.filter(|etag| !etag.is_empty() && etag.len() <= MAX_ETAG_LENGTH),
             fetched_at_epoch_ms: epoch_ms(),
-            sequence,
-            envelope,
+            envelope: value,
         };
-        self.write(&cached)
+        self.write(&cached).map_err(|_| IndexError::Malformed)?;
+        Ok(index)
     }
 
     /// Reset the freshness clock without touching the document, which is what a
@@ -525,8 +639,9 @@ pub async fn refresh_index(
         bytes.extend_from_slice(&chunk);
     }
 
-    let index = parse_signed_index(&bytes, cache.floor()).map_err(|error| error.message())?;
-    cache.store(&bytes, etag, index.sequence)?;
+    cache
+        .accept(&bytes, etag)
+        .map_err(|error| error.message().to_string())?;
     Ok(RefreshOutcome::Updated)
 }
 
@@ -732,27 +847,28 @@ mod tests {
         output
     }
 
-    /// The module's key is compiled in, so a test that wants a *verifiable*
-    /// envelope has to reach the same verifier the production path does. It
-    /// does that by re-implementing the two lines of `parse_signed_index` that
-    /// concern the key, against a key it generated itself — which is also the
-    /// only honest way to test the signature without holding Orivo's.
+    /// The production verifier, with a key the suite owns.
+    ///
+    /// It used to re-implement the four lines about the key and then test its
+    /// own re-implementation — which meant the signature check on the real path
+    /// was covered by nothing, and a change to how the document is hashed would
+    /// have left both halves agreeing with each other and with nobody else.
     fn verify_with(key: &VerifyingKey, bytes: &[u8]) -> Result<RegistryIndex, IndexError> {
-        let envelope =
-            serde_json::from_slice::<SignedEnvelope>(bytes).map_err(|_| IndexError::Malformed)?;
-        let signature = decode_base64(&envelope.signature)
-            .and_then(|raw| <[u8; 64]>::try_from(raw.as_slice()).ok())
-            .ok_or(IndexError::Unsigned)?;
-        key.verify_strict(
-            &Sha256::digest(envelope.document.as_bytes()),
-            &Signature::from_bytes(&signature),
-        )
-        .map_err(|_| IndexError::Unsigned)?;
-        parse_signed_index_document(&envelope.document, 0)
+        parse_signed_index_with_key(bytes, key, MINIMUM_INDEX_SEQUENCE)
+    }
+
+    fn a_year_from_now() -> u64 {
+        epoch_ms() + 365 * 24 * 60 * 60 * 1000
     }
 
     fn document(sequence: u64, plugins: &str) -> String {
-        format!(r#"{{"schemaVersion":1,"sequence":{sequence},"plugins":[{plugins}]}}"#)
+        document_expiring(sequence, a_year_from_now(), plugins)
+    }
+
+    fn document_expiring(sequence: u64, expires_at: u64, plugins: &str) -> String {
+        format!(
+            r#"{{"schemaVersion":1,"sequence":{sequence},"expiresAtEpochMs":{expires_at},"plugins":[{plugins}]}}"#
+        )
     }
 
     fn entry_json(id: &str, version: &str, url: &str) -> String {
@@ -764,7 +880,7 @@ mod tests {
     }
 
     fn envelope(document: &str) -> Vec<u8> {
-        let signature = signing_key().sign(&Sha256::digest(document.as_bytes()));
+        let signature = signing_key().sign(&index_digest(document));
         serde_json::to_vec(&SignedEnvelope {
             format_version: INDEX_FORMAT_VERSION,
             document: document.to_string(),
@@ -830,7 +946,10 @@ mod tests {
             1,
             &entry_json("com.orivo.quiky", "0.2.0", "https://github.com/a/b"),
         ));
-        assert_eq!(parse_signed_index(&bytes, 0), Err(IndexError::Unsigned));
+        assert_eq!(
+            parse_signed_index_with_key(&bytes, &index_public_key().unwrap(), 0),
+            Err(IndexError::Unsigned)
+        );
     }
 
     /// A signature says who wrote a document, not that the document is sane. A
@@ -902,7 +1021,7 @@ mod tests {
     fn an_index_larger_than_the_host_will_read_is_refused() {
         let oversized = vec![b'{'; MAX_INDEX_BYTES as usize + 1];
         assert_eq!(
-            parse_signed_index(&oversized, 0),
+            parse_signed_index_with_key(&oversized, &signing_key().verifying_key(), 0),
             Err(IndexError::Malformed)
         );
     }
@@ -939,26 +1058,238 @@ mod tests {
     /// forget an index, never to make it believe one.
     #[test]
     fn a_tampered_cache_is_forgotten_rather_than_believed() {
+        let key = signing_key().verifying_key();
         let root = temporary_root();
         let cache = IndexCache::new(&root);
         let bytes = envelope(&document(
-            2,
+            4,
             &entry_json("com.orivo.quiky", "0.2.0", "https://github.com/a/b"),
         ));
-        cache.store(&bytes, Some("\"etag-1\"".into()), 2).unwrap();
-        assert!(cache.is_fresh());
-        assert_eq!(cache.floor(), 2);
+        cache
+            .accept_with_key(&bytes, Some("\"etag-1\"".into()), &key)
+            .expect("stored");
+        assert!(cache.load_with_key(&key).is_some());
         assert_eq!(cache.etag().as_deref(), Some("\"etag-1\""));
 
-        // Signed by a key this build does not hold, so the cached index is
-        // unusable — and the Store shows nothing rather than an attacker's list.
+        // Signed by a key this build does not hold, so the production read
+        // finds nothing — the Store shows the compiled-in list rather than an
+        // attacker's.
         assert_eq!(cache.load(), None);
 
         fs::write(&cache.path, b"{ not json").unwrap();
         assert_eq!(cache.load(), None);
-        assert_eq!(cache.floor(), 0);
+        assert_eq!(cache.load_with_key(&key), None);
         assert!(!cache.is_fresh());
         fs::remove_dir_all(root).ok();
+    }
+
+    /// The anti-replay floor is a *guarantee*, so the three moments a cache
+    /// cannot speak are the ones that matter: a fresh install, a cleared cache,
+    /// and a cache this build can no longer read. In all three the floor used to
+    /// be zero, and the next fetch would take any signed index however old.
+    ///
+    /// It also has to resist being *raised*: a floor an edit can push to
+    /// `u64::MAX` freezes the client on whatever it has, which is the same
+    /// attack from the other side. Neither number comes out of the cache file —
+    /// only out of a build constant and out of an index that still verifies.
+    #[test]
+    fn the_anti_replay_floor_is_never_read_out_of_the_cache_file() {
+        let key = signing_key().verifying_key();
+        let root = temporary_root();
+        let cache = IndexCache::new(&root);
+
+        // Nothing cached at all.
+        assert_eq!(cache.floor_with_key(&key), MINIMUM_INDEX_SEQUENCE);
+
+        cache
+            .accept_with_key(
+                &envelope(&document(
+                    9,
+                    &entry_json("com.orivo.quiky", "0.2.0", "https://github.com/a/b"),
+                )),
+                None,
+                &key,
+            )
+            .expect("stored");
+        assert_eq!(cache.floor_with_key(&key), 9);
+
+        // An edit that claims a lower sequence cannot lower the floor, because
+        // there is no sequence field to edit — the number comes from the
+        // envelope, and changing that breaks the signature.
+        let mut tampered =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&cache.path).unwrap()).unwrap();
+        tampered["sequence"] = serde_json::json!(0);
+        tampered["envelope"]["document"] = serde_json::json!(document(
+            0,
+            &entry_json("com.orivo.quiky", "0.1.0", "https://github.com/a/b")
+        ));
+        fs::write(&cache.path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert_eq!(
+            cache.floor_with_key(&key),
+            MINIMUM_INDEX_SEQUENCE,
+            "a forged envelope must not be believed, in either direction"
+        );
+
+        // And an edit that claims an enormous one cannot raise it.
+        let mut frozen =
+            serde_json::from_slice::<serde_json::Value>(&fs::read(&cache.path).unwrap()).unwrap();
+        frozen["sequence"] = serde_json::json!(u64::MAX);
+        fs::write(&cache.path, serde_json::to_vec(&frozen).unwrap()).unwrap();
+        assert_eq!(cache.floor_with_key(&key), MINIMUM_INDEX_SEQUENCE);
+
+        // Cleared entirely.
+        fs::remove_file(&cache.path).unwrap();
+        assert_eq!(cache.floor_with_key(&key), MINIMUM_INDEX_SEQUENCE);
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The floor is only worth having if the code that stores a fetched index
+    /// actually applies it. Testing the pure parser against a literal proves
+    /// nothing about that wiring — the caller could pass zero — so this drives
+    /// the function the fetch calls, against a cache that already holds one.
+    #[test]
+    fn a_fetched_index_is_held_to_the_floor_the_cache_already_has() {
+        let key = signing_key().verifying_key();
+        let root = temporary_root();
+        let cache = IndexCache::new(&root);
+        let good = "https://github.com/a/b";
+
+        cache
+            .accept_with_key(
+                &envelope(&document(5, &entry_json("com.orivo.quiky", "0.5.0", good))),
+                None,
+                &key,
+            )
+            .expect("stored");
+
+        assert_eq!(
+            cache.accept_with_key(
+                &envelope(&document(4, &entry_json("com.orivo.quiky", "0.4.0", good))),
+                None,
+                &key,
+            ),
+            Err(IndexError::Replayed)
+        );
+        // Refused *and* not kept: the cache still holds the newer one.
+        assert_eq!(cache.load_with_key(&key).unwrap().sequence, 5);
+
+        assert_eq!(
+            cache
+                .accept_with_key(
+                    &envelope(&document(6, &entry_json("com.orivo.quiky", "0.6.0", good))),
+                    None,
+                    &key,
+                )
+                .map(|index| index.sequence),
+            Ok(6)
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// A signature never expires on its own, so a registry that simply keeps
+    /// serving its newest document holds every client on it — and the sequence
+    /// floor cannot see that, because nothing is going backwards. The expiry is
+    /// inside the signature for the same reason the sequence is.
+    #[test]
+    fn an_index_past_its_expiry_is_refused_and_stops_being_served() {
+        let key = signing_key().verifying_key();
+        let root = temporary_root();
+        let cache = IndexCache::new(&root);
+        let good = "https://github.com/a/b";
+        let expired = document_expiring(
+            7,
+            epoch_ms() - 1,
+            &entry_json("com.orivo.quiky", "0.7.0", good),
+        );
+
+        assert_eq!(
+            verify_with(&key, &envelope(&expired)),
+            Err(IndexError::Expired)
+        );
+        assert_eq!(
+            cache.accept_with_key(&envelope(&expired), None, &key),
+            Err(IndexError::Expired)
+        );
+
+        // One that is cached and *then* expires stops being served, and stops
+        // counting as fresh — so the next refresh goes to the network instead of
+        // quietly holding the stale view.
+        let soon = document_expiring(
+            8,
+            epoch_ms() + 400,
+            &entry_json("com.orivo.quiky", "0.8.0", good),
+        );
+        cache
+            .accept_with_key(&envelope(&soon), None, &key)
+            .expect("stored while still valid");
+        assert!(cache.load_with_key(&key).is_some());
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert_eq!(cache.load_with_key(&key), None);
+        assert!(!cache.is_fresh());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Package signatures and index signatures used to be the same
+    /// construction over the same key: Ed25519 over a SHA-256. Every installed
+    /// package ships a `signature.ed25519` valid over its `manifest.json`, so
+    /// the only thing keeping one from being presented as the other was the two
+    /// documents needing different JSON fields — a coincidence, not a rule.
+    ///
+    /// The index is hashed with a domain tag in front of it. This checks both
+    /// directions: the tag really is in the hash, and a signature made the
+    /// package way over a document that *is* a valid index is refused.
+    #[test]
+    fn a_package_signature_is_not_an_index_signature() {
+        let key = signing_key().verifying_key();
+        let good = "https://github.com/a/b";
+        let text = document(3, &entry_json("com.orivo.quiky", "0.3.0", good));
+
+        // The tag is in the digest, not decoration.
+        assert_ne!(index_digest(&text)[..], Sha256::digest(text.as_bytes())[..]);
+
+        // A signature made the way a package manifest is signed, over a
+        // document that is otherwise a perfectly good index.
+        let package_style = signing_key().sign(&Sha256::digest(text.as_bytes()));
+        let forged = serde_json::to_vec(&SignedEnvelope {
+            format_version: INDEX_FORMAT_VERSION,
+            document: text.clone(),
+            signature: encode_base64(&package_style.to_bytes()),
+        })
+        .unwrap();
+        assert_eq!(verify_with(&key, &forged), Err(IndexError::Unsigned));
+
+        // And the index's own signature still verifies, so the tag is applied
+        // on both sides rather than only on the verifier's.
+        assert!(verify_with(&key, &envelope(&text)).is_ok());
+    }
+
+    /// The allowlist is re-checked on every hop, and the hops after the first
+    /// are the ones a test of the initial URL never reaches. The policy the
+    /// client runs is this function, so what is asserted here is what is
+    /// enforced there.
+    #[test]
+    fn a_redirect_off_the_allowlist_is_never_followed() {
+        let url = |value: &str| reqwest::Url::parse(value).unwrap();
+        assert!(redirect_is_allowed(
+            &url("https://objects.githubusercontent.com/a"),
+            1
+        ));
+        assert!(!redirect_is_allowed(
+            &url("https://cdn.attacker.example/a"),
+            1
+        ));
+        assert!(!redirect_is_allowed(&url("http://github.com/a"), 1));
+        assert!(!redirect_is_allowed(&url("https://evil.github.com/a"), 1));
+        assert!(!redirect_is_allowed(&url("https://user@github.com/a"), 1));
+        assert!(!redirect_is_allowed(
+            &url("https://user:pass@github.com/a"),
+            1
+        ));
+        // A chain that never leaves the allowlist still has to end.
+        assert!(!redirect_is_allowed(
+            &url("https://github.com/a"),
+            MAX_REDIRECTS
+        ));
     }
 
     #[test]

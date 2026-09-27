@@ -24,7 +24,7 @@
 //! <root>/.journal/<id>.smoke       ⟺ the promoted tree has not passed its smoke test
 //! <root>/.staging/<id>~new/        the unpacked candidate
 //! <root>/.staging/<id>~discard/    a tree on its way out
-//! <root>/.staging/trusted/<id>     one byte: this version arrived release-signed
+//! <root>/.staging/trusted/<id>     which key signed the live tree, and its digest
 //! ```
 //!
 //! The commit point is a single rename of the journal file onto
@@ -36,11 +36,18 @@
 //! grammar is lowercase, digits, hyphen and dot — so `<id>~new` can never
 //! collide with a real plugin called `<id>.new`. And `previous.json` is written
 //! *only* by the commit rename, so its presence is proof rather than a hint.
+//!
+//! **Every path in this module is built from a plugin id, so no id that did not
+//! pass [`valid_plugin_id`] reaches one.** A journal is a file in a directory
+//! any local process can write to, and its name is where the id used to come
+//! from — an id of `..` would have made `remove_dir_all` climb out of the plugin
+//! root and take the whole application data directory with it.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
@@ -57,8 +64,10 @@ const SIGNATURE_FILE: &str = "signature.ed25519";
 /// so a package can never name itself into another package's scratch space.
 const STAGED_SUFFIX: &str = "~new";
 const DISCARD_SUFFIX: &str = "~discard";
+const COMPONENT_FILE: &str = "component.wasm";
 const JOURNAL_FORMAT_VERSION: u32 = 1;
 const MAX_JOURNAL_BYTES: u64 = 8 * 1024;
+const MAX_COMPONENT_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Every entry of a package, already bounded and read into memory by the
 /// installer. Nothing reaches this module that has not been hashed against its
@@ -79,6 +88,77 @@ pub enum OperationKind {
     Rollback,
 }
 
+/// Which channel a version arrived through. Not a label: it decides whether
+/// the version is updated automatically, and whether the next package is
+/// allowed to replace it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PackageChannel {
+    /// Signed by a key this build compiles in. The signer is named rather than
+    /// implied so a key rotation is visible in the record instead of silent.
+    Official { signer: String },
+    /// Sideloaded. Never updated automatically, and it cannot inherit the
+    /// official badge from the version it replaces.
+    Development,
+}
+
+impl PackageChannel {
+    pub fn is_official(&self) -> bool {
+        matches!(self, Self::Official { .. })
+    }
+
+    pub fn signer(&self) -> Option<&str> {
+        match self {
+            Self::Official { signer } => Some(signer),
+            Self::Development => None,
+        }
+    }
+}
+
+impl fmt::Display for PackageChannel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Official { signer } => write!(formatter, "signed by {signer}"),
+            Self::Development => formatter.write_str("unsigned"),
+        }
+    }
+}
+
+/// What the live version of a plugin *is*, as opposed to what it calls itself.
+///
+/// The component digest is re-derived from the tree on every read rather than
+/// remembered, so it cannot disagree with the bytes the host will actually run.
+/// It exists for the consumer the plan names next: a grant, or a runner profile
+/// marked valid, is only meaningful against the package it was granted to, so
+/// whoever holds one needs to be told when that package stops being the same
+/// package. See [`PluginStore::observe`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageIdentity {
+    pub plugin_id: String,
+    pub version: String,
+    /// SHA-256 of `component.wasm` as it sits in the live tree.
+    pub component_sha256: String,
+    pub channel: PackageChannel,
+}
+
+/// What an observer is told. Two cases, because "this plugin is now something
+/// else" and "this plugin is gone" call for different answers from anyone
+/// holding a grant against it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityChange {
+    /// The live version of this plugin is now this identity. Sent for an
+    /// install, an update, a rollback, and a crash recovery that moved the
+    /// plugin — anything that makes the running package a different package.
+    Activated(PackageIdentity),
+    /// The plugin is no longer installed.
+    Removed { plugin_id: String },
+}
+
+/// Registered from `lib.rs`, so the installer never has to know who is
+/// listening. Observers are called **after** the store's lock is released, and
+/// must not call back into the store.
+pub type IdentityObserver = Arc<dyn Fn(&IdentityChange) + Send + Sync>;
+
 /// The journal entry, and — after the commit rename — the description of the
 /// rollback target. One type for both because they are the same fact read from
 /// two moments: *this version is replacing that one*.
@@ -90,17 +170,40 @@ pub struct OperationRecord {
     pub plugin_id: String,
     /// The version that is live once the operation completes.
     pub incoming_version: String,
-    pub incoming_trusted: bool,
+    pub incoming_channel: PackageChannel,
     /// The version being displaced — the one that lands in `previous/`. `None`
     /// on a first install, where there is nothing to keep.
     pub displaced_version: Option<String>,
-    pub displaced_trusted: bool,
+    pub displaced_channel: PackageChannel,
 }
 
 impl OperationRecord {
+    /// A journal is a file in a directory any local process can write to, and
+    /// it names the directory the recovery will move. Both halves are checked:
+    /// the grammar, so no path escapes the plugin root, and the identity, so a
+    /// record that was copied or planted cannot decide another plugin's fate.
     fn valid_for(&self, plugin_id: &str) -> bool {
-        self.format_version == JOURNAL_FORMAT_VERSION && self.plugin_id == plugin_id
+        self.format_version == JOURNAL_FORMAT_VERSION
+            && self.plugin_id == plugin_id
+            && valid_plugin_id(plugin_id)
     }
+}
+
+/// The one grammar every path in this module is built from.
+///
+/// It is the installer's directory-name rule, and it lives here because this is
+/// the module that turns an id into a `remove_dir_all`. `..`, an empty segment,
+/// a separator or a `~` never gets that far.
+pub fn valid_plugin_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.split('.').count() >= 3
+        && value.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +223,7 @@ pub struct InstallOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackTarget {
     pub version: String,
-    pub trusted: bool,
+    pub channel: PackageChannel,
 }
 
 /// What [`PluginStore::recover`] did to one interrupted operation. Reported so
@@ -186,7 +289,7 @@ pub enum Step {
 // The store
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PluginStore {
     root: PathBuf,
     /// One transaction at a time, per store.
@@ -198,6 +301,16 @@ pub struct PluginStore {
     /// rather than a race. It costs nothing in practice: an install is already
     /// behind a download.
     gate: Arc<Mutex<()>>,
+    observers: Arc<Mutex<Vec<IdentityObserver>>>,
+}
+
+impl fmt::Debug for PluginStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PluginStore")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PluginStore {
@@ -205,7 +318,69 @@ impl PluginStore {
         Self {
             root,
             gate: Arc::new(Mutex::new(())),
+            observers: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Be told when a plugin becomes a different package, or stops being
+    /// installed at all.
+    ///
+    /// The seam exists for grants and runner profiles: both are agreements with
+    /// a *package*, not with an id, so the holder has to learn when the package
+    /// behind the id changes. Registering from `lib.rs` keeps that dependency
+    /// pointing one way — the installer never learns who is listening.
+    pub fn observe(&self, observer: IdentityObserver) {
+        self.observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(observer);
+    }
+
+    /// Run `work`, then tell the observers if the live package changed.
+    ///
+    /// Comparing before and after is what makes this exact rather than eager: a
+    /// refused install, a no-op recovery and a rollback that could not start all
+    /// leave the identity alone and say nothing. The comparison and the
+    /// notification both happen outside the gate, so an observer is free to be
+    /// slow and cannot deadlock the store.
+    fn announcing<T>(&self, plugin_id: &str, work: impl FnOnce() -> T) -> T {
+        let before = self.identity(plugin_id);
+        let result = work();
+        let after = self.identity(plugin_id);
+        if before != after {
+            let change = match after {
+                Some(identity) => IdentityChange::Activated(identity),
+                None => IdentityChange::Removed {
+                    plugin_id: plugin_id.to_owned(),
+                },
+            };
+            let observers = self
+                .observers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            for observer in observers {
+                observer(&change);
+            }
+        }
+        result
+    }
+
+    /// What the live version of this plugin is. `None` when nothing is
+    /// installed, or when the tree is too broken to describe — a directory
+    /// without a readable manifest and component is not a package.
+    pub fn identity(&self, plugin_id: &str) -> Option<PackageIdentity> {
+        if !valid_plugin_id(plugin_id) {
+            return None;
+        }
+        let live = self.live_directory(plugin_id);
+        let component_sha256 = component_digest(&live)?;
+        Some(PackageIdentity {
+            plugin_id: plugin_id.to_owned(),
+            version: installed_version(&live)?,
+            channel: self.recorded_channel(plugin_id, &component_sha256),
+            component_sha256,
+        })
     }
 
     /// A panic inside a transaction poisons the gate, and refusing every later
@@ -221,19 +396,44 @@ impl PluginStore {
         self.root.join(plugin_id)
     }
 
-    /// A one-byte marker recording that a version arrived release-signed. It is
-    /// host-owned state about *how* a plugin arrived, so it deliberately lives
-    /// outside the plugin's own directory, where a package could otherwise
-    /// declare itself trusted.
-    pub fn trust_marker(&self, plugin_id: &str) -> PathBuf {
+    /// Host-owned state about *how* a plugin arrived, deliberately outside the
+    /// plugin's own directory, where a package could otherwise declare itself
+    /// trusted.
+    fn trust_marker(&self, plugin_id: &str) -> PathBuf {
         self.root
             .join(STAGING_DIRECTORY)
             .join(TRUST_DIRECTORY)
             .join(plugin_id)
     }
 
+    /// The channel of the live tree, as recorded — but only if the record still
+    /// describes *these* bytes.
+    ///
+    /// The marker names the component digest it was written for, so it does not
+    /// survive the component being swapped underneath it: dropping another
+    /// `.wasm` into an installed plugin now costs the official badge instead of
+    /// inheriting it. This is tamper-*evident*, not tamper-proof — a local
+    /// process that can write the marker can also write the right digest into
+    /// it. Making it unforgeable needs a key the user's account cannot read,
+    /// which is a keychain change and not this module's.
+    fn recorded_channel(&self, plugin_id: &str, component_sha256: &str) -> PackageChannel {
+        let Some(bytes) = read_small(&self.trust_marker(plugin_id), MAX_JOURNAL_BYTES) else {
+            return PackageChannel::Development;
+        };
+        let Ok(marker) = serde_json::from_slice::<TrustMarker>(&bytes) else {
+            return PackageChannel::Development;
+        };
+        if marker.component_sha256 != component_sha256 || marker.signer.trim().is_empty() {
+            return PackageChannel::Development;
+        }
+        PackageChannel::Official {
+            signer: marker.signer,
+        }
+    }
+
     pub fn is_trusted(&self, plugin_id: &str) -> bool {
-        self.trust_marker(plugin_id).is_file()
+        self.identity(plugin_id)
+            .is_some_and(|identity| identity.channel.is_official())
     }
 
     fn staged_directory(&self, plugin_id: &str) -> PathBuf {
@@ -291,7 +491,7 @@ impl PluginStore {
         let record = read_record(&self.previous_record(plugin_id), plugin_id)?;
         Some(RollbackTarget {
             version: record.displaced_version?,
-            trusted: record.displaced_trusted,
+            channel: record.displaced_channel,
         })
     }
 
@@ -311,11 +511,13 @@ impl PluginStore {
         &self,
         plugin_id: &str,
         version: &str,
-        trusted: bool,
+        channel: PackageChannel,
         files: &PackageFiles,
         verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
     ) -> Result<InstallOutcome, String> {
-        self.install_stopping_before(None, plugin_id, version, trusted, files, verify)
+        self.announcing(plugin_id, || {
+            self.install_stopping_before(None, plugin_id, version, channel.clone(), files, verify)
+        })
     }
 
     fn install_stopping_before(
@@ -323,10 +525,13 @@ impl PluginStore {
         stop: Option<Step>,
         plugin_id: &str,
         version: &str,
-        trusted: bool,
+        channel: PackageChannel,
         files: &PackageFiles,
         verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
     ) -> Result<InstallOutcome, String> {
+        if !valid_plugin_id(plugin_id) {
+            return Err("The plugin identity is not usable as a directory.".into());
+        }
         let _gate = self.enter();
         let cut = |step: Step| stop == Some(step);
         // An interrupted operation on this plugin is settled first. Starting a
@@ -336,7 +541,20 @@ impl PluginStore {
 
         let live = self.live_directory(plugin_id);
         let displaced_version = installed_version(&live);
-        let displaced_trusted = self.is_trusted(plugin_id);
+        let displaced_channel = self
+            .identity(plugin_id)
+            .map_or(PackageChannel::Development, |identity| identity.channel);
+        // The developer channel can never take over from the official one
+        // silently. A sideloaded build replacing a signed package would keep the
+        // id, and with it every grant and every runner profile the user agreed
+        // to for the *signed* package — so the package that arrives with less
+        // provenance has to arrive through a removal the user performed.
+        if !channel.is_official() && displaced_channel.is_official() {
+            return Err(
+                "This plugin is installed from Orivo's registry. Remove it first to replace it with an unsigned build."
+                    .into(),
+            );
+        }
 
         if cut(Step::Stage) {
             return Err(interrupted());
@@ -373,51 +591,99 @@ impl PluginStore {
             kind: OperationKind::Install,
             plugin_id: plugin_id.to_owned(),
             incoming_version: version.to_owned(),
-            incoming_trusted: trusted,
+            incoming_channel: channel,
             displaced_version: displaced_version.clone(),
-            displaced_trusted,
+            displaced_channel,
         };
         self.write_journal(&record)?;
 
-        if cut(Step::ArchiveLive) {
-            return Err(interrupted());
+        // Past the journal, `?` is the wrong exit. A disk that filled up, or a
+        // Windows scanner still holding a file the host has just written, would
+        // leave the plugin archived and unpromoted — that is, absent — until the
+        // next start, and the first read of the catalogue happens before
+        // recovery does. Every failure from here restores the tree itself.
+        match self.swap_and_prove(stop, &record, &staged, &live, verify) {
+            Ok(()) => {}
+            // A cut is not an error, it is the process ceasing to exist. It
+            // leaves the disk exactly as a crash would and hands the state to
+            // recovery — which is the whole thing the interruption tests check.
+            Err(SwapError::Interrupted) => return Err(interrupted()),
+            Err(SwapError::Failed(error)) => {
+                self.undo_install(&record);
+                return Err(error);
+            }
         }
-        if is_directory(&live) {
-            create_parent(&previous)?;
-            rename(&live, &previous)?;
-        }
-
-        if cut(Step::PromoteStaged) {
-            return Err(interrupted());
-        }
-        // From here the live tree is unproven, and recovery must undo rather
-        // than finish. The marker is what tells it which of the two to do.
-        touch(&self.smoke_marker(plugin_id))?;
-        rename(&staged, &live)?;
-
-        if cut(Step::SmokeTest) {
-            return Err(interrupted());
-        }
-        if let Err(refusal) = verify(&live, Checkpoint::Live) {
-            self.undo_install(&record);
-            return Err(refusal);
-        }
-        let _ = fs::remove_file(self.smoke_marker(plugin_id));
 
         if cut(Step::WriteTrust) {
             return Err(interrupted());
         }
-        self.write_trust(plugin_id, trusted)?;
+        // Only bookkeeping is left, and the version it describes is live and
+        // proved. Undoing here would throw away a good update because a marker
+        // could not be written, so the failure is handed to the one code path
+        // that knows how to finish an operation from what is on disk.
+        if self
+            .write_trust(plugin_id, &record.incoming_channel)
+            .is_err()
+        {
+            self.recover_plugin(plugin_id);
+            return Ok(self.outcome(&record));
+        }
 
         if cut(Step::Commit) {
             return Err(interrupted());
         }
-        self.commit_install(&record)?;
-        Ok(InstallOutcome {
-            plugin_id: plugin_id.to_owned(),
-            version: version.to_owned(),
-            rollback_to: displaced_version,
-        })
+        if self.commit_install(&record).is_err() {
+            self.recover_plugin(plugin_id);
+        }
+        Ok(self.outcome(&record))
+    }
+
+    fn outcome(&self, record: &OperationRecord) -> InstallOutcome {
+        InstallOutcome {
+            plugin_id: record.plugin_id.clone(),
+            version: record.incoming_version.clone(),
+            rollback_to: record.displaced_version.clone(),
+        }
+    }
+
+    /// Archive, promote, prove. The three steps that leave the plugin root
+    /// mid-transaction, kept together so there is exactly one place that
+    /// decides what an error between them means.
+    fn swap_and_prove(
+        &self,
+        stop: Option<Step>,
+        record: &OperationRecord,
+        staged: &Path,
+        live: &Path,
+        verify: &dyn Fn(&Path, Checkpoint) -> Result<(), String>,
+    ) -> Result<(), SwapError> {
+        let cut = |step: Step| stop == Some(step);
+        let plugin_id = &record.plugin_id;
+        let previous = self.previous_directory(plugin_id);
+        let failed = |error: String| SwapError::Failed(error);
+
+        if cut(Step::ArchiveLive) {
+            return Err(SwapError::Interrupted);
+        }
+        if is_directory(live) {
+            create_parent(&previous).map_err(failed)?;
+            rename(live, &previous).map_err(failed)?;
+        }
+
+        if cut(Step::PromoteStaged) {
+            return Err(SwapError::Interrupted);
+        }
+        // From here the live tree is unproven, and recovery must undo rather
+        // than finish. The marker is what tells it which of the two to do.
+        touch(&self.smoke_marker(plugin_id)).map_err(failed)?;
+        rename(staged, live).map_err(failed)?;
+
+        if cut(Step::SmokeTest) {
+            return Err(SwapError::Interrupted);
+        }
+        verify(live, Checkpoint::Live).map_err(failed)?;
+        let _ = fs::remove_file(self.smoke_marker(plugin_id));
+        Ok(())
     }
 
     /// The point of no return, in one rename. With something displaced, the
@@ -456,14 +722,14 @@ impl PluginStore {
                 let _ = rename(&live, &discard);
             }
             let _ = rename(&previous, &live);
-            let _ = self.write_trust(plugin_id, record.displaced_trusted);
+            let _ = self.write_trust(plugin_id, &record.displaced_channel);
         } else if record.displaced_version.is_none() {
             // A first install that failed leaves no plugin, and no claim that
             // one was ever signed.
             let _ = fs::remove_dir_all(&live);
             let _ = fs::remove_file(self.trust_marker(plugin_id));
         } else {
-            let _ = self.write_trust(plugin_id, record.displaced_trusted);
+            let _ = self.write_trust(plugin_id, &record.displaced_channel);
         }
         self.clear_operation(plugin_id);
     }
@@ -477,7 +743,7 @@ impl PluginStore {
     /// worked, not a two-way switch, and one slot is the only one whose
     /// contents are always known to have passed a smoke test.
     pub fn rollback(&self, plugin_id: &str) -> Result<RollbackTarget, String> {
-        self.rollback_stopping_before(None, plugin_id)
+        self.announcing(plugin_id, || self.rollback_stopping_before(None, plugin_id))
     }
 
     fn rollback_stopping_before(
@@ -485,6 +751,9 @@ impl PluginStore {
         stop: Option<Step>,
         plugin_id: &str,
     ) -> Result<RollbackTarget, String> {
+        if !valid_plugin_id(plugin_id) {
+            return Err("That is not a plugin Orivo installed.".into());
+        }
         let _gate = self.enter();
         let cut = |step: Step| stop == Some(step);
         self.recover_plugin(plugin_id);
@@ -498,9 +767,11 @@ impl PluginStore {
             kind: OperationKind::Rollback,
             plugin_id: plugin_id.to_owned(),
             incoming_version: target.version.clone(),
-            incoming_trusted: target.trusted,
+            incoming_channel: target.channel.clone(),
             displaced_version: installed_version(&live),
-            displaced_trusted: self.is_trusted(plugin_id),
+            displaced_channel: self
+                .identity(plugin_id)
+                .map_or(PackageChannel::Development, |identity| identity.channel),
         };
 
         if cut(Step::WriteJournal) {
@@ -526,7 +797,7 @@ impl PluginStore {
         if cut(Step::WriteTrust) {
             return Err(interrupted());
         }
-        self.write_trust(plugin_id, target.trusted)?;
+        let _ = self.write_trust(plugin_id, &target.channel);
 
         if cut(Step::Commit) {
             return Err(interrupted());
@@ -549,6 +820,13 @@ impl PluginStore {
     /// door; keeping a rollback target for a plugin the user removed would be
     /// disk the Plugins panel cannot show and cannot offer.
     pub fn remove(&self, plugin_id: &str) -> Result<(), String> {
+        self.announcing(plugin_id, || self.remove_locked(plugin_id))
+    }
+
+    fn remove_locked(&self, plugin_id: &str) -> Result<(), String> {
+        if !valid_plugin_id(plugin_id) {
+            return Err("That is not a plugin Orivo installed.".into());
+        }
         let _gate = self.enter();
         self.recover_plugin(plugin_id);
         let directory = self.live_directory(plugin_id);
@@ -575,30 +853,57 @@ impl PluginStore {
     /// once at start and again before each operation, because a journal left by
     /// a crash must never be overwritten by the next transaction.
     pub fn recover(&self) -> Vec<RecoveryOutcome> {
-        let _gate = self.enter();
         let mut outcomes = Vec::new();
-        let Ok(entries) = fs::read_dir(self.root.join(JOURNAL_DIRECTORY)) else {
-            self.sweep_staging();
-            return outcomes;
-        };
-        let mut plugin_ids = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.strip_suffix(".json").map(str::to_owned)
-            })
-            .collect::<Vec<_>>();
-        plugin_ids.sort();
-        for plugin_id in plugin_ids {
-            if let Some(resolution) = self.recover_plugin(&plugin_id) {
+        for plugin_id in self.journalled_plugin_ids() {
+            let settled = self.announcing(&plugin_id, || {
+                let _gate = self.enter();
+                self.recover_plugin(&plugin_id)
+            });
+            if let Some(resolution) = settled {
                 outcomes.push(RecoveryOutcome {
                     plugin_id,
                     resolution,
                 });
             }
         }
+        let _gate = self.enter();
         self.sweep_staging();
         outcomes
+    }
+
+    /// The plugins a journal file names — and *only* those whose name is a
+    /// plugin id.
+    ///
+    /// The journal directory is ordinary state on disk, so its file names are
+    /// as untrusted as anything else a local process can write. `...json`
+    /// names the plugin `..`, which every path helper below would happily join
+    /// onto the plugin root; `undo_install` would then `remove_dir_all` the
+    /// whole application data directory. A name that is not an inverse-DNS id
+    /// is swept, never acted on.
+    fn journalled_plugin_ids(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(self.root.join(JOURNAL_DIRECTORY)) else {
+            return Vec::new();
+        };
+        let mut plugin_ids = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stem = name
+                .strip_suffix(".json")
+                .or_else(|| name.strip_suffix(".smoke"));
+            match stem {
+                // Nothing here can be recovered — the name is not a plugin
+                // Orivo could have installed — and leaving it would invite the
+                // next reader to try again. The smoke markers go with it: one
+                // on its own would send a later journal down the undo path.
+                Some(stem) if !valid_plugin_id(stem) => {
+                    let _ = fs::remove_file(entry.path());
+                }
+                Some(stem) if name.ends_with(".json") => plugin_ids.push(stem.to_owned()),
+                _ => {}
+            }
+        }
+        plugin_ids.sort();
+        plugin_ids
     }
 
     /// Finish or undo one plugin's interrupted operation.
@@ -608,6 +913,9 @@ impl PluginStore {
     /// not itself atomic reintroduces the problem it claims to solve. Which
     /// directories exist is the record, and each rename moves exactly one.
     fn recover_plugin(&self, plugin_id: &str) -> Option<Resolution> {
+        if !valid_plugin_id(plugin_id) {
+            return None;
+        }
         let journal = self.journal_path(plugin_id);
         let Some(record) = read_record(&journal, plugin_id) else {
             if journal.exists() {
@@ -657,7 +965,7 @@ impl PluginStore {
                 // Promoted and proved, with a target kept: only the commit
                 // rename was missing.
                 (false, true, true) => {
-                    let _ = self.write_trust(plugin_id, record.incoming_trusted);
+                    let _ = self.write_trust(plugin_id, &record.incoming_channel);
                     let _ = self.commit_install(&record);
                     return Some(Resolution::Committed);
                 }
@@ -665,12 +973,12 @@ impl PluginStore {
                 // that had already put the old tree back and lost only its
                 // bookkeeping; `displaced_version` separates the two.
                 (false, true, false) => {
-                    let trusted = if record.displaced_version.is_none() {
-                        record.incoming_trusted
+                    let channel = if record.displaced_version.is_none() {
+                        &record.incoming_channel
                     } else {
-                        record.displaced_trusted
+                        &record.displaced_channel
                     };
-                    let _ = self.write_trust(plugin_id, trusted);
+                    let _ = self.write_trust(plugin_id, channel);
                     if record.displaced_version.is_none() {
                         Resolution::Committed
                     } else {
@@ -695,13 +1003,13 @@ impl PluginStore {
                         &self.previous_directory(plugin_id),
                         &self.live_directory(plugin_id),
                     );
-                    let _ = self.write_trust(plugin_id, record.incoming_trusted);
+                    let _ = self.write_trust(plugin_id, &record.incoming_channel);
                     self.finish_rollback(plugin_id);
                     return Some(Resolution::Committed);
                 }
                 // Promoted; only the marker and the trust flag were missing.
                 (true, false) => {
-                    let _ = self.write_trust(plugin_id, record.incoming_trusted);
+                    let _ = self.write_trust(plugin_id, &record.incoming_channel);
                     self.finish_rollback(plugin_id);
                     return Some(Resolution::Committed);
                 }
@@ -710,7 +1018,7 @@ impl PluginStore {
                     let discard = self.discard_directory(plugin_id);
                     if is_directory(&discard) {
                         let _ = rename(&discard, &self.live_directory(plugin_id));
-                        let _ = self.write_trust(plugin_id, record.displaced_trusted);
+                        let _ = self.write_trust(plugin_id, &record.displaced_channel);
                         Resolution::RolledBack
                     } else {
                         Resolution::Abandoned
@@ -728,7 +1036,7 @@ impl PluginStore {
             &self.previous_directory(plugin_id),
             &self.live_directory(plugin_id),
         );
-        let _ = self.write_trust(plugin_id, record.displaced_trusted);
+        let _ = self.write_trust(plugin_id, &record.displaced_channel);
     }
 
     fn clear_operation(&self, plugin_id: &str) {
@@ -797,17 +1105,36 @@ impl PluginStore {
         Ok(())
     }
 
-    fn write_trust(&self, plugin_id: &str, trusted: bool) -> Result<(), String> {
+    /// Record which key signed the tree that is live *now*.
+    ///
+    /// The digest goes in with the signer, so the marker only speaks for the
+    /// bytes it was written against; see [`PluginStore::recorded_channel`].
+    fn write_trust(&self, plugin_id: &str, channel: &PackageChannel) -> Result<(), String> {
         let marker = self.trust_marker(plugin_id);
-        create_parent(&marker)?;
-        if trusted {
-            write_durably(&marker, b"1")
-                .map_err(|_| "The plugin folder is unavailable.".to_string())
-        } else {
+        let Some(signer) = channel.signer() else {
             let _ = fs::remove_file(&marker);
-            Ok(())
-        }
+            return Ok(());
+        };
+        let component_sha256 = component_digest(&self.live_directory(plugin_id))
+            .ok_or_else(|| "The plugin component is unavailable.".to_string())?;
+        create_parent(&marker)?;
+        let encoded = serde_json::to_vec(&TrustMarker {
+            signer: signer.to_owned(),
+            component_sha256,
+        })
+        .map_err(|_| "The plugin folder is unavailable.".to_string())?;
+        write_durably(&marker, &encoded)
+            .map_err(|_| "The plugin folder is unavailable.".to_string())
     }
+}
+
+/// What the trust marker holds. Bound to a digest so it cannot outlive the
+/// component it describes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustMarker {
+    signer: String,
+    component_sha256: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -829,12 +1156,27 @@ fn installed_version(directory: &Path) -> Option<String> {
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
-fn read_record(path: &Path, plugin_id: &str) -> Option<OperationRecord> {
+/// SHA-256 of the component in a package tree. `None` when there is no tree, or
+/// no component in it — which is also how [`PluginStore::identity`] says "this
+/// is not a package".
+fn component_digest(directory: &Path) -> Option<String> {
+    let bytes = read_small(&directory.join(COMPONENT_FILE), MAX_COMPONENT_BYTES)?;
+    Some(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// Read a bounded regular file, following nothing. Every caller here is reading
+/// host state a local process could have replaced with a link or a device.
+fn read_small(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
     let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() || metadata.len() > MAX_JOURNAL_BYTES {
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
         return None;
     }
-    let record = serde_json::from_slice::<OperationRecord>(&fs::read(path).ok()?).ok()?;
+    fs::read(path).ok()
+}
+
+fn read_record(path: &Path, plugin_id: &str) -> Option<OperationRecord> {
+    let record =
+        serde_json::from_slice::<OperationRecord>(&read_small(path, MAX_JOURNAL_BYTES)?).ok()?;
     record.valid_for(plugin_id).then_some(record)
 }
 
@@ -884,6 +1226,14 @@ fn sync_directory(path: Option<&Path>) {
 #[cfg(not(unix))]
 fn sync_directory(_path: Option<&Path>) {}
 
+/// A cut and a failure look the same to a caller and are opposites to the
+/// store: one is the process ceasing to exist, which recovery is built for, and
+/// the other is a process still running and able to put the tree back itself.
+enum SwapError {
+    Interrupted,
+    Failed(String),
+}
+
 fn interrupted() -> String {
     "The update was interrupted.".into()
 }
@@ -912,6 +1262,16 @@ mod tests {
     }
 
     const PLUGIN: &str = "com.orivo.fixture";
+
+    fn official() -> PackageChannel {
+        PackageChannel::Official {
+            signer: "orivo-release-v1".into(),
+        }
+    }
+
+    fn development() -> PackageChannel {
+        PackageChannel::Development
+    }
 
     fn files(version: &str, payload: &str) -> PackageFiles {
         PackageFiles::from([
@@ -973,7 +1333,7 @@ mod tests {
         let store = PluginStore::new(root.clone());
 
         let outcome = store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .expect("installs");
         assert_eq!(outcome.rollback_to, None);
         assert_eq!(live_version(&store).as_deref(), Some("1.0.0"));
@@ -995,11 +1355,11 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
 
         let outcome = store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &passes)
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
             .expect("updates");
         assert_eq!(outcome.rollback_to.as_deref(), Some("1.0.0"));
         assert_eq!(live_payload(&store).as_deref(), Some("two"));
@@ -1007,7 +1367,7 @@ mod tests {
             store.rollback_target(PLUGIN),
             Some(RollbackTarget {
                 version: "1.0.0".into(),
-                trusted: true
+                channel: official(),
             })
         );
 
@@ -1027,11 +1387,17 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
 
         let refusal = store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &refuses)
+            .install(
+                PLUGIN,
+                "2.0.0",
+                official(),
+                &files("2.0.0", "two"),
+                &refuses,
+            )
             .expect_err("the smoke test refuses it");
         assert!(refusal.contains("does not match the package"));
 
@@ -1053,17 +1419,17 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &passes)
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
             .unwrap();
         assert!(store.rollback_target(PLUGIN).is_some());
 
         let refusal = store.install(
             PLUGIN,
             "3.0.0",
-            true,
+            official(),
             &files("3.0.0", "three"),
             &|_directory, _checkpoint| Err("This plugin is built for a newer Orivo.".into()),
         );
@@ -1094,14 +1460,20 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &passes)
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
             .unwrap();
 
         store
-            .install(PLUGIN, "3.0.0", true, &files("3.0.0", "three"), &refuses)
+            .install(
+                PLUGIN,
+                "3.0.0",
+                official(),
+                &files("3.0.0", "three"),
+                &refuses,
+            )
             .expect_err("the smoke test refuses it");
 
         assert_eq!(live_payload(&store).as_deref(), Some("two"));
@@ -1115,7 +1487,13 @@ mod tests {
         let store = PluginStore::new(root.clone());
 
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &refuses)
+            .install(
+                PLUGIN,
+                "1.0.0",
+                official(),
+                &files("1.0.0", "one"),
+                &refuses,
+            )
             .expect_err("the smoke test refuses it");
 
         assert!(!is_directory(&store.live_directory(PLUGIN)));
@@ -1133,24 +1511,43 @@ mod tests {
         let store = PluginStore::new(root.clone());
 
         store
-            .install(PLUGIN, "1.0.0", false, &files("1.0.0", "one"), &passes)
+            .install(
+                PLUGIN,
+                "1.0.0",
+                development(),
+                &files("1.0.0", "one"),
+                &passes,
+            )
             .unwrap();
         assert!(!store.is_trusted(PLUGIN));
 
         store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &passes)
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
             .unwrap();
         assert!(store.is_trusted(PLUGIN));
 
-        store
-            .install(PLUGIN, "3.0.0", false, &files("3.0.0", "three"), &passes)
-            .unwrap();
-        assert!(!store.is_trusted(PLUGIN));
+        // The other direction is refused outright; see
+        // `an_unsigned_build_cannot_replace_a_signed_one`.
+        assert!(
+            store
+                .install(
+                    PLUGIN,
+                    "3.0.0",
+                    development(),
+                    &files("3.0.0", "three"),
+                    &passes
+                )
+                .is_err()
+        );
+        assert!(store.is_trusted(PLUGIN));
 
-        // And a rollback restores the badge the kept version arrived with.
+        // A rollback restores the badge the kept version arrived with — which
+        // here means going *back* to an unsigned build. That is deliberate: it
+        // is a version the user had, and the identity change is announced, so
+        // anything holding a grant against the signed package is told.
         store.rollback(PLUGIN).unwrap();
-        assert_eq!(live_version(&store).as_deref(), Some("2.0.0"));
-        assert!(store.is_trusted(PLUGIN));
+        assert_eq!(live_version(&store).as_deref(), Some("1.0.0"));
+        assert!(!store.is_trusted(PLUGIN));
         fs::remove_dir_all(root).ok();
     }
 
@@ -1164,14 +1561,14 @@ mod tests {
             let root = temporary_root();
             let store = PluginStore::new(root.clone());
             store
-                .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+                .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
                 .unwrap();
 
             let cut = store.install_stopping_before(
                 Some(step),
                 PLUGIN,
                 "2.0.0",
-                true,
+                official(),
                 &files("2.0.0", "two"),
                 &passes,
             );
@@ -1236,7 +1633,7 @@ mod tests {
                     Some(step),
                     PLUGIN,
                     "1.0.0",
-                    true,
+                    official(),
                     &files("1.0.0", "one"),
                     &passes,
                 )
@@ -1276,10 +1673,16 @@ mod tests {
             let root = temporary_root();
             let store = PluginStore::new(root.clone());
             store
-                .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+                .install(
+                    PLUGIN,
+                    "1.0.0",
+                    development(),
+                    &files("1.0.0", "one"),
+                    &passes,
+                )
                 .unwrap();
             store
-                .install(PLUGIN, "2.0.0", false, &files("2.0.0", "two"), &passes)
+                .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
                 .unwrap();
 
             store
@@ -1306,7 +1709,7 @@ mod tests {
             // The trust marker tracks whichever version won, never the other.
             assert_eq!(
                 restarted.is_trusted(PLUGIN),
-                payload.as_deref() == Some("one"),
+                payload.as_deref() == Some("two"),
                 "after {step:?}: the trust marker belongs to the other version"
             );
             assert!(!restarted.journal_path(PLUGIN).exists(), "after {step:?}");
@@ -1327,14 +1730,14 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
             .install_stopping_before(
                 Some(Step::PromoteStaged),
                 PLUGIN,
                 "2.0.0",
-                true,
+                official(),
                 &files("2.0.0", "two"),
                 &passes,
             )
@@ -1364,14 +1767,14 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
             .install_stopping_before(
                 Some(Step::SmokeTest),
                 PLUGIN,
                 "2.0.0",
-                true,
+                official(),
                 &files("2.0.0", "two"),
                 &passes,
             )
@@ -1391,14 +1794,14 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
             .install_stopping_before(
                 Some(Step::PromoteStaged),
                 PLUGIN,
                 "2.0.0",
-                true,
+                official(),
                 &files("2.0.0", "two"),
                 &passes,
             )
@@ -1407,7 +1810,13 @@ mod tests {
         // No `recover()` call: the next install has to do it, or it would
         // overwrite the journal that says how to undo the last one.
         store
-            .install(PLUGIN, "3.0.0", true, &files("3.0.0", "three"), &passes)
+            .install(
+                PLUGIN,
+                "3.0.0",
+                official(),
+                &files("3.0.0", "three"),
+                &passes,
+            )
             .expect("installs over an interrupted update");
         assert_eq!(live_payload(&store).as_deref(), Some("three"));
         assert_eq!(
@@ -1423,7 +1832,7 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         let journal = store.journal_path(PLUGIN);
         create_parent(&journal).unwrap();
@@ -1454,9 +1863,9 @@ mod tests {
             kind: OperationKind::Install,
             plugin_id: "com.orivo.elsewhere".into(),
             incoming_version: "9.0.0".into(),
-            incoming_trusted: true,
+            incoming_channel: official(),
             displaced_version: None,
-            displaced_trusted: false,
+            displaced_channel: development(),
         };
         let journal = store.journal_path(PLUGIN);
         create_parent(&journal).unwrap();
@@ -1478,10 +1887,10 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         store
-            .install(PLUGIN, "2.0.0", true, &files("2.0.0", "two"), &passes)
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
             .unwrap();
         assert!(store.rollback_target(PLUGIN).is_some());
 
@@ -1502,7 +1911,7 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
 
         let payloads = ["two", "three", "four", "five"];
@@ -1511,8 +1920,13 @@ mod tests {
                 let store = store.clone();
                 scope.spawn(move || {
                     let version = format!("2.0.{index}");
-                    let _ =
-                        store.install(PLUGIN, &version, true, &files(&version, payload), &passes);
+                    let _ = store.install(
+                        PLUGIN,
+                        &version,
+                        official(),
+                        &files(&version, payload),
+                        &passes,
+                    );
                 });
             }
         });
@@ -1529,12 +1943,246 @@ mod tests {
         fs::remove_dir_all(root).ok();
     }
 
+    /// The grammar every path in this module is built from. It moved here from
+    /// the installer because this is the module that turns an id into a
+    /// `remove_dir_all`, and a rule enforced somewhere else is a rule the
+    /// dangerous caller does not have.
+    #[test]
+    fn an_id_that_is_not_a_plugin_id_never_becomes_a_path() {
+        assert!(valid_plugin_id("com.orivo.quiky"));
+        assert!(!valid_plugin_id(""));
+        assert!(!valid_plugin_id(".."));
+        assert!(!valid_plugin_id("../../etc"));
+        assert!(!valid_plugin_id("quiky"));
+        assert!(!valid_plugin_id("com.Orivo.quiky"));
+        assert!(!valid_plugin_id("com.orivo.quiky~new"));
+        assert!(!valid_plugin_id("com/orivo/quiky"));
+        assert!(!valid_plugin_id("com.orivo."));
+    }
+
+    /// A journal file is a file in a directory any local process can write to,
+    /// and its *name* is where recovery used to learn which plugin it was
+    /// about. `...json` names the plugin `..`, whose live directory is the
+    /// application data directory — and `undo_install` removes that directory.
+    ///
+    /// The test plants exactly that: a journal whose name and whose `pluginId`
+    /// both say `..`, and the smoke marker that sends recovery down the
+    /// undo path. Then it asserts the user's catalogue, their preferences and
+    /// the plugin root are all still there.
+    #[test]
+    fn a_planted_journal_cannot_name_a_directory_outside_the_plugin_root() {
+        let app_data = temporary_root();
+        let plugin_root = app_data.join("plugins");
+        fs::create_dir_all(&plugin_root).unwrap();
+        let store = PluginStore::new(plugin_root.clone());
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+
+        // The user's own data, sitting where the plugin root's parent is.
+        fs::write(app_data.join("catalog.json"), b"{}").unwrap();
+        fs::write(app_data.join("preferences.json"), b"{}").unwrap();
+
+        for escape in ["..", "", "../..", "/"] {
+            let record = OperationRecord {
+                format_version: JOURNAL_FORMAT_VERSION,
+                kind: OperationKind::Install,
+                plugin_id: escape.to_string(),
+                incoming_version: "9.9.9".into(),
+                incoming_channel: development(),
+                displaced_version: Some("9.9.8".into()),
+                displaced_channel: development(),
+            };
+            let journal_directory = plugin_root.join(JOURNAL_DIRECTORY);
+            fs::create_dir_all(&journal_directory).unwrap();
+            // `/` and `../..` do not even land in the journal directory; the
+            // names that matter are the ones that do and still escape.
+            let _ = fs::write(
+                journal_directory.join(format!("{escape}.json")),
+                serde_json::to_vec(&record).unwrap(),
+            );
+            let _ = fs::write(journal_directory.join(format!("{escape}.smoke")), b"");
+
+            store.recover();
+
+            assert!(
+                app_data.join("catalog.json").is_file(),
+                "{escape:?} took the library with it"
+            );
+            assert!(
+                app_data.join("preferences.json").is_file(),
+                "{escape:?} took the preferences with it"
+            );
+            assert!(plugin_root.is_dir(), "{escape:?} took the plugin root");
+            assert_eq!(live_payload(&store).as_deref(), Some("one"), "{escape:?}");
+            // And the inner guard, reached directly: a caller that already
+            // holds an id is held to the same grammar as one that read it off a
+            // file name.
+            assert_eq!(store.recover_plugin(escape), None, "{escape:?}");
+            assert!(app_data.join("catalog.json").is_file(), "{escape:?}");
+
+            let leftovers = fs::read_dir(plugin_root.join(JOURNAL_DIRECTORY))
+                .map(|entries| entries.filter_map(Result::ok).count())
+                .unwrap_or(0);
+            assert_eq!(
+                leftovers, 0,
+                "{escape:?}: a journal was left in place to be replayed"
+            );
+        }
+        fs::remove_dir_all(app_data).ok();
+    }
+
+    /// The developer channel can never take over from the official one without
+    /// the user removing the plugin first. A sideloaded build keeping the id
+    /// would keep every grant and every runner profile agreed to for the
+    /// *signed* package.
+    #[test]
+    fn an_unsigned_build_cannot_replace_a_signed_one() {
+        let root = temporary_root();
+        let store = PluginStore::new(root.clone());
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+
+        let refusal = store
+            .install(
+                PLUGIN,
+                "2.0.0",
+                development(),
+                &files("2.0.0", "two"),
+                &passes,
+            )
+            .expect_err("an unsigned build cannot take over");
+        assert!(refusal.contains("Remove it first"), "{refusal}");
+        assert_eq!(live_payload(&store).as_deref(), Some("one"));
+        assert!(store.is_trusted(PLUGIN));
+
+        // Removing it is the door, and it works.
+        store.remove(PLUGIN).unwrap();
+        store
+            .install(
+                PLUGIN,
+                "2.0.0",
+                development(),
+                &files("2.0.0", "two"),
+                &passes,
+            )
+            .expect("installs once the signed one is gone");
+        assert!(!store.is_trusted(PLUGIN));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The marker names the digest it was written for, so swapping the
+    /// component underneath an installed plugin costs the official badge
+    /// instead of inheriting it.
+    #[test]
+    fn the_trust_marker_does_not_survive_the_component_it_describes() {
+        let root = temporary_root();
+        let store = PluginStore::new(root.clone());
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+        assert_eq!(
+            store.identity(PLUGIN).unwrap().channel.signer(),
+            Some("orivo-release-v1")
+        );
+
+        fs::write(
+            store.live_directory(PLUGIN).join("component.wasm"),
+            b"something else",
+        )
+        .unwrap();
+
+        assert!(!store.is_trusted(PLUGIN));
+        assert_eq!(store.identity(PLUGIN).unwrap().channel, development());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The seam E2 plugs into. A grant is an agreement with a package, so the
+    /// holder has to be told every time the package behind an id changes — and
+    /// told *nothing* when it does not, or the notification means nothing.
+    #[test]
+    fn every_change_of_package_is_announced_once_and_no_non_change_is() {
+        let root = temporary_root();
+        let store = PluginStore::new(root.clone());
+        let seen: Arc<Mutex<Vec<IdentityChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&seen);
+        store.observe(Arc::new(move |change: &IdentityChange| {
+            recorder.lock().unwrap().push(change.clone());
+        }));
+
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+        store
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
+            .unwrap();
+        // Refused in staging: nothing changed, so nothing is announced.
+        store
+            .install(
+                PLUGIN,
+                "3.0.0",
+                official(),
+                &files("3.0.0", "three"),
+                &|_directory, _checkpoint| Err("no".into()),
+            )
+            .unwrap_err();
+        store.rollback(PLUGIN).unwrap();
+        store.remove(PLUGIN).unwrap();
+
+        let seen = seen.lock().unwrap().clone();
+        let versions = seen
+            .iter()
+            .map(|change| match change {
+                IdentityChange::Activated(identity) => identity.version.clone(),
+                IdentityChange::Removed { .. } => "removed".to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec!["1.0.0", "2.0.0", "1.0.0", "removed"]);
+        // The identity carries what a grant is actually held against.
+        let IdentityChange::Activated(first) = &seen[0] else {
+            panic!("the first change is an activation");
+        };
+        assert_eq!(first.plugin_id, PLUGIN);
+        assert_eq!(first.component_sha256.len(), 64);
+        assert!(first.channel.is_official());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// After the live tree has been archived, an ordinary I/O failure is not a
+    /// crash — the process is still running and can put it back. Leaving it for
+    /// the next start would mean the plugin is *absent* in the meantime, and the
+    /// catalogue is read before recovery runs.
+    ///
+    /// A directory where the smoke marker belongs makes the write fail at
+    /// exactly that point: after the archive rename, before the promotion.
+    #[test]
+    fn an_io_failure_after_the_archive_rename_puts_the_tree_back_at_once() {
+        let root = temporary_root();
+        let store = PluginStore::new(root.clone());
+        store
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
+            .unwrap();
+
+        // `write_durably` opens this path with `File::create`, which cannot
+        // truncate a directory.
+        fs::create_dir_all(store.smoke_marker(PLUGIN)).unwrap();
+        store
+            .install(PLUGIN, "2.0.0", official(), &files("2.0.0", "two"), &passes)
+            .expect_err("the marker cannot be written");
+
+        // No recovery pass: the version that was working is back already.
+        assert_eq!(live_payload(&store).as_deref(), Some("one"));
+        assert!(store.is_trusted(PLUGIN));
+        fs::remove_dir_all(root).ok();
+    }
+
     #[test]
     fn rolling_back_without_a_kept_version_is_refused() {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
 
         assert!(
@@ -1553,7 +2201,7 @@ mod tests {
         let root = temporary_root();
         let store = PluginStore::new(root.clone());
         store
-            .install(PLUGIN, "1.0.0", true, &files("1.0.0", "one"), &passes)
+            .install(PLUGIN, "1.0.0", official(), &files("1.0.0", "one"), &passes)
             .unwrap();
         let orphan = store.staged_directory("com.orivo.other");
         fs::create_dir_all(&orphan).unwrap();
