@@ -22,8 +22,11 @@
 //! 1. Does the catalog step of startup scale acceptably from a hobby library
 //!    (10 games) to a hoarder's (10,000)? `catalog::Catalog::load_with_migration`
 //!    and `save_atomically` are exactly what `load_or_migrate_catalog` calls.
-//! 2. Are the two auto-apply passes (Wine, Winlator) cheap no-ops when nothing
-//!    needs them, and still linear rather than quadratic when something does?
+//! 2. Is the Wine auto-apply pass a cheap no-op when nothing needs it, and
+//!    still linear rather than quadratic when something does? Winlator's pass
+//!    was measured here too until M1 took it off the startup path entirely: it
+//!    now runs in the background, only against a folder the user connected
+//!    through a storage access grant, which this bench cannot synthesise.
 //! 3. What does having plugins installed cost the two on-demand commands that
 //!    actually touch the plugin runtime — `get_plugin_catalog` (Settings ›
 //!    Plugins) and `get_runner_plugins` (the emulator flow) — neither of which
@@ -89,9 +92,7 @@ fn report(label: &str, n: usize, mut samples: Vec<Duration>) {
     let min = samples[0];
     let median = samples[samples.len() / 2];
     let max = samples[samples.len() - 1];
-    println!(
-        "PERF {label:<40} n={n:<6} min={min:>10.2?} median={median:>10.2?} max={max:>10.2?}"
-    );
+    println!("PERF {label:<40} n={n:<6} min={min:>10.2?} median={median:>10.2?} max={max:>10.2?}");
 }
 
 fn timed<T>(mut work: impl FnMut() -> T) -> (T, Duration) {
@@ -133,7 +134,7 @@ fn synthetic_catalog_json(count: usize) -> String {
     )
 }
 
-/// `load_with_migration` + `save_atomically` + both auto-apply passes, at one
+/// `load_with_migration` + `save_atomically` + the Wine auto-apply pass, at one
 /// catalog size. This is the sequence `AppState::load` runs on every startup.
 fn bench_catalog_at_size(n: usize) {
     let dir = scratch_dir(&format!("catalog-{n}"));
@@ -148,11 +149,9 @@ fn bench_catalog_at_size(n: usize) {
     let mut load_samples = Vec::with_capacity(MEASURED_ITERATIONS);
     let mut save_samples = Vec::with_capacity(MEASURED_ITERATIONS);
     let mut wine_samples = Vec::with_capacity(MEASURED_ITERATIONS);
-    let mut winlator_samples = Vec::with_capacity(MEASURED_ITERATIONS);
 
     for _ in 0..MEASURED_ITERATIONS {
-        let (loaded, load_elapsed) =
-            timed(|| Catalog::load_with_migration(&catalog_path).unwrap());
+        let (loaded, load_elapsed) = timed(|| Catalog::load_with_migration(&catalog_path).unwrap());
         load_samples.push(load_elapsed);
 
         let mut catalog = loaded.catalog;
@@ -160,24 +159,19 @@ fn bench_catalog_at_size(n: usize) {
         let (_, save_elapsed) = timed(|| catalog.save_atomically(&save_path).unwrap());
         save_samples.push(save_elapsed);
 
-        // Both passes are `#[cfg]`-gated to one OS each (see lib.rs), so on
-        // any other platform — including this bench run, most of the time —
-        // they return `false` after their `O(n)` filter without touching
-        // Wine or Winlator at all. That early return is still measured here,
-        // not assumed, because it is exactly the cost every non-macOS,
-        // non-Android startup actually pays for these two passes.
+        // The pass is `#[cfg]`-gated to macOS (see lib.rs), so on any other
+        // platform — including this bench run, most of the time — it returns
+        // `false` after its `O(n)` filter without touching Wine at all. That
+        // early return is still measured here, not assumed, because it is
+        // exactly the cost every non-macOS startup actually pays for it.
         let (_, wine_elapsed) =
             timed(|| crate::auto_apply_wine_to_direct_games(&mut catalog, &wine_prefix_root));
         wine_samples.push(wine_elapsed);
-
-        let (_, winlator_elapsed) = timed(|| crate::auto_apply_winlator_shortcuts(&mut catalog));
-        winlator_samples.push(winlator_elapsed);
     }
 
     report("catalog.load_with_migration", n, load_samples);
     report("catalog.save_atomically", n, save_samples);
     report("auto_apply_wine_to_direct_games", n, wine_samples);
-    report("auto_apply_winlator_shortcuts", n, winlator_samples);
 
     fs::remove_dir_all(&dir).ok();
 }
@@ -271,7 +265,11 @@ fn bench_plugin_surfaces_at_count(count: usize) {
         let (_, elapsed) = timed(|| installer_registry.installed_plugins(&runtime));
         installed_samples.push(elapsed);
     }
-    report("plugin_installer.get_plugin_catalog", count, installed_samples);
+    report(
+        "plugin_installer.get_plugin_catalog",
+        count,
+        installed_samples,
+    );
     fs::remove_dir_all(&installer_dir).ok();
 
     let runner_dir = scratch_dir(&format!("runner-{count}"));

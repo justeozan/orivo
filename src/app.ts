@@ -41,6 +41,16 @@ import {
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { prefersReducedMotion } from "./motion";
+import {
+  isWinlatorHost,
+  normaliseWinlatorExportFolder,
+  normaliseWinlatorImportResult,
+  winlatorReviewList,
+  winlatorReviewPrompt,
+  winlatorShortcutsToOffer,
+  winlatorWaitingToast,
+  type WinlatorShortcut,
+} from "./winlator-source";
 
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
@@ -353,6 +363,9 @@ interface State {
   onboarding: OnboardingState;
   notifications: NotificationsState;
   libraryMenuOpen: boolean;
+  // What Winlator's export folder holds that the library does not, waiting for
+  // the user to say yes: a shortcut is a command, so it is never assumed.
+  winlatorReview: { folderLabel: string | null; shortcuts: WinlatorShortcut[] } | null;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
   sourceAccounts: SourceAccountsState;
@@ -425,6 +438,7 @@ const SOURCE_ACCOUNT_CONNECTED_EVENT = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
+const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
@@ -454,6 +468,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       highlighted: [],
     },
     libraryMenuOpen: false,
+    winlatorReview: null,
     steam: {
       open: false,
       phase: "idle",
@@ -1478,6 +1493,62 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // managed; repeating them in this menu made it long without adding an
     // action beyond "sync now".
 
+    renderWinlatorReview(list);
+  };
+
+  // Every title here came out of a file on shared storage, so all of it goes in
+  // through `textContent`: `innerHTML` would let a file name write markup.
+  const renderWinlatorReview = (list: HTMLElement): void => {
+    const review = state.winlatorReview;
+    if (!review || review.shortcuts.length === 0) {
+      return;
+    }
+    const heading = document.createElement("p");
+    heading.className = "library-source-menu__label";
+    heading.textContent = review.folderLabel ? `Winlator · ${review.folderLabel}` : "Winlator";
+    const prompt = document.createElement("p");
+    prompt.className = "library-source-review__prompt";
+    prompt.textContent = winlatorReviewPrompt(review.shortcuts);
+    const { titles, remaining } = winlatorReviewList(review.shortcuts);
+    const found = document.createElement("ul");
+    found.className = "library-source-review__list";
+    for (const title of titles) {
+      const item = document.createElement("li");
+      item.textContent = title;
+      found.append(item);
+    }
+    if (remaining > 0) {
+      const more = document.createElement("li");
+      more.textContent = `and ${remaining} more`;
+      found.append(more);
+    }
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "library-source-action library-source-action--review";
+    add.setAttribute("role", "menuitem");
+    add.dataset.libraryAction = "winlator-import";
+    const addCopy = document.createElement("span");
+    addCopy.className = "library-source-action__copy";
+    const addLabel = document.createElement("strong");
+    addLabel.textContent =
+      review.shortcuts.length === 1 ? "Add this game" : `Add these ${review.shortcuts.length} games`;
+    addCopy.append(addLabel);
+    add.append(addCopy);
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "library-source-action library-source-action--review";
+    dismiss.setAttribute("role", "menuitem");
+    dismiss.dataset.libraryAction = "winlator-dismiss";
+    const dismissCopy = document.createElement("span");
+    dismissCopy.className = "library-source-action__copy";
+    const dismissLabel = document.createElement("strong");
+    dismissLabel.textContent = "Not now";
+    dismissCopy.append(dismissLabel);
+    dismiss.append(dismissCopy);
+
+    list.append(heading, prompt, found, add, dismiss);
   };
 
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
@@ -1604,6 +1675,67 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
     } catch (error) {
       showToast(messageFromError(error, "Could not import this game."));
+    }
+  };
+
+  const connectWinlatorExportFolder = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      closeLibraryMenu();
+      showToast("Connecting a folder is available in the Orivo app.");
+      return;
+    }
+
+    try {
+      const answer = normaliseWinlatorExportFolder(
+        await invoke<unknown>("connect_winlator_export_folder"),
+      );
+      if (!answer) {
+        closeLibraryMenu();
+        showToast("Orivo could not read the folder you chose.");
+        return;
+      }
+      const waiting = winlatorShortcutsToOffer(answer);
+      state.winlatorReview = waiting.length
+        ? { folderLabel: answer.folderLabel, shortcuts: waiting }
+        : null;
+      // Nothing was imported: the host found shortcuts and is asking. The menu
+      // stays open, now carrying that question, instead of closing on a toast
+      // the user would have to act on from memory.
+      if (state.winlatorReview) {
+        setLibraryMenuOpen(true);
+      } else {
+        closeLibraryMenu();
+      }
+      showToast(answer.message);
+    } catch (error) {
+      closeLibraryMenu();
+      showToast(messageFromError(error, "Orivo could not connect that folder."));
+    }
+  };
+
+  const importWinlatorShortcuts = async (): Promise<void> => {
+    const review = state.winlatorReview;
+    if (!review || !isTauriRuntime()) {
+      return;
+    }
+    closeLibraryMenu();
+    state.winlatorReview = null;
+    try {
+      const result = normaliseWinlatorImportResult(
+        await invoke<unknown>("import_winlator_shortcuts", {
+          gameRefs: review.shortcuts.map((shortcut) => shortcut.gameRef),
+        }),
+      );
+      if (!result) {
+        showToast("Orivo could not add those Winlator games.");
+        return;
+      }
+      if (result.importedIds.length > 0) {
+        await refreshLibrary(result.importedIds[0]);
+      }
+      showToast(result.message);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not add those Winlator games."));
     }
   };
 
@@ -4862,6 +4994,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       navigate({ page: "settings", section: "libraries", attachGameId: null });
     } else if (action === "local") {
       void importGame();
+    } else if (action === "winlator-folder") {
+      void connectWinlatorExportFolder();
+    } else if (action === "winlator-import") {
+      void importWinlatorShortcuts();
+    } else if (action === "winlator-dismiss") {
+      // Declining is not a refusal to see them again: the shortcuts stay in the
+      // folder, and the same entry lists them next time.
+      state.winlatorReview = null;
+      closeLibraryMenu();
     }
   });
 
@@ -5229,6 +5370,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (!result) return;
       state.sourceAccounts.lastSync.set(result.provider, result);
       renderSourceAccountsPanel();
+    });
+    // The background pass runs after the first paint and imports nothing: it
+    // says what is waiting, and the user decides. Nothing is refreshed here
+    // because nothing changed.
+    void listen<unknown>(WINLATOR_SHORTCUTS_WAITING_EVENT, (event) => {
+      const waiting = winlatorWaitingToast(event.payload);
+      if (waiting) showToast(waiting);
     });
     void listen<WineLaunchStatusEvent>(WINE_LAUNCH_STATUS_EVENT, (event) => {
       const payload = event.payload;
@@ -6712,6 +6860,17 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
               </button>
+              <!-- Android only, and deliberately not a desktop no-op: Winlator is
+                   an Android application, and the folder chooser this opens does
+                   not exist anywhere else. -->
+              ${
+                isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? `<button type="button" class="library-source-action" role="menuitem" data-library-action="winlator-folder">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>Winlator shortcuts</strong><small>Review what Winlator exported, and add what you want</small></span>
+              </button>`
+                  : ""
+              }
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>

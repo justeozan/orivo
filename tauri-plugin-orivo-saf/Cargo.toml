@@ -1,0 +1,21 @@
+[package]
+name = "tauri-plugin-orivo-saf"
+version = "0.1.0"
+description = "The one thing JNI cannot do: receive an Android activity result."
+authors = ["Ozan Sahin"]
+license-file = "../LICENSE"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+# `tauri-build` discovers a plugin's Android library project through the
+# `DEP_<LINKS>_ANDROID_LIBRARY_PATH` metadata a `links` key makes visible, and
+# writes it into `gen/android/tauri.settings.gradle`. Without this the Kotlin
+# below would never reach the APK.
+links = "tauri-plugin-orivo-saf"
+
+[build-dependencies]
+tauri-plugin = "2"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = "2.11.5"

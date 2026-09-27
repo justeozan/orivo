@@ -671,6 +671,13 @@ pub struct WinlatorProfile {
     /// its exported frontend shortcuts. No implicit device-wide fallback.
     #[serde(default)]
     pub shortcut_directories: Vec<PathBuf>,
+    /// Android storage access grants covering those same directories, when the
+    /// folder is one Orivo can only read through a `ContentResolver`. A grant is
+    /// held *in addition to* the directory it stands for, never instead of it:
+    /// the directory is the scope every check already uses and the path Winlator
+    /// itself opens, and the tree URI is only how Orivo reads it.
+    #[serde(default)]
+    pub shortcut_trees: Vec<String>,
     /// Disabled profiles and their games stay persisted and visible, but
     /// cannot be launched until the user enables them again.
     #[serde(default = "default_winlator_profile_enabled")]
@@ -2375,6 +2382,10 @@ impl WineGameInventoryEntry {
 }
 
 const MAX_WINLATOR_PROFILE_NAME_LENGTH: usize = 120;
+/// A profile points at the folder Winlator exports into. A handful of grants is
+/// already more than Winlator's own exporter can produce.
+const MAX_WINLATOR_SHORTCUT_TREES: usize = 8;
+const MAX_WINLATOR_SHORTCUT_TREE_LENGTH: usize = 2_048;
 const MAX_WINLATOR_GAME_TITLE_LENGTH: usize = 512;
 const MAX_WINLATOR_FINGERPRINT_LENGTH: usize = 256;
 /// Winlator numbers containers from 1 upwards as the user creates them. The
@@ -2407,6 +2418,32 @@ impl WinlatorProfile {
             if !shortcut_directories.insert(directory) {
                 return Err(CatalogError::Invalid(
                     "Winlator profile has duplicate granted shortcut directories".into(),
+                ));
+            }
+        }
+        // Only the durable shape of a storage access grant is checked here. What
+        // a tree URI may actually name — which provider, which volume, and the
+        // folder it resolves to — is the runner's to decide, against the device.
+        if self.shortcut_trees.len() > MAX_WINLATOR_SHORTCUT_TREES {
+            return Err(CatalogError::Invalid(
+                "Winlator profile has too many granted shortcut folders".into(),
+            ));
+        }
+        let mut shortcut_trees = BTreeSet::new();
+        for tree in &self.shortcut_trees {
+            if tree.len() > MAX_WINLATOR_SHORTCUT_TREE_LENGTH
+                || !tree.starts_with("content://")
+                || tree.chars().any(|character| {
+                    character.is_control() || character.is_whitespace() || !character.is_ascii()
+                })
+            {
+                return Err(CatalogError::Invalid(
+                    "Winlator granted shortcut folder must be a content URI".into(),
+                ));
+            }
+            if !shortcut_trees.insert(tree) {
+                return Err(CatalogError::Invalid(
+                    "Winlator profile has duplicate granted shortcut folders".into(),
                 ));
             }
         }
@@ -4755,6 +4792,7 @@ mod tests {
             shortcut_directories: vec![PathBuf::from(
                 "/storage/emulated/0/Download/Winlator/Frontend",
             )],
+            shortcut_trees: Vec::new(),
             enabled: true,
             last_imported_at: Some(1_721_553_600_000),
         }

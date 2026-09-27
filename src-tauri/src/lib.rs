@@ -38,6 +38,7 @@ mod wallpaper_credentials;
 mod wallpaper_search;
 mod wine_runner;
 mod winlator_runner;
+mod winlator_saf;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -157,6 +158,9 @@ const MOBILE_EVAL_MAX_RETRIES: u32 = 8;
 const SOURCE_EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 const SOURCE_EVAL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WINE_LAUNCH_STATUS_EVENT: &str = "wine-launch-status";
+/// The background pass runs after the library has painted, and it imports
+/// nothing by itself. This is how the user learns there is something to look at.
+const WINLATOR_SHORTCUTS_WAITING_EVENT: &str = "winlator-shortcuts-waiting";
 const WINE_EARLY_EXIT_WINDOW: Duration = Duration::from_secs(8);
 static MEDIA_CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// The detail projection is derived state built once during setup. Keeping the
@@ -262,6 +266,14 @@ struct AppState {
     /// Ephemeral setup grants hold native-picker selections until a profile is
     /// explicitly created. The WebView sees only opaque ids and labels.
     wine_setups: Arc<Mutex<BTreeMap<String, WineSetupSession>>>,
+    /// Winlator adoption runs once per launch, in the background, and can be
+    /// stopped. It is state rather than a fire-and-forget spawn because two
+    /// passes walking the same folder would fight over one catalog write.
+    winlator_adoption: Arc<WinlatorAdoption>,
+    /// The last folder scan, waiting for the user to say which of it they want.
+    /// It holds host-private paths and fingerprints; the WebView sees only the
+    /// opaque references and titles projected out of it.
+    winlator_preview: Mutex<Option<WinlatorImportPreview>>,
     /// Long-running scans are owned by Rust and polled through safe, bounded
     /// view models. Cancelling a job never touches the persistent library.
     wine_scan_jobs: Mutex<BTreeMap<String, Arc<WineScanJob>>>,
@@ -580,6 +592,41 @@ struct WineScanGameView {
     launchable: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WinlatorShortcutsWaitingEvent {
+    pending: usize,
+    changed: usize,
+}
+
+/// What the WebView learns about the folder: whether one is connected, what to
+/// call it, what is in it, and one sentence. Never a URI, never a path — and
+/// never a card, because the answer to this is the user choosing.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WinlatorExportFolderView {
+    connected: bool,
+    folder_label: Option<String>,
+    found: Vec<WinlatorShortcutView>,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WinlatorShortcutView {
+    game_ref: String,
+    title: String,
+    already_imported: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WinlatorImportResponse {
+    imported_ids: Vec<String>,
+    skipped_refs: Vec<String>,
+    message: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WineImportResponse {
@@ -613,13 +660,11 @@ impl AppState {
             catalog.save_atomically(&catalog_path)?;
         }
 
-        // On Android the same idea applies through Winlator: adopt whatever
-        // shortcuts it has exported for a frontend. This is a no-op everywhere
-        // else, and a no-op on Android until Winlator has actually exported one,
-        // so the first paint never waits on it.
-        if auto_apply_winlator_shortcuts(&mut catalog) {
-            catalog.save_atomically(&catalog_path)?;
-        }
+        // Winlator's side of this — adopting whatever shortcuts it has exported
+        // for a frontend — deliberately does *not* happen here. It reads a folder
+        // the user granted, over a `ContentResolver`, which is exactly the kind
+        // of work that has no business between the process starting and the first
+        // frame. `spawn_winlator_adoption` runs it once the shell is on screen.
 
         Ok(Self {
             catalog_path,
@@ -632,6 +677,8 @@ impl AppState {
             steam_auth_settled: Mutex::new(None),
             source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
+            winlator_adoption: Arc::new(WinlatorAdoption::default()),
+            winlator_preview: Mutex::new(None),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
         })
@@ -776,6 +823,9 @@ pub fn run() {
         // lets the frontend relaunch into the version it just installed.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // The one Android call Orivo cannot make from Rust: receiving the folder
+        // the system chooser returns. See `tauri-plugin-orivo-saf/README.md`.
+        .plugin(tauri_plugin_orivo_saf::init())
         .setup(|app| {
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
@@ -932,6 +982,13 @@ pub fn run() {
         .register_uri_scheme_protocol(game_media::GAME_MEDIA_URI_SCHEME, |context, request| {
             game_media_scheme_response(context.app_handle(), &request)
         })
+        // The first finished page load is the honest "the shell is on screen"
+        // signal, and it is when the Winlator pass may start looking at a folder.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                spawn_winlator_adoption(webview.app_handle().clone());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             get_library,
             import_game,
@@ -982,6 +1039,8 @@ pub fn run() {
             get_wine_runner_settings,
             set_wine_profile_enabled,
             delete_wine_profile,
+            connect_winlator_export_folder,
+            import_winlator_shortcuts,
             launch_game,
             install_steam_game,
             install_epic_game,
@@ -2800,149 +2859,692 @@ fn winlator_catalog_game(
     }
 }
 
-/// Adopt the shortcuts Winlator exported for a frontend as library cards backed
-/// by the managed default Winlator profile.
+/// The background Winlator pass.
 ///
-/// Orivo can create none of what Winlator owns — the container, the Wine prefix
-/// and the shortcut all live in that app's private storage. What it can do is
-/// read the folder Winlator itself writes an exported shortcut into, scope-check
-/// and hash each file, and reduce it to opaque ids before it becomes a runner
-/// card. Nothing outside that granted folder is read, and a shortcut rewritten
-/// afterwards is refused at launch rather than launched blind.
-///
-/// Returns `true` when the catalog was modified. The caller owns locking and
-/// persistence.
-fn auto_apply_winlator_shortcuts(catalog: &mut Catalog) -> bool {
-    if !cfg!(target_os = "android") {
-        // Winlator is an Android application; there is nothing to adopt here.
-        return false;
-    }
-    adopt_exported_winlator_shortcuts(
-        catalog,
-        Path::new(winlator_runner::DEFAULT_FRONTEND_SHORTCUT_DIRECTORY),
-    )
+/// It is state rather than a bare spawn because three things have to be true at
+/// once: it runs once per launch, it never runs twice at the same time, and a
+/// pass already walking a folder can be stopped — by a user reviewing that
+/// folder, and by the scanner's own bounds.
+#[derive(Debug, Default)]
+struct WinlatorAdoption {
+    started: AtomicBool,
+    in_flight: AtomicBool,
+    cancelled: AtomicBool,
 }
 
-fn adopt_exported_winlator_shortcuts(catalog: &mut Catalog, granted: &Path) -> bool {
-    // No exported shortcut folder means Winlator has never been asked to share
-    // one. That is the ordinary state, not an error, and it must not cost a
-    // directory walk on every start.
-    if !granted.is_dir() {
-        return false;
-    }
+/// What the background pass saw. It changes nothing: a shortcut becomes a card
+/// only where a user said so, so all this carries is what is waiting for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct WinlatorShortcutReport {
+    /// Shortcuts in the folder that are not in the library.
+    pending: usize,
+    /// Imported shortcuts whose bytes no longer match what was imported. Their
+    /// stored fingerprint is deliberately left alone: the launch guard refuses
+    /// them until the user has looked at the change.
+    changed: usize,
+}
 
-    let profile = match catalog.winlator_profile(AUTO_WINLATOR_PROFILE_ID).cloned() {
-        Some(profile) if profile.enabled => profile,
-        // Respect an explicit user disable of the managed default profile.
-        Some(_) => return false,
-        None => {
-            // The grant is stored canonical because every later scope check
-            // compares it against a canonicalised shortcut path. Storing the
-            // pathname as given would make one symlink in the middle of it look
-            // like a shortcut outside the grant.
-            let Ok(granted) = fs::canonicalize(granted) else {
-                return false;
-            };
-            WinlatorProfile {
-                id: AUTO_WINLATOR_PROFILE_ID.to_string(),
-                display_name: AUTO_WINLATOR_PROFILE_NAME.to_string(),
-                distribution: WinlatorDistribution::Cmod,
-                container_id: None,
-                shortcut_directories: vec![granted],
-                enabled: true,
-                last_imported_at: None,
-            }
+/// A scan the user has not acted on yet.
+///
+/// The WebView only ever sees opaque references and titles out of this; the
+/// paths, the fingerprints and the container ids stay here, and the import
+/// re-derives them from the folder rather than from anything it was sent.
+#[derive(Debug)]
+struct WinlatorImportPreview {
+    profile_id: String,
+    shortcuts: Vec<winlator_runner::ScannedWinlatorShortcut>,
+}
+
+/// How a pass reaches the folder Winlator exports into.
+///
+/// The directory is what Winlator itself opens and what every scope check
+/// compares against; the tree is how Orivo reads it when the pathname is
+/// unreachable, which on API 30+ it always is. Holding both is what lets one
+/// code path serve a device and a desktop test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WinlatorExportFolder {
+    directory: PathBuf,
+    tree_uri: Option<String>,
+}
+
+impl WinlatorExportFolder {
+    /// The directory to store as the profile's grant.
+    ///
+    /// A folder read by pathname is stored canonical, because every later scope
+    /// check compares it against a canonicalised shortcut path: storing the
+    /// pathname as given would make one symlink in the middle of it look like a
+    /// shortcut outside the grant. A folder behind a storage access grant is
+    /// already canonical — it was derived from the identifier the provider gave —
+    /// and a path Orivo cannot read cannot be canonicalised anyway.
+    fn granted_directory(&self) -> Option<PathBuf> {
+        match self.tree_uri {
+            Some(_) => Some(self.directory.clone()),
+            None => fs::canonicalize(&self.directory).ok(),
         }
-    };
+    }
+}
 
-    let cancelled = AtomicBool::new(false);
-    let scan = match winlator_runner::scan_winlator_shortcuts(
+/// Start the background pass, once, after the shell is on screen.
+///
+/// Its predecessor ran inside `AppState::load`, with a comment claiming the
+/// first paint never waited on it. That was only true while the export folder
+/// was unreadable; with a storage access grant it would have been false, and a
+/// library would have waited on a `ContentResolver` walk to paint.
+fn spawn_winlator_adoption(app: AppHandle) {
+    // Winlator is an Android application: there is nothing to look at anywhere
+    // else, and startup pays nothing for this on a desktop.
+    if !cfg!(target_os = "android") {
+        return;
+    }
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state.winlator_adoption.started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        match run_winlator_shortcut_report(&state) {
+            // The library was painted before this pass existed, so the only way
+            // the user learns that Winlator exported something is to say it. A
+            // pass with nothing to report stays silent.
+            Ok(report) if report.pending > 0 || report.changed > 0 => {
+                let _ = app.emit_to(
+                    MAIN_WINDOW_LABEL,
+                    WINLATOR_SHORTCUTS_WAITING_EVENT,
+                    WinlatorShortcutsWaitingEvent {
+                        pending: report.pending,
+                        changed: report.changed,
+                    },
+                );
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("orivo: winlator shortcut pass did not run: {error}"),
+        }
+    });
+}
+
+/// Run one background pass under the one-at-a-time guard.
+fn run_winlator_shortcut_report(state: &AppState) -> Result<WinlatorShortcutReport, String> {
+    if state
+        .winlator_adoption
+        .in_flight
+        .swap(true, Ordering::AcqRel)
+    {
+        return Err("a Winlator pass is already running".into());
+    }
+    state
+        .winlator_adoption
+        .cancelled
+        .store(false, Ordering::Release);
+    let report = winlator_shortcut_report(state);
+    state
+        .winlator_adoption
+        .in_flight
+        .store(false, Ordering::Release);
+    report
+}
+
+/// Stop the pass that is walking a folder right now, and wait for it to notice.
+///
+/// Reviewing a folder is the one action that has to overtake a running pass:
+/// both read the same grant, and the user's is the one with somebody waiting on
+/// it.
+fn cancel_winlator_adoption(state: &AppState) {
+    /// A scan checks its cancellation flag between entries and before every
+    /// read, so noticing takes one document. This bound exists so a wedged pass
+    /// cannot hold the review flow instead.
+    const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+    state
+        .winlator_adoption
+        .cancelled
+        .store(true, Ordering::Release);
+    let deadline = Instant::now() + CANCEL_GRACE;
+    while state.winlator_adoption.in_flight.load(Ordering::Acquire) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Look at the connected folder and answer what is waiting, writing nothing.
+///
+/// Nothing here takes the catalog's write lock, and nothing here creates a card.
+/// Both are deliberate: a pass that ran at every launch and imported whatever it
+/// found would make any `.desktop` file that reached the folder into a card, and
+/// a card is one tap from running the `Exec=` line inside it.
+fn winlator_shortcut_report(state: &AppState) -> Result<WinlatorShortcutReport, String> {
+    let Some((profile, inventory)) = winlator_managed_profile(state)? else {
+        return Ok(WinlatorShortcutReport::default());
+    };
+    let source = winlator_runner::shortcut_source_for_profile(&profile)
+        .map_err(|error| error.to_string())?;
+    let scan = winlator_runner::scan_winlator_shortcuts(
         &profile,
+        source.as_ref(),
+        &state.winlator_adoption.cancelled,
+        winlator_runner::ScanLimits::default(),
+        |_| {},
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(winlator_report_for(&scan.shortcuts, &inventory))
+}
+
+/// What a folder holds that the library does not, and what it holds that has
+/// changed underneath it.
+///
+/// A changed shortcut is counted and nothing else: refreshing its stored
+/// fingerprint here would silently re-arm a file whose `Exec=` line may now
+/// point somewhere else, which is exactly what the launch guard exists to
+/// refuse. The user is told, and the guard keeps refusing until they act.
+fn winlator_report_for(
+    scan: &[winlator_runner::ScannedWinlatorShortcut],
+    inventory: &[WinlatorShortcutInventoryEntry],
+) -> WinlatorShortcutReport {
+    let mut report = WinlatorShortcutReport::default();
+    for shortcut in scan {
+        match inventory
+            .iter()
+            .find(|entry| entry.game_ref == shortcut.game_ref)
+        {
+            None => report.pending += 1,
+            Some(entry) if entry.fingerprint != shortcut.fingerprint => report.changed += 1,
+            Some(_) => {}
+        }
+    }
+    report
+}
+
+/// The managed profile and its inventory, cloned out from under a read lock that
+/// is released immediately: everything after this reads a folder, and reading a
+/// folder is not something to do while the catalog is locked.
+#[allow(clippy::type_complexity)]
+fn winlator_managed_profile(
+    state: &AppState,
+) -> Result<Option<(WinlatorProfile, Vec<WinlatorShortcutInventoryEntry>)>, String> {
+    let catalog = state
+        .catalog
+        .read()
+        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
+    let Some(profile) = catalog
+        .winlator_profile(AUTO_WINLATOR_PROFILE_ID)
+        .filter(|profile| profile.enabled)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let inventory = catalog
+        .winlator_inventory
+        .iter()
+        .filter(|entry| entry.profile_id == AUTO_WINLATOR_PROFILE_ID)
+        .cloned()
+        .collect();
+    Ok(Some((profile, inventory)))
+}
+
+/// Scan the connected folder and remember what was found, so the user can be
+/// shown it and asked.
+///
+/// The scan runs with no catalog lock held. It reads a folder over a
+/// `ContentResolver`, hashes every file it finds, and is bounded but not fast;
+/// holding the lock across it would make every other catalog write — an import,
+/// a launch's play-time update, an artwork refresh — wait on shared storage.
+fn preview_winlator_shortcuts(
+    state: &AppState,
+    folder: Option<&WinlatorExportFolder>,
+) -> Result<WinlatorExportFolderView, String> {
+    if let Some(folder) = folder {
+        point_managed_winlator_profile(state, folder)?;
+        release_stale_winlator_grants(state);
+    }
+    let Some((profile, inventory)) = winlator_managed_profile(state)? else {
+        return Err(winlator_runner::WinlatorRunnerError::ExportFolderNotConnected.to_string());
+    };
+    let source = winlator_runner::shortcut_source_for_profile(&profile)
+        .map_err(|error| error.to_string())?;
+    // A scan the user is waiting on carries its own cancellation, never the
+    // background pass's: the flag that stops that pass is *set* on the way in
+    // here, and sharing it would cancel this scan before it read a document.
+    let cancelled = AtomicBool::new(false);
+    let scan = winlator_runner::scan_winlator_shortcuts(
+        &profile,
+        source.as_ref(),
         &cancelled,
         winlator_runner::ScanLimits::default(),
         |_| {},
-    ) {
-        Ok(scan) => scan,
-        Err(_) => return false,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let found = scan
+        .shortcuts
+        .iter()
+        .map(|shortcut| WinlatorShortcutView {
+            game_ref: shortcut.game_ref.clone(),
+            title: shortcut.title.clone(),
+            already_imported: inventory.iter().any(|entry| {
+                entry.game_ref == shortcut.game_ref && entry.fingerprint == shortcut.fingerprint
+            }),
+        })
+        .collect::<Vec<_>>();
+    let label = profile
+        .shortcut_directories
+        .first()
+        .and_then(|directory| directory.file_name())
+        .and_then(|name| name.to_str())
+        .map(str::to_string);
+
+    *state
+        .winlator_preview
+        .lock()
+        .map_err(|_| "Winlator import is temporarily unavailable.".to_string())? =
+        Some(WinlatorImportPreview {
+            profile_id: profile.id.clone(),
+            shortcuts: scan.shortcuts,
+        });
+
+    let waiting = found.iter().filter(|found| !found.already_imported).count();
+    let folder_name = label.clone().unwrap_or_else(|| "that folder".into());
+    Ok(WinlatorExportFolderView {
+        connected: true,
+        folder_label: label,
+        message: match (found.len(), waiting) {
+            (0, _) => format!(
+                "Connected {folder_name}. Winlator has not exported a shortcut there yet — export one to the frontend, then try again."
+            ),
+            (_, 0) => {
+                format!("Connected {folder_name}. Every shortcut in it is already in your library.")
+            }
+            (_, 1) => {
+                format!("Connected {folder_name}. One Winlator shortcut is waiting to be added.")
+            }
+            (_, waiting) => {
+                format!(
+                    "Connected {folder_name}. {waiting} Winlator shortcuts are waiting to be added."
+                )
+            }
+        },
+        found,
+    })
+}
+
+/// Turn the shortcuts the user picked into library cards.
+///
+/// The preview is a preview, never an authorization: every reference is looked
+/// up in the host's own snapshot, re-resolved against the profile's grant and
+/// re-read from the folder before it becomes a card, so a reference the WebView
+/// invented resolves to nothing.
+fn import_winlator_shortcuts_now(
+    state: &AppState,
+    game_refs: &[String],
+) -> Result<WinlatorImportResponse, String> {
+    if game_refs.is_empty() || game_refs.len() > MAX_WINE_IMPORT_SELECTION {
+        return Err("Choose the Winlator shortcuts to add, then try again.".into());
+    }
+    let requested = game_refs.iter().cloned().collect::<BTreeSet<_>>();
+    let (profile_id, candidates) = {
+        let preview = state
+            .winlator_preview
+            .lock()
+            .map_err(|_| "Winlator import is temporarily unavailable.".to_string())?;
+        let preview = preview.as_ref().ok_or_else(|| {
+            "This Winlator list is no longer available. Connect the folder again.".to_string()
+        })?;
+        (
+            preview.profile_id.clone(),
+            preview
+                .shortcuts
+                .iter()
+                .filter(|shortcut| requested.contains(&shortcut.game_ref))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
     };
-    if scan.shortcuts.is_empty() {
-        return false;
+    let mut skipped_refs = requested
+        .iter()
+        .filter(|game_ref| {
+            !candidates
+                .iter()
+                .any(|candidate| &&candidate.game_ref == game_ref)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let profile = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "Winlator profiles are temporarily unavailable.".to_string())?;
+        catalog
+            .winlator_profile(&profile_id)
+            .filter(|profile| profile.enabled)
+            .cloned()
+            .ok_or_else(|| "This Winlator folder is no longer connected.".to_string())?
+    };
+    let source = winlator_runner::shortcut_source_for_profile(&profile)
+        .map_err(|error| error.to_string())?;
+
+    // Re-read and re-hash before the lock is taken, not under it: a preview is
+    // only a preview, and the folder is the slow part.
+    let cancelled = AtomicBool::new(false);
+    let mut validated = Vec::new();
+    for candidate in &candidates {
+        match winlator_runner::revalidate_winlator_import_candidate(
+            &profile,
+            source.as_ref(),
+            candidate,
+            &cancelled,
+        ) {
+            Ok(current) => validated.push(current),
+            Err(_) => skipped_refs.push(candidate.game_ref.clone()),
+        }
     }
 
-    let mut next = catalog.clone();
-    if next.upsert_winlator_profile(profile.clone()).is_err() {
-        return false;
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
+    let mut next = state
+        .catalog
+        .read()
+        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?
+        .clone();
+    let imported_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    let (imported_ids, rejected) =
+        apply_winlator_import(&mut next, &profile.id, &validated, imported_at)?;
+    skipped_refs.extend(rejected);
+
+    if imported_ids.is_empty() {
+        return Ok(WinlatorImportResponse {
+            message: "None of those Winlator shortcuts could be added. Connect the folder again."
+                .into(),
+            imported_ids,
+            skipped_refs,
+        });
     }
-    // The runner contract's `discover-page` is paginated for a reason: a scan
-    // snapshot is walked in bounded pages so one adoption pass never holds an
-    // unbounded working set, however many shortcuts the folder turned out to
-    // hold.
+    if let Some(persisted) = next
+        .winlator_profiles
+        .iter_mut()
+        .find(|persisted| persisted.id == profile.id)
+    {
+        persisted.last_imported_at = Some(imported_at);
+    }
+    persist_catalog(&next, &state.catalog_path)
+        .map_err(|_| "Orivo could not save these Winlator games.".to_string())?;
+    let mut catalog = state
+        .catalog
+        .write()
+        .map_err(|_| "the game catalog is temporarily unavailable".to_string())?;
+    *catalog = next;
+
+    let message = match imported_ids.len() {
+        1 => "One Winlator game was added to your library.".to_string(),
+        added => format!("{added} Winlator games were added to your library."),
+    };
+    Ok(WinlatorImportResponse {
+        imported_ids,
+        skipped_refs,
+        message,
+    })
+}
+
+/// Write the chosen shortcuts into a catalog, in bounded pages.
+///
+/// One page at a time, like the runner contract's `discover-page`: every upsert
+/// validates before it mutates, so one rejected candidate is skipped rather than
+/// rolled back, and the whole catalog is validated once a page rather than once
+/// a candidate — a clone per candidate is what made this quadratic.
+fn apply_winlator_import(
+    catalog: &mut Catalog,
+    profile_id: &str,
+    validated: &[winlator_runner::ScannedWinlatorShortcut],
+    imported_at: u64,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut imported_ids = Vec::new();
+    let mut rejected = Vec::new();
     let mut offset = 0;
-    while let Ok((page, next_offset)) = winlator_runner::page_winlator_inventory(
-        &scan.shortcuts,
-        offset,
-        WINLATOR_ADOPTION_PAGE_SIZE,
-    ) {
-        for candidate in &page {
-            // Apply each shortcut on a clone so one rejected candidate leaves
-            // the rest of the adoption intact.
-            let Ok(current) = winlator_runner::revalidate_winlator_import_candidate(
-                &profile, candidate, &cancelled,
-            ) else {
-                continue;
-            };
+    while let Ok((page, next_offset)) =
+        winlator_runner::page_winlator_inventory(validated, offset, WINLATOR_ADOPTION_PAGE_SIZE)
+    {
+        let mut applied = catalog.clone();
+        for current in &page {
             let entry = WinlatorShortcutInventoryEntry {
-                profile_id: AUTO_WINLATOR_PROFILE_ID.to_string(),
+                profile_id: profile_id.to_string(),
                 game_ref: current.game_ref.clone(),
                 title: current.title.clone(),
                 shortcut_path: current.shortcut_path.clone(),
                 fingerprint: current.fingerprint.clone(),
                 container_id: current.container_id,
-                imported_at: None,
+                imported_at: Some(imported_at),
             };
-            let mut trial = next.clone();
-            if trial.upsert_winlator_inventory(entry).is_err()
-                || trial
-                    .upsert_runner(winlator_catalog_game(AUTO_WINLATOR_PROFILE_ID, &current))
-                    .is_err()
-                || trial.validate().is_err()
+            let game = winlator_catalog_game(profile_id, current);
+            let game_id = game.id.clone();
+            if applied.upsert_winlator_inventory(entry).is_err()
+                || applied.upsert_runner(game).is_err()
             {
+                rejected.push(current.game_ref.clone());
                 continue;
             }
-            next = trial;
+            imported_ids.push(game_id);
         }
+        if applied.validate().is_err() {
+            return Err("Orivo could not add these Winlator games safely.".into());
+        }
+        *catalog = applied;
         match next_offset {
             Some(next_offset) => offset = next_offset,
             None => break,
         }
     }
+    Ok((imported_ids, rejected))
+}
 
-    // Comparing the whole candidate is what keeps a restart from rewriting
-    // `catalog.json` when Winlator exported nothing new.
-    if next == *catalog {
-        return false;
-    }
-    let imported_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or_default();
-    if let Some(persisted) = next
-        .winlator_profiles
-        .iter_mut()
-        .find(|persisted| persisted.id == AUTO_WINLATOR_PROFILE_ID)
-    {
-        persisted.last_imported_at = Some(imported_at);
-    }
-    for entry in &mut next.winlator_inventory {
-        if entry.profile_id == AUTO_WINLATOR_PROFILE_ID && entry.imported_at.is_none() {
-            entry.imported_at = Some(imported_at);
+/// Give back every persisted grant no Winlator profile points at any more.
+///
+/// A persistable permission has no expiry: the folder a user connected in March
+/// stays readable forever unless it is handed back. Nothing else does this, so
+/// replacing a folder — or disabling the profile that referenced it — would
+/// otherwise leave Orivo holding read access it has no use for.
+fn release_stale_winlator_grants(state: &AppState) {
+    let in_use = match state.catalog.read() {
+        Ok(catalog) => catalog
+            .winlator_profiles
+            .iter()
+            .flat_map(|profile| profile.shortcut_trees.iter().cloned())
+            .collect::<Vec<_>>(),
+        Err(_) => return,
+    };
+    let Ok(persisted) = winlator_saf::persisted_read_tree_uris() else {
+        return;
+    };
+    for stale in winlator_saf::stale_persisted_trees(&persisted, &in_use) {
+        if let Err(error) = winlator_saf::release_persisted_tree(stale) {
+            eprintln!("orivo: a Winlator folder grant could not be released: {error}");
         }
     }
-    if next.validate().is_err() {
-        return false;
+}
+
+#[tauri::command]
+async fn connect_winlator_export_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<WinlatorExportFolderView, String> {
+    use tauri_plugin_orivo_saf::OrivoSafExt;
+
+    require_winlator_runner_platform()?;
+    // A folder already connected is reviewed without a chooser: the same menu
+    // entry is what the user reaches for after being told that Winlator exported
+    // something new, and re-picking the same folder to see it would be a chore.
+    let connected = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "Winlator profiles are temporarily unavailable.".to_string())?;
+        catalog
+            .winlator_profile(AUTO_WINLATOR_PROFILE_ID)
+            .is_some_and(|profile| profile.enabled && !profile.shortcut_trees.is_empty())
+    };
+    if connected {
+        let review = winlator_blocking(&app, |state| preview_winlator_shortcuts(state, None)).await;
+        match review {
+            Ok(view) => return Ok(view),
+            // The grant was revoked, or the folder stopped being one Orivo may
+            // read. Asking for it again is the answer, so fall through.
+            Err(error) => eprintln!("orivo: winlator folder review needs a new grant: {error}"),
+        }
     }
+
+    let picked = app
+        .orivo_saf()
+        .pick_document_tree()
+        .await
+        .map_err(|error| {
+            // The detail names a Java exception; the player gets a sentence.
+            eprintln!("orivo: winlator export folder picker: {error}");
+            "Orivo could not open the folder chooser. Try again.".to_string()
+        })?;
+    let Some(tree_uri) = picked else {
+        return Ok(WinlatorExportFolderView {
+            connected: false,
+            folder_label: None,
+            found: Vec::new(),
+            message: "No folder was connected.".into(),
+        });
+    };
+
+    winlator_blocking(&app, move |state| {
+        // The chooser returns whichever provider the user browsed to, and
+        // whichever folder. Winlator opens a *file path*, and a folder every app
+        // can drop a file into is not an export folder, so both are refused here
+        // — before anything is persisted.
+        let grant = winlator_runner::grant_for_picked_folder(&tree_uri)
+            .map_err(|error| error.to_string())?;
+        let folder = WinlatorExportFolder {
+            directory: grant.directory().to_path_buf(),
+            tree_uri: Some(grant.tree_uri().to_string()),
+        };
+        // A background pass walking the previous folder would race this one over
+        // the same managed profile.
+        cancel_winlator_adoption(state);
+        preview_winlator_shortcuts(state, Some(&folder))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn import_winlator_shortcuts(
+    app: AppHandle,
+    game_refs: Vec<String>,
+) -> Result<WinlatorImportResponse, String> {
+    require_winlator_runner_platform()?;
+    winlator_blocking(&app, move |state| {
+        import_winlator_shortcuts_now(state, &game_refs)
+    })
+    .await
+}
+
+/// Run one piece of Winlator work off the command executor.
+///
+/// Everything in this flow reads shared storage over a `ContentResolver` and
+/// hashes what it finds. None of it belongs on an async runtime thread, and a
+/// command that blocked one would stall every other command behind it.
+async fn winlator_blocking<T, F>(app: &AppHandle, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&AppState) -> Result<T, String> + Send + 'static,
+{
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&app.state::<AppState>()))
+        .await
+        .map_err(|_| "Winlator did not finish. Try again.".to_string())?
+}
+
+/// Point the managed Winlator profile at a folder, creating it the first time.
+fn point_managed_winlator_profile(
+    state: &AppState,
+    folder: &WinlatorExportFolder,
+) -> Result<(), String> {
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "Winlator profiles are temporarily unavailable.".to_string())?;
+    let mut next = state
+        .catalog
+        .read()
+        .map_err(|_| "Winlator profiles are temporarily unavailable.".to_string())?
+        .clone();
+    point_managed_winlator_profile_at(&mut next, folder)?;
+    persist_catalog(&next, &state.catalog_path).map_err(|_| {
+        "Orivo could not save that folder. Your library was left unchanged.".to_string()
+    })?;
+    let mut catalog = state
+        .catalog
+        .write()
+        .map_err(|_| "Winlator profiles are temporarily unavailable.".to_string())?;
     *catalog = next;
-    true
+    Ok(())
+}
+
+/// Move the managed profile to a folder without losing what still belongs to it.
+///
+/// The profile keeps its identity across a change of folder, so its cards keep
+/// theirs. What cannot survive is an inventory entry outside the new grant: it
+/// could never be launched again, and the catalog's own scope check would refuse
+/// the whole write. Those entries, and the cards that stand on them, go.
+fn point_managed_winlator_profile_at(
+    catalog: &mut Catalog,
+    folder: &WinlatorExportFolder,
+) -> Result<(), String> {
+    let mut profile = catalog
+        .winlator_profile(AUTO_WINLATOR_PROFILE_ID)
+        .cloned()
+        .unwrap_or_else(|| WinlatorProfile {
+            id: AUTO_WINLATOR_PROFILE_ID.to_string(),
+            display_name: AUTO_WINLATOR_PROFILE_NAME.to_string(),
+            distribution: WinlatorDistribution::Cmod,
+            container_id: None,
+            shortcut_directories: Vec::new(),
+            shortcut_trees: Vec::new(),
+            enabled: true,
+            last_imported_at: None,
+        });
+    let directory = folder
+        .granted_directory()
+        .ok_or_else(|| "Orivo could not read that folder.".to_string())?;
+    profile.shortcut_directories = vec![directory.clone()];
+    profile.shortcut_trees = folder.tree_uri.iter().cloned().collect();
+    // Choosing the folder by hand is explicit enough to undo an earlier disable:
+    // the alternative is a connect that appears to do nothing.
+    profile.enabled = true;
+
+    catalog.winlator_inventory.retain(|entry| {
+        entry.profile_id != AUTO_WINLATOR_PROFILE_ID || entry.shortcut_path.starts_with(&directory)
+    });
+    let live = catalog
+        .winlator_inventory
+        .iter()
+        .filter(|entry| entry.profile_id == AUTO_WINLATOR_PROFILE_ID)
+        .map(|entry| entry.game_ref.clone())
+        .collect::<BTreeSet<_>>();
+    catalog.games.retain(|game| match &game.launch_target {
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if runner_id == WINLATOR_RUNNER_ID && profile_id == AUTO_WINLATOR_PROFILE_ID => {
+            live.contains(game_ref)
+        }
+        _ => true,
+    });
+    catalog
+        .upsert_winlator_profile(profile)
+        .map_err(|_| "Orivo could not use that folder for Winlator.".to_string())?;
+    catalog
+        .validate()
+        .map_err(|_| "Orivo could not use that folder for Winlator.".to_string())?;
+    Ok(())
 }
 
 const MAX_DXVK_DOWNLOAD_BYTES: usize = 128 * 1024 * 1024;
@@ -6284,8 +6886,18 @@ async fn launch_game(
             // boundary, and the result is a closed Android intent rather than a
             // command.
             let intent = winlator_runner::WinlatorLaunchIntent::new(&profile.id, &game_ref)?;
-            let prepared = winlator_runner::prepare_winlator_launch(&profile, &inventory, &intent)?;
-            prepared.launch()?;
+            // The source is resolved once and used for both halves of the
+            // launch, so the pre-send recheck reads the shortcut exactly the way
+            // the preparation did — through the storage access grant on a device,
+            // through the filesystem where the folder is readable.
+            let source = winlator_runner::shortcut_source_for_profile(&profile)?;
+            let prepared = winlator_runner::prepare_winlator_launch(
+                &profile,
+                source.as_ref(),
+                &inventory,
+                &intent,
+            )?;
+            prepared.launch(source.as_ref())?;
             // The name Winlator wrote into the shortcut is what the player sees
             // on the other side of the hand-off, so it is what is worth
             // reporting back.
@@ -8259,6 +8871,7 @@ mod tests {
                 shortcut_directories: vec![PathBuf::from(
                     "/storage/emulated/0/Download/Winlator/Frontend",
                 )],
+                shortcut_trees: Vec::new(),
                 enabled: true,
                 last_imported_at: None,
             })
@@ -8957,92 +9570,371 @@ mod tests {
         }
     }
 
+    /// A folder that is readable by pathname: what a desktop test has, and what
+    /// a device has only if shared storage happens to be reachable. The storage
+    /// access grant is exercised in `winlator_saf`, against a fake provider.
+    fn readable(directory: &Path) -> WinlatorExportFolder {
+        WinlatorExportFolder {
+            directory: directory.to_path_buf(),
+            tree_uri: None,
+        }
+    }
+
     fn exported_winlator_shortcut(name: &str, container_id: u32) -> String {
         format!(
             "[Desktop Entry]\nName={name}\nType=Application\n\n[Extra Data]\ncontainer_id={container_id}\n"
         )
     }
 
-    /// Adoption is the only thing that puts a Winlator card in the library
-    /// today, so it has to be idempotent: a restart that finds nothing new must
-    /// not rewrite `catalog.json`, and it must not duplicate a card either.
-    #[test]
-    fn adopts_exported_winlator_shortcuts_once_and_leaves_the_catalog_alone_after_that() {
-        let granted = temporary_directory("winlator-adoption");
-        fs::write(
-            granted.join("Celeste.desktop"),
-            exported_winlator_shortcut("Celeste", 2),
-        )
-        .unwrap();
-        // Winlator writes these two notes beside its exported shortcuts; neither
-        // is a game.
-        fs::write(granted.join("metadata.pegasus.txt"), "collection: Windows").unwrap();
-        fs::write(granted.join("FRONTEND_INSTRUCTIONS.txt"), "am start -n ...").unwrap();
-
-        let mut catalog = Catalog::default();
-        assert!(adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        catalog.validate().unwrap();
-        assert_eq!(catalog.winlator_profiles.len(), 1);
-        assert_eq!(catalog.winlator_inventory.len(), 1);
-        assert_eq!(catalog.games.len(), 1);
-
-        let card = &catalog.games[0];
-        assert_eq!(card.title, "Celeste");
-        assert!(matches!(
-            &card.launch_target,
-            LaunchTarget::Runner { runner_id, profile_id, .. }
-                if runner_id == WINLATOR_RUNNER_ID && profile_id == AUTO_WINLATOR_PROFILE_ID
-        ));
-        // The shortcut path is private host data: a library card must not carry
-        // it in any shape.
-        assert!(card.executable_path.is_none());
-        assert!(card.installation_path.is_none());
-        assert!(card.working_directory.is_none());
-        assert!(card.arguments.is_empty());
-        assert_eq!(catalog.winlator_inventory[0].container_id, Some(2));
-
-        let before = catalog.clone();
-        assert!(!adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        assert_eq!(catalog, before);
+    /// An `AppState` with nothing behind it but a temporary directory. It is
+    /// what lets the Winlator flow — which is all state, locks and a folder —
+    /// be exercised without a device or a Tauri app.
+    fn state_for(directory: &Path) -> AppState {
+        AppState {
+            catalog_path: directory.join("catalog.json"),
+            wine_prefix_root: directory.join("wine-prefixes"),
+            plugin_root: directory.join("plugins"),
+            plugin_discovery_in_flight: Arc::new(AtomicBool::new(false)),
+            catalog: Arc::new(RwLock::new(Catalog::default())),
+            catalog_mutation: Arc::new(Mutex::new(())),
+            steam_preview: Mutex::new(None),
+            steam_auth_settled: Mutex::new(None),
+            source_logins: Mutex::new(BTreeMap::new()),
+            wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
+            winlator_adoption: Arc::new(WinlatorAdoption::default()),
+            winlator_preview: Mutex::new(None),
+            wine_scan_jobs: Mutex::new(BTreeMap::new()),
+            wine_operation_sequence: AtomicU64::new(0),
+        }
     }
 
-    /// Winlator exporting a second shortcut is the one thing that should make a
-    /// later pass write again — and it must not disturb the first card.
+    /// The whole connected flow, without a device: connect the folder, look at
+    /// what came back, add the ones that were chosen.
     #[test]
-    fn a_newly_exported_shortcut_is_adopted_without_touching_the_existing_card() {
-        let granted = temporary_directory("winlator-second-shortcut");
+    fn connecting_a_folder_asks_before_it_adds_anything() {
+        let home = temporary_directory("winlator-flow");
+        let granted = temporary_directory("winlator-flow-folder");
+        for name in ["Celeste", "Braid"] {
+            fs::write(
+                granted.join(format!("{name}.desktop")),
+                exported_winlator_shortcut(name, 2),
+            )
+            .unwrap();
+        }
+        let state = state_for(&home);
+        let view = preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+
+        assert!(view.connected);
+        assert_eq!(view.found.len(), 2);
+        assert!(view.found.iter().all(|found| !found.already_imported));
+        // Connecting a folder is not importing it.
+        assert!(state.catalog.read().unwrap().games.is_empty());
+
+        let chosen = vec![view.found[0].game_ref.clone()];
+        let imported = import_winlator_shortcuts_now(&state, &chosen).unwrap();
+        assert_eq!(imported.imported_ids.len(), 1);
+        assert!(imported.skipped_refs.is_empty());
+
+        let catalog = state.catalog.read().unwrap();
+        assert_eq!(catalog.games.len(), 1);
+        assert_eq!(managed_inventory(&catalog).len(), 1);
+        // And the other one is still only waiting.
+        assert_eq!(
+            winlator_shortcut_report(&state).unwrap(),
+            WinlatorShortcutReport {
+                pending: 1,
+                changed: 0
+            }
+        );
+    }
+
+    /// A reference the WebView made up is not a shortcut. The preview is the
+    /// host's own snapshot, and anything outside it resolves to nothing.
+    #[test]
+    fn an_invented_reference_imports_nothing() {
+        let home = temporary_directory("winlator-invented");
+        let granted = temporary_directory("winlator-invented-folder");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let state = state_for(&home);
+        preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+
+        let imported =
+            import_winlator_shortcuts_now(&state, &["shortcut:deadbeef".to_string()]).unwrap();
+        assert!(imported.imported_ids.is_empty());
+        assert_eq!(imported.skipped_refs, ["shortcut:deadbeef"]);
+        assert!(state.catalog.read().unwrap().games.is_empty());
+    }
+
+    /// The background pass and the user's scan cancel separately. Stopping the
+    /// pass — which is what connecting a folder does first — must not cancel the
+    /// scan the user is waiting on, which is how the first connect on a device
+    /// came back having read nothing at all.
+    #[test]
+    fn stopping_the_background_pass_does_not_cancel_the_scan_the_user_asked_for() {
+        let home = temporary_directory("winlator-cancel");
+        let granted = temporary_directory("winlator-cancel-folder");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let state = state_for(&home);
+
+        cancel_winlator_adoption(&state);
+        assert!(state.winlator_adoption.cancelled.load(Ordering::Acquire));
+
+        let view = preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+        assert_eq!(view.found.len(), 1);
+    }
+
+    /// Connect a folder and read what is in it, the way the command does
+    /// without a device: point the managed profile at the folder, then scan it.
+    fn scan_connected(
+        catalog: &mut Catalog,
+        directory: &Path,
+    ) -> Vec<winlator_runner::ScannedWinlatorShortcut> {
+        point_managed_winlator_profile_at(catalog, &readable(directory)).unwrap();
+        let profile = catalog
+            .winlator_profile(AUTO_WINLATOR_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        let source = winlator_runner::shortcut_source_for_profile(&profile).unwrap();
+        winlator_runner::scan_winlator_shortcuts(
+            &profile,
+            source.as_ref(),
+            &AtomicBool::new(false),
+            winlator_runner::ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap()
+        .shortcuts
+    }
+
+    fn managed_inventory(catalog: &Catalog) -> Vec<WinlatorShortcutInventoryEntry> {
+        catalog
+            .winlator_inventory
+            .iter()
+            .filter(|entry| entry.profile_id == AUTO_WINLATOR_PROFILE_ID)
+            .cloned()
+            .collect()
+    }
+
+    /// The security property this whole flow rests on: a `.desktop` file is a
+    /// program Winlator will run, so finding one is never enough to make it a
+    /// card. Only the references the user chose are written.
+    #[test]
+    fn imports_only_the_shortcuts_that_were_chosen() {
+        let granted = temporary_directory("winlator-chosen");
+        for name in ["Celeste", "Braid", "Doom"] {
+            fs::write(
+                granted.join(format!("{name}.desktop")),
+                exported_winlator_shortcut(name, 2),
+            )
+            .unwrap();
+        }
+        let mut catalog = Catalog::default();
+        let found = scan_connected(&mut catalog, &granted);
+        assert_eq!(found.len(), 3);
+
+        // Nothing is in the library yet: a scan is a scan.
+        assert!(catalog.winlator_inventory.is_empty());
+        assert!(catalog.games.is_empty());
+
+        let chosen = found
+            .iter()
+            .filter(|shortcut| shortcut.title == "Celeste")
+            .cloned()
+            .collect::<Vec<_>>();
+        let (imported, rejected) =
+            apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &chosen, 1).unwrap();
+
+        assert_eq!(imported.len(), 1);
+        assert!(rejected.is_empty());
+        assert_eq!(managed_inventory(&catalog).len(), 1);
+        assert_eq!(managed_inventory(&catalog)[0].title, "Celeste");
+        assert_eq!(catalog.games.len(), 1);
+        catalog.validate().unwrap();
+    }
+
+    /// The background pass reports and writes nothing at all. What it finds is
+    /// waiting for an answer, not already in the library.
+    #[test]
+    fn the_background_pass_reports_what_is_waiting_instead_of_importing_it() {
+        let granted = temporary_directory("winlator-waiting");
         fs::write(
             granted.join("Celeste.desktop"),
             exported_winlator_shortcut("Celeste", 2),
         )
         .unwrap();
         let mut catalog = Catalog::default();
-        assert!(adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        let first_card = catalog
-            .games
-            .iter()
-            .find(|game| game.title == "Celeste")
-            .cloned()
-            .unwrap();
+        let found = scan_connected(&mut catalog, &granted);
+        apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 1).unwrap();
 
+        // A second shortcut appears in the folder Winlator exports into.
         fs::write(
             granted.join("Braid.desktop"),
             exported_winlator_shortcut("Braid", 3),
         )
         .unwrap();
-        assert!(adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        catalog.validate().unwrap();
-        assert_eq!(catalog.games.len(), 2);
+        let found = scan_connected(&mut catalog, &granted);
+        let before = catalog.clone();
+        let report = winlator_report_for(&found, &managed_inventory(&catalog));
+
         assert_eq!(
-            catalog.games.iter().find(|game| game.title == "Celeste"),
-            Some(&first_card)
+            report,
+            WinlatorShortcutReport {
+                pending: 1,
+                changed: 0
+            }
         );
+        assert_eq!(catalog, before);
     }
 
-    /// A user who turned the managed profile off must not have it silently
-    /// re-adopt its games on the next start.
+    /// Winlator rewrites a shortcut whenever the user re-exports it, and the new
+    /// file can point at another executable. Refreshing the stored fingerprint
+    /// in the background would re-arm it silently, so the pass only counts it —
+    /// and the launch guard keeps refusing until the user has looked.
     #[test]
-    fn a_disabled_managed_winlator_profile_is_left_disabled_and_empty() {
+    fn a_rewritten_shortcut_is_reported_and_never_silently_re_armed() {
+        let granted = temporary_directory("winlator-rewritten");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        let found = scan_connected(&mut catalog, &granted);
+        apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 1).unwrap();
+        let imported = managed_inventory(&catalog)[0].clone();
+
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 9),
+        )
+        .unwrap();
+        let found = scan_connected(&mut catalog, &granted);
+        let report = winlator_report_for(&found, &managed_inventory(&catalog));
+
+        assert_eq!(
+            report,
+            WinlatorShortcutReport {
+                pending: 0,
+                changed: 1
+            }
+        );
+        assert_eq!(managed_inventory(&catalog)[0], imported);
+        assert_ne!(found[0].fingerprint, imported.fingerprint);
+    }
+
+    /// Importing the same shortcut twice refreshes one card rather than making a
+    /// second, and importing a reference the folder no longer holds is skipped
+    /// rather than fabricated.
+    #[test]
+    fn a_second_import_refreshes_one_card_and_skips_what_is_gone() {
+        let granted = temporary_directory("winlator-second-import");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        let found = scan_connected(&mut catalog, &granted);
+        apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 1).unwrap();
+        let (imported, rejected) =
+            apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 2).unwrap();
+
+        assert_eq!(imported.len(), 1);
+        assert!(rejected.is_empty());
+        assert_eq!(managed_inventory(&catalog).len(), 1);
+        assert_eq!(catalog.games.len(), 1);
+
+        // A candidate that names a folder outside the profile's grant cannot be
+        // written, whatever the preview said.
+        let elsewhere = temporary_directory("winlator-second-import-elsewhere");
+        let mut stray = found[0].clone();
+        stray.game_ref = "shortcut:deadbeef".into();
+        stray.shortcut_path = elsewhere.join("Doom.desktop");
+        let (imported, rejected) =
+            apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &[stray], 3).unwrap();
+        assert!(imported.is_empty());
+        assert_eq!(rejected, ["shortcut:deadbeef"]);
+        catalog.validate().unwrap();
+    }
+
+    /// Connecting another folder is allowed to leave cards behind, but never a
+    /// card whose shortcut is outside the new grant: it could not be launched,
+    /// and the catalog's own scope check would refuse the whole write.
+    #[test]
+    fn connecting_another_folder_drops_the_cards_from_the_old_one() {
+        let granted = temporary_directory("winlator-repoint");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        let found = scan_connected(&mut catalog, &granted);
+        apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 1).unwrap();
+        assert_eq!(catalog.winlator_inventory.len(), 1);
+
+        let elsewhere = temporary_directory("winlator-repoint-elsewhere");
+        point_managed_winlator_profile_at(&mut catalog, &readable(&elsewhere)).unwrap();
+
+        assert!(catalog.winlator_inventory.is_empty());
+        assert!(!catalog.games.iter().any(|game| matches!(
+            &game.launch_target,
+            LaunchTarget::Runner { runner_id, .. } if runner_id == WINLATOR_RUNNER_ID
+        )));
+        assert_eq!(
+            catalog.winlator_profiles[0].shortcut_directories,
+            vec![fs::canonicalize(&elsewhere).unwrap()]
+        );
+        // The profile itself survives, so its id — and every card imported into
+        // it next — stays stable across the change of folder.
+        assert_eq!(catalog.winlator_profiles[0].id, AUTO_WINLATOR_PROFILE_ID);
+        catalog.validate().unwrap();
+    }
+
+    /// Re-pointing a profile at a folder that still holds its shortcut keeps the
+    /// card: the grant changed, the game did not.
+    #[test]
+    fn reconnecting_the_same_folder_keeps_its_cards() {
+        let granted = temporary_directory("winlator-reconnect");
+        fs::write(
+            granted.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let mut catalog = Catalog::default();
+        let found = scan_connected(&mut catalog, &granted);
+        apply_winlator_import(&mut catalog, AUTO_WINLATOR_PROFILE_ID, &found, 1).unwrap();
+        let before = catalog.clone();
+
+        // What a real reconnect adds: the tree URI for the folder already stored.
+        point_managed_winlator_profile_at(
+            &mut catalog,
+            &WinlatorExportFolder {
+                directory: before.winlator_profiles[0].shortcut_directories[0].clone(),
+                tree_uri: Some(
+                    "content://com.android.externalstorage.documents/tree/primary%3AWinlator"
+                        .into(),
+                ),
+            },
+        )
+        .unwrap();
+        assert_eq!(catalog.winlator_inventory, before.winlator_inventory);
+        assert_eq!(catalog.games, before.games);
+        catalog.validate().unwrap();
+    }
+
+    /// A disabled managed profile is a user saying "not these": the folder is
+    /// not read, so nothing is ever waiting for them.
+    #[test]
+    fn a_disabled_managed_winlator_profile_is_not_scanned() {
         let granted = temporary_directory("winlator-disabled");
         fs::write(
             granted.join("Celeste.desktop"),
@@ -9050,28 +9942,24 @@ mod tests {
         )
         .unwrap();
         let mut catalog = Catalog::default();
-        assert!(adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        catalog.games.clear();
-        catalog.winlator_inventory.clear();
+        scan_connected(&mut catalog, &granted);
         catalog.winlator_profiles[0].enabled = false;
 
-        let before = catalog.clone();
-        assert!(!adopt_exported_winlator_shortcuts(&mut catalog, &granted));
-        assert_eq!(catalog, before);
-    }
-
-    /// Nothing to adopt is the ordinary state on a device with no Winlator, and
-    /// it must cost neither a profile nor a catalog write.
-    #[test]
-    fn a_missing_or_empty_export_folder_is_not_an_adoption() {
-        let mut catalog = Catalog::default();
-        assert!(!adopt_exported_winlator_shortcuts(
-            &mut catalog,
-            Path::new("/nonexistent/orivo/winlator/frontend")
-        ));
-        let empty = temporary_directory("winlator-empty");
-        assert!(!adopt_exported_winlator_shortcuts(&mut catalog, &empty));
-        assert_eq!(catalog, Catalog::default());
+        let profile = catalog
+            .winlator_profile(AUTO_WINLATOR_PROFILE_ID)
+            .cloned()
+            .unwrap();
+        let source = winlator_runner::shortcut_source_for_profile(&profile).unwrap();
+        assert_eq!(
+            winlator_runner::scan_winlator_shortcuts(
+                &profile,
+                source.as_ref(),
+                &AtomicBool::new(false),
+                winlator_runner::ScanLimits::default(),
+                |_| {}
+            ),
+            Err(winlator_runner::WinlatorRunnerError::ProfileDisabled)
+        );
     }
 
     fn temporary_directory(label: &str) -> PathBuf {
