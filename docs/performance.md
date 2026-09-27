@@ -325,21 +325,26 @@ aucune vraie clé, aucun vrai jeu.
 
 | Mesure | n=1 | n=100 | n=1000 |
 | --- | --- | --- | --- |
-| Import complet, composant à froid | 33,2 ms | 41,8 ms | 164,0 ms |
-| Import relancé (rafraîchit au lieu d’insérer, médiane) | 33,1 ms | 42,3 ms | 161,6 ms |
+| Import complet, composant à froid | 37,2 ms | 39,9 ms | 64,4 ms |
+| Import relancé (rafraîchit au lieu d’insérer, médiane) | 36,7 ms | 40,3 ms | 100,0 ms\* |
 | Jeux réellement importés / pages | 1 / 1 | 100 / 2 | **256 / 6** |
-| `prepare_runner_launch` du premier jeu (médiane) | 226 µs | 217 µs | 189 µs |
-| `Catalog::load_with_migration` après import (médiane) | 14 µs | 224 µs | 563 µs |
+| `prepare_runner_launch` du premier jeu (médiane) | 195 µs | 182 µs | 229 µs |
+| `Catalog::load_with_migration` après import (médiane) | 15,9 µs | 224,8 µs | 579,5 µs |
+
+\* médiane peu représentative sur cette machine : min 69,3 ms, max 239,0 ms sur
+cinq répétitions. C’est la contention disque déjà documentée dans « Méthode »,
+pas une non-linéarité du code — le min est la valeur à lire ici, et il est
+cohérent avec l’import à froid.
 
 Ouverture de Réglages → Plugins et du flux émulateur, avec ce seul plugin
 installé :
 
 | Commande | Médiane |
 | --- | --- |
-| `get_plugin_catalog` (Réglages → Plugins) | 33,0 ms |
-| `get_runner_plugins` (flux « Ajouter un émulateur ») | 33,8 ms |
+| `get_plugin_catalog` (Réglages → Plugins) | 36,2 ms |
+| `get_runner_plugins` (flux « Ajouter un émulateur ») | 37,0 ms |
 
-**Quatre lectures, dont une mauvaise nouvelle.**
+**Ce que ces chiffres disent, et ce qu’ils ont corrigé.**
 
 1. **1000 fichiers n’en font pas 1000.** À n=1000, l’import en écrit **256** :
    `MAX_DIRECTORY_ENTRIES` (256, `plugin_runtime.rs`) borne ce que le host
@@ -350,14 +355,27 @@ installé :
    plus dure de ce palier ; elle est consignée dans
    [`docs/ryujinx-runner.md`](ryujinx-runner.md) et reste à trancher (pagination
    de `list-directory` en v2, ou plusieurs dossiers accordés par profil).
-2. **L’import est dominé par une compilation, pas par la bibliothèque.** À n=1,
-   33 ms pour un seul jeu — c’est le coût Cranelift à froid du composant
-   (≈ 31-33 ms, section 3), payé une fois par appel de `RunnerPackage::load`
-   parce que `Component::new` recompile toujours. Les 256 jeux de n=1000 coûtent
-   les 131 ms restantes, soit ≈ 0,5 ms par jeu, transaction catalogue comprise
-   (six commits atomiques). Un cache de compilation inter-appels (lot P5, non
-   mergé sur cette base) retirerait donc l’essentiel du coût d’un petit import.
-3. **Le premier lancement est à trois ordres de grandeur du budget.** Le contrat
+2. **Une première mesure a trouvé un vrai défaut, et il est corrigé.** Le même
+   banc donnait 164,0 ms à n=1000 avant que `resolve_page_candidates` ne lise ses
+   dossiers accordés **une fois par page** au lieu d’une fois par candidat : une
+   page de cinquante coûtait cinquante parcours du même dossier, soit ≈ 0,51 ms
+   par jeu pour une écriture catalogue qui en vaut environ dix fois moins. La
+   résolution passe par un `GrantedLibrary` construit une fois par page ;
+   l’import à n=1000 est passé de 164,0 ms à **64,4 ms** et le coût par jeu de
+   ≈ 0,51 ms à **≈ 0,11 ms** (28 ms pour 256 jeux, une fois la compilation
+   retirée). Une page est aussi devenue cohérente avec elle-même : sa seconde
+   moitié ne peut plus contredire la première sur le contenu du dossier.
+3. **Ce qui reste dominant est la compilation du composant, à toutes les tailles
+   mesurées** — et c’est bien une arithmétique, pas un slogan : ≈ 36 ms de
+   Cranelift à froid (section 3, et `get_plugin_catalog` ci-dessus qui ne fait
+   que ça) contre 0,3 ms de bibliothèque à n=1, 4 ms à n=100 et 28 ms pour les
+   256 jeux de n=1000. Ce coût est payé une fois par appel de
+   `RunnerPackage::load`, parce que `Component::new` recompile toujours ; un cache
+   de compilation inter-appels (lot P5, non mergé sur cette base) retirerait donc
+   la plus grande part de n’importe lequel de ces imports. À une taille de
+   bibliothèque supérieure — qui demanderait de lever la borne du point 1 — le
+   rapport s’inverserait autour de 300 à 400 jeux par page.
+4. **Le premier lancement est à trois ordres de grandeur du budget.** Le contrat
    de performance du plan donne « budget initial de 150 ms » à une invocation
    interactive : `prepare_runner_launch` — `prepare-launch` sous le budget,
    validation de l’intent, résolution du binaire dans le bundle `.app` et du
@@ -366,14 +384,21 @@ installé :
    compilation du composant, qui est payée à l’ouverture de l’écran (tableau
    ci-dessus) et non à l’appui sur Play ; il exclut aussi `spawn`, qui
    démarrerait un vrai émulateur.
-4. **Le démarrage ne paie rien pour ce plugin.** « Aucun composant tiers n’est
-   requis avant le premier shell utilisable » reste vrai par construction :
-   `AppState::load` ne touche jamais `PluginRuntime::shared()`, et les deux
-   commandes qui le font sont des `async fn` en `spawn_blocking` déclenchées par
-   l’utilisateur (section 3). Ce que le démarrage paie vraiment après un import,
-   c’est du JSON : **563 µs** pour lire un catalogue de 256 cartes runner, une
-   fiche de profil et son inventaire privé — du même ordre que les 418 µs de la
-   section 2 pour 1000 jeux ordinaires, et la même croissance linéaire.
+5. **Le démarrage ne paie rien pour ce plugin, mais une carte runner coûte plus
+   qu’une carte ordinaire.** « Aucun composant tiers n’est requis avant le
+   premier shell utilisable » reste vrai par construction : `AppState::load` ne
+   touche jamais `PluginRuntime::shared()`, et les deux commandes qui le font sont
+   des `async fn` en `spawn_blocking` déclenchées par l’utilisateur (section 3).
+   Ce que le démarrage paie vraiment après un import, c’est du JSON : **579 µs**
+   pour 256 cartes runner. La croissance est linéaire comme en section 2, mais la
+   pente ne l’est pas la même — **≈ 2,2 µs par carte runner contre ≈ 0,4 µs par
+   jeu ordinaire, environ cinq fois plus raide**. La raison est dans le schéma et
+   pas dans le code de lecture : un jeu runner est *deux* enregistrements, la carte
+   plus sa ligne d’inventaire privée (`RunnerGameInventoryEntry` : chemin résolu,
+   créneau de grant, provider, id externe), et les chemins y sont longs. À une
+   bibliothèque Switch de 2 000 jeux cela ferait environ 4,5 ms de démarrage,
+   toujours très en dessous du premier rendu ; à surveiller si une intégration
+   future importe des dizaines de milliers de lignes.
 
 Aucun budget n’est proposé pour ces lignes : le seul seuil que le plan fixe déjà
 (150 ms interactif) est respecté avec une marge de trois ordres de grandeur, et
