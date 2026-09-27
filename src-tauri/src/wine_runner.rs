@@ -2223,6 +2223,32 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A fake Wine-Staging binary that satisfies `probe_wine_staging`'s checks
+/// under `cfg(test)` (the real Mach-O executable check is compiled out for
+/// tests — see that function) without needing a real Wine install on the
+/// machine running the suite. Shared with `lib.rs`'s tests so the Wine
+/// auto-apply pass can be exercised against a profile that already has a
+/// validated binary, the same way this module's own tests do.
+#[cfg(test)]
+pub(crate) fn write_staging_binary(directory: &Path) -> PathBuf {
+    let wine = directory.join("wine");
+    fs::write(
+        &wine,
+        "#!/bin/sh\nif [ \"${1:-}\" = \"-u\" ]; then\n  mkdir -p \"$WINEPREFIX\"\n  : > \"$WINEPREFIX/user.reg\"\n  exit 0\nfi\nif [ \"${1:-}\" = \"reg\" ]; then\n  exit 0\nfi\necho 'wine-10.0 (Staging)'\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::symlink;
+        let mut permissions = fs::metadata(&wine).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wine, permissions).unwrap();
+        symlink(&wine, directory.join("wineboot")).unwrap();
+    }
+    wine
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2245,25 +2271,6 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         fs::canonicalize(directory).unwrap()
-    }
-
-    fn write_staging_binary(directory: &Path) -> PathBuf {
-        let wine = directory.join("wine");
-        fs::write(
-            &wine,
-            "#!/bin/sh\nif [ \"${1:-}\" = \"-u\" ]; then\n  mkdir -p \"$WINEPREFIX\"\n  : > \"$WINEPREFIX/user.reg\"\n  exit 0\nfi\nif [ \"${1:-}\" = \"reg\" ]; then\n  exit 0\nfi\necho 'wine-10.0 (Staging)'\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            use std::os::unix::fs::symlink;
-            let mut permissions = fs::metadata(&wine).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&wine, permissions).unwrap();
-            symlink(&wine, directory.join("wineboot")).unwrap();
-        }
-        wine
     }
 
     fn profile(root: &Path, wine: PathBuf, games: PathBuf) -> WineProfile {

@@ -22,11 +22,13 @@
 //! 1. Does the catalog step of startup scale acceptably from a hobby library
 //!    (10 games) to a hoarder's (10,000)? `catalog::Catalog::load_with_migration`
 //!    and `save_atomically` are exactly what `load_or_migrate_catalog` calls.
-//! 2. Is the Wine auto-apply pass a cheap no-op when nothing needs it, and
-//!    still linear rather than quadratic when something does? Winlator's pass
-//!    was measured here too until M1 took it off the startup path entirely: it
-//!    now runs in the background, only against a folder the user connected
-//!    through a storage access grant, which this bench cannot synthesise.
+//! 2. Is the Wine auto-apply pass's own cost — a disk probe once, then a
+//!    canonicalise-and-hash per pending `.exe` — still linear rather than
+//!    quadratic in catalog size? It was measured as part of startup itself
+//!    until O2b took it off that path, mirroring what M1 did for Winlator's
+//!    adoption pass: both now run in the background, after the first paint.
+//!    `bench_catalog_at_size` no longer times it at all — see its doc comment
+//!    — and `bench_wine_auto_apply_at_size` measures it standalone instead.
 //! 3. What does having plugins installed cost the two on-demand commands that
 //!    actually touch the plugin runtime — `get_plugin_catalog` (Settings ›
 //!    Plugins) and `get_runner_plugins` (the emulator flow) — neither of which
@@ -102,8 +104,8 @@ fn timed<T>(mut work: impl FnMut() -> T) -> (T, Duration) {
 }
 
 /// A `catalog.json` body with `count` games, a fraction of them local `.exe`
-/// Direct games so `auto_apply_wine_to_direct_games`'s filter has something to
-/// walk instead of short-circuiting on an empty catalog. Built as text, not as
+/// Direct games so `wine_auto_apply_candidates`'s filter has something to walk
+/// instead of short-circuiting on an empty catalog. Built as text, not as
 /// `Game` values: this is exactly the shape `load_or_migrate_catalog` reads
 /// off disk, and it exercises the same `#[serde(default)]` fill-in a real
 /// catalog file relies on.
@@ -134,13 +136,20 @@ fn synthetic_catalog_json(count: usize) -> String {
     )
 }
 
-/// `load_with_migration` + `save_atomically` + the Wine auto-apply pass, at one
-/// catalog size. This is the sequence `AppState::load` runs on every startup.
+/// `load_with_migration` + `save_atomically`, at one catalog size. This is the
+/// catalog sequence `AppState::load` runs on every startup.
+///
+/// The Wine auto-apply pass measured here too until O2b (see
+/// `bench_wine_auto_apply_at_size` below) took it off the startup path
+/// entirely, the same way M1 (#44) took Winlator's own adoption pass off it:
+/// it now runs in the background, after the first paint, in bounded pages —
+/// so, like the Winlator row this note replaces, `AppState::load` no longer
+/// pays for it at all, and this bench no longer measures it as part of
+/// startup.
 fn bench_catalog_at_size(n: usize) {
     let dir = scratch_dir(&format!("catalog-{n}"));
     let catalog_path = dir.join("catalog.json");
     fs::write(&catalog_path, synthetic_catalog_json(n)).unwrap();
-    let wine_prefix_root = dir.join("wine-prefixes");
 
     for _ in 0..WARMUP_ITERATIONS {
         let _ = Catalog::load_with_migration(&catalog_path).unwrap();
@@ -148,30 +157,19 @@ fn bench_catalog_at_size(n: usize) {
 
     let mut load_samples = Vec::with_capacity(MEASURED_ITERATIONS);
     let mut save_samples = Vec::with_capacity(MEASURED_ITERATIONS);
-    let mut wine_samples = Vec::with_capacity(MEASURED_ITERATIONS);
 
     for _ in 0..MEASURED_ITERATIONS {
         let (loaded, load_elapsed) = timed(|| Catalog::load_with_migration(&catalog_path).unwrap());
         load_samples.push(load_elapsed);
 
-        let mut catalog = loaded.catalog;
+        let catalog = loaded.catalog;
         let save_path = dir.join("catalog.save.json");
         let (_, save_elapsed) = timed(|| catalog.save_atomically(&save_path).unwrap());
         save_samples.push(save_elapsed);
-
-        // The pass is `#[cfg]`-gated to macOS (see lib.rs), so on any other
-        // platform — including this bench run, most of the time — it returns
-        // `false` after its `O(n)` filter without touching Wine at all. That
-        // early return is still measured here, not assumed, because it is
-        // exactly the cost every non-macOS startup actually pays for it.
-        let (_, wine_elapsed) =
-            timed(|| crate::auto_apply_wine_to_direct_games(&mut catalog, &wine_prefix_root));
-        wine_samples.push(wine_elapsed);
     }
 
     report("catalog.load_with_migration", n, load_samples);
     report("catalog.save_atomically", n, save_samples);
-    report("auto_apply_wine_to_direct_games", n, wine_samples);
 
     fs::remove_dir_all(&dir).ok();
 }
@@ -192,6 +190,62 @@ fn bench_catalog_1000_games() {
 #[ignore]
 fn bench_catalog_10000_games() {
     bench_catalog_at_size(10_000);
+}
+
+/// The Wine auto-apply pass, on its own, off the startup path it used to sit
+/// on. Same synthetic catalog as `bench_catalog_at_size`, but timed apart from
+/// `load_with_migration`/`save_atomically` because nothing in `AppState::load`
+/// calls it any more (see that function's doc comment, and O2b): it now runs
+/// from `spawn_wine_auto_apply`, once the shell is on screen, one bounded page
+/// at a time.
+///
+/// No managed profile exists yet in this synthetic catalog, so every run pays
+/// `wine_runner::detect_wine_staging`'s fixed disk probe — the same cost
+/// `docs/performance.md` recorded for the old startup call, reproduced here to
+/// show moving it did not change what it costs, only when it runs.
+fn bench_wine_auto_apply_at_size(n: usize) {
+    let dir = scratch_dir(&format!("wine-auto-apply-{n}"));
+    let catalog_path = dir.join("catalog.json");
+    fs::write(&catalog_path, synthetic_catalog_json(n)).unwrap();
+    let wine_prefix_root = dir.join("wine-prefixes");
+
+    let mut wine_samples = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let mut catalog = Catalog::load_with_migration(&catalog_path).unwrap().catalog;
+        let candidates = crate::wine_auto_apply_candidates(&catalog);
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let (_, wine_elapsed) = timed(|| {
+            crate::apply_wine_auto_apply_to_candidates(
+                &mut catalog,
+                &wine_prefix_root,
+                &candidates,
+                &cancelled,
+            )
+        });
+        wine_samples.push(wine_elapsed);
+    }
+
+    report("wine_auto_apply (background)", n, wine_samples);
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+#[ignore]
+fn bench_wine_auto_apply_10_games() {
+    bench_wine_auto_apply_at_size(10);
+}
+
+#[test]
+#[ignore]
+fn bench_wine_auto_apply_1000_games() {
+    bench_wine_auto_apply_at_size(1_000);
+}
+
+#[test]
+#[ignore]
+fn bench_wine_auto_apply_10000_games() {
+    bench_wine_auto_apply_at_size(10_000);
 }
 
 /// Installs `count` copies of the real runner fixture, each under its own
