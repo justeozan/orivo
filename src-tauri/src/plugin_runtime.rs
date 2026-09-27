@@ -2276,7 +2276,8 @@ impl PluginRuntime {
                     .orivo_plugin_runner()
                     .call_discover_page(&mut *store, profile_id, &page_request)
                     .map_err(|error| self.classify(store, error))??;
-                validate_discovery_page(page, *limit).map(PluginResponse::DiscoveryPage)
+                validate_discovery_page(page, cursor.as_deref(), *limit)
+                    .map(PluginResponse::DiscoveryPage)
             }
             PluginRequest::PrepareLaunch {
                 profile_id,
@@ -2411,6 +2412,7 @@ fn validate_profile_validation(
 
 fn validate_discovery_page(
     page: wit_runner::RunnerGamePage,
+    requested_cursor: Option<&str>,
     limit: u32,
 ) -> Result<PluginDiscoveryPage, PluginRuntimeError> {
     let ceiling = (limit as usize).min(MAX_RESULT_PAGE_GAMES);
@@ -2461,6 +2463,13 @@ fn validate_discovery_page(
     // import unable to decide whether to resume.
     if page.page.complete && next_cursor.is_some() {
         return Err(PluginRuntimeError::InvalidResult("cursor after completion"));
+    }
+    // A cursor is a promise of progress, and the host is the only party holding
+    // both halves of it. Handing back the cursor it was given is well-formed in
+    // every other way, and a caller that trusts it asks the same question
+    // forever; refusing it here is cheaper than teaching every caller to count.
+    if next_cursor.is_some() && next_cursor.as_deref() == requested_cursor {
+        return Err(PluginRuntimeError::InvalidResult("cursor did not advance"));
     }
     Ok(PluginDiscoveryPage {
         games,
@@ -3918,6 +3927,39 @@ mod tests {
     // Untrusted results
     // -----------------------------------------------------------------------
 
+    /// A cursor is a promise of progress. Handing back the one it was given is
+    /// the cheapest lie a paginating plugin can tell: every field is well-formed,
+    /// the page is short and honest, and a caller that trusts it asks the same
+    /// question until something else stops it. The host has the request in front
+    /// of it, so it is the one that can tell.
+    #[test]
+    fn the_host_refuses_a_cursor_that_does_not_advance() {
+        let library = FixtureLibrary::new("loop-cursor");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert_eq!(
+            harness
+                .call(PluginRequest::DiscoverPage {
+                    profile_id: "fixture:loop-cursor".into(),
+                    cursor: Some("alpha.rom".into()),
+                    limit: 2,
+                })
+                .unwrap_err(),
+            PluginRuntimeError::InvalidResult("cursor did not advance")
+        );
+
+        // A first page has no cursor to repeat, and a page that really moves on
+        // is still accepted.
+        assert!(
+            harness
+                .call(PluginRequest::DiscoverPage {
+                    profile_id: FIXTURE_PROFILE.into(),
+                    cursor: Some("alpha.rom".into()),
+                    limit: 1,
+                })
+                .is_ok()
+        );
+    }
+
     #[test]
     fn the_host_refuses_a_launch_mode_it_does_not_recognise() {
         let library = FixtureLibrary::new("bad-mode");
@@ -4122,7 +4164,25 @@ mod tests {
     #[test]
     fn a_page_is_rejected_when_it_breaks_the_hosts_rules() {
         let good = page(vec![candidate("prov", "one", "One")], None, true);
-        assert!(validate_discovery_page(good, 4).is_ok());
+        assert!(validate_discovery_page(good, None, 4).is_ok());
+        // A cursor that really moves on, against the one the host sent.
+        assert!(
+            validate_discovery_page(
+                page(vec![candidate("prov", "two", "Two")], Some("two"), false),
+                Some("one"),
+                4,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            validate_discovery_page(
+                page(vec![candidate("prov", "two", "Two")], Some("one"), false),
+                Some("one"),
+                4,
+            )
+            .unwrap_err(),
+            PluginRuntimeError::InvalidResult("cursor did not advance")
+        );
 
         assert_eq!(
             validate_discovery_page(
@@ -4134,6 +4194,7 @@ mod tests {
                     None,
                     true,
                 ),
+                None,
                 1,
             )
             .unwrap_err(),
@@ -4149,6 +4210,7 @@ mod tests {
                     None,
                     true,
                 ),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -4157,6 +4219,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "one", "One")], Some("next"), true),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -4169,6 +4232,7 @@ mod tests {
                     Some("../escape"),
                     false
                 ),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -4177,6 +4241,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "../etc", "One")], None, true),
+                None,
                 4,
             )
             .unwrap_err(),
@@ -4185,6 +4250,7 @@ mod tests {
         assert_eq!(
             validate_discovery_page(
                 page(vec![candidate("prov", "one", "One\u{7}Two")], None, true),
+                None,
                 4,
             )
             .unwrap_err(),
