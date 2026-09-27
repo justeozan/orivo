@@ -6028,19 +6028,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * Crash reports and the feedback form.
    *
    * Started before the router so an error thrown during the first render is
-   * still caught. Without a DSN this does nothing and the button stays hidden,
-   * which is the state every test and every source build runs in.
+   * still caught — the SDK arrives a chunk later, and `sentry.ts` holds what
+   * happened in between. Without a DSN this does nothing and the button stays
+   * hidden, which is the state every test and every source build runs in.
    */
   if (initErrorReporting(isTauriRuntime() ? "desktop" : "browser")) {
     // The page and the game on screen travel with the report: "the covers are
     // wrong" is a shrug, the same sentence tagged with a title is a lead.
-    const attached = attachFeedbackTo(refs.feedbackButton, () => ({
+    void attachFeedbackTo(refs.feedbackButton, () => ({
       page: currentRoute.page,
       // An empty library has no selection, and naming a fixture here would tag
       // the report with a game the reporter has never seen.
       game: libraryIsEmpty() ? "" : selectedGame().title,
-    }));
-    refs.feedbackButton.hidden = !attached;
+    })).then((attached) => {
+      // The button starts hidden in the markup, so it appears when it works
+      // rather than sitting there as a control that opens nothing.
+      if (root.isConnected) refs.feedbackButton.hidden = !attached;
+    });
   }
 
   router.start((route) => {
