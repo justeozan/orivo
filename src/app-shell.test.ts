@@ -307,6 +307,16 @@ describe("application shell", () => {
     expect(menu.querySelector("#library-source-list")?.textContent).toBe("");
     expect(menu.querySelectorAll("[data-library-action='add-source']")).toHaveLength(1);
   });
+
+  // Winlator's entry point is Android's. On a desktop it must not be in the
+  // menu at all — not disabled, not present-and-explaining — because this menu
+  // is one of the reference screenshots.
+  it("keeps the Winlator folder entry off a desktop", () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    expect(menu.querySelector("[data-library-action='winlator-folder']")).toBeNull();
+    expect(menu.textContent).not.toContain("Winlator");
+  });
 });
 
 /**

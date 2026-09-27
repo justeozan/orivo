@@ -41,6 +41,12 @@ import {
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { prefersReducedMotion } from "./motion";
+import {
+  isWinlatorHost,
+  normaliseWinlatorExportFolder,
+  readWinlatorAdoptedCount,
+  winlatorAdoptionToast,
+} from "./winlator-source";
 
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
@@ -425,6 +431,7 @@ const SOURCE_ACCOUNT_CONNECTED_EVENT = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
+const WINLATOR_LIBRARY_ADOPTED_EVENT = "winlator-library-adopted";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
@@ -1604,6 +1611,33 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
     } catch (error) {
       showToast(messageFromError(error, "Could not import this game."));
+    }
+  };
+
+  const connectWinlatorExportFolder = async (): Promise<void> => {
+    closeLibraryMenu();
+    if (!isTauriRuntime()) {
+      showToast("Connecting a folder is available in the Orivo app.");
+      return;
+    }
+
+    try {
+      const answer = normaliseWinlatorExportFolder(
+        await invoke<unknown>("connect_winlator_export_folder"),
+      );
+      if (!answer) {
+        showToast("Orivo could not read the folder you chose.");
+        return;
+      }
+      // The host adopts inside the same call, so the library is already behind by
+      // the time this returns. Refreshing before the toast is what makes the new
+      // cards and the sentence about them arrive together.
+      if (answer.adopted > 0) {
+        await refreshLibrary();
+      }
+      showToast(answer.message);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not connect that folder."));
     }
   };
 
@@ -4862,6 +4896,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       navigate({ page: "settings", section: "libraries", attachGameId: null });
     } else if (action === "local") {
       void importGame();
+    } else if (action === "winlator-folder") {
+      void connectWinlatorExportFolder();
     }
   });
 
@@ -5229,6 +5265,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (!result) return;
       state.sourceAccounts.lastSync.set(result.provider, result);
       renderSourceAccountsPanel();
+    });
+    // Adoption runs after the first paint, so the cards it finds land after the
+    // library stopped asking. This is the only thing that makes them appear
+    // without a restart.
+    void listen<unknown>(WINLATOR_LIBRARY_ADOPTED_EVENT, (event) => {
+      const adopted = readWinlatorAdoptedCount(event.payload);
+      if (adopted === null) return;
+      void refreshLibrary().then(() => showToast(winlatorAdoptionToast(adopted)));
     });
     void listen<WineLaunchStatusEvent>(WINE_LAUNCH_STATUS_EVENT, (event) => {
       const payload = event.payload;
@@ -6712,6 +6756,17 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
               </button>
+              <!-- Android only, and deliberately not a desktop no-op: Winlator is
+                   an Android application, and the folder chooser this opens does
+                   not exist anywhere else. -->
+              ${
+                isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? `<button type="button" class="library-source-action" role="menuitem" data-library-action="winlator-folder">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>Connect Winlator's shortcuts</strong><small>Pick the folder Winlator exports its shortcuts into</small></span>
+              </button>`
+                  : ""
+              }
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
