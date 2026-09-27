@@ -3291,6 +3291,21 @@ mod tests {
         }
     }
 
+    /// Points a *file* name at a file somewhere else. On Windows this needs
+    /// `SeCreateSymbolicLinkPrivilege`, which the CI runner has because it is an
+    /// administrator — and a file symbolic link is what the leaf tests need: a
+    /// junction can only point at a directory, and the fixture skips directories
+    /// for reasons of its own, so a junction named `*.rom` would be left out of a
+    /// listing whether or not the host understood reparse points at all.
+    fn redirect_file(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_file(target, link).unwrap_or_else(|error| {
+            panic!("symlink_file needs SeCreateSymbolicLinkPrivilege and did not get it: {error}")
+        });
+    }
+
     /// Removes a directory redirection without touching what it pointed at. A
     /// junction is removed with `RemoveDirectory`, a symbolic link with `unlink`.
     fn remove_directory_redirect(link: &Path) {
@@ -3945,22 +3960,29 @@ mod tests {
     #[test]
     fn reading_a_symlink_by_name_never_leaves_the_grant() {
         let library = FixtureLibrary::new("read-symlink");
-        std::os::unix::fs::symlink(
-            library.root.join("secret.txt"),
-            library.games.join("link.rom"),
-        )
-        .unwrap();
+        redirect_file(
+            &library.games.join("link.rom"),
+            &library.root.join("secret.txt"),
+        );
         let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:read-link").unwrap_err();
-        assert!(
-            matches!(
-                error,
-                PluginRuntimeError::Plugin {
-                    code: PluginErrorCode::Unavailable,
-                    ..
+        // Unix refuses at the open — `O_NOFOLLOW` returns `ELOOP` — so the host
+        // reports the entry as gone. Windows opens the link itself and refuses on
+        // the kind, which is a permission. Both are refusals of the same thing, and
+        // the code each platform reaches is worth pinning rather than blurring.
+        let refused = match error {
+            PluginRuntimeError::Plugin { code, .. } => {
+                if cfg!(unix) {
+                    code == PluginErrorCode::Unavailable
+                } else {
+                    code == PluginErrorCode::PermissionDenied
                 }
-            ),
-            "reading a symlink out of the grant returned {error:?}"
+            }
+            _ => false,
+        };
+        assert!(
+            refused,
+            "reading a symbolic link out of the grant returned {error:?}"
         );
     }
 
@@ -4253,6 +4275,74 @@ mod tests {
         ));
     }
 
+    /// Not every reparse point is a redirection, and treating them alike loses the
+    /// user their library.
+    ///
+    /// OneDrive manages Documents and Desktop on a great many Windows machines, and
+    /// a file it has not downloaded is a *placeholder*: an ordinary file whose data
+    /// lives behind a filter driver, carrying a reparse tag. Deduplicated and
+    /// WOF-compressed files are the same shape. A host that refuses every reparse
+    /// point shows the plugin an empty folder and refuses every read in it, and the
+    /// user is told nothing.
+    ///
+    /// Windows' own test is one bit — `IsReparseTagNameSurrogate`, `ntifs.h` — and
+    /// it separates the tags that stand for another named object from the tags that
+    /// only describe where the bytes are.
+    ///
+    /// This drives it end to end with the one non-surrogate reparse point a CI
+    /// runner can be asked for: `compact /c /exe:LZX`, which turns a file into a
+    /// WOF reparse point. If the environment declines to produce one, the property
+    /// is left to `a_reparse_tag_is_a_redirection_only_when_it_names_one`, which
+    /// carries the rule itself and runs everywhere.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_reparse_point_that_is_not_a_redirection_is_read_like_any_file() {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        let library = FixtureLibrary::new("wof");
+        let cloudish = library.games.join("delta.rom");
+        // Compressible enough that WOF is worth the filter driver's while.
+        fs::write(&cloudish, "Delta Drift\n".repeat(4096).as_bytes()).unwrap();
+
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:LZX"])
+            .arg(&cloudish)
+            .output()
+            .expect("compact is on PATH");
+        let attributes = fs::metadata(&cloudish).unwrap().file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+            println!(
+                "this volume produced no reparse point, so the end-to-end half is \
+                 not exercised here: compact said {}",
+                String::from_utf8_lossy(&compacted.stdout).trim()
+            );
+            return;
+        }
+
+        let harness = Harness::new(untimed(), Some(&library));
+        let PluginResponse::DiscoveryPage(page) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        assert!(
+            page.games.iter().any(|game| game.external_id == "delta"),
+            "a file whose only peculiarity is where its bytes live was left out of the listing"
+        );
+        // And its contents come back, which is the half a listing cannot prove:
+        // opening the reparse point itself would hand back the placeholder.
+        assert!(
+            harness.prepare("fixture:read-delta").is_ok(),
+            "a file behind a storage filter could not be read"
+        );
+    }
+
     /// A redirection *inside* the granted folder is skipped rather than followed,
     /// on both platforms: a symbolic link on Unix, a junction on Windows. The
     /// listing reports what an entry is, and a reparse point is not a file the
@@ -4260,21 +4350,15 @@ mod tests {
     #[test]
     fn a_redirect_inside_a_granted_directory_is_not_listed() {
         let library = FixtureLibrary::new("symlink");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            library.root.join("secret.txt"),
-            library.games.join("zeta.rom"),
-        )
-        .unwrap();
-        #[cfg(not(unix))]
-        {
-            // A junction needs a directory to point at, and the name still has to
-            // end in `.rom` for the fixture to consider it a game at all.
-            let outside = library.root.join("outside");
-            fs::create_dir_all(&outside).unwrap();
-            fs::write(outside.join("secret.txt"), b"a keychain token").unwrap();
-            redirect_directory(&library.games.join("zeta.rom"), &outside);
-        }
+        // A *file* symbolic link, on both platforms. The Windows form of this used
+        // a junction, which points at a directory — and the fixture skips
+        // directories, so it would have been left out of the listing whether or not
+        // the host understood reparse points. This one is only excluded if the host
+        // recognises the redirection.
+        redirect_file(
+            &library.games.join("zeta.rom"),
+            &library.root.join("secret.txt"),
+        );
         let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
             .call(PluginRequest::DiscoverPage {
