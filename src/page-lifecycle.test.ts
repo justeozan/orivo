@@ -100,4 +100,70 @@ describe("PageLifecycleHost", () => {
 
     expect(container.hidden).toBe(true);
   });
+  it("does not load a lazy page until something asks for it", async () => {
+    const container = document.createElement("section");
+    const mount = vi.fn();
+    const load = vi.fn(async () => ({ mount, activate: vi.fn(), deactivate: () => null }));
+    const host = new PageLifecycleHost(container, load);
+
+    expect(load).not.toHaveBeenCalled();
+
+    await host.activate(libraryRoute);
+    await host.activate(libraryRoute);
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(mount).toHaveBeenCalledTimes(1);
+    expect(container.hidden).toBe(false);
+  });
+
+  it("shares one download between a warm-up and the navigation that beats it", async () => {
+    const container = document.createElement("section");
+    const page: AppPage = { mount: vi.fn(), activate: vi.fn(), deactivate: () => null };
+    const load = vi.fn(async () => page);
+    const host = new PageLifecycleHost(container, load);
+
+    const [warmed] = await Promise.all([host.load(), host.activate(libraryRoute)]);
+
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(warmed).toBe(page);
+  });
+
+  it("asks again after a failed load instead of closing the page for good", async () => {
+    const container = document.createElement("section");
+    const page: AppPage = { mount: vi.fn(), activate: vi.fn(), deactivate: () => null };
+    const load = vi
+      .fn<() => Promise<AppPage>>()
+      .mockRejectedValueOnce(new Error("chunk did not arrive"))
+      .mockResolvedValueOnce(page);
+    const host = new PageLifecycleHost(container, load);
+
+    await expect(host.activate(libraryRoute)).rejects.toThrow("chunk did not arrive");
+    expect(container.hidden).toBe(true);
+
+    await host.activate(libraryRoute);
+
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(container.hidden).toBe(false);
+  });
+
+  it("stays hidden when a lazy page arrives after the route moved on", async () => {
+    const container = document.createElement("section");
+    let resolveLoad!: (page: AppPage) => void;
+    const host = new PageLifecycleHost(
+      container,
+      () =>
+        new Promise<AppPage>((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+
+    const activatePromise = host.activate(libraryRoute);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    host.deactivate();
+
+    resolveLoad({ mount: vi.fn(), activate: vi.fn(), deactivate: () => null });
+    await activatePromise;
+
+    expect(container.hidden).toBe(true);
+  });
 });

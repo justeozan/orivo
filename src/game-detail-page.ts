@@ -1,3 +1,4 @@
+import "./game-detail-page.css";
 import { invoke } from "@tauri-apps/api/core";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {

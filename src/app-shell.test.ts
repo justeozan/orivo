@@ -80,6 +80,17 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/**
+ * Wait for the detail page's wiring to exist. The shell fetches that page on
+ * demand, and a dynamic import resolves over several event-loop turns rather
+ * than the fixed two `settle()` ticks the rest of these tests get by with.
+ */
+async function waitForDetailPage(): Promise<GameDetailPageOptions> {
+  for (let attempt = 0; attempt < 50 && !tauri.detailOptions; attempt += 1) await settle();
+  if (!tauri.detailOptions) throw new Error("the detail page never loaded");
+  return tauri.detailOptions;
+}
+
 async function goto(hash: string): Promise<void> {
   window.location.hash = hash;
   await settle();
@@ -391,15 +402,19 @@ describe("application shell against the desktop backend", () => {
   it("never launches anything when the requested game is not in the library", async () => {
     mount();
     await settle();
+    // The detail page is loaded on demand, so its wiring only exists once the
+    // router has opened it; `mountApp` no longer builds it up front.
+    await goto(`#/games/${encodeURIComponent(alpha.id)}`);
+    const detail = await waitForDetailPage();
 
     // A deep link opened before the library landed names an id the shell has
     // never seen. Falling back to the Library's selection here would launch a
     // completely different game than the one the user is looking at.
-    tauri.detailOptions?.play("steam:does-not-exist");
+    detail.play("steam:does-not-exist");
     await settle();
     expect(launchedGameIds()).toEqual([]);
 
-    tauri.detailOptions?.play(alpha.id);
+    detail.play(alpha.id);
     await settle();
     expect(launchedGameIds()).toEqual([alpha.id]);
   });

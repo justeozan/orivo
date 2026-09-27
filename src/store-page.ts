@@ -1,3 +1,4 @@
+import "./store-page.css";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppRoute,
