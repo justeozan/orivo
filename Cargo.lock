@@ -3068,6 +3068,8 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "getrandom 0.3.4",
+ "hmac",
  "jni 0.21.1",
  "keyring",
  "keyring-core",

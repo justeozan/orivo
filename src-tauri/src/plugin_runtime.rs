@@ -34,6 +34,7 @@
 //! host is the point: a limit or a refusal that arrives after the code it is
 //! meant to gate is one that never gated anything.
 
+use crate::plugin_compile_cache::ComponentCache;
 use crate::plugin_manifest::{
     CapabilityGrant, CapabilityScope, GrantValidationError, PluginCapability, PluginExtension,
     ValidatedPluginManifest, valid_opaque_id,
@@ -2264,6 +2265,12 @@ struct RuntimeInner {
     /// Created on first use, in whichever worker asks for it. A session that
     /// never opens a plugin surface never pays for the worker threads.
     scheduler: OnceLock<Arc<PluginScheduler>>,
+    /// Resolved on the first compilation rather than at construction. The cache
+    /// is authenticated by a key in the system keychain, and macOS prompts when
+    /// an application whose code signature it does not recognise reads one — so
+    /// opening it has to happen where a component is actually being compiled,
+    /// never on a path the user did not ask for.
+    compile_cache: OnceLock<Option<ComponentCache>>,
 }
 
 impl Drop for RuntimeInner {
@@ -2343,6 +2350,7 @@ impl PluginRuntime {
                 ticker,
                 epoch_mode,
                 scheduler: OnceLock::new(),
+                compile_cache: OnceLock::new(),
             }),
         })
     }
@@ -2384,6 +2392,42 @@ impl PluginRuntime {
                 Arc::clone(&self.inner.journal),
             ))
         })
+    }
+
+    /// The compile cache, or `None` when this process has none — no directory
+    /// configured, or no install key. `None` is the whole feature switched off:
+    /// every caller then behaves exactly as it did before the cache existed.
+    fn compile_cache(&self) -> Option<&ComponentCache> {
+        self.inner
+            .compile_cache
+            .get_or_init(|| crate::plugin_compile_cache::shared(&self.inner.engine))
+            .as_ref()
+    }
+
+    /// The engine every component is compiled by. Only the compile cache needs
+    /// it: an artifact is loadable by an engine whose configuration produced it
+    /// and by no other, so the cache is built from this one or not at all.
+    #[cfg(test)]
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.inner.engine
+    }
+
+    /// Attaches a cache explicitly instead of the process-wide one `lib.rs`
+    /// configures, so a test can own its directory and its key.
+    #[cfg(test)]
+    pub(crate) fn use_compile_cache(&self, cache: ComponentCache) {
+        assert!(
+            self.inner.compile_cache.set(Some(cache)).is_ok(),
+            "the compile cache was already resolved for this runtime"
+        );
+    }
+
+    /// What the attached cache answered. The only way to tell a reused artifact
+    /// from a recompilation from outside this module, since both produce the same
+    /// component.
+    #[cfg(test)]
+    pub(crate) fn compile_cache_counts(&self) -> Option<crate::plugin_compile_cache::CacheCounts> {
+        self.compile_cache().map(ComponentCache::counts)
     }
 
     /// Queues one invocation. This is the door every caller outside this module
@@ -2531,7 +2575,19 @@ impl PluginRuntime {
         bytes: &[u8],
         sha256: &str,
     ) -> Result<PreparedComponent, PluginRuntimeError> {
-        self.compile(bytes).map(|component| PreparedComponent {
+        // A cached artifact is machine code, so the cache answers only with one
+        // it can prove this installation wrote; anything it cannot prove is a
+        // compile, which is what this call did before the cache existed. See
+        // `plugin_compile_cache.rs` for why that proof is the whole module.
+        //
+        // `preflight_component` stays a plain compile on purpose: it is the
+        // installer asking whether *these bytes* validate, and answering that
+        // from an artifact would answer a different question.
+        let component = match self.compile_cache() {
+            Some(cache) => cache.component(bytes, || self.compile(bytes))?,
+            None => self.compile(bytes)?,
+        };
+        Ok(PreparedComponent {
             component,
             sha256: sha256.to_owned(),
         })
