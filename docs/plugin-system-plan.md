@@ -164,6 +164,19 @@ de survivre au processus. Révoquer écrit une date au lieu de supprimer une lig
 de sorte que « ce plugin pouvait lire ce dossier entre ces deux dates » reste une
 question à laquelle le registre répond.
 
+Deux règles rendent ce registre sûr plutôt que déclaratif. Une permission de
+dossier est nominative : elle porte `<id de profil>:<créneau>`, parce que le
+créneau appartient au composant — il le code en dur, faute d’un champ pour le
+déclarer dans le manifeste — et que deux profils d’un même plugin le nomment
+donc pareil ; révoquer sur l’un ne doit rien dire de l’autre. Et une permission
+appartient à du code, pas à un identifiant : chaque ligne enregistre le composant
+auquel elle a été accordée et si ce paquet est arrivé signé. Un paquet signé peut
+être mis à jour sous sa signature et conserver ce qu’il avait ; un paquet arrivé
+sans signature n’a personne pour répondre d’une nouvelle version, donc seuls ses
+propres octets comptent. Le verdict d’un profil est lui aussi rattaché au
+composant qui l’a rendu : un paquet qui change sous le même identifiant renvoie
+le profil à « à revalider » au lieu de lancer sur un ancien oui.
+
 ## Les promesses à préserver
 
 1. Le shell et la bibliothèque locale apparaissent sans attendre un plugin.
