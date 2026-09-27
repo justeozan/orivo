@@ -33,7 +33,14 @@ export interface PluginJournalEntryView {
 export interface PluginHealthClient {
   getHealthReport(pluginIds: string[], signal: AbortSignal): Promise<PluginHealthView[]>;
   resume(pluginId: string, signal: AbortSignal): Promise<PluginHealthView>;
-  getJournal(pluginId: string, signal: AbortSignal): Promise<PluginJournalEntryView[]>;
+  /**
+   * `null` means the read failed — no Tauri, an older host binary, a dropped
+   * IPC call — and is distinct from an empty array, which means the read
+   * succeeded and the plugin simply has nothing recent to show. A caller that
+   * folded both into "no recent activity" would show a broken plugin the same
+   * blank screen as a healthy, quiet one.
+   */
+  getJournal(pluginId: string, signal: AbortSignal): Promise<PluginJournalEntryView[] | null>;
 }
 
 function isTauriRuntime(): boolean {
@@ -123,13 +130,15 @@ export function createDefaultPluginHealthClient(): PluginHealthClient {
 
     async getJournal(pluginId, signal) {
       try {
+        // No Tauri here is not a failed read — it is the browser fallback,
+        // which never had a log to read in the first place.
         if (!isTauriRuntime()) return [];
         assertActive(signal);
         const entries = await invoke<unknown>("get_plugin_journal", { pluginId });
         assertActive(signal);
         return readJournal(entries);
       } catch {
-        return [];
+        return null;
       }
     },
   };

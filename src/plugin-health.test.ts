@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDefaultPluginHealthClient,
   phraseJournalEntry,
@@ -9,6 +9,11 @@ import {
   type PluginHealthView,
   type PluginJournalEntryView,
 } from "./plugin-health";
+
+const tauri = vi.hoisted(() => ({
+  invoke: vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>(),
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: tauri.invoke }));
 
 const liveSignal = (): AbortSignal => new AbortController().signal;
 
@@ -172,6 +177,27 @@ describe("the default client outside the desktop shell", () => {
   it("returns no report at all for an empty id list, without a round trip", async () => {
     const client = createDefaultPluginHealthClient();
     await expect(client.getHealthReport([], liveSignal())).resolves.toEqual([]);
+  });
+});
+
+describe("the default client's journal read inside the desktop shell", () => {
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    tauri.invoke.mockReset();
+  });
+
+  it("tells a failed read apart from a plugin with nothing to report", async () => {
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    const client = createDefaultPluginHealthClient();
+
+    tauri.invoke.mockResolvedValueOnce([]);
+    await expect(client.getJournal("com.orivo.dolphin", liveSignal())).resolves.toEqual([]);
+
+    tauri.invoke.mockRejectedValueOnce(new Error("unknown command: get_plugin_journal"));
+    // A dropped call must read as "could not read this", never as the same
+    // empty array a healthy, quiet plugin answers with — a caller that folded
+    // the two together would show a broken plugin the same blank screen.
+    await expect(client.getJournal("com.orivo.dolphin", liveSignal())).resolves.toBeNull();
   });
 });
 
