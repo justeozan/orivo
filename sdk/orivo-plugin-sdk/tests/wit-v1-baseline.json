@@ -1,0 +1,110 @@
+{
+  "types": {
+    "host-files.directory-entry": "record{name:string,byte-size:u64,directory:bool}",
+    "host-files.plugin-error": "types.plugin-error",
+    "host-journal.journal-level": "enum{debug,info,warning,error}",
+    "metadata.external-reference": "types.external-reference",
+    "metadata.game-metadata": "record{description:option<string>,genres:list<string>,media:list<metadata.media-candidate>}",
+    "metadata.media-candidate": "types.media-candidate",
+    "metadata.plugin-error": "types.plugin-error",
+    "plugin-core.extension-kind": "types.extension-kind",
+    "plugin-core.health": "record{ready:bool,message:option<string>}",
+    "plugin-core.identity": "record{id:string,version:string,extensions:list<plugin-core.extension-kind>}",
+    "plugin-core.plugin-error": "types.plugin-error",
+    "runner.game-candidate": "types.game-candidate",
+    "runner.launch-intent": "record{runner-id:string,profile-id:string,game-reference:string,mode:string}",
+    "runner.page-info": "types.page-info",
+    "runner.page-request": "types.page-request",
+    "runner.plugin-error": "types.plugin-error",
+    "runner.profile-validation": "record{valid:bool,message:option<string>}",
+    "runner.runner-game-page": "record{games:list<runner.game-candidate>,page:runner.page-info}",
+    "runner.runner-profile": "record{id:string,display-name:string}",
+    "source.discovery-page": "record{games:list<source.game-candidate>,page:source.page-info}",
+    "source.game-candidate": "types.game-candidate",
+    "source.page-info": "types.page-info",
+    "source.page-request": "types.page-request",
+    "source.plugin-error": "types.plugin-error",
+    "types.badge-contribution": "record{id:string,label:string,tone:string}",
+    "types.command-contribution": "record{id:string,title:string,subtitle:option<string>,icon:option<string>}",
+    "types.extension-kind": "enum{source,runner,metadata,search,automation,ui-contribution}",
+    "types.external-reference": "record{provider-id:string,external-id:string}",
+    "types.game-candidate": "record{reference:types.external-reference,title:string,sort-title:option<string>,platform:option<string>,installed:bool}",
+    "types.media-candidate": "record{kind:string,url:string,width:option<u32>,height:option<u32>}",
+    "types.page-info": "record{next-cursor:option<string>,complete:bool}",
+    "types.page-request": "record{cursor:option<string>,limit:u32}",
+    "types.plugin-error": "record{code:types.plugin-error-code,message:string,retryable:bool}",
+    "types.plugin-error-code": "enum{invalid-input,permission-denied,unavailable,rate-limited,cancelled,internal}",
+    "ui-contrib.badge-contribution": "types.badge-contribution",
+    "ui-contrib.command-contribution": "types.command-contribution",
+    "ui-contrib.plugin-error": "types.plugin-error",
+    "ui-contrib.ui-contributions": "record{commands:list<ui-contrib.command-contribution>,badges:list<ui-contrib.badge-contribution>,settings-schema:option<string>}"
+  },
+  "interfaces": {
+    "host-files": {
+      "list-directory": "(grant:string)->result<list<host-files.directory-entry>,host-files.plugin-error>",
+      "read-file": "(grant:string,name:string)->result<list<u8>,host-files.plugin-error>"
+    },
+    "host-journal": {
+      "log": "(level:host-journal.journal-level,message:string)->()"
+    },
+    "metadata": {
+      "enrich": "(reference:metadata.external-reference)->result<metadata.game-metadata,metadata.plugin-error>"
+    },
+    "plugin-core": {
+      "get-identity": "()->plugin-core.identity",
+      "health-check": "()->result<plugin-core.health,plugin-core.plugin-error>"
+    },
+    "runner": {
+      "discover-page": "(profile-id:string,request:runner.page-request)->result<runner.runner-game-page,runner.plugin-error>",
+      "prepare-launch": "(profile-id:string,game-reference:string)->result<runner.launch-intent,runner.plugin-error>",
+      "validate-profile": "(profile:runner.runner-profile)->result<runner.profile-validation,runner.plugin-error>"
+    },
+    "source": {
+      "discover-page": "(request:source.page-request)->result<source.discovery-page,source.plugin-error>"
+    },
+    "types": {},
+    "ui-contrib": {
+      "contributions": "()->result<ui-contrib.ui-contributions,ui-contrib.plugin-error>"
+    }
+  },
+  "worlds": {
+    "metadata-plugin": {
+      "imports": [
+        "types"
+      ],
+      "exports": [
+        "metadata",
+        "plugin-core"
+      ]
+    },
+    "runner-plugin": {
+      "imports": [
+        "host-files",
+        "host-journal",
+        "types"
+      ],
+      "exports": [
+        "plugin-core",
+        "runner"
+      ]
+    },
+    "source-plugin": {
+      "imports": [
+        "types"
+      ],
+      "exports": [
+        "plugin-core",
+        "source"
+      ]
+    },
+    "ui-plugin": {
+      "imports": [
+        "types"
+      ],
+      "exports": [
+        "plugin-core",
+        "ui-contrib"
+      ]
+    }
+  }
+}

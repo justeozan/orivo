@@ -3094,6 +3094,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "orivo-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "orivo",
+ "serde",
+ "serde_json",
+ "sha2",
+ "wit-parser",
+]
+
+[[package]]
 name = "osakit"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

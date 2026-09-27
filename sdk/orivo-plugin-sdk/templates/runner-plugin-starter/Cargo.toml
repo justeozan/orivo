@@ -1,0 +1,27 @@
+# Its own workspace, same reasoning as `src-tauri/fixtures/runner-fixture`:
+# this crate targets wasm32-unknown-unknown and is built by `build.sh`, never
+# by `cargo build`/`cargo test` at the repository root. Keeping it out of
+# Orivo's workspace is what stops those commands from needing a wasm target
+# or a component tool on a fresh clone.
+[workspace]
+
+[package]
+name = "orivo-runner-plugin-starter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Pinned to the same release the fixture and the host's Wasmtime depend on —
+# see `src-tauri/fixtures/README.md` for why the version has to match.
+wit-bindgen = { version = "0.62.0", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

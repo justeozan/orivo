@@ -1,0 +1,23 @@
+[package]
+name = "orivo-plugin-sdk"
+version = "0.1.0"
+description = "Manifest validator, host simulator and WIT compatibility guard for Orivo plugin authors."
+edition = "2024"
+publish = false
+license-file = "../../LICENSE"
+
+[dependencies]
+# Same rules as the host, not a second copy of them: `PluginManifest::validate`
+# and `PluginRuntime` are the exact code Orivo runs, reused as an rlib so the
+# two cannot drift apart. See `src-tauri/src/lib.rs` for the `pub mod` this
+# depends on.
+orivo_lib = { path = "../../src-tauri", package = "orivo" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+# Pinned to the exact release `src-tauri/Cargo.toml` already depends on (as a
+# dev-dependency there too), so both readings of `wit/` use the same encoder.
+# Only the compatibility test needs it, so it stays out of the shipped binary.
+wit-parser = "=0.246.2"

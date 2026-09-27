@@ -10,9 +10,14 @@ mod launcher;
 #[cfg(test)]
 mod perf_bench;
 mod plugin_installer;
-mod plugin_manifest;
+// `pub`, not `mod`: the developer SDK (`sdk/orivo-plugin-sdk`) links this crate
+// as an rlib so its manifest validator and host simulator call the same
+// policy and invocation code Orivo runs, instead of a second copy that could
+// drift from it. Nothing else changes: every other item in both modules kept
+// the visibility it already had.
+pub mod plugin_manifest;
 mod plugin_registry;
-mod plugin_runtime;
+pub mod plugin_runtime;
 mod plugin_scheduler;
 mod preferences;
 mod quiky_installer;

@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri"]
+members = ["src-tauri", "sdk/orivo-plugin-sdk"]
 resolver = "2"
 
 [profile.dev]
