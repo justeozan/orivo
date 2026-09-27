@@ -1581,15 +1581,22 @@ impl EntryFacts {
     }
 
     /// From a `stat` the host asked for without opening anything.
+    ///
+    /// Everything is widened before it is compared. `st_mode` and `mode_t` are not
+    /// the same width on every target this ships to — 32-bit Android has a
+    /// `c_uint` mode and a `u16` `mode_t`, so the mask and the comparisons below
+    /// do not even compile there without the casts — and `st_nlink` is `u64` on
+    /// 64-bit Linux and `u32` on 32-bit, which is why it is `as` rather than
+    /// `u64::from`.
     #[cfg(unix)]
     fn of_stat(raw: &libc::stat) -> Self {
-        let kind = raw.st_mode & libc::S_IFMT;
+        let kind = u32::from(raw.st_mode) & u32::from(libc::S_IFMT);
         Self {
-            file: kind == libc::S_IFREG,
-            directory: kind == libc::S_IFDIR,
-            symlink: kind == libc::S_IFLNK,
+            file: kind == u32::from(libc::S_IFREG),
+            directory: kind == u32::from(libc::S_IFDIR),
+            symlink: kind == u32::from(libc::S_IFLNK),
             byte_size: raw.st_size.max(0) as u64,
-            links: u64::from(raw.st_nlink),
+            links: raw.st_nlink as u64,
             owner: raw.st_uid,
         }
     }
@@ -2959,6 +2966,77 @@ mod tests {
         })
     }
 
+    /// Redirects `link` at `target`, with the mechanism an unprivileged attacker
+    /// actually has on each platform.
+    ///
+    /// On Windows that is a **junction**, not a symbolic link: a directory symlink
+    /// needs `SeCreateSymbolicLinkPrivilege`, which an ordinary account does not
+    /// have, while `mklink /J` needs nothing but write access to the parent — so
+    /// the junction is the redirection the sandbox has to survive.
+    fn redirect_directory(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg(format!(
+                    "mklink /J \"{}\" \"{}\"",
+                    link.display(),
+                    target.display()
+                ))
+                .status()
+                .expect("mklink is on PATH");
+            assert!(status.success(), "mklink /J did not create the junction");
+        }
+    }
+
+    /// Plants a file the host cannot open for reading, and hands back whatever has
+    /// to stay alive for it to remain unopenable.
+    ///
+    /// A listing that opens each entry to describe it loses this one. Mode bits do
+    /// it on Unix; on Windows the test holds the file with no sharing, which is
+    /// what any running program does to a file it is using — and which still
+    /// permits an open for *attributes*, so a listing that asks rather than opens
+    /// is unaffected.
+    fn plant_unopenable_file(path: &Path) -> Option<File> {
+        fs::write(path, b"Locked\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            None
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(path)
+                    .expect("the test can hold its own file"),
+            )
+        }
+    }
+
+    /// Whether this process can be refused anything by permissions. Root opens
+    /// files whose mode forbids it, so a test that needs a refusal has nothing to
+    /// observe.
+    fn permissions_are_enforced_here() -> bool {
+        #[cfg(unix)]
+        {
+            host_account() != 0
+        }
+        #[cfg(not(unix))]
+        {
+            // Sharing, not permissions: a handle with no sharing refuses a second
+            // opener whatever its privileges, so the Windows form of this holds
+            // even for the administrator the CI runner is.
+            true
+        }
+    }
+
     fn temporary_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "orivo-plugin-host-{tag}-{}-{}",
@@ -3564,7 +3642,6 @@ mod tests {
     /// Before the handle, `read_file` joined the grant's path and followed the
     /// link, so `fixture:read-secret` did not fail — it succeeded, reading a file
     /// from the attacker's folder.
-    #[cfg(unix)]
     #[test]
     fn a_swapped_parent_cannot_redirect_a_granted_folder() {
         let root = temporary_root("swapped-parent");
@@ -3584,7 +3661,7 @@ mod tests {
         // The swap happens after the user granted the folder, which is the whole
         // point: the handle names the directory they approved, not the path.
         fs::rename(&library, root.join("library-real")).unwrap();
-        std::os::unix::fs::symlink(&decoy, &library).unwrap();
+        redirect_directory(&library, &decoy);
 
         let error = harness.prepare("fixture:read-secret").unwrap_err();
         assert!(
@@ -3718,7 +3795,6 @@ mod tests {
     /// file's own. A link the test makes itself has two names and this account's
     /// owner, and it stays readable — refusing every hard link would break a
     /// deduplicated library for no security gained.
-    #[cfg(unix)]
     #[test]
     fn the_facts_a_refusal_is_made_from_come_from_the_descriptor() {
         let library = FixtureLibrary::new("hard-link");
@@ -3735,6 +3811,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(facts.links, 2, "the link count is not the file's own");
+        #[cfg(unix)]
         assert_eq!(facts.owner, host_account());
 
         // The temporary directory this runs in is private, so the same link is
@@ -3860,27 +3937,19 @@ mod tests {
     /// to 4,096 of them per call on a network share or a cloud-backed folder,
     /// inside a host call nothing can interrupt.
     ///
-    /// The unopenable file is how that is reproducible here: `stat` describes it,
-    /// `open` refuses it. The folder beside it is the Windows half, in the one
-    /// form this platform can check.
-    #[cfg(unix)]
+    /// Both halves are checked on both platforms now. The subdirectory is the
+    /// regression itself, and the unopenable file is the same property from the
+    /// other side: `stat` describes it, `open` refuses it.
     #[test]
     fn a_listing_describes_entries_it_does_not_open() {
-        use std::os::unix::fs::PermissionsExt;
-
-        if host_account() == 0 {
-            // Root opens anything, so the interesting entry would not be
-            // interesting. Better skipped than passing for the wrong reason.
+        if !permissions_are_enforced_here() {
             return;
         }
         let library = FixtureLibrary::new("census");
-        fs::write(library.games.join("locked.rom"), b"Locked\n").unwrap();
-        fs::set_permissions(
-            library.games.join("locked.rom"),
-            fs::Permissions::from_mode(0o000),
-        )
-        .unwrap();
         fs::create_dir(library.games.join("nested")).unwrap();
+        // Held for the length of the test on Windows, and dropped before the
+        // library's own directory is removed.
+        let _locked = plant_unopenable_file(&library.games.join("locked.rom"));
 
         let harness = Harness::new(PluginLimits::default(), Some(&library));
         assert!(harness.prepare("fixture:census").is_ok());
@@ -3940,7 +4009,6 @@ mod tests {
     /// lives, and no longer. Whatever persists grants will reload a *path*, and a
     /// path is answered by whatever is at it — so the approval has to record
     /// which folder it was, and the reload has to check.
-    #[cfg(unix)]
     #[test]
     fn a_reloaded_grant_is_pinned_to_the_folder_that_was_approved() {
         let root = temporary_root("pinned");

@@ -147,6 +147,22 @@ jobs:
       - name: Check the Rust crate
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      # `plugin_runtime.rs` is the one module whose implementation genuinely
+      # differs per platform — handle-relative opens, a granted folder's trust,
+      # that folder's identity — and `cargo check` cannot say whether any of it
+      # is *right*. Windows is where that gap cost something: a change that
+      # dropped every subdirectory from a plugin's directory listing shipped and
+      # was found by reading the code, not by a test, because the tests that
+      # would have caught it were `#[cfg(unix)]`. This runs the plugin host's own
+      # tests where nothing else does.
+      #
+      # Deliberately not the whole suite: the rest of the crate is
+      # platform-independent and already covered on macOS and Linux, and a
+      # Windows runner is the slowest in this matrix.
+      - name: Test the plugin host (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib plugin_
+
       # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
       # `wit_compatibility` test is the one thing here that is *supposed* to
       # fail on a breaking change to wit/orivo-plugin.wit — a check that never
