@@ -84,7 +84,7 @@ qu'un retour anticipé sur liste vide).
 | `Catalog::load_with_migration` (lecture + parse JSON) | 90 µs | 418 µs | 4,6 ms |
 | `Catalog::save_atomically` (sérialisation + écriture atomique) | 554 µs | 1,4 ms | 11,5 ms |
 | `auto_apply_wine_to_direct_games` | 26,2 ms\* | 22,5 ms\* | 25,9 ms\* |
-| `auto_apply_winlator_shortcuts` | 0 ns | 0 ns | 0 ns |
+| `adopt_exported_winlator_shortcuts`\*\* | — | — | — |
 
 \* Ce chiffre ne dépend pas de `n` : c'est le coût fixe d'une sonde disque
 (`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
@@ -93,17 +93,23 @@ local existe et qu'aucun profil Wine managé n'est encore associé — jamais un
 fois par jeu. Sur la machine partagée de cette mesure, une répétition sur
 cinq a atteint 960 ms au lieu de ~25 ms (contention disque avec sept builds
 concurrents) : à surveiller si ce chiffre revient sur une machine calme, mais
-pas traité comme une régression ici. `auto_apply_winlator_shortcuts` est un
-vrai no-op sur macOS (`cfg!(target_os = "android")`), donc à coût nul quelle
-que soit `n` sur cette plateforme — la mesure le confirme plutôt que de le
-supposer.
+pas traité comme une régression ici.
+
+\*\* Cette ligne mesurait `auto_apply_winlator_shortcuts` — un no-op vérifié
+hors Android (`cfg!(target_os = "android")`), à 0 ns quelle que soit `n` —
+tant que la passe tournait dans `AppState::load`. Depuis M1 (#44) elle tourne
+en tâche de fond après le premier rendu : ce n'est plus un coût de démarrage.
+Le banc la mesure toujours, sous le nom de la fonction qui fait le travail, et
+s'arrête désormais sur un `is_dir()` du dossier d'export plutôt que sur un
+`cfg!` — quelques microsecondes au lieu de zéro, hors du chemin de démarrage.
+Les chiffres seront repris au prochain passage du banc, sur une machine calme.
 
 **Lecture :** le parse/sérialisation JSON croît linéairement et reste sous la
 milliseconde jusqu'à 1 000 jeux, environ 4-12 ms à 10 000 — largement sous un
-budget de premier rendu perçu. Les deux passes d'auto-application sont soit un
-no-op vérifié (Winlator hors Android), soit un coût fixe indépendant de la
-taille de la bibliothèque (Wine), jamais une boucle par jeu qui écrirait sur
-le disque.
+budget de premier rendu perçu. La seule passe d'auto-application encore sur le
+chemin de démarrage (Wine) a un coût fixe indépendant de la taille de la
+bibliothèque, jamais une boucle par jeu qui écrirait sur le disque ; celle de
+Winlator a quitté ce chemin.
 
 ## 3. Plugins — coût de découverte, avec et sans composants installés
 

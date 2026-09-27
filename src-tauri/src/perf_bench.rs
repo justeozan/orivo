@@ -22,8 +22,11 @@
 //! 1. Does the catalog step of startup scale acceptably from a hobby library
 //!    (10 games) to a hoarder's (10,000)? `catalog::Catalog::load_with_migration`
 //!    and `save_atomically` are exactly what `load_or_migrate_catalog` calls.
-//! 2. Are the two auto-apply passes (Wine, Winlator) cheap no-ops when nothing
+//! 2. Are the two adoption passes (Wine, Winlator) cheap no-ops when nothing
 //!    needs them, and still linear rather than quadratic when something does?
+//!    Only the Wine one is on the startup path: since M1 the Winlator pass runs
+//!    in the background after the first paint, and is measured here for its own
+//!    sake rather than as a startup cost.
 //! 3. What does having plugins installed cost the two on-demand commands that
 //!    actually touch the plugin runtime — `get_plugin_catalog` (Settings ›
 //!    Plugins) and `get_runner_plugins` (the emulator flow) — neither of which
@@ -43,7 +46,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -133,8 +136,11 @@ fn synthetic_catalog_json(count: usize) -> String {
     )
 }
 
-/// `load_with_migration` + `save_atomically` + both auto-apply passes, at one
-/// catalog size. This is the sequence `AppState::load` runs on every startup.
+/// `load_with_migration` + `save_atomically` + the Wine auto-apply pass, at one
+/// catalog size: the sequence `AppState::load` runs on every startup. The
+/// Winlator adoption pass is measured alongside them because its number is worth
+/// having, but it is no longer part of that sequence — it runs on a background
+/// worker once the shell is on screen.
 fn bench_catalog_at_size(n: usize) {
     let dir = scratch_dir(&format!("catalog-{n}"));
     let catalog_path = dir.join("catalog.json");
@@ -160,24 +166,30 @@ fn bench_catalog_at_size(n: usize) {
         let (_, save_elapsed) = timed(|| catalog.save_atomically(&save_path).unwrap());
         save_samples.push(save_elapsed);
 
-        // Both passes are `#[cfg]`-gated to one OS each (see lib.rs), so on
-        // any other platform — including this bench run, most of the time —
-        // they return `false` after their `O(n)` filter without touching
-        // Wine or Winlator at all. That early return is still measured here,
-        // not assumed, because it is exactly the cost every non-macOS,
-        // non-Android startup actually pays for these two passes.
+        // Both passes stop early where they have nothing to do — Wine behind
+        // its `#[cfg]`, Winlator on a folder that is not there — so on any
+        // other platform, including this bench run most of the time, they
+        // return `false` after their `O(n)` filter without touching Wine or
+        // Winlator at all. That early return is still measured here, not
+        // assumed, because it is exactly what a startup actually pays.
         let (_, wine_elapsed) =
             timed(|| crate::auto_apply_wine_to_direct_games(&mut catalog, &wine_prefix_root));
         wine_samples.push(wine_elapsed);
 
-        let (_, winlator_elapsed) = timed(|| crate::auto_apply_winlator_shortcuts(&mut catalog));
+        // The folder resolution is part of what the background pass pays, so it
+        // is inside the timed closure rather than hoisted out of it.
+        let cancelled = AtomicBool::new(false);
+        let (_, winlator_elapsed) = timed(|| {
+            let folder = crate::winlator_export_folder(&catalog);
+            crate::adopt_exported_winlator_shortcuts(&mut catalog, &folder, &cancelled)
+        });
         winlator_samples.push(winlator_elapsed);
     }
 
     report("catalog.load_with_migration", n, load_samples);
     report("catalog.save_atomically", n, save_samples);
     report("auto_apply_wine_to_direct_games", n, wine_samples);
-    report("auto_apply_winlator_shortcuts", n, winlator_samples);
+    report("adopt_exported_winlator_shortcuts", n, winlator_samples);
 
     fs::remove_dir_all(&dir).ok();
 }
