@@ -55,9 +55,10 @@ pub(crate) const GAMES_SLOT: &str = "games";
 const PROFILE_ID: &str = "runner-ryujinx-1";
 
 /// Names a real dumped library actually uses. The first three are files the
-/// opaque-id grammar cannot spell, which is why the reference is hex; the fourth
-/// can be spelled plainly and is here so both forms are exercised by the same
-/// import.
+/// opaque-id grammar cannot spell at all; the fourth could be spelled plainly and
+/// is not, because `encode_name` has one form and uses it for every file. It is
+/// here for the titles: a name with no brackets and no spaces has to come out
+/// unchanged.
 const LIBRARY: &[(&str, &str)] = &[
     (
         "Super Mario Odyssey [0100000000010000][v0].nsp",
@@ -602,7 +603,7 @@ fn nothing_beside_the_games_is_offered_and_no_file_is_ever_read() {
 /// the default `Hidden | System`. `host-files` has no such default, so both the
 /// plugin and the host apply the rule themselves.
 #[test]
-fn a_hidden_file_never_becomes_a_card_or_a_launch() {
+fn a_hidden_file_becomes_neither_a_card_nor_a_resolvable_reference() {
     let harness = Harness::new("hidden");
     harness.configure();
     harness.import();
@@ -624,19 +625,23 @@ fn a_hidden_file_never_becomes_a_card_or_a_launch() {
             .iter()
             .any(|entry| entry.game_path.file_name().unwrap() == sidecar)
     );
-    // And it cannot be reached by naming it either: a plain id could never start
-    // with a dot, and the hex form must not be the way around that.
-    let package = harness.service.package(PLUGIN_ID).unwrap();
-    let cancelled = AtomicBool::new(false);
-    assert!(
-        prepare_runner_launch(
-            &package,
-            &catalog,
-            PROFILE_ID,
-            &reference(sidecar),
-            &cancelled,
-        )
-        .is_err()
+    // And it cannot be reached by *naming* it either, which is the half that
+    // matters: a plain id could never start with a dot, and the hex form must not
+    // be the way around that. Asserted at the resolver rather than at
+    // `prepare_runner_launch`, because a launch refuses an unknown reference with
+    // `InventoryMissing` before it resolves anything — which would pass whatever
+    // the rule was. A launch of a *known* entry re-verifies the canonical path it
+    // stored and never re-reads a name, so the import path is the only door a
+    // hidden file could have come through, and this is that door.
+    let profile = catalog.runner_profile(PROFILE_ID).unwrap();
+    let granted = profile
+        .game_directories
+        .iter()
+        .map(|directory| directory.id.clone())
+        .collect();
+    assert_eq!(
+        crate::runner_host::resolve_game_file(profile, &granted, &reference(sidecar)),
+        Err(crate::runner_host::RunnerHostError::GameUnresolvable)
     );
 }
 

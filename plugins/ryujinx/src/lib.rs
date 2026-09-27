@@ -184,14 +184,7 @@ impl RunnerGuest for Ryujinx {
                 next_cursor = Some(index.to_string());
                 break;
             }
-            // A file with nothing to call it is skipped alone rather than being
-            // allowed to take the page with it: the host rejects a whole page
-            // over one empty title, and an import retries that same page every
-            // time, so one unnameable file would stop a library dead.
-            match candidate(&entry.name, suffix) {
-                Some(candidate) => games.push(candidate),
-                None => unaddressable += 1,
-            }
+            games.push(candidate(&entry.name, suffix));
         }
 
         // One bounded line per page, not one per entry: this is what the
@@ -200,7 +193,7 @@ impl RunnerGuest for Ryujinx {
         host_journal::log(
             JournalLevel::Info,
             &format!(
-                "{} Switch game(s) on this page; skipped {unsupported} entr(y|ies) Ryujinx does \
+                "{} Switch game(s) on this page; skipped {unsupported} entries Ryujinx does \
                  not open and {unaddressable} name(s) Orivo cannot refer to",
                 games.len()
             ),
@@ -253,13 +246,11 @@ impl RunnerGuest for Ryujinx {
 /// runner needs, and reading an `.nsp` header would mean opening a file the user
 /// allowed this plugin to *list*.
 ///
-/// `None` when there is nothing to put on the card. The host refuses a candidate
-/// whose title is blank, and it refuses the whole page with it.
-fn candidate(name: &str, suffix_len: usize) -> Option<GameCandidate> {
+fn candidate(name: &str, suffix_len: usize) -> GameCandidate {
     let stem = &name[..name.len() - suffix_len];
-    let title = readable_title(name, stem)?;
+    let title = readable_title(name, stem);
     let title_id = title_id(stem);
-    Some(GameCandidate {
+    GameCandidate {
         reference: ExternalReference {
             provider_id: PLUGIN_ID.into(),
             external_id: encode_name(name),
@@ -274,7 +265,7 @@ fn candidate(name: &str, suffix_len: usize) -> Option<GameCandidate> {
             None => PLATFORM.to_string(),
         }),
         installed: true,
-    })
+    }
 }
 
 /// The recognised suffix's byte length, or `None` for anything else in the
@@ -391,7 +382,7 @@ fn title_id(stem: &str) -> Option<String> {
 /// its title id and version, so they come off; parentheses stay, because that is
 /// where the region usually is and a region is part of what tells two dumps
 /// apart.
-fn readable_title(name: &str, stem: &str) -> Option<String> {
+fn readable_title(name: &str, stem: &str) -> String {
     let mut title = String::with_capacity(stem.len());
     let mut depth = 0_usize;
     for character in stem.chars() {
@@ -413,12 +404,16 @@ fn readable_title(name: &str, stem: &str) -> Option<String> {
     // `[0100000000010000].nsp` has nothing left once the brackets come off, so
     // its stem is the label; a file called ` .nsp` — or one named with a
     // no-break space, or U+3000 — has a stem that is blank as well, and its own
-    // file name is all there is. Only if even that is blank is there no card to
-    // make, and the caller drops that one file rather than the page.
+    // file name is all there is.
+    //
+    // The last one cannot be blank, so there is no fourth case and no card left
+    // unmade: this is only ever called for a name that matched a suffix of at
+    // least four printable characters, and `trim` removes none of them.
     [collapsed.as_str(), stem.trim(), name.trim()]
         .into_iter()
         .find(|candidate| !candidate.is_empty())
-        .map(str::to_owned)
+        .unwrap_or(name)
+        .to_owned()
 }
 
 /// Lower case only, so one file has one reference. `char::to_digit(16)` takes

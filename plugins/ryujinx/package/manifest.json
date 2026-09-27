@@ -4,15 +4,20 @@
   "version": "1.0.0",
   "sdk": "orivo-plugin@1",
   "minOrivoVersion": "0.3.0",
-  "extensions": ["runner"],
-  "capabilities": ["runner_prepare", "files_read"],
+  "extensions": [
+    "runner"
+  ],
+  "capabilities": [
+    "runner_prepare",
+    "files_read"
+  ],
   "networkDomains": [],
   "artifacts": [
     {
       "path": "component.wasm",
       "kind": "component",
-      "sha256": "d5b6f95c7eb702609203cf6a8681dd62142a832dd50f0058c2737146ecbd32da",
-      "byteSize": 45804
+      "sha256": "fb8b2f37c7eab475179aa3748144c12ec737610915ebf7388007bff16d0d1ca8",
+      "byteSize": 45850
     }
   ]
 }

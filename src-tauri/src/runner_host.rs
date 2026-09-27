@@ -1872,6 +1872,19 @@ mod tests {
                 "{name} is not a name host-files would list"
             );
         }
+        // And the plain form, which is where this actually changed behaviour. A
+        // hidden name was never reachable that way — the opaque grammar makes an
+        // id start with an alphanumeric — but `with:a:colon.nsp` and `CON` both
+        // pass that grammar and used to resolve by exact name, even though no
+        // listing could ever have offered either.
+        for name in ["with:a:colon.nsp", "with:a:colon", "CON"] {
+            assert!(valid_opaque_id(name, MAX_EXTERNAL_ID_LENGTH));
+            assert_eq!(
+                resolve_game_file(&profile, &all_slots(&profile), name),
+                Err(RunnerHostError::GameUnresolvable),
+                "{name} is not a name host-files would list"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
