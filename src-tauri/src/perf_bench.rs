@@ -526,6 +526,7 @@ fn ryujinx_service(
     root: &Path,
     games: &Path,
     profile_id: &str,
+    artifacts: Option<&Path>,
 ) -> std::sync::Arc<crate::runner_commands::ThirdPartyRunnerService> {
     use crate::ryujinx_plugin::{
         GAMES_SLOT, PLUGIN_ID, fake_application, manifest, package_archive,
@@ -555,11 +556,27 @@ fn ryujinx_service(
         root.join("catalog.json"),
         std::sync::Arc::new(std::sync::Mutex::new(())),
     );
-    let service = std::sync::Arc::new(crate::runner_commands::ThirdPartyRunnerService::new(
+    let mut service = crate::runner_commands::ThirdPartyRunnerService::new(
         store,
         plugin_root,
         HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
-    ));
+    );
+    // The service's own engine, not `PluginRuntime::shared()`: the process-wide
+    // one has no cache directory configured in a test binary, so it is the
+    // cacheless state whatever P5 does, and a bench that wants to show the cache
+    // has to bring one. `CACHE_BENCH_KEY` is a fixed key for the reason that
+    // constant gives — nothing here may reach the keychain.
+    if let Some(artifacts) = artifacts {
+        let runtime = PluginRuntime::new().expect("an engine is available on the bench host");
+        runtime.use_compile_cache(ComponentCache::open(
+            runtime.engine().clone(),
+            artifacts.to_path_buf(),
+            CACHE_BENCH_KEY,
+            CacheLimits::default(),
+        ));
+        service = service.with_runtime(runtime);
+    }
+    let service = std::sync::Arc::new(service);
     service
         .create_profile_with_id(profile_id, PLUGIN_ID, "Ryujinx", &fake_application(root))
         .unwrap();
@@ -584,13 +601,13 @@ fn bench_ryujinx_import_at_size(count: usize) {
     fs::create_dir_all(&games).unwrap();
     let names = synthetic_switch_library(&games, count);
     let profile_id = "runner-ryujinx-bench";
-    let service = ryujinx_service(&root, &games, profile_id);
+    let service = ryujinx_service(&root, &games, profile_id, None);
 
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let (first, first_elapsed) =
         timed(|| service.import_now(profile_id, &cancelled, |_| {}).unwrap());
     report(
-        "ryujinx.import (first, cold component)",
+        "ryujinx.import (no cache, first)",
         count,
         vec![first_elapsed],
     );
@@ -607,7 +624,34 @@ fn bench_ryujinx_import_at_size(count: usize) {
         let (_, elapsed) = timed(|| service.import_now(profile_id, &cancelled, |_| {}).unwrap());
         again.push(elapsed);
     }
-    report("ryujinx.import (again, refreshes)", count, again);
+    report("ryujinx.import (no cache, again)", count, again);
+
+    // The same two numbers with P5's compile cache (#49) behind them, over a
+    // second root so the first import is an insert in both runs.
+    //
+    // Both of these are cache *hits*, and deliberately so: `ryujinx_service`
+    // creates the profile before returning, which loads the package and therefore
+    // compiles the component once. That is not an artefact of the bench, it is
+    // production — `ThirdPartyRunnerService::runtime` permits the cache on every
+    // runner gesture, and the gesture that pays the cold compile is the one that
+    // picked the emulator, not the import. The cold cost itself is measured where
+    // it is actually paid, by `bench_ryujinx_plugin_surfaces` below.
+    let cached_root = scratch_dir(&format!("ryujinx-cached-{count}"));
+    let cached_games = cached_root.join("games");
+    fs::create_dir_all(&cached_games).unwrap();
+    synthetic_switch_library(&cached_games, count);
+    let artifacts = scratch_dir(&format!("ryujinx-artifacts-{count}"));
+    let cached = ryujinx_service(&cached_root, &cached_games, profile_id, Some(&artifacts));
+    let (_, hit) = timed(|| cached.import_now(profile_id, &cancelled, |_| {}).unwrap());
+    report("ryujinx.import (cache hit, first)", count, vec![hit]);
+    let mut warm = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| cached.import_now(profile_id, &cancelled, |_| {}).unwrap());
+        warm.push(elapsed);
+    }
+    report("ryujinx.import (cache hit, again)", count, warm);
+    fs::remove_dir_all(&cached_root).ok();
+    fs::remove_dir_all(&artifacts).ok();
 
     // The first launch: `prepare-launch` under the interactive budget, the
     // intent validated, then the host resolving a bundle executable and a game
@@ -710,8 +754,36 @@ fn bench_ryujinx_plugin_surfaces() {
         let (_, elapsed) = timed(|| registry.runner_plugins(&runtime));
         runner_samples.push(elapsed);
     }
-    report("ryujinx.get_plugin_catalog", 1, installed_samples);
-    report("ryujinx.get_runner_plugins", 1, runner_samples);
+    report(
+        "ryujinx.get_plugin_catalog (no cache)",
+        1,
+        installed_samples,
+    );
+    report("ryujinx.get_runner_plugins (no cache)", 1, runner_samples);
 
+    // And with P5's cache, which is what both commands really get in production:
+    // they are two of `plugin_compile_cache::permit`'s call sites.
+    let artifacts = scratch_dir("ryujinx-surface-artifacts");
+    let cached = PluginRuntime::new().expect("an engine is available on the bench host");
+    cached.use_compile_cache(ComponentCache::open(
+        cached.engine().clone(),
+        artifacts.clone(),
+        CACHE_BENCH_KEY,
+        CacheLimits::default(),
+    ));
+    let (_, cold) = timed(|| registry.installed_plugins(&cached));
+    report("ryujinx.get_plugin_catalog (cold cache)", 1, vec![cold]);
+    let mut warm = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| registry.installed_plugins(&cached));
+        warm.push(elapsed);
+    }
+    report("ryujinx.get_plugin_catalog (warm cache)", 1, warm);
+    println!(
+        "PERF ryujinx cache counts                n=1      {:?}",
+        cached.compile_cache_counts()
+    );
+
+    fs::remove_dir_all(&artifacts).ok();
     fs::remove_dir_all(&dir).ok();
 }
