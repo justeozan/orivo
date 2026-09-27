@@ -124,12 +124,15 @@ const MAX_ENTRY_NAME_BYTES: usize = 255;
 const MAX_JOURNAL_MESSAGE_BYTES: usize = 512;
 /// How many bytes of plugin text one host call pays for.
 ///
-/// `log` is the one import whose *input* the guest sizes. Wasmtime copies the
-/// whole string out of guest memory before this host sees it, so truncating to
-/// [`MAX_JOURNAL_MESSAGE_BYTES`] bounds what is kept and not what was copied —
-/// and wasmtime 44 has no `set_hostcall_fuel` to charge the copy against. The
-/// budget this host function can reach is the host-call count, so that is what a
-/// large message spends: an ordinary line costs one, and a megabyte costs the
+/// `log` is the one import whose *input* the guest sizes, and it is bounded
+/// twice, because the two bounds answer different questions.
+///
+/// [`PluginLimits::hostcall_bytes`] is the per-call one, spent by Wasmtime inside
+/// the canonical ABI *before* the string is copied out of guest memory; it is the
+/// only one that can refuse an oversized argument without first allocating it.
+/// This one is the per-*invocation* total: hostcall fuel is reset for every host
+/// call, so a plugin could otherwise hand over a megabyte two hundred and
+/// fifty-six times. An ordinary line costs one call, and a megabyte costs the
 /// whole invocation.
 const JOURNAL_BYTES_PER_HOST_CALL: usize = 4096;
 const MAX_JOURNAL_ENTRIES: usize = 256;
@@ -202,6 +205,18 @@ pub struct PluginLimits {
     pub tables_per_store: usize,
     pub memories_per_store: usize,
     pub epoch_tick: Duration,
+    /// Bytes a guest may transfer to the host in *one* host call, enforced by
+    /// Wasmtime before it copies anything (`Store::set_hostcall_fuel`). This is
+    /// the only bound that can refuse an oversized argument without first
+    /// allocating it: a host function reached through `bindgen!` sees the lifted
+    /// value, never the lift. Wasmtime's own default is 128 MiB, which is two
+    /// instance memory ceilings and therefore no bound at all here.
+    ///
+    /// One mebibyte, against a legitimate discovery page of a few hundred
+    /// kilobytes. It is deliberately not the journal's 512-byte truncation: this
+    /// bounds every argument of every host call, and refusing a slightly large
+    /// one with a trap would turn a clumsy plugin into a broken one.
+    pub hostcall_bytes: usize,
 }
 
 impl Default for PluginLimits {
@@ -222,6 +237,7 @@ impl Default for PluginLimits {
             tables_per_store: 8,
             memories_per_store: 4,
             epoch_tick: EPOCH_TICK,
+            hostcall_bytes: 1024 * 1024,
         }
     }
 }
@@ -2120,6 +2136,10 @@ impl PluginRuntime {
             },
         );
         store.limiter(|state| &mut state.memory);
+        // Before the fuel and before the deadline, because this one is spent
+        // inside the canonical ABI rather than inside the guest: it is what stops
+        // an argument from being copied out of guest memory at all.
+        store.set_hostcall_fuel(self.inner.limits.hostcall_bytes);
         store
             .set_fuel(fuel)
             .map_err(|_| PluginRuntimeError::EngineUnavailable)?;
@@ -2398,22 +2418,41 @@ impl PluginRuntime {
         match error.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => PluginRuntimeError::FuelExhausted,
             Some(Trap::Interrupt) => PluginRuntimeError::DeadlineExceeded,
-            // Every remaining trap is the same sentence to a user, and they are
-            // not the same event to whoever has to explain one. Recording which
-            // trap it was is also what lets a test tell a guest that ran out of
-            // *wasm* stack from one that ran out of the stack it keeps in its own
-            // linear memory — outwardly identical, and reached by different
-            // ceilings.
-            Some(trap) => {
-                let plugin_id = store.data().plugin_id.clone();
-                let correlation_id = store.data().correlation_id;
-                self.inner
-                    .journal
-                    .record(correlation_id, &plugin_id, "trap", trap.to_string());
+            // Everything else is the same sentence to a user, and not the same
+            // event to whoever has to explain one. Recording the cause is what
+            // lets a test tell a guest that ran out of *wasm* stack from one that
+            // ran out of the stack it keeps in its own linear memory — outwardly
+            // identical, reached by different ceilings — and it is also the only
+            // record of the ways a guest stops that are not a `Trap` at all, such
+            // as an argument too large for the canonical ABI's own budget.
+            //
+            // The root cause rather than the error: the outer layer is a wasm
+            // backtrace, which is neither short nor the reason.
+            _ => {
+                self.record_trap(store, error.root_cause().to_string());
                 PluginRuntimeError::Trapped
             }
-            None => PluginRuntimeError::Trapped,
         }
+    }
+
+    /// Records why a guest stopped, for every arm `classify` flattens into
+    /// `Trapped`. The text is Wasmtime's, never the plugin's, and the journal is
+    /// host-private either way.
+    fn record_trap(&self, store: &mut Store<HostState>, detail: String) {
+        let plugin_id = store.data().plugin_id.clone();
+        let correlation_id = store.data().correlation_id;
+        let mut detail = detail;
+        detail.truncate(
+            detail
+                .char_indices()
+                .map(|(index, character)| index + character.len_utf8())
+                .take_while(|end| *end <= MAX_RESULT_TEXT_BYTES)
+                .last()
+                .unwrap_or(0),
+        );
+        self.inner
+            .journal
+            .record(correlation_id, &plugin_id, "trap", detail);
     }
 
     /// Journals a refusal and hands it back, so no failure path can return
@@ -4272,11 +4311,12 @@ mod tests {
         );
     }
 
-    /// The 512-byte truncation bounds what the host *keeps*. It does not bound
-    /// what it was made to *copy*: Wasmtime lifts the whole string out of guest
-    /// memory before this host sees one byte of it, and wasmtime 44 has no
-    /// `set_hostcall_fuel` to charge that against. So the budget `log` does reach
-    /// has to count bytes rather than calls.
+    /// The 512-byte truncation bounds what the host *keeps*, and this bounds what
+    /// it will accept over one invocation. Neither can bound the copy itself —
+    /// [`PluginLimits::hostcall_bytes`] does that, and is tested beside this one.
+    /// What is tested here is the total: hostcall fuel is reset for every host
+    /// call, so without a per-invocation charge a plugin hands over a megabyte at
+    /// a time, as often as its call budget allows.
     #[test]
     fn a_plugin_pays_for_the_text_it_hands_the_journal() {
         let library = FixtureLibrary::new("shout");
@@ -4318,6 +4358,49 @@ mod tests {
             1,
             "a message the host keeps whole must cost one call"
         );
+    }
+
+    /// Charging by the byte bounds what the host *keeps* and what it will accept
+    /// over a whole invocation. It cannot bound the copy itself: Wasmtime lifts
+    /// the argument out of guest memory before this host is reached, so by the
+    /// time `log` can refuse, the megabytes are already allocated.
+    ///
+    /// `Store::set_hostcall_fuel` is the budget for exactly that, and it is a
+    /// plain method on wasmtime 44 with no feature behind it — the previous
+    /// commit's claim that it did not exist was simply wrong. Set, an oversized
+    /// argument traps the guest before the copy.
+    #[test]
+    fn an_oversized_host_call_argument_traps_before_it_is_copied() {
+        let library = FixtureLibrary::new("megashout");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert_eq!(
+            harness.prepare("fixture:megashout").unwrap_err(),
+            PluginRuntimeError::Trapped,
+            "a four-megabyte argument was copied out of guest memory and then refused"
+        );
+        let trap = harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.decision == "trap")
+            .map(|entry| entry.detail)
+            .expect("the host recorded no trap");
+        assert!(
+            trap.contains("fuel allocated for hostcalls has been exhausted"),
+            "the guest was stopped by {trap:?} rather than by the host-call budget"
+        );
+        // Nothing of that size reached the journal, and the invocation is over
+        // rather than merely quieter.
+        assert!(harness.runtime.journal().plugin_messages().is_empty());
+
+        // A legitimate discovery page moves a few hundred kilobytes at most, so
+        // the budget has to be well clear of one. This is the assertion that fails
+        // if the ceiling is ever tightened to where real work lives.
+        assert!(harness.runtime.limits().hostcall_bytes >= 1024 * 1024);
+        let library = FixtureLibrary::new("megashout-ok");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:shout").is_ok());
     }
 
     #[test]
