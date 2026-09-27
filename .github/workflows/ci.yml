@@ -211,7 +211,13 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: |
           PINNED=$(awk -F'"' '/^channel/ {print $2}' plugins/ryujinx/rust-toolchain.toml)
-          rustup toolchain install "$PINNED" --profile minimal --target wasm32-unknown-unknown
+          # `rust-src` is not a convenience here: without it, a `#[track_caller]`
+          # location inside the standard library keeps the `/rustc/<commit>`
+          # prefix baked into the shipped `.rlib` instead of resolving against a
+          # local checkout, which is forty bytes of difference no
+          # `--remap-path-prefix` can reach. `build.sh` refuses to run without it.
+          rustup toolchain install "$PINNED" --profile minimal \
+            --component rust-src --target wasm32-unknown-unknown
 
       # The pinned release binary rather than `cargo install`: building
       # wasm-tools from source costs minutes and a compiler cache, and what this

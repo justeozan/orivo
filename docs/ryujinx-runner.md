@@ -271,10 +271,19 @@ allowlist.
 Rebuilding the component:
 
 ```sh
-rustup toolchain install 1.98.1 --target wasm32-unknown-unknown
+rustup toolchain install 1.98.1 --component rust-src --target wasm32-unknown-unknown
 cargo install wasm-tools --locked --version 1.246.2
 plugins/ryujinx/build.sh     # prints component.wasm's sha256 and byte size
 ```
+
+`rust-src` is a requirement, not a convenience, and `build.sh` refuses to run
+without it. A `#[track_caller]` location inside the standard library resolves
+against that local checkout when it exists and against the `/rustc/<commit>`
+prefix baked into the shipped `.rlib` when it does not — two spellings of one
+location, about forty bytes apart, and `--remap-path-prefix` cannot reach the
+second because that string was written when the standard library was built rather
+than by this compilation. It is how the first CI rebuild of this component came out
+forty bytes larger than the macOS one that committed it.
 
 Three things make that digest reproducible rather than a local accident, and
 `build.sh` applies or verifies all three rather than describing them:

@@ -23,8 +23,8 @@
 #
 # Requires:
 #   cargo install wasm-tools --locked --version 1.246.2
-# and the pinned toolchain, which rustup installs on demand:
-#   rustup toolchain install 1.98.1 --target wasm32-unknown-unknown
+# and the pinned toolchain with its sources, which rustup installs on demand:
+#   rustup toolchain install 1.98.1 --component rust-src --target wasm32-unknown-unknown
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -56,6 +56,20 @@ have_rustc=$(rustc --version | awk '{print $2}')
 }
 rustup target list --installed | grep -qx wasm32-unknown-unknown || {
   echo "build.sh: rustup target add wasm32-unknown-unknown" >&2
+  exit 2
+}
+# `rust-src` decides forty bytes of the artefact, which is why it is a requirement
+# and not a convenience. A `#[track_caller]` location inside the standard library
+# resolves against this local checkout when it exists — an absolute path, which the
+# remap below turns into `/rust/...` — and against the `/rustc/<commit>` prefix
+# baked into the shipped `.rlib` when it does not. `--remap-path-prefix` cannot
+# normalise the second form, because that string was written when the standard
+# library was built and not by this compilation, so the only way both machines
+# agree is for both to have the component. This is how the first CI rebuild of
+# this component came out forty bytes larger than the one that committed it.
+[ -f "$(rustc --print sysroot)/lib/rustlib/src/rust/library/alloc/src/str.rs" ] || {
+  echo "build.sh: the rust-src component is missing, and the digest depends on it" >&2
+  echo "          (rustup component add rust-src)." >&2
   exit 2
 }
 
