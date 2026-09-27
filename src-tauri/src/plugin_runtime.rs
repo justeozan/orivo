@@ -124,12 +124,15 @@ const MAX_ENTRY_NAME_BYTES: usize = 255;
 const MAX_JOURNAL_MESSAGE_BYTES: usize = 512;
 /// How many bytes of plugin text one host call pays for.
 ///
-/// `log` is the one import whose *input* the guest sizes. Wasmtime copies the
-/// whole string out of guest memory before this host sees it, so truncating to
-/// [`MAX_JOURNAL_MESSAGE_BYTES`] bounds what is kept and not what was copied —
-/// and wasmtime 44 has no `set_hostcall_fuel` to charge the copy against. The
-/// budget this host function can reach is the host-call count, so that is what a
-/// large message spends: an ordinary line costs one, and a megabyte costs the
+/// `log` is the one import whose *input* the guest sizes, and it is bounded
+/// twice, because the two bounds answer different questions.
+///
+/// [`PluginLimits::hostcall_bytes`] is the per-call one, spent by Wasmtime inside
+/// the canonical ABI *before* the string is copied out of guest memory; it is the
+/// only one that can refuse an oversized argument without first allocating it.
+/// This one is the per-*invocation* total: hostcall fuel is reset for every host
+/// call, so a plugin could otherwise hand over a megabyte two hundred and
+/// fifty-six times. An ordinary line costs one call, and a megabyte costs the
 /// whole invocation.
 const JOURNAL_BYTES_PER_HOST_CALL: usize = 4096;
 const MAX_JOURNAL_ENTRIES: usize = 256;
@@ -202,6 +205,18 @@ pub struct PluginLimits {
     pub tables_per_store: usize,
     pub memories_per_store: usize,
     pub epoch_tick: Duration,
+    /// Bytes a guest may transfer to the host in *one* host call, enforced by
+    /// Wasmtime before it copies anything (`Store::set_hostcall_fuel`). This is
+    /// the only bound that can refuse an oversized argument without first
+    /// allocating it: a host function reached through `bindgen!` sees the lifted
+    /// value, never the lift. Wasmtime's own default is 128 MiB, which is two
+    /// instance memory ceilings and therefore no bound at all here.
+    ///
+    /// One mebibyte, against a legitimate discovery page of a few hundred
+    /// kilobytes. It is deliberately not the journal's 512-byte truncation: this
+    /// bounds every argument of every host call, and refusing a slightly large
+    /// one with a trap would turn a clumsy plugin into a broken one.
+    pub hostcall_bytes: usize,
 }
 
 impl Default for PluginLimits {
@@ -222,6 +237,7 @@ impl Default for PluginLimits {
             tables_per_store: 8,
             memories_per_store: 4,
             epoch_tick: EPOCH_TICK,
+            hostcall_bytes: 1024 * 1024,
         }
     }
 }
@@ -368,7 +384,7 @@ impl PluginJournal {
                 return;
             }
             if ring.len() == MAX_JOURNAL_ENTRIES {
-                ring.pop_front();
+                Self::evict_one(&mut ring);
             }
             ring.push_back(entry);
         }
@@ -389,6 +405,33 @@ impl PluginJournal {
     #[allow(dead_code)]
     pub fn traces(&self) -> Vec<JournalEntry> {
         Self::snapshot(&self.traces)
+    }
+
+    /// Makes room, at the expense of whichever plugin is using the most of it.
+    ///
+    /// A single ring shared by every plugin is a ring one busy plugin empties for
+    /// everybody else — and the entries that matter are refusals, which is exactly
+    /// what a misbehaving neighbour would be scrolling away. Dropping the oldest
+    /// entry of the *largest* holder instead of the globally oldest one gives each
+    /// plugin its share without a map of rings to bound and evict in turn.
+    fn evict_one(ring: &mut VecDeque<JournalEntry>) {
+        let mut held: BTreeMap<&str, usize> = BTreeMap::new();
+        for entry in ring.iter() {
+            *held.entry(entry.plugin_id.as_str()).or_default() += 1;
+        }
+        let Some(greediest) = held
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(plugin_id, _)| plugin_id.to_owned())
+        else {
+            ring.pop_front();
+            return;
+        };
+        if let Some(index) = ring.iter().position(|entry| entry.plugin_id == greediest) {
+            ring.remove(index);
+        } else {
+            ring.pop_front();
+        }
     }
 
     fn snapshot(ring: &Mutex<VecDeque<JournalEntry>>) -> Vec<JournalEntry> {
@@ -430,6 +473,181 @@ pub struct GrantedDirectory {
     path: PathBuf,
     #[cfg(unix)]
     handle: File,
+    trust: FolderTrust,
+    identity: Option<DirectoryIdentity>,
+}
+
+/// Which folder a grant names, as the filesystem identifies it rather than as a
+/// path spells it.
+///
+/// A held descriptor pins a folder for as long as a [`PluginGrants`] value lives,
+/// and that is the whole of what #41 bought: nothing outlives the value, because
+/// nothing persists a grant yet. Whatever does will store a *path*, and a path is
+/// answered by whatever happens to be at it — so the approval records this
+/// alongside, and the reload checks it.
+///
+/// Both halves are public and plain integers so grant storage can keep them. They
+/// are not a secret and not a capability: knowing a device and inode number
+/// grants nothing, and a mismatch is refused rather than resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    volume: u64,
+    file_id: u64,
+}
+
+#[allow(dead_code)]
+impl DirectoryIdentity {
+    /// Rebuilds what grant storage kept. Deliberately not `Default`: an identity
+    /// nobody recorded is [`None`], not zero.
+    pub fn new(volume: u64, file_id: u64) -> Self {
+        Self { volume, file_id }
+    }
+
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+
+    pub fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    /// `None` where the host cannot ask. On Windows that needs
+    /// `GetFileInformationByHandle`, which cannot be type-checked on this machine
+    /// at all — see the note on [`FolderTrust::of_path`] — so a stored identity
+    /// there is refused rather than waved through.
+    fn of_directory(handle_or_path: &GrantedDirectoryHandle<'_>) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = handle_or_path.0.metadata().ok()?;
+            Some(Self {
+                volume: metadata.dev(),
+                file_id: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = handle_or_path;
+            None
+        }
+    }
+}
+
+/// A path and, when it came from storage rather than from a picker, the folder it
+/// is supposed to lead to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedDirectory {
+    pub path: PathBuf,
+    /// `None` for a folder the user is approving right now: there is nothing to
+    /// check it against, and [`PluginGrants::directory_identity`] is what the
+    /// caller reads afterwards to store.
+    pub identity: Option<DirectoryIdentity>,
+}
+
+/// The thing an identity is asked of, so the unix and non-unix bodies above read
+/// the same. A handle where there is one, and nothing where there is not.
+#[cfg(unix)]
+struct GrantedDirectoryHandle<'directory>(&'directory File);
+#[cfg(not(unix))]
+struct GrantedDirectoryHandle<'directory>(&'directory Path);
+
+/// Whether this account is the only one that can put something in the granted
+/// folder. Captured once, from the handle, at the moment the grant is made.
+///
+/// It decides one thing: whether a file in there with a second name could have
+/// been planted by somebody else. Linking a file does not require being able to
+/// read it, so a folder anyone else can write to is a folder where a second name
+/// may be another account's way of having Orivo read something for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FolderTrust {
+    /// `None` when the host could not establish it. Treated as "not private",
+    /// because the alternative is trusting a folder it knows nothing about.
+    private: Option<bool>,
+}
+
+impl FolderTrust {
+    /// Deliberately `false` for the unknown case. A host that cannot tell whether
+    /// another account can write here has not established that one cannot.
+    fn only_this_account_can_write(&self) -> bool {
+        self.private == Some(true)
+    }
+
+    #[cfg(unix)]
+    fn of_handle(handle: &File) -> Self {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = handle.metadata() else {
+            return Self { private: None };
+        };
+        let group_or_other_writable =
+            metadata.mode() & u32::from(libc::S_IWGRP | libc::S_IWOTH) != 0;
+        Self {
+            private: Some(
+                metadata.uid() == host_account()
+                    && !group_or_other_writable
+                    && !has_extended_acl(handle.as_raw_fd()),
+            ),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of_path(path: &Path) -> Self {
+        // Reading a Windows DACL needs `GetSecurityInfo` from advapi32, which is
+        // not in the feature set this crate enables and cannot be compiled here
+        // at all — `cargo check --target x86_64-pc-windows-msvc` stops in `ring`
+        // for want of a Windows C toolchain. Unknown, therefore not private.
+        //
+        // Note what that does *not* achieve on Windows: `EntryFacts::of` cannot
+        // count links there either, for the same reason, so it reports one and
+        // this rule never fires. The hard-link gap is open on Windows and is
+        // written down as open, in `fixtures/README.md` and in the PR.
+        let _ = path;
+        Self { private: None }
+    }
+}
+
+/// Whether the folder carries an access-control list, which is how macOS shares a
+/// directory without saying so in its mode bits — `~/Public`, `/Users/Shared`, and
+/// anything a user has shared through System Settings.
+///
+/// Any extended ACL counts. Reading its entries to see whether one of them grants
+/// *write* means `acl_get_entry`/`acl_get_permset`/`acl_get_perm_np` and a great
+/// deal more FFI; "the mode bits do not describe who can write here" is the honest
+/// summary and errs towards refusing.
+#[cfg(target_vendor = "apple")]
+fn has_extended_acl(descriptor: std::os::fd::RawFd) -> bool {
+    /// `<sys/acl.h>`. Not in the `libc` crate, and it lives in libSystem, which is
+    /// already linked.
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(descriptor: libc::c_int, acl_type: libc::c_int) -> *mut libc::c_void;
+        fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    }
+
+    // Safety: `descriptor` is an open descriptor borrowed for the call, and the
+    // returned handle is freed here and nowhere else.
+    unsafe {
+        let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED);
+        if acl.is_null() {
+            return false;
+        }
+        acl_free(acl);
+        true
+    }
+}
+
+/// Linux and Android keep a POSIX ACL in an extended attribute, so its presence
+/// is the same question asked of `fgetxattr`.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn has_extended_acl(descriptor: std::os::fd::RawFd) -> bool {
+    const NAME: &[u8] = b"system.posix_acl_access\0";
+    // Safety: a NUL-terminated name, a null buffer and a zero size, which is the
+    // documented way to ask only for the attribute's length.
+    let size =
+        unsafe { libc::fgetxattr(descriptor, NAME.as_ptr().cast(), std::ptr::null_mut(), 0) };
+    size > 0
 }
 
 impl std::fmt::Debug for GrantedDirectory {
@@ -466,9 +684,16 @@ impl GrantedDirectory {
                 .read(true)
                 .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
                 .open(path)?;
+            let trust = FolderTrust::of_handle(&handle);
+            // Asked of the descriptor, after the open: a path could have been
+            // answered by something else in between, and this is the answer that
+            // was actually given.
+            let identity = DirectoryIdentity::of_directory(&GrantedDirectoryHandle(&handle));
             Ok(Self {
                 path: path.to_path_buf(),
                 handle,
+                trust,
+                identity,
             })
         }
         #[cfg(not(unix))]
@@ -481,7 +706,54 @@ impl GrantedDirectory {
             }
             Ok(Self {
                 path: path.to_path_buf(),
+                trust: FolderTrust::of_path(path),
+                identity: DirectoryIdentity::of_directory(&GrantedDirectoryHandle(path)),
             })
+        }
+    }
+
+    /// What one entry of this directory is, without opening it.
+    ///
+    /// A listing needs the kind, the size and nothing else, and opening is a
+    /// different question from describing: an entry Orivo has no permission to
+    /// open still exists, a folder cannot be opened on Windows without
+    /// `FILE_FLAG_BACKUP_SEMANTICS`, and a cloud-backed file may be *downloaded*
+    /// by the attempt. Up to 4,096 of those per host call, inside a call nothing
+    /// can interrupt, is the wrong shape for a listing whatever it returns.
+    fn entry_facts(&self, name: &str) -> std::io::Result<EntryFacts> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+
+            let raw_name = CString::new(name)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let mut raw = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // Safety: `handle` is an open directory descriptor borrowed for the
+            // length of the call, `raw_name` is NUL-terminated, and `fstatat`
+            // either fills `raw` or returns non-zero.
+            let answered = unsafe {
+                libc::fstatat(
+                    self.handle.as_raw_fd(),
+                    raw_name.as_ptr(),
+                    raw.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if answered != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Safety: `fstatat` returned zero, so `raw` is initialised.
+            Ok(EntryFacts::of_stat(&unsafe { raw.assume_init() }))
+        }
+        #[cfg(not(unix))]
+        {
+            // No handle to be relative to here — see the note on `open`. The link
+            // count this cannot reach is not used by a listing.
+            self.path
+                .join(name)
+                .symlink_metadata()
+                .map(|metadata| EntryFacts::of(&metadata))
         }
     }
 
@@ -519,9 +791,17 @@ impl GrantedDirectory {
         #[cfg(not(unix))]
         {
             use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+            // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be opened at
+            // all (`std/src/sys/fs/windows/dir.rs`). Without it, asking for one
+            // fails at the open and the caller cannot tell "that is a folder"
+            // from "that is gone" — so the refusal below is the kind check on the
+            // handle, as it is on Unix, rather than an accident of the flags.
             fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
                 .open(self.path.join(name))
         }
     }
@@ -556,25 +836,73 @@ impl PluginGrants {
         grants: &[CapabilityGrant],
         directories: &BTreeMap<String, PathBuf>,
     ) -> Result<Self, GrantValidationError> {
+        let pinned = directories
+            .iter()
+            .map(|(id, path)| {
+                (
+                    id.clone(),
+                    PinnedDirectory {
+                        path: path.clone(),
+                        identity: None,
+                    },
+                )
+            })
+            .collect();
+        Self::resolve_pinned(manifest, grants, &pinned)
+    }
+
+    /// The same, for a grant that came back from storage.
+    ///
+    /// A path is not a folder. Whatever persists grants keeps the path the user
+    /// picked, and on the next start that path is answered by whatever is at it —
+    /// a different library, a folder somebody put there, the same name on another
+    /// volume. Where the caller kept the identity the approval recorded, this
+    /// refuses anything else, and it checks *after* opening so the answer is the
+    /// one actually given rather than one a second lookup might agree with.
+    ///
+    /// The identity follows the folder, not the path, so a library the user moved
+    /// still resolves at its new location.
+    #[allow(dead_code)]
+    pub fn resolve_pinned(
+        manifest: &ValidatedPluginManifest,
+        grants: &[CapabilityGrant],
+        directories: &BTreeMap<String, PinnedDirectory>,
+    ) -> Result<Self, GrantValidationError> {
         let mut resolved = Self::declared_only(manifest);
         for grant in grants {
             manifest.validate_grant(grant)?;
             resolved.granted.insert(grant.capability);
             if let CapabilityScope::DirectoryGrants(ids) = &grant.scope {
                 for id in ids {
-                    let path = directories
+                    let pinned = directories
                         .get(id)
                         .ok_or(GrantValidationError::InvalidScope(grant.capability))?;
                     // Opened here rather than at the call, because this is the
                     // moment the grant is made. A folder the host cannot open as
                     // a directory now is not a scope it can honour later.
-                    let directory = GrantedDirectory::open(path)
+                    let directory = GrantedDirectory::open(&pinned.path)
                         .map_err(|_| GrantValidationError::InvalidScope(grant.capability))?;
+                    // A recorded identity the host cannot confirm is refused, not
+                    // assumed: `None` here means this platform cannot ask, and a
+                    // grant that was pinned somewhere it could is not one to
+                    // honour blindly somewhere it cannot.
+                    if let Some(expected) = pinned.identity
+                        && directory.identity != Some(expected)
+                    {
+                        return Err(GrantValidationError::InvalidScope(grant.capability));
+                    }
                     resolved.directories.insert(id.clone(), Arc::new(directory));
                 }
             }
         }
         Ok(resolved)
+    }
+
+    /// What the approval should store beside the path it stores. `None` where the
+    /// host could not ask — see [`DirectoryIdentity::of_directory`].
+    #[allow(dead_code)]
+    pub fn directory_identity(&self, id: &str) -> Option<DirectoryIdentity> {
+        self.directories.get(id).and_then(|entry| entry.identity)
     }
 
     pub fn declares(&self, capability: PluginCapability) -> bool {
@@ -1033,25 +1361,22 @@ impl host_files::Host for HostState {
             }
             // `read_dir` walks a path, and a path is what a swapped parent
             // redirects. The name is therefore only a suggestion: every fact
-            // reported below is asked of a descriptor opened relative to the
-            // granted directory's own handle, so an entry the approved folder
-            // does not have cannot be listed at all, and a symbolic link is
-            // refused by the open rather than described. The worst a swap can
-            // still do is *hide* entries, which is not a way out of the grant.
-            let Ok(opened) = directory.open_entry(&name) else {
+            // reported below is asked *of the granted directory's own handle*, so
+            // an entry the approved folder does not have cannot be listed at all.
+            // The worst a swap can still do is hide entries, which is not a way
+            // out of the grant.
+            let Ok(facts) = directory.entry_facts(&name) else {
                 continue;
             };
-            let Ok(metadata) = opened.metadata() else {
+            // A link is skipped rather than resolved, so a granted folder cannot
+            // be used as a door to an ungranted one.
+            if facts.symlink {
                 continue;
-            };
+            }
             listing.push(host_files::DirectoryEntry {
                 name,
-                byte_size: if metadata.is_file() {
-                    metadata.len()
-                } else {
-                    0
-                },
-                directory: metadata.is_dir(),
+                byte_size: if facts.file { facts.byte_size } else { 0 },
+                directory: facts.directory,
             });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1113,7 +1438,7 @@ impl host_files::Host for HostState {
                 "That file is no longer available.",
             ));
         };
-        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), host_account()) {
+        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), directory.trust) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
                 refusal.message(),
@@ -1214,6 +1539,8 @@ fn is_windows_device_name(resolved: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EntryFacts {
     file: bool,
+    directory: bool,
+    symlink: bool,
     byte_size: u64,
     /// How many names this file answers to. More than one is a hard link.
     links: u64,
@@ -1221,12 +1548,16 @@ struct EntryFacts {
 }
 
 impl EntryFacts {
+    /// From metadata the host already holds — a descriptor it opened, or, on
+    /// Windows, a path it asked about without following a link.
     fn of(metadata: &fs::Metadata) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             Self {
                 file: metadata.is_file(),
+                directory: metadata.is_dir(),
+                symlink: metadata.file_type().is_symlink(),
                 byte_size: metadata.len(),
                 links: metadata.nlink(),
                 owner: metadata.uid(),
@@ -1234,15 +1565,32 @@ impl EntryFacts {
         }
         #[cfg(not(unix))]
         {
-            // Windows reports a link count only through a separate query and has
-            // no uid to compare, so the ownership rule below never fires there.
-            // Said out loud rather than silently approximated.
+            // Windows has no uid, and the link count is only reachable through a
+            // handle query, which a listing deliberately does not do. Said out
+            // loud rather than silently approximated: `read_file` fills both in
+            // from the handle it opens.
             Self {
                 file: metadata.is_file(),
+                directory: metadata.is_dir(),
+                symlink: metadata.file_type().is_symlink(),
                 byte_size: metadata.len(),
                 links: 1,
                 owner: 0,
             }
+        }
+    }
+
+    /// From a `stat` the host asked for without opening anything.
+    #[cfg(unix)]
+    fn of_stat(raw: &libc::stat) -> Self {
+        let kind = raw.st_mode & libc::S_IFMT;
+        Self {
+            file: kind == libc::S_IFREG,
+            directory: kind == libc::S_IFDIR,
+            symlink: kind == libc::S_IFLNK,
+            byte_size: raw.st_size.max(0) as u64,
+            links: u64::from(raw.st_nlink),
+            owner: raw.st_uid,
         }
     }
 }
@@ -1252,8 +1600,9 @@ impl EntryFacts {
 enum EntryRefusal {
     NotAFile,
     TooLarge,
-    /// A file with more than one name, owned by another local account.
-    ForeignHardLink,
+    /// A file with more than one name, in a folder this account is not the only
+    /// one able to write to.
+    SharedHardLink,
 }
 
 impl EntryRefusal {
@@ -1262,28 +1611,28 @@ impl EntryRefusal {
             Self::NotAFile | Self::TooLarge => {
                 "That entry is not a readable file of an allowed size."
             }
-            Self::ForeignHardLink => {
-                "That entry is another account's file, under a second name in your folder."
+            Self::SharedHardLink => {
+                "That entry has a second name, in a folder other accounts can add files to."
             }
         }
     }
 }
 
-fn refuse_entry(facts: &EntryFacts, host_owner: u32) -> Option<EntryRefusal> {
+fn refuse_entry(facts: &EntryFacts, folder: FolderTrust) -> Option<EntryRefusal> {
     if !facts.file {
         return Some(EntryRefusal::NotAFile);
     }
     if facts.byte_size > MAX_HOST_FILE_BYTES {
         return Some(EntryRefusal::TooLarge);
     }
-    // One name for another account's file is a folder the user pointed at on
-    // purpose — a shared library, something under `/Applications`. A *second*
-    // name for it is not: linking a file does not require being able to read it,
-    // so this is the shape a plugin is being used to read something on someone
-    // else's behalf. The user's own hard links stay readable, because a
-    // deduplicated library is an ordinary thing to have.
-    if facts.links > 1 && facts.owner != host_owner {
-        return Some(EntryRefusal::ForeignHardLink);
+    // A second name is only suspicious if somebody else could have put it there.
+    // In a folder only this account can write to, every name in it is the user's
+    // own, and a deduplicated ROM library is an ordinary thing to have. In a
+    // folder anyone else can write to, a second name may be their way of having
+    // Orivo read a file they cannot — including one of this user's own private
+    // files, which is why the *file's* owner answers nothing here.
+    if facts.links > 1 && !folder.only_this_account_can_write() {
+        return Some(EntryRefusal::SharedHardLink);
     }
     None
 }
@@ -2047,6 +2396,10 @@ impl PluginRuntime {
             },
         );
         store.limiter(|state| &mut state.memory);
+        // Before the fuel and before the deadline, because this one is spent
+        // inside the canonical ABI rather than inside the guest: it is what stops
+        // an argument from being copied out of guest memory at all.
+        store.set_hostcall_fuel(self.inner.limits.hostcall_bytes);
         store
             .set_fuel(fuel)
             .map_err(|_| PluginRuntimeError::EngineUnavailable)?;
@@ -2325,22 +2678,41 @@ impl PluginRuntime {
         match error.downcast_ref::<Trap>() {
             Some(Trap::OutOfFuel) => PluginRuntimeError::FuelExhausted,
             Some(Trap::Interrupt) => PluginRuntimeError::DeadlineExceeded,
-            // Every remaining trap is the same sentence to a user, and they are
-            // not the same event to whoever has to explain one. Recording which
-            // trap it was is also what lets a test tell a guest that ran out of
-            // *wasm* stack from one that ran out of the stack it keeps in its own
-            // linear memory — outwardly identical, and reached by different
-            // ceilings.
-            Some(trap) => {
-                let plugin_id = store.data().plugin_id.clone();
-                let correlation_id = store.data().correlation_id;
-                self.inner
-                    .journal
-                    .record(correlation_id, &plugin_id, "trap", trap.to_string());
+            // Everything else is the same sentence to a user, and not the same
+            // event to whoever has to explain one. Recording the cause is what
+            // lets a test tell a guest that ran out of *wasm* stack from one that
+            // ran out of the stack it keeps in its own linear memory — outwardly
+            // identical, reached by different ceilings — and it is also the only
+            // record of the ways a guest stops that are not a `Trap` at all, such
+            // as an argument too large for the canonical ABI's own budget.
+            //
+            // The root cause rather than the error: the outer layer is a wasm
+            // backtrace, which is neither short nor the reason.
+            _ => {
+                self.record_trap(store, error.root_cause().to_string());
                 PluginRuntimeError::Trapped
             }
-            None => PluginRuntimeError::Trapped,
         }
+    }
+
+    /// Records why a guest stopped, for every arm `classify` flattens into
+    /// `Trapped`. The text is Wasmtime's, never the plugin's, and the journal is
+    /// host-private either way.
+    fn record_trap(&self, store: &mut Store<HostState>, detail: String) {
+        let plugin_id = store.data().plugin_id.clone();
+        let correlation_id = store.data().correlation_id;
+        let mut detail = detail;
+        detail.truncate(
+            detail
+                .char_indices()
+                .map(|(index, character)| index + character.len_utf8())
+                .take_while(|end| *end <= MAX_RESULT_TEXT_BYTES)
+                .last()
+                .unwrap_or(0),
+        );
+        self.inner
+            .journal
+            .record(correlation_id, &plugin_id, "trap", detail);
     }
 
     /// Journals a refusal and hands it back, so no failure path can return
@@ -2551,7 +2923,7 @@ mod tests {
     /// target and no component tool; `build.sh` beside it is how it changes.
     const FIXTURE: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
     /// Regenerated by `build.sh`, which prints this digest.
-    const FIXTURE_SHA256: &str = "36ba4a71ad5a7973dd7e54cd702eb1926d5c3fa2f1268cf25b2cc8a4802d7dde";
+    const FIXTURE_SHA256: &str = "885587f0ac0d4ecd7066747ca90bddc0d3508224e64447947bedba0c1389b6ea";
     /// A component whose only import is WASI. Also built by `build.sh`, from
     /// hand-written component text rather than a second Rust guest.
     const WASI_IMPORT: &[u8] = include_bytes!("../fixtures/wasi-import.wasm");
@@ -3302,56 +3674,44 @@ mod tests {
     /// without `fs.protected_hardlinks` — so anyone who can write to the granted
     /// folder can plant one there and let Orivo do the reading.
     ///
-    /// Driven through the rule rather than the filesystem because the case that
-    /// matters needs a second local account, which a test suite cannot create.
-    /// What *is* reproducible is checked below, in
-    /// `the_facts_a_refusal_is_made_from_come_from_the_descriptor`: the link
-    /// count and owner really are read off the open file.
+    /// The first version of this rule asked about the *file's* owner, and missed
+    /// the case that matters: the file another account wants read is usually the
+    /// Orivo user's **own** private file, so its owner is this account and the
+    /// rule said nothing. What decides it is whether anyone else could have put
+    /// the second name there, which is a question about the granted folder.
+    ///
+    /// Driven through `read_file` rather than through the rule, because a rule
+    /// nothing calls is a rule: deleting its call site used to break no test.
+    #[cfg(unix)]
     #[test]
-    fn a_multiply_linked_file_owned_by_another_account_is_refused() {
-        let ours = host_account();
-        let theirs = ours.wrapping_add(1);
-        let entry = |links, owner| EntryFacts {
-            file: true,
-            byte_size: 32,
-            links,
-            owner,
-        };
+    fn a_hard_link_is_refused_when_other_accounts_can_write_the_granted_folder() {
+        use std::os::unix::fs::PermissionsExt;
 
-        assert_eq!(refuse_entry(&entry(1, ours), ours), None);
-        // A deduplicated ROM library is an ordinary thing for a user to have,
-        // and every name in it is theirs.
-        assert_eq!(refuse_entry(&entry(9, ours), ours), None);
-        // One name, another owner: a shared or system folder the user pointed at
-        // on purpose. The grant is what authorises this.
-        assert_eq!(refuse_entry(&entry(1, theirs), ours), None);
-        // A second name for someone else's file is the one shape that is not
-        // explained by the user having granted the folder.
-        assert_eq!(
-            refuse_entry(&entry(2, theirs), ours),
-            Some(EntryRefusal::ForeignHardLink)
-        );
+        // The same library, the same link, the same call. Only the folder's
+        // permissions differ.
+        for (mode, expected) in [(0o700, true), (0o770, false), (0o777, false)] {
+            let library = FixtureLibrary::new(&format!("link-{mode:o}"));
+            fs::hard_link(
+                library.games.join("beta.rom"),
+                library.games.join("twin.rom"),
+            )
+            .unwrap();
+            fs::set_permissions(&library.games, fs::Permissions::from_mode(mode)).unwrap();
 
-        assert_eq!(
-            refuse_entry(
-                &EntryFacts {
-                    file: false,
-                    ..entry(1, ours)
-                },
-                ours
-            ),
-            Some(EntryRefusal::NotAFile)
-        );
-        assert_eq!(
-            refuse_entry(
-                &EntryFacts {
-                    byte_size: MAX_HOST_FILE_BYTES + 1,
-                    ..entry(1, ours)
-                },
-                ours
-            ),
-            Some(EntryRefusal::TooLarge)
-        );
+            let harness = Harness::new(PluginLimits::default(), Some(&library));
+            let outcome = harness.prepare("fixture:read-twin");
+            assert_eq!(
+                outcome.is_ok(),
+                expected,
+                "a hard link in a folder with mode {mode:o} was answered {outcome:?}"
+            );
+            // A file with one name is unaffected either way: this refuses a
+            // shared *link*, not a shared folder.
+            assert!(
+                harness.prepare("fixture:read-alpha").is_ok(),
+                "an ordinary file in a folder with mode {mode:o} was refused"
+            );
+        }
     }
 
     /// The rule above is only worth anything if the numbers it judges are the
@@ -3377,8 +3737,72 @@ mod tests {
         assert_eq!(facts.links, 2, "the link count is not the file's own");
         assert_eq!(facts.owner, host_account());
 
+        // The temporary directory this runs in is private, so the same link is
+        // readable — which is the pairing that matters: the rule refuses a link a
+        // *stranger could have made*, not a link.
         let harness = Harness::new(PluginLimits::default(), Some(&library));
         assert!(harness.prepare("fixture:read-twin").is_ok());
+    }
+
+    /// The branch no filesystem here can produce: a folder whose write access the
+    /// host could not establish at all, which is every Windows grant until
+    /// somebody reads a DACL. Unknown has to mean refused, or the rule is only as
+    /// good as the platform it was written on.
+    #[test]
+    fn a_folder_the_host_cannot_vouch_for_is_not_a_private_one() {
+        let private = FolderTrust {
+            private: Some(true),
+        };
+        let shared = FolderTrust {
+            private: Some(false),
+        };
+        let unknown = FolderTrust { private: None };
+        assert!(private.only_this_account_can_write());
+        assert!(!shared.only_this_account_can_write());
+        assert!(!unknown.only_this_account_can_write());
+
+        let entry = |links| EntryFacts {
+            file: true,
+            directory: false,
+            symlink: false,
+            byte_size: 32,
+            links,
+            owner: host_account(),
+        };
+        // A deduplicated library in a folder only this account can write to.
+        assert_eq!(refuse_entry(&entry(9), private), None);
+        // One name is never the shape this rule is about.
+        assert_eq!(refuse_entry(&entry(1), shared), None);
+        assert_eq!(refuse_entry(&entry(1), unknown), None);
+        assert_eq!(
+            refuse_entry(&entry(2), shared),
+            Some(EntryRefusal::SharedHardLink)
+        );
+        assert_eq!(
+            refuse_entry(&entry(2), unknown),
+            Some(EntryRefusal::SharedHardLink)
+        );
+
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    file: false,
+                    ..entry(1)
+                },
+                private
+            ),
+            Some(EntryRefusal::NotAFile)
+        );
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    byte_size: MAX_HOST_FILE_BYTES + 1,
+                    ..entry(1)
+                },
+                private
+            ),
+            Some(EntryRefusal::TooLarge)
+        );
     }
 
     #[test]
@@ -3428,6 +3852,58 @@ mod tests {
         );
     }
 
+    /// A listing says what an entry *is*. Opening each one to find out was how
+    /// this was written, and opening is not the same question: an entry Orivo has
+    /// no permission to open still exists, and on Windows a folder cannot be
+    /// opened at all without `FILE_FLAG_BACKUP_SEMANTICS`, so every subdirectory
+    /// silently left the listing there. Opening is also the expensive answer — up
+    /// to 4,096 of them per call on a network share or a cloud-backed folder,
+    /// inside a host call nothing can interrupt.
+    ///
+    /// The unopenable file is how that is reproducible here: `stat` describes it,
+    /// `open` refuses it. The folder beside it is the Windows half, in the one
+    /// form this platform can check.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_describes_entries_it_does_not_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if host_account() == 0 {
+            // Root opens anything, so the interesting entry would not be
+            // interesting. Better skipped than passing for the wrong reason.
+            return;
+        }
+        let library = FixtureLibrary::new("census");
+        fs::write(library.games.join("locked.rom"), b"Locked\n").unwrap();
+        fs::set_permissions(
+            library.games.join("locked.rom"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        fs::create_dir(library.games.join("nested")).unwrap();
+
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:census").is_ok());
+        let census = harness
+            .runtime
+            .journal()
+            .plugin_messages()
+            .into_iter()
+            .map(|entry| entry.detail)
+            .find(|detail| detail.contains("census n="))
+            .expect("the fixture reported no census");
+
+        assert!(
+            census.contains("locked.rom:file:7"),
+            "an entry the host cannot open was left out of the listing: {census}"
+        );
+        assert!(
+            census.contains("nested:dir:0"),
+            "a subdirectory was not described as one: {census}"
+        );
+        assert!(census.contains("alpha.rom:file:"), "{census}");
+    }
+
     #[test]
     fn a_grant_for_an_undeclared_capability_is_refused() {
         let library = FixtureLibrary::new("undeclared");
@@ -3458,6 +3934,66 @@ mod tests {
             error,
             GrantValidationError::InvalidScope(PluginCapability::FilesRead)
         );
+    }
+
+    /// A held descriptor pins a folder for as long as a `PluginGrants` value
+    /// lives, and no longer. Whatever persists grants will reload a *path*, and a
+    /// path is answered by whatever is at it — so the approval has to record
+    /// which folder it was, and the reload has to check.
+    #[cfg(unix)]
+    #[test]
+    fn a_reloaded_grant_is_pinned_to_the_folder_that_was_approved() {
+        let root = temporary_root("pinned");
+        let approved = root.join("library");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(&approved).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        let manifest = fixture_manifest(vec![
+            PluginCapability::RunnerPrepare,
+            PluginCapability::FilesRead,
+        ]);
+
+        // What the approval writes down, for whoever stores the grant.
+        let grants = PluginGrants::resolve(
+            &manifest,
+            &[files_grant(&[GAMES_GRANT])],
+            &BTreeMap::from([(GAMES_GRANT.to_string(), approved.clone())]),
+        )
+        .unwrap();
+        let recorded = grants
+            .directory_identity(GAMES_GRANT)
+            .expect("an approved folder has an identity");
+
+        // Reloaded against the same folder, it still resolves.
+        let reload = |path: &Path, identity: Option<DirectoryIdentity>| {
+            PluginGrants::resolve_pinned(
+                &manifest,
+                &[files_grant(&[GAMES_GRANT])],
+                &BTreeMap::from([(
+                    GAMES_GRANT.to_string(),
+                    PinnedDirectory {
+                        path: path.to_path_buf(),
+                        identity,
+                    },
+                )]),
+            )
+        };
+        assert!(reload(&approved, Some(recorded)).is_ok());
+
+        // The swap a stored path cannot see: the approved folder is moved away and
+        // another one takes its place. Same path, different folder.
+        fs::rename(&approved, root.join("library-moved")).unwrap();
+        fs::rename(&decoy, &approved).unwrap();
+        assert_eq!(
+            reload(&approved, Some(recorded)).unwrap_err(),
+            GrantValidationError::InvalidScope(PluginCapability::FilesRead),
+            "a stored grant resolved to a folder the user never approved"
+        );
+        // And the folder that *was* approved is still recognised at its new path,
+        // because the identity is the folder's and not the path's.
+        assert!(reload(&root.join("library-moved"), Some(recorded)).is_ok());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     // -----------------------------------------------------------------------
@@ -3661,21 +4197,27 @@ mod tests {
             .expect("the host recorded no trap")
     }
 
-    /// Isolates the tick half. The epoch tick is a whole second, so the wall
-    /// clock cannot have run out in the few milliseconds this takes: only the
-    /// count of observed ticks can end the call.
+    /// Isolates the tick half: three ticks of budget, and thirty seconds of wall
+    /// clock it cannot plausibly reach, so only the count of observed ticks can end
+    /// the call. The epoch tick's *length* does not matter under
+    /// [`EpochMode::Manual`] — nothing is ticking but the test — it only sets how
+    /// many ticks the deadline is worth, which is why a generous wall clock costs
+    /// nothing here. The first version budgeted three seconds and failed on a
+    /// loaded machine, where three hand-driven ticks and a job handover can take
+    /// longer than that and the two halves stop being distinguishable.
     #[test]
     fn the_deadline_runs_out_of_epoch_ticks() {
         let library = FixtureLibrary::new("deadline-ticks");
         let (runtime, prepared, grants) = manual(
             PluginLimits {
                 interactive_fuel: 1 << 42,
-                interactive_deadline: Duration::from_secs(3),
-                epoch_tick: Duration::from_secs(1),
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_secs(10),
                 ..PluginLimits::default()
             },
             &library,
         );
+        assert_eq!(runtime.limits().ticks(Duration::from_secs(30)), 3);
         let started = Instant::now();
         let outcome =
             spin_under_manual_epoch(&runtime, &prepared, &grants, 8, Duration::from_millis(1));
@@ -3684,7 +4226,7 @@ mod tests {
             JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(30),
             "the wall clock, not the tick count, is what stopped it"
         );
     }
@@ -4117,6 +4659,70 @@ mod tests {
         );
     }
 
+    /// The counter, which the previous version of this test could not exercise:
+    /// `fixture:bury` earns its refusal *once*, so removing `repeats` and letting
+    /// each attempt write its own entry changed nothing it asserted. `fixture:nag`
+    /// asks for the same forbidden folder four hundred times.
+    #[test]
+    fn the_same_refusal_earned_again_is_counted_and_not_repeated() {
+        let library = FixtureLibrary::new("nag");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:nag").is_ok());
+
+        let refusals = harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.decision == "scope-refused")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refusals.len(),
+            1,
+            "four hundred attempts left {} entries in a ring of {MAX_JOURNAL_ENTRIES}",
+            refusals.len()
+        );
+        assert!(
+            refusals[0].repeats > 1,
+            "the repeats were not counted: {:?}",
+            refusals[0]
+        );
+    }
+
+    /// One ring for every plugin is a ring one busy plugin empties for everybody
+    /// else, and what it empties are refusals — the entries a misbehaving
+    /// neighbour has the most reason to scroll away. Four hundred distinct
+    /// decisions from one plugin must not cost another plugin the one it earned.
+    #[test]
+    fn a_busy_plugin_cannot_evict_another_plugins_refusal() {
+        let journal = PluginJournal::default();
+        journal.record(
+            next_correlation_id(),
+            "com.orivo.quiet-runner",
+            "scope-refused",
+            "a directory grant outside the approved scope was requested",
+        );
+        for index in 0..400 {
+            journal.record(
+                next_correlation_id(),
+                "com.orivo.busy-runner",
+                "scope-refused",
+                // Distinct, so the repeat counter cannot absorb them: this is
+                // about the share of the ring, not about duplicates.
+                format!("attempt {index}"),
+            );
+        }
+
+        let entries = journal.entries();
+        assert_eq!(entries.len(), MAX_JOURNAL_ENTRIES);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.plugin_id == "com.orivo.quiet-runner"),
+            "a busy plugin scrolled away a refusal that was not its own"
+        );
+    }
+
     /// Separate rings were only half of it. The host's own ring is bounded too,
     /// and it was written to on *every* host call — a listing wrote a line, a
     /// refusal wrote a line — so a plugin that earned a refusal and then made
@@ -4145,11 +4751,12 @@ mod tests {
         );
     }
 
-    /// The 512-byte truncation bounds what the host *keeps*. It does not bound
-    /// what it was made to *copy*: Wasmtime lifts the whole string out of guest
-    /// memory before this host sees one byte of it, and wasmtime 44 has no
-    /// `set_hostcall_fuel` to charge that against. So the budget `log` does reach
-    /// has to count bytes rather than calls.
+    /// The 512-byte truncation bounds what the host *keeps*, and this bounds what
+    /// it will accept over one invocation. Neither can bound the copy itself —
+    /// [`PluginLimits::hostcall_bytes`] does that, and is tested beside this one.
+    /// What is tested here is the total: hostcall fuel is reset for every host
+    /// call, so without a per-invocation charge a plugin hands over a megabyte at
+    /// a time, as often as its call budget allows.
     #[test]
     fn a_plugin_pays_for_the_text_it_hands_the_journal() {
         let library = FixtureLibrary::new("shout");
@@ -4191,6 +4798,49 @@ mod tests {
             1,
             "a message the host keeps whole must cost one call"
         );
+    }
+
+    /// Charging by the byte bounds what the host *keeps* and what it will accept
+    /// over a whole invocation. It cannot bound the copy itself: Wasmtime lifts
+    /// the argument out of guest memory before this host is reached, so by the
+    /// time `log` can refuse, the megabytes are already allocated.
+    ///
+    /// `Store::set_hostcall_fuel` is the budget for exactly that, and it is a
+    /// plain method on wasmtime 44 with no feature behind it — the previous
+    /// commit's claim that it did not exist was simply wrong. Set, an oversized
+    /// argument traps the guest before the copy.
+    #[test]
+    fn an_oversized_host_call_argument_traps_before_it_is_copied() {
+        let library = FixtureLibrary::new("megashout");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert_eq!(
+            harness.prepare("fixture:megashout").unwrap_err(),
+            PluginRuntimeError::Trapped,
+            "a four-megabyte argument was copied out of guest memory and then refused"
+        );
+        let trap = harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.decision == "trap")
+            .map(|entry| entry.detail)
+            .expect("the host recorded no trap");
+        assert!(
+            trap.contains("fuel allocated for hostcalls has been exhausted"),
+            "the guest was stopped by {trap:?} rather than by the host-call budget"
+        );
+        // Nothing of that size reached the journal, and the invocation is over
+        // rather than merely quieter.
+        assert!(harness.runtime.journal().plugin_messages().is_empty());
+
+        // A legitimate discovery page moves a few hundred kilobytes at most, so
+        // the budget has to be well clear of one. This is the assertion that fails
+        // if the ceiling is ever tightened to where real work lives.
+        assert!(harness.runtime.limits().hostcall_bytes >= 1024 * 1024);
+        let library = FixtureLibrary::new("megashout-ok");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:shout").is_ok());
     }
 
     #[test]

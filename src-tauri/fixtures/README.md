@@ -53,6 +53,9 @@ the nominal path and every refusal:
 | `fixture:fail` | returns a plain WIT error |
 | `fixture:chatty` | earns a refusal, swallows it, then floods the journal |
 | `fixture:shout` | logs messages far larger than the host will keep |
+| `fixture:megashout` | hands one host call a four-megabyte argument |
+| `fixture:nag` | earns the same refusal four hundred times |
+| `fixture:census` | reports the listing back, entry by entry, through the journal |
 | `fixture:churn` | spends the whole call inside host calls, computing almost nothing |
 | `fixture:bury` | earns a refusal, then churns until the ring should have lost it |
 | `fixture:read-NAME` | reads `NAME.rom` by name, whatever the host planted there |
@@ -92,7 +95,11 @@ These exist so a suite can be adversarial without reaching into private state.
 
 - **Injectable limits.** `PluginLimits` and `SchedulerLimits` are plain values;
   `PluginRuntime::with_all_limits` takes both. Shrinking a deadline to two ticks
-  or a memory ceiling to 8 MiB needs no feature flag.
+  or a memory ceiling to 8 MiB needs no feature flag. `hostcall_bytes` is the odd
+  one out: it is spent by Wasmtime inside the canonical ABI, before an argument is
+  copied out of guest memory, which is the only place an oversized one can be
+  refused without first being allocated. The byte charge on `log` is the
+  per-invocation total beside it, because hostcall fuel is reset for every call.
 - **Controlled epoch.** `EpochMode::Manual` stops the runtime from spawning its
   tick thread, and `PluginRuntime::tick_epoch` advances the epoch by hand. The
   deadline is counted in ticks rather than read off a clock, so a test decides
@@ -105,6 +112,15 @@ These exist so a suite can be adversarial without reaching into private state.
   real directories, so a test supplies its own temporary folder. `resolve` *opens*
   each of them: a grant is a descriptor, not a path, so a test can swap the folder
   or a parent afterwards and watch the grant hold.
+- **Grants that outlive the value.** A descriptor pins a folder for as long as a
+  `PluginGrants` lives, and nothing longer. Whatever persists grants stores a
+  *path*, and a path is answered by whatever is at it on the next start, so the
+  approval also records `PluginGrants::directory_identity` — the folder's device
+  and inode, as two plain integers — and `PluginGrants::resolve_pinned` refuses
+  anything else. It checks *after* opening, so the answer is the one actually
+  given. The identity follows the folder rather than the path, so a library the
+  user moved still resolves; a different folder at the same path does not.
+  Whoever owns grant storage has to keep both halves next to the path.
 - **Journal, in three rings.** `entries()` is the host's decisions, `traces()` is
   per-call bookkeeping, and `plugin_messages()` is the plugin's own text. Only the
   first is a refusal, and it is the one nothing a plugin does in a loop can write
@@ -126,6 +142,28 @@ These exist so a suite can be adversarial without reaching into private state.
   Wasmtime's translator — it `expect`s its own invariants — into
   `PluginRuntimeError::InvalidComponent`. It is generic over the work, so a test
   can hand it a panic instead of a component.
+
+### Gaps, and where they are
+
+Three of these are open, and this section exists so nobody reads the code as
+closing them.
+
+- **Windows does not pin a grant.** `openat` has an equivalent there —
+  `NtCreateFile` with a directory handle as `RootDirectory`, which is what `std`'s
+  unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`) — so the
+  swapped-parent and junction redirection *is* closable; it is not closed. Neither
+  is the folder identity, which needs `GetFileInformationByHandle`. Both need code
+  that cannot be type-checked on the machine this was written on: `cargo check
+  --target x86_64-pc-windows-msvc` stops in `ring`'s build script for want of a
+  Windows C toolchain, and Orivo's CI only `cargo check`s Windows. A stored
+  identity is therefore *refused* on Windows rather than waved through, which is
+  the direction that fails safe.
+- **The hard-link rule does not fire on Windows.** `EntryFacts` cannot count links
+  there without the same handle query, so it reports one name and the rule never
+  triggers. `FolderTrust` is unknown there too, for want of a DACL read.
+- **A listing enumerates through a path.** Names come from `read_dir`; every fact
+  comes from the handle. An attacker who swaps a parent can hide entries, never
+  reveal one. Enumerating from the descriptor needs `fdopendir`/`readdir`.
 
 A listing cut at 256 entries leaves a `files-truncated` decision behind. The
 contract has no field for it — see the ABI note in the PR that added this — so the
