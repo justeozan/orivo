@@ -41,7 +41,9 @@ the nominal path and every refusal:
 | `fixture:ok` | returns the launch intent the host asked for |
 | `fixture:spin` | never returns — fuel, deadline and cancellation |
 | `fixture:grow` | allocates until the memory ceiling refuses it |
-| `fixture:recurse` | recurses until a stack ceiling refuses it |
+| `fixture:recurse` | fills the wasm stack with real call frames |
+| `fixture:shadow-stack` | fills Rust's own stack, the one inside linear memory |
+| `fixture:trap` | executes `unreachable` |
 | `fixture:bad-mode` | returns a launch mode the host does not recognise |
 | `fixture:bad-target` | answers about a different profile and game |
 | `fixture:bad-runner` | claims to be preparing another runner's launch |
@@ -50,7 +52,29 @@ the nominal path and every refusal:
 | `fixture:escape` | reads `../` out of the folder it *was* given |
 | `fixture:fail` | returns a plain WIT error |
 | `fixture:chatty` | earns a refusal, swallows it, then floods the journal |
+| `fixture:shout` | logs messages far larger than the host will keep |
+| `fixture:churn` | spends the whole call inside host calls, computing almost nothing |
+| `fixture:bury` | earns a refusal, then churns until the ring should have lost it |
 | `fixture:read-NAME` | reads `NAME.rom` by name, whatever the host planted there |
+
+`discover-page` reads its selector from the *profile id* rather than a game
+reference, because what it is asked to get wrong is the page it hands back:
+
+| Selector | What the page looks like |
+| --- | --- |
+| `fixture:dup` | the same external reference twice |
+| `fixture:overfill` | more rows than the host asked for, all distinct |
+| `fixture:huge` | a title no view model would take |
+| `fixture:bad-cursor` | a cursor that is really a path |
+| `fixture:loop-cursor` | the cursor it was handed, unchanged |
+| `fixture:done-cursor` | `complete`, and somewhere to continue from |
+
+Two of the stack selectors look alike and are not. `fixture:recurse` takes no
+address of a local, so its frames are wasm locals and land on the native stack
+`max_wasm_stack` bounds; `fixture:shadow-stack` takes the address of a 512-byte
+array, which forces Rust to put each frame in linear memory and run out of a
+different region entirely, long before that ceiling. Which one stops the
+component is visible in the journal, because the host records the trap it got.
 
 The component reads exactly one directory grant, named `fixture-games`, and lists
 `*.rom` entries whose contents are the game titles. A grant for any other id, or
