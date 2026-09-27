@@ -485,6 +485,110 @@ pub struct GrantedDirectory {
     identity: Option<DirectoryIdentity>,
 }
 
+/// Whether a Windows reparse tag stands for another named object.
+///
+/// This is Windows' own test, from `ntifs.h`:
+///
+/// ```c
+/// #define IsReparseTagNameSurrogate(_tag) (((_tag) & 0x20000000) != 0)
+/// ```
+///
+/// A name surrogate *is* a redirection: a symbolic link, a mount point (what
+/// `mklink /J` makes). Every other reparse tag describes where a file's bytes
+/// live and nothing about which file it is — a OneDrive placeholder that has not
+/// been downloaded, a deduplicated file, a WOF-compressed one. Refusing those as
+/// links is how a granted folder under OneDrive-managed Documents looks empty to a
+/// plugin and refuses every read in it.
+///
+/// A pure function over a `u32` so the rule can be driven on any platform, which
+/// is the only way the tags that matter get tested at all: no CI runner has
+/// OneDrive.
+#[allow(dead_code)]
+fn reparse_tag_redirects(tag: u32) -> bool {
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    tag & NAME_SURROGATE != 0
+}
+
+/// Whether the host follows this reparse point to read the file behind it,
+/// rather than the entry it already holds.
+///
+/// `IsReparseTagNameSurrogate` says only that a tag is not a *name* — it says
+/// nothing about who serves the bytes behind one that isn't. Single-instance
+/// storage and the container-layer filter can, in principle, serve the data of
+/// a *different* file on the volume through a reparse point that clears that
+/// one bit exactly as a OneDrive placeholder does, so "not a name" is not
+/// "safe to trust". Data Deduplication is the same shape and is deliberately
+/// **not** on this list even though it is a real Microsoft mechanism: the
+/// identity check below can only tell that the second open reached the same
+/// *file*, never that dedup handed back that file's own bytes rather than a
+/// shared chunk that happens to collide, and Windows client — which is what
+/// Orivo ships to — does not have the feature at all, so there is no user this
+/// buys anything for. The host follows only the mechanisms it has read about,
+/// can name, and can tell apart from that failure mode, each checked against
+/// Microsoft's own values:
+///
+/// - `IO_REPARSE_TAG_WOF` — the Windows Overlay Filter, what `compact`
+///   produces (`ntifs.h`, `0x80000017`);
+/// - the cloud-file family, `IO_REPARSE_TAG_CLOUD` and its sixteen provider
+///   variants `IO_REPARSE_TAG_CLOUD_1`..`_F` — OneDrive and other Cloud Files
+///   API providers (`winnt.h`, base `0x9000001A`, provider nibble at
+///   `IO_REPARSE_TAG_CLOUD_MASK = 0x0000F000`).
+///
+/// Everything else — `IO_REPARSE_TAG_DEDUP`, `IO_REPARSE_TAG_STORAGE_SYNC`,
+/// `IO_REPARSE_TAG_NFS`, a tag this host has never seen — is refused rather
+/// than followed. The consequence is stated in
+/// [`fixtures/README.md`](../fixtures/README.md): a file behind a mechanism
+/// not on this list is not read, and the reason is journalled.
+#[allow(dead_code)]
+fn reparse_tag_is_followed(tag: u32) -> bool {
+    const WOF: u32 = 0x8000_0017;
+    const CLOUD_BASE: u32 = 0x9000_001A;
+    const CLOUD_PROVIDER_MASK: u32 = 0x0000_F000;
+    tag == WOF || (tag & !CLOUD_PROVIDER_MASK) == CLOUD_BASE
+}
+
+/// A refusal `open_entry_for_reading` decided on its own, carried as the inner
+/// error of an [`io::Error`] rather than keyed on its [`io::ErrorKind`].
+///
+/// Windows' own error codes are not reserved for this file's decisions —
+/// `ERROR_ACCESS_DENIED` can arrive from the OS just as easily as from the
+/// identity check below, both as `PermissionDenied` — so a caller that wants
+/// to journal *which* decision this was has to downcast to this type rather
+/// than compare kinds. `#[allow(dead_code)]` on both variants' matches: only
+/// `read_file` reads them on Windows, and this type still has to exist on
+/// every platform because `read_file` does.
+#[derive(Debug)]
+#[cfg_attr(unix, allow(dead_code))]
+enum ReparseRefusal {
+    /// The tag cleared the name-surrogate bit but is not on
+    /// [`reparse_tag_is_followed`]'s list.
+    UnrecognisedTag(u32),
+    /// The identity check after a trusted tag's second open did not agree with
+    /// the first.
+    EntryChangedBetweenOpens,
+}
+
+impl std::fmt::Display for ReparseRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnrecognisedTag(tag) => {
+                write!(
+                    formatter,
+                    "reparse tag {tag:#010x} is not one this host follows"
+                )
+            }
+            Self::EntryChangedBetweenOpens => {
+                write!(
+                    formatter,
+                    "the entry changed between the two opens needed to read it"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReparseRefusal {}
+
 /// Handle-relative file access on Windows.
 ///
 /// `openat` has an exact equivalent here, and the pattern in this module is the
@@ -515,9 +619,11 @@ mod windows_relative {
 
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, GetFileInformationByHandle, SYNCHRONIZE,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_ID_INFO,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        SYNCHRONIZE,
     };
 
     /// `winternl.h`. `Length` and `MaximumLength` are byte counts, not character
@@ -555,6 +661,20 @@ mod windows_relative {
     const FILE_OPEN: u32 = 1;
     const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
     const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    /// Whether an open follows a reparse point or opens the point itself.
+    ///
+    /// `AsItself` is what a grant needs from a *redirection*: the link, so the kind
+    /// check refuses it instead of reading wherever it leads. `Following` is what a
+    /// grant needs from a reparse point on [`super::reparse_tag_is_followed`]'s
+    /// list, because the bytes of a OneDrive placeholder are behind a filter
+    /// driver, and opening the reparse point is precisely how you go round that
+    /// driver and read the stub.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Reparse {
+        AsItself,
+        Following,
+    }
 
     unsafe extern "system" {
         fn NtCreateFile(
@@ -596,7 +716,12 @@ mod windows_relative {
     /// so the caller's kind check refuses it rather than following it out of the
     /// grant. `FILE_SYNCHRONOUS_IO_NONALERT` is required for the handle to be
     /// usable with ordinary reads afterwards.
-    fn open_relative(directory: &File, name: &str, access: u32) -> io::Result<File> {
+    fn open_relative(
+        directory: &File,
+        name: &str,
+        access: u32,
+        reparse: Reparse,
+    ) -> io::Result<File> {
         let mut wide = OsStr::new(name).encode_wide().collect::<Vec<u16>>();
         if wide.is_empty() {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
@@ -632,7 +757,10 @@ mod windows_relative {
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 FILE_OPEN,
-                FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                match reparse {
+                    Reparse::AsItself => FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                    Reparse::Following => FILE_SYNCHRONOUS_IO_NONALERT,
+                },
                 ptr::null(),
                 0,
             )
@@ -647,8 +775,113 @@ mod windows_relative {
         Ok(unsafe { File::from_raw_handle(handle as _) })
     }
 
+    /// Which of this function's answers a call reached.
+    ///
+    /// Production discards it: the handle *is* the answer. A test cannot, because
+    /// two of these hand back the same bytes from the same file — the fallback
+    /// returns the entry, an agreed identity returns a second handle onto it —
+    /// so comparing what was read cannot tell them apart, and a check that
+    /// cannot tell them apart cannot notice one of them having become
+    /// unreachable.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum FollowOutcome {
+        /// `reparse_tag` found none, so there was nothing to follow.
+        NoReparsePoint,
+        /// A name surrogate, handed back as the link it is for the caller's kind
+        /// check to refuse.
+        RedirectionLeftAsItself,
+        /// The tag is one this host follows, the second open failed, and the
+        /// first handle is what stands.
+        FellBackToEntry,
+        /// The tag is one this host follows, the second open succeeded, and both
+        /// opens reported the same file.
+        IdentityAgreed,
+    }
+
+    /// Opens one entry for its bytes.
+    ///
+    /// Two steps, because the first answer decides the second. The entry is opened
+    /// as itself so its reparse tag can be read without following anything; a tag
+    /// that names another object is handed back as the link it is, for the caller
+    /// to refuse. A tag on [`super::reparse_tag_is_followed`]'s list — OneDrive
+    /// and WOF — is opened again *following* it, which is what lets the filter
+    /// driver serve the file the user actually has. Anything else is refused
+    /// outright: this host does not know what serves the bytes behind it, and the
+    /// one bit already checked never promised that it was safe.
     pub(super) fn open_entry_for_reading(directory: &File, name: &str) -> io::Result<File> {
-        open_relative(directory, name, FILE_GENERIC_READ)
+        open_entry_for_reading_seamed(directory, name, || {}).map(|(file, _)| file)
+    }
+
+    /// The same, with the seam between the two opens taken as a parameter.
+    ///
+    /// A real attacker only sometimes lands inside that window, which is not
+    /// something a test can assert on; firing it deterministically through
+    /// [`open_entry_for_reading_racing`] is what lets a test force the swap
+    /// instead. `open_entry_for_reading` is what production calls, with nothing
+    /// to run there. The whitelist itself, [`super::reparse_tag_is_followed`], is
+    /// not a parameter: this function has exactly one answer for which tags it
+    /// follows, in every build.
+    fn open_entry_for_reading_seamed(
+        directory: &File,
+        name: &str,
+        between_opens: impl FnOnce(),
+    ) -> io::Result<(File, FollowOutcome)> {
+        let entry = open_relative(directory, name, FILE_GENERIC_READ, Reparse::AsItself)?;
+        let Some(tag) = reparse_tag(&entry)? else {
+            return Ok((entry, FollowOutcome::NoReparsePoint));
+        };
+        if super::reparse_tag_redirects(tag) {
+            // A link, for the caller's kind check to refuse.
+            return Ok((entry, FollowOutcome::RedirectionLeftAsItself));
+        }
+        if !super::reparse_tag_is_followed(tag) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                super::ReparseRefusal::UnrecognisedTag(tag),
+            ));
+        }
+        between_opens();
+        // Followed, so a filter driver serves the file the user has. Any
+        // failure of this second open is answered the same way: the entry the
+        // host already holds is the right answer rather than a refusal,
+        // because that handle was opened and inspected before this line ran,
+        // so nothing that happens to the *name* afterwards can have touched
+        // it. The common case is `STATUS_IO_REPARSE_TAG_NOT_HANDLED` — nobody
+        // owns the tag, and the data under the point is still this file's own,
+        // in this folder — but a name that stops resolving at all (deleted,
+        // not replaced) answers exactly as safely from the same handle.
+        // Refusing instead would trade a fact this host already verified for
+        // no fact at all.
+        let Ok(followed) = open_relative(directory, name, FILE_GENERIC_READ, Reparse::Following)
+        else {
+            return Ok((entry, FollowOutcome::FellBackToEntry));
+        };
+        // The name was resolved twice, and anything can happen to it in between —
+        // the realistic thing being a symbolic link swapped in for the entry,
+        // which an ordinary open follows without a filter's help. A driver
+        // serving this file's own bytes behind a redirection hands back the same
+        // file every time `FileIdInfo` is asked; two different answers mean the
+        // second open reached a different file than the first one reported on,
+        // and its data is refused rather than trusted.
+        if full_identity(&entry)? != full_identity(&followed)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                super::ReparseRefusal::EntryChangedBetweenOpens,
+            ));
+        }
+        Ok((followed, FollowOutcome::IdentityAgreed))
+    }
+
+    /// [`open_entry_for_reading`], with the between-opens seam exposed so a test
+    /// can stage a race deterministically, against the real production
+    /// whitelist.
+    #[cfg(test)]
+    pub(super) fn open_entry_for_reading_racing(
+        directory: &File,
+        name: &str,
+        between_opens: impl FnOnce(),
+    ) -> io::Result<(File, FollowOutcome)> {
+        open_entry_for_reading_seamed(directory, name, between_opens)
     }
 
     /// Opens for attributes only, which is not "opening" in any of the senses a
@@ -657,7 +890,64 @@ mod windows_relative {
     /// entry some program holds exclusively is still describable, exactly as a
     /// mode-000 file is on Unix.
     pub(super) fn open_entry_for_facts(directory: &File, name: &str) -> io::Result<File> {
-        open_relative(directory, name, FILE_READ_ATTRIBUTES)
+        open_relative(directory, name, FILE_READ_ATTRIBUTES, Reparse::AsItself)
+    }
+
+    /// The reparse tag of an entry, or `None` when it is not a reparse point.
+    ///
+    /// Asked of the handle rather than of the directory entry, and asked only when
+    /// the attribute says there is one to ask about.
+    pub(super) fn reparse_tag(handle: &File) -> io::Result<Option<u32>> {
+        let mut tag_info = MaybeUninit::<FILE_ATTRIBUTE_TAG_INFO>::zeroed();
+        // Safety: an open handle, and an out-parameter whose class and size are
+        // declared together and which is only read once the call reports success.
+        let answered = unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle() as HANDLE,
+                FileAttributeTagInfo,
+                tag_info.as_mut_ptr().cast(),
+                size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        if answered == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: the call reported success, so the structure is initialised.
+        let tag_info = unsafe { tag_info.assume_init() };
+        Ok(
+            (tag_info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+                .then_some(tag_info.ReparseTag),
+        )
+    }
+
+    /// The volume and the file, as wide as the filesystem makes them.
+    ///
+    /// `nFileIndexHigh`/`nFileIndexLow` from `GetFileInformationByHandle` is 64
+    /// bits, and on ReFS — which a Dev Drive is — a file's identifier is 128, so the
+    /// 64-bit index is a truncation with no uniqueness guarantee.
+    /// `FileIdInfo` is the whole of it, and it also widens the volume serial number
+    /// from 32 bits to 64.
+    pub(super) fn full_identity(handle: &File) -> io::Result<(u64, u128)> {
+        let mut identity = MaybeUninit::<FILE_ID_INFO>::zeroed();
+        // Safety: as above — a class, a matching size, and a structure read only
+        // after success.
+        let answered = unsafe {
+            GetFileInformationByHandleEx(
+                handle.as_raw_handle() as HANDLE,
+                FileIdInfo,
+                identity.as_mut_ptr().cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if answered == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: the call reported success.
+        let identity = unsafe { identity.assume_init() };
+        Ok((
+            identity.VolumeSerialNumber,
+            u128::from_le_bytes(identity.FileId.Identifier),
+        ))
     }
 
     /// Everything the host asks of a handle on Windows: kind, size, how many names
@@ -692,14 +982,36 @@ mod windows_relative {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirectoryIdentity {
     volume: u64,
-    file_id: u64,
+    /// Wide enough for every filesystem Orivo runs on. A Unix inode is 64 bits and
+    /// an NTFS file index is too, but a ReFS identifier — which is what a Dev Drive
+    /// hands out — is 128, and the 64-bit index Windows also reports for it is a
+    /// truncation with no uniqueness guarantee.
+    file_id: u128,
 }
 
 #[allow(dead_code)]
 impl DirectoryIdentity {
     /// Rebuilds what grant storage kept. Deliberately not `Default`: an identity
     /// nobody recorded is [`None`], not zero.
+    /// From a 64-bit identifier: a Unix inode, or the file index NTFS reports.
+    /// Kept as the plain constructor because that is what every filesystem but
+    /// ReFS hands out, and what a caller reading two `u64`s back out of storage
+    /// has.
     pub fn new(volume: u64, file_id: u64) -> Self {
+        Self {
+            volume,
+            file_id: u128::from(file_id),
+        }
+    }
+
+    /// From a filesystem whose identifiers need all 128 bits — ReFS, and therefore
+    /// a Dev Drive.
+    ///
+    /// A wide identity never compares equal to a 64-bit one for the same file, and
+    /// that is the safe direction: a comparison is only ever used to *refuse*, so
+    /// the two disagreeing costs a grant that has to be re-approved rather than a
+    /// folder that should not have been accepted.
+    pub fn wide(volume: u64, file_id: u128) -> Self {
         Self { volume, file_id }
     }
 
@@ -707,7 +1019,7 @@ impl DirectoryIdentity {
         self.volume
     }
 
-    pub fn file_id(&self) -> u64 {
+    pub fn file_id(&self) -> u128 {
         self.file_id
     }
 
@@ -720,19 +1032,28 @@ impl DirectoryIdentity {
         {
             use std::os::unix::fs::MetadataExt;
             let metadata = handle.metadata().ok()?;
-            Some(Self {
-                volume: metadata.dev(),
-                file_id: metadata.ino(),
-            })
+            Some(Self::new(metadata.dev(), metadata.ino()))
         }
         #[cfg(not(unix))]
         {
+            if let Ok((volume, file_id)) = windows_relative::full_identity(handle) {
+                return Some(Self::wide(volume, file_id));
+            }
+            // The fallback, and the reason it is a safe one: `FileIdInfo` is the
+            // query NTFS and ReFS have both answered since Windows 8, so a failure
+            // here means a filesystem that implements neither — an SMB share, an
+            // unusual driver — where the 64-bit index is the only identity on offer
+            // at all. The volume whose identifiers actually need 128 bits is the one
+            // that would have answered above. Recorded as documented rather than
+            // silently truncated: a comparison is only ever used to *refuse*, so a
+            // collision here would be a false accept, which is why the reasoning has
+            // to hold rather than be convenient.
             let information = windows_relative::information(handle).ok()?;
-            Some(Self {
-                volume: u64::from(information.dwVolumeSerialNumber),
-                file_id: (u64::from(information.nFileIndexHigh) << 32)
+            Some(Self::new(
+                u64::from(information.dwVolumeSerialNumber),
+                (u64::from(information.nFileIndexHigh) << 32)
                     | u64::from(information.nFileIndexLow),
-            })
+            ))
         }
     }
 }
@@ -1619,11 +1940,35 @@ impl host_files::Host for HostState {
         // a character device has no size to bound. The open refuses the first
         // two, and the kind, size and ownership below are asked of the
         // descriptor rather than of the name.
-        let Ok(file) = directory.open_entry(&name) else {
-            return Err(plugin_error(
-                wit_types::PluginErrorCode::Unavailable,
-                "That file is no longer available.",
-            ));
+        let file = match directory.open_entry(&name) {
+            Ok(file) => file,
+            Err(error) => {
+                // A reparse-tag decision is worth a reason in the journal, the
+                // same way a truncated listing is — an ordinary "gone" is not.
+                // Downcast rather than match on `error.kind()`: Windows' own
+                // codes are not reserved for this file's decisions, so an
+                // `ErrorKind` a genuine OS failure could also produce is not a
+                // safe key for which decision this was.
+                if let Some(refusal) = error
+                    .get_ref()
+                    .and_then(|inner| inner.downcast_ref::<ReparseRefusal>())
+                {
+                    let decision = match refusal {
+                        ReparseRefusal::UnrecognisedTag(_) => "reparse-tag-refused",
+                        ReparseRefusal::EntryChangedBetweenOpens => "reparse-entry-changed",
+                    };
+                    self.journal.record(
+                        self.correlation_id,
+                        &self.plugin_id,
+                        decision,
+                        error.to_string(),
+                    );
+                }
+                return Err(plugin_error(
+                    wit_types::PluginErrorCode::Unavailable,
+                    "That file is no longer available.",
+                ));
+            }
         };
         let Ok(facts) = EntryFacts::of_handle(&file) else {
             return Err(plugin_error(
@@ -1759,17 +2104,20 @@ impl EntryFacts {
         }
         #[cfg(not(unix))]
         {
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-            };
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
 
             let information = windows_relative::information(handle)?;
             let directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-            let symlink = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            // A reparse point is only a redirection when its tag says it names
+            // another object. The rest — a OneDrive placeholder, a deduplicated or
+            // WOF-compressed file — are ordinary files that happen to keep their
+            // bytes somewhere else, and Documents and Desktop are OneDrive-managed
+            // on a great many machines.
+            let symlink = windows_relative::reparse_tag(handle)?.is_some_and(reparse_tag_redirects);
             Ok(Self {
-                // A junction and a symbolic link are both reparse points, and
-                // neither is a file the host will read: the grant covers what is
-                // inside the folder, not wherever a reparse point leads.
+                // A symbolic link and a junction are not files the host will read:
+                // the grant covers what is inside the folder, not wherever a
+                // redirection leads.
                 file: !directory && !symlink,
                 directory,
                 symlink,
@@ -3291,6 +3639,21 @@ mod tests {
         }
     }
 
+    /// Points a *file* name at a file somewhere else. On Windows this needs
+    /// `SeCreateSymbolicLinkPrivilege`, which the CI runner has because it is an
+    /// administrator — and a file symbolic link is what the leaf tests need: a
+    /// junction can only point at a directory, and the fixture skips directories
+    /// for reasons of its own, so a junction named `*.rom` would be left out of a
+    /// listing whether or not the host understood reparse points at all.
+    fn redirect_file(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_file(target, link).unwrap_or_else(|error| {
+            panic!("symlink_file needs SeCreateSymbolicLinkPrivilege and did not get it: {error}")
+        });
+    }
+
     /// Removes a directory redirection without touching what it pointed at. A
     /// junction is removed with `RemoveDirectory`, a symbolic link with `unlink`.
     fn remove_directory_redirect(link: &Path) {
@@ -3343,6 +3706,28 @@ mod tests {
             // opener whatever its privileges, so the Windows form of this holds
             // even for the administrator the CI runner is.
             true
+        }
+    }
+
+    /// Limits for a test that is not about time.
+    ///
+    /// The production deadline is one second for an interactive call, which is the
+    /// right policy and the wrong thing for a test to inherit: a test asserting the
+    /// *shape* of a refusal, while a component makes four hundred host calls,
+    /// starts failing on a machine under load and tells you nothing true when it
+    /// does. `the_same_refusal_earned_again_is_counted_and_not_repeated` did
+    /// exactly that at a load average around fifty, and passed eight times out of
+    /// eight when the machine was quiet.
+    ///
+    /// Fuel is deliberately left at its default: it is the bound that still catches
+    /// a component that never returns, so removing the clock does not remove the
+    /// safety net. Only the clock goes.
+    fn untimed() -> PluginLimits {
+        PluginLimits {
+            interactive_deadline: Duration::from_secs(60),
+            discovery_deadline: Duration::from_secs(60),
+            probe_deadline: Duration::from_secs(60),
+            ..PluginLimits::default()
         }
     }
 
@@ -3682,7 +4067,7 @@ mod tests {
     #[test]
     fn invokes_every_runner_export_end_to_end() {
         let library = FixtureLibrary::new("nominal");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let PluginResponse::Identity(identity) = harness.call(PluginRequest::Identity).unwrap()
         else {
@@ -3742,7 +4127,7 @@ mod tests {
     #[test]
     fn discovery_resumes_from_its_own_cursor() {
         let library = FixtureLibrary::new("cursor");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let PluginResponse::DiscoveryPage(first) = harness
             .call(PluginRequest::DiscoverPage {
@@ -3787,7 +4172,7 @@ mod tests {
     /// linked to it, so it cannot be instantiated at all.
     #[test]
     fn an_undeclared_capability_refuses_instantiation() {
-        let harness = Harness::new(PluginLimits::default(), None);
+        let harness = Harness::new(untimed(), None);
         let error = harness.call(PluginRequest::Identity).unwrap_err();
         assert_eq!(
             error,
@@ -3861,7 +4246,7 @@ mod tests {
     #[test]
     fn a_directory_outside_the_grant_is_refused_at_the_call() {
         let library = FixtureLibrary::new("deny");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:deny").unwrap_err();
         assert!(matches!(
             error,
@@ -3883,7 +4268,7 @@ mod tests {
     #[test]
     fn a_name_that_leaves_the_granted_directory_is_refused() {
         let library = FixtureLibrary::new("escape");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:escape").unwrap_err();
         assert!(matches!(
             error,
@@ -3923,22 +4308,29 @@ mod tests {
     #[test]
     fn reading_a_symlink_by_name_never_leaves_the_grant() {
         let library = FixtureLibrary::new("read-symlink");
-        std::os::unix::fs::symlink(
-            library.root.join("secret.txt"),
-            library.games.join("link.rom"),
-        )
-        .unwrap();
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        redirect_file(
+            &library.games.join("link.rom"),
+            &library.root.join("secret.txt"),
+        );
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:read-link").unwrap_err();
-        assert!(
-            matches!(
-                error,
-                PluginRuntimeError::Plugin {
-                    code: PluginErrorCode::Unavailable,
-                    ..
+        // Unix refuses at the open — `O_NOFOLLOW` returns `ELOOP` — so the host
+        // reports the entry as gone. Windows opens the link itself and refuses on
+        // the kind, which is a permission. Both are refusals of the same thing, and
+        // the code each platform reaches is worth pinning rather than blurring.
+        let refused = match error {
+            PluginRuntimeError::Plugin { code, .. } => {
+                if cfg!(unix) {
+                    code == PluginErrorCode::Unavailable
+                } else {
+                    code == PluginErrorCode::PermissionDenied
                 }
-            ),
-            "reading a symlink out of the grant returned {error:?}"
+            }
+            _ => false,
+        };
+        assert!(
+            refused,
+            "reading a symbolic link out of the grant returned {error:?}"
         );
     }
 
@@ -3971,7 +4363,7 @@ mod tests {
         redirect_directory(&through, &approved);
 
         let harness = Harness::with_directories(
-            PluginLimits::default(),
+            untimed(),
             &[GAMES_GRANT],
             &BTreeMap::from([(GAMES_GRANT.to_string(), through.join("games"))]),
         );
@@ -4011,7 +4403,7 @@ mod tests {
         // Safety: a path this process owns, in a directory it just created.
         assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let handle = harness
             .runtime
             .submit(
@@ -4093,7 +4485,7 @@ mod tests {
             .unwrap();
             fs::set_permissions(&library.games, fs::Permissions::from_mode(mode)).unwrap();
 
-            let harness = Harness::new(PluginLimits::default(), Some(&library));
+            let harness = Harness::new(untimed(), Some(&library));
             let outcome = harness.prepare("fixture:read-twin");
             assert_eq!(
                 outcome.is_ok(),
@@ -4130,7 +4522,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(facts.owner, host_account());
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let outcome = harness.prepare("fixture:read-twin");
         // Unix can tell that this temporary folder is private, so the user's own
         // link stays readable. Windows cannot tell yet, and a folder whose write
@@ -4221,7 +4613,7 @@ mod tests {
             vec![b'x'; MAX_HOST_FILE_BYTES as usize + 1],
         )
         .unwrap();
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(matches!(
             harness.prepare("fixture:read-big").unwrap_err(),
             PluginRuntimeError::Plugin {
@@ -4231,6 +4623,915 @@ mod tests {
         ));
     }
 
+    /// The rule itself, against the tags that actually occur. It runs on every
+    /// platform because the tags that matter most cannot be produced on any CI
+    /// runner: nobody's runner has OneDrive, and the whole point is what happens to
+    /// a folder OneDrive manages.
+    ///
+    /// Before the one-bit test, `EntryFacts` called every reparse point a link, so
+    /// each of the second group below was a file the host refused to list or read.
+    #[test]
+    fn a_reparse_tag_is_a_redirection_only_when_it_names_one() {
+        // Tags that stand for another named object. These are the redirections a
+        // grant has to refuse, and both are things an unprivileged account can
+        // make.
+        for (tag, what) in [
+            (0xA000_000Cu32, "IO_REPARSE_TAG_SYMLINK"),
+            (0xA000_0003, "IO_REPARSE_TAG_MOUNT_POINT"),
+            (0xA000_0018, "IO_REPARSE_TAG_GLOBAL_REPARSE"),
+            (0xA000_001D, "IO_REPARSE_TAG_LX_SYMLINK"),
+        ] {
+            assert!(
+                reparse_tag_redirects(tag),
+                "{what} names another object and was not treated as a redirection"
+            );
+        }
+
+        // Tags that say where a file's bytes live and nothing about which file it
+        // is. Every one of these is an ordinary file to a user, and the first four
+        // are how OneDrive represents a file it has not downloaded — on Documents
+        // and Desktop, by default, on a great many machines.
+        for (tag, what) in [
+            (0x9000_001Au32, "IO_REPARSE_TAG_CLOUD"),
+            (0x9000_101A, "IO_REPARSE_TAG_CLOUD_1"),
+            (0x9000_901A, "IO_REPARSE_TAG_CLOUD_9"),
+            (0x9000_F01A, "IO_REPARSE_TAG_CLOUD_F"),
+            (0x8000_0013, "IO_REPARSE_TAG_DEDUP"),
+            (0x8000_0017, "IO_REPARSE_TAG_WOF"),
+            (0x8000_001E, "IO_REPARSE_TAG_STORAGE_SYNC"),
+            (0x8000_0014, "IO_REPARSE_TAG_NFS"),
+        ] {
+            assert!(
+                !reparse_tag_redirects(tag),
+                "{what} describes storage, not a name, and was treated as a redirection"
+            );
+        }
+
+        // And the bit, stated once so the two lists above are examples rather than
+        // the rule: `IsReparseTagNameSurrogate`, `ntifs.h`.
+        assert!(reparse_tag_redirects(0x2000_0000));
+        assert!(!reparse_tag_redirects(0xDFFF_FFFF));
+    }
+
+    /// Clearing the name-surrogate bit is not a whitelist. `reparse_tag_redirects`
+    /// above answers "is this a name"; this is the second, separate question —
+    /// "is this a mechanism the host has read about" — and it runs on every
+    /// platform for the same reason: no CI runner can produce most of these tags
+    /// either way, so the rule has to be tested as a pure function to be tested at
+    /// all.
+    #[test]
+    fn the_host_follows_only_the_reparse_tags_it_recognises() {
+        // Cited against Microsoft's own values, not guessed: `ntifs.h` for WOF,
+        // `winnt.h` for the cloud family.
+        for (tag, what) in [
+            (0x8000_0017u32, "IO_REPARSE_TAG_WOF"),
+            (0x9000_001A, "IO_REPARSE_TAG_CLOUD"),
+            (0x9000_101A, "IO_REPARSE_TAG_CLOUD_1"),
+            (0x9000_901A, "IO_REPARSE_TAG_CLOUD_9"),
+            (0x9000_F01A, "IO_REPARSE_TAG_CLOUD_F"),
+        ] {
+            assert!(
+                reparse_tag_is_followed(tag),
+                "{what} is a mechanism this host understands and was refused"
+            );
+        }
+
+        // Real, documented, and still refused: a tag naming no object is not
+        // enough on its own, and these are exactly the ones the brief warns are
+        // capable of serving another file's data through a mechanism nobody here
+        // has read about — Data Deduplication included, deliberately: it is a
+        // real Microsoft tag this host could name, and it is refused anyway,
+        // because the identity check cannot tell its own bytes from a shared
+        // chunk that only looks like them.
+        for (tag, what) in [
+            (0x8000_0013u32, "IO_REPARSE_TAG_DEDUP"),
+            (0x8000_001E, "IO_REPARSE_TAG_STORAGE_SYNC"),
+            (0x8000_0014, "IO_REPARSE_TAG_NFS"),
+            (0x0000_1234, "a tag with no meaning at all"),
+        ] {
+            assert!(
+                !reparse_tag_is_followed(tag),
+                "{what} was followed without the host knowing what serves it"
+            );
+        }
+
+        // Near-misses on the cloud mask specifically: both share `IO_REPARSE_TAG_CLOUD`'s
+        // `0x9000` prefix, and a mask wider than the documented provider nibble
+        // would swallow either. `IO_REPARSE_TAG_PROJFS` (Windows Projected File
+        // System) differs in the low byte; `IO_REPARSE_TAG_WCI_1` (the Windows
+        // Container Isolation filesystem's first tier) differs in the low word.
+        for (tag, what) in [
+            (0x9000_001Cu32, "IO_REPARSE_TAG_PROJFS"),
+            (0x9000_1018, "IO_REPARSE_TAG_WCI_1"),
+        ] {
+            assert!(
+                !reparse_tag_is_followed(tag),
+                "{what} shares the cloud family's prefix and was followed anyway"
+            );
+        }
+
+        // A name surrogate is never on this list either — following one is a
+        // different bug, but it would be worse to have both checks agree on it.
+        assert!(!reparse_tag_is_followed(0xA000_000C));
+    }
+
+    /// Not every reparse point is a redirection, and treating them alike loses the
+    /// user their library.
+    ///
+    /// OneDrive manages Documents and Desktop on a great many Windows machines, and
+    /// a file it has not downloaded is a *placeholder*: an ordinary file whose data
+    /// lives behind a filter driver, carrying a reparse tag. Deduplicated and
+    /// WOF-compressed files are the same shape. A host that refuses every reparse
+    /// point shows the plugin an empty folder and refuses every read in it, and the
+    /// user is told nothing.
+    ///
+    /// The rule is one bit — `IsReparseTagNameSurrogate`, `ntifs.h` — and it is
+    /// checked against the real tags in
+    /// `a_reparse_tag_is_a_redirection_only_when_it_names_one`. What this test
+    /// adds is the wiring: that `EntryFacts` consults the tag at all, so a
+    /// non-redirecting reparse point is *listed* rather than dropped.
+    ///
+    /// It does not assert that a read returns the file's bytes, because on this
+    /// runner it cannot: the branch that runs here plants a tag the whitelist
+    /// refuses, and the assertion below is `read.is_err()` for exactly that
+    /// reason. Only a `compact` that leaves a visible placeholder takes the
+    /// other branch, and that is the one thing this runner has never given.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_reparse_point_that_is_not_a_redirection_is_read_like_any_file() {
+        let library = FixtureLibrary::new("storage-reparse");
+        let unusual = library.games.join("delta.rom");
+        // Short, because the fixture turns a rom's contents into its title and the
+        // host refuses a title longer than it will show. A file big enough to
+        // interest WOF fails that check instead of this test's, which is how the
+        // runner reported it the first time.
+        fs::write(&unusual, b"Delta Drift\n").unwrap();
+        let (trusted, mechanism) = plant_storage_reparse_point(&unusual);
+        println!("reparse point planted as {mechanism}");
+
+        let harness = Harness::new(untimed(), Some(&library));
+        let PluginResponse::DiscoveryPage(page) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        assert!(
+            page.games.iter().any(|game| game.external_id == "delta"),
+            "a file whose only peculiarity is where its bytes live was left out of \
+             the listing ({mechanism})"
+        );
+        // Reading is where the two mechanisms diverge. A real WOF placeholder is
+        // a tag `reparse_tag_is_followed` trusts, so the host opens it following
+        // the redirection and the driver serves the file the user has. The
+        // by-hand fallback plants a tag nobody has ever read about, which is
+        // refused before that second open is even attempted — proof that "not a
+        // name" alone no longer buys a read.
+        let read = harness.prepare("fixture:read-delta");
+        if trusted {
+            assert!(
+                read.is_ok(),
+                "a file behind a trusted storage reparse point could not be read ({mechanism})"
+            );
+        } else {
+            assert!(
+                read.is_err(),
+                "a file behind an untrusted, hand-planted reparse tag was read ({mechanism})"
+            );
+        }
+    }
+
+    /// Whether the reparse attribute is set, regardless of what its tag means.
+    /// Shared by every helper below that plants one by hand and needs to know
+    /// whether the plant actually took.
+    ///
+    /// A handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`, queried through
+    /// *that handle*, is the closest this can get to what production sees: it is
+    /// the pattern `Reparse::AsItself` and `information` already use there.
+    /// `fs::metadata` is not equivalent — it follows a reparse point like an
+    /// ordinary open would — and neither is `fs::symlink_metadata`, a *path*-level
+    /// query (`GetFileAttributesEx`) rather than a handle-level one.
+    ///
+    /// What none of the three can tell you is whether a filter is *hiding* a
+    /// reparse point it owns, and on the runner wof.sys does exactly that:
+    /// `FSCTL_GET_EXTERNAL_BACKING` reports a `compact`ed file externally backed
+    /// (provider 2, algorithm 1 — the file provider, LZX) while this query and
+    /// production's own `reparse_tag` both answer "no reparse point". "This says
+    /// no" and "there is none" are therefore not the same statement, and an
+    /// earlier version of this file treated them as one. The three answers are
+    /// printed side by side by
+    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag`.
+    #[cfg(not(unix))]
+    fn is_reparse_point(path: &Path) -> bool {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .unwrap_or(false)
+    }
+
+    /// Plants a reparse point that is **not** a redirection, and says how, and
+    /// whether the tag is one [`reparse_tag_is_followed`] trusts.
+    ///
+    /// `compact /c /exe:LZX` is tried first: on a volume where WOF applies it
+    /// makes a real placeholder a driver actually owns, the closest thing to a
+    /// real OneDrive placeholder this file can produce. What decides the branch
+    /// below is not whether `compact` compressed anything — on the runner it
+    /// really does, `FSCTL_GET_EXTERNAL_BACKING` confirms it — but whether
+    /// `is_reparse_point` can *see* a reparse point afterwards, and it cannot,
+    /// because wof.sys keeps its own tag out of every attribute query this host
+    /// makes. A WOF file is therefore never a placeholder *this* code has to
+    /// follow: it reads transparently, and
+    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` is where
+    /// that is asserted. So this helper falls back to a tag of its own
+    /// (`plant_unrecognised_reparse_point`), which is refused before the second
+    /// open is even attempted: `reparse_tag_is_followed` does not trust it,
+    /// unlike the tag `plant_trusted_reparse_point` hand-plants for the tests
+    /// that need a trusted one deterministically.
+    #[cfg(not(unix))]
+    fn plant_storage_reparse_point(path: &Path) -> (bool, &'static str) {
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:LZX"])
+            .arg(path)
+            .output()
+            .expect("compact is on PATH");
+        if is_reparse_point(path) {
+            return (true, "WOF, through `compact /c /exe:LZX`");
+        }
+        println!(
+            "compact produced no reparse point here, so one is set by hand: {}",
+            String::from_utf8_lossy(&compacted.stdout).trim()
+        );
+        plant_unrecognised_reparse_point(path);
+        (
+            false,
+            "an unrecognised tag, through FSCTL_SET_REPARSE_POINT",
+        )
+    }
+
+    /// Sets a reparse point whose tag is neither a name surrogate nor one
+    /// `reparse_tag_is_followed` recognises — the shape a container-layer filter,
+    /// or a mechanism this host has simply never read about, would carry.
+    /// `REPARSE_GUID_DATA_BUFFER` is the layout a tag with bit 31 clear takes:
+    /// that is what makes the GUID legal, and bit 29 clear is the whole point —
+    /// this tag names no other object, exactly as a OneDrive placeholder names
+    /// none. Returns the tag, for the assertion message.
+    #[cfg(not(unix))]
+    fn plant_unrecognised_reparse_point(path: &Path) -> u32 {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        /// `FSCTL_SET_REPARSE_POINT`, from `winioctl.h`.
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        /// A tag of this test's own. Bit 31 clear marks it non-Microsoft, which is
+        /// what makes a GUID buffer legal; bit 29 clear is the whole point — this
+        /// names no other object, exactly as a OneDrive placeholder names none.
+        const TAG: u32 = 0x0000_1234;
+
+        /// `REPARSE_GUID_DATA_BUFFER`, with a payload of this test's size.
+        #[repr(C)]
+        struct ReparseGuidDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            reparse_guid: [u8; 16],
+            data: [u8; 8],
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        assert!(!reparse_tag_redirects(TAG), "the test's own tag redirects");
+        assert!(
+            !reparse_tag_is_followed(TAG),
+            "the test's own tag is one the host follows"
+        );
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .expect("the test can open its own file for writing");
+        let buffer = ReparseGuidDataBuffer {
+            reparse_tag: TAG,
+            reparse_data_length: 8,
+            reserved: 0,
+            reparse_guid: *b"orivo-w2-fixture",
+            data: *b"nodriver",
+        };
+        let mut returned = 0u32;
+        // Safety: an open handle with write access, one input buffer whose declared
+        // length matches its `data` field, and no output buffer — which is what
+        // `FSCTL_SET_REPARSE_POINT` takes.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_SET_REPARSE_POINT,
+                (&raw const buffer).cast(),
+                size_of::<ReparseGuidDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            answered != 0,
+            "FSCTL_SET_REPARSE_POINT failed: {}",
+            std::io::Error::last_os_error()
+        );
+        drop(handle);
+        assert!(
+            is_reparse_point(path),
+            "the reparse point was set and the attribute did not appear"
+        );
+        TAG
+    }
+
+    /// Clearing the name-surrogate bit is not enough to be trusted either: an
+    /// entry with a tag this host has never read about is refused, closed,
+    /// rather than followed and hoped safe. Deduplication, single-instance
+    /// storage and the container-layer filter can all in principle serve a
+    /// *different* file's data through a mechanism exactly this shape.
+    ///
+    /// It is still listed — a listing only opens attributes, and this tag is
+    /// not a name surrogate, so `EntryFacts` reports an ordinary file — which is
+    /// what makes "refused on read, not on listing" the property worth pinning
+    /// rather than "the folder looks empty".
+    #[cfg(not(unix))]
+    #[test]
+    fn an_unrecognised_reparse_tag_is_refused_rather_than_followed() {
+        let library = FixtureLibrary::new("reparse-unrecognised");
+        let unusual = library.games.join("epsilon.rom");
+        fs::write(&unusual, b"Epsilon Run\n").unwrap();
+        let tag = plant_unrecognised_reparse_point(&unusual);
+
+        let harness = Harness::new(untimed(), Some(&library));
+        let PluginResponse::DiscoveryPage(page) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        assert!(
+            page.games.iter().any(|game| game.external_id == "epsilon"),
+            "an entry with an unrecognised reparse tag ({tag:#010x}) was left out of the listing"
+        );
+
+        let error = harness.prepare("fixture:read-epsilon").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "a file behind an unrecognised reparse tag ({tag:#010x}) was read: {error:?}"
+        );
+        let refused = harness
+            .runtime
+            .journal()
+            .entries()
+            .iter()
+            .any(|entry| entry.decision == "reparse-tag-refused");
+        assert!(
+            refused,
+            "an unrecognised reparse tag ({tag:#010x}) was refused with no reason in the journal"
+        );
+    }
+
+    /// Plants a tag [`reparse_tag_is_followed`] trusts, on a folder this file
+    /// does not need to be running on real cloud-sync software or a WOF-capable
+    /// volume to test against.
+    ///
+    /// `compact /c /exe:LZX` was the first thing tried here, and it is not usable
+    /// for this — but not for the reason three earlier rounds of this branch
+    /// gave. They inferred from the attribute answering "no reparse point" that
+    /// no WOF placeholder had been made; asking WOF instead
+    /// (`FSCTL_GET_EXTERNAL_BACKING`) shows one was, provider 2 and algorithm 1,
+    /// and that wof.sys simply does not let this host see the tag. A tag no query
+    /// can see is a tag no test can drive the whitelist with, which is the real
+    /// reason `compact` cannot serve here; a hand-planted tag nothing hides can.
+    ///
+    /// `IO_REPARSE_TAG_CLOUD` (`winnt.h`, `0x9000001A`) does not have that
+    /// problem: `FSCTL_SET_REPARSE_POINT` already proved it accepts a
+    /// Microsoft-owned tag through the generic, no-GUID `REPARSE_DATA_BUFFER`
+    /// layout for `IO_REPARSE_TAG_DEDUP` — the tag the race test used before
+    /// dedup came off the whitelist — so the same mechanism, the same buffer,
+    /// pointed at the one tag that is both on the whitelist and provably
+    /// plantable by hand, needs no cloud-sync software and no particular
+    /// volume capability at all.
+    /// `IO_REPARSE_TAG_CLOUD` (`winnt.h`, `0x9000001A`): on
+    /// `reparse_tag_is_followed`'s list, and — unlike `IO_REPARSE_TAG_WOF` — a
+    /// tag `FSCTL_SET_REPARSE_POINT` accepts through the generic buffer. Named
+    /// here rather than inside the helper because deleting a reparse point has
+    /// to name the tag that is actually on the file.
+    #[cfg(not(unix))]
+    const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
+
+    #[cfg(not(unix))]
+    fn plant_trusted_reparse_point(path: &Path) -> Vec<u8> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        let content = vec![b'A'; 128 * 1024];
+        fs::write(path, &content).unwrap();
+
+        assert!(reparse_tag_is_followed(IO_REPARSE_TAG_CLOUD));
+
+        /// `FSCTL_SET_REPARSE_POINT`, from `winioctl.h`.
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+
+        /// `REPARSE_DATA_BUFFER`'s generic arm (`ntifs.h`): no GUID, which is
+        /// the layout `IsReparseTagMicrosoft` says a tag with bit 31 set
+        /// takes.
+        #[repr(C)]
+        struct ReparseDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            data: [u8; 8],
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .expect("the test can open its own file for writing");
+        let buffer = ReparseDataBuffer {
+            reparse_tag: IO_REPARSE_TAG_CLOUD,
+            reparse_data_length: 8,
+            reserved: 0,
+            data: *b"nosyncer",
+        };
+        let mut returned = 0u32;
+        // Safety: an open handle with write access, one input buffer whose
+        // declared length matches its `data` field, and no output buffer —
+        // which is what `FSCTL_SET_REPARSE_POINT` takes.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_SET_REPARSE_POINT,
+                (&raw const buffer).cast(),
+                size_of::<ReparseDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            answered != 0,
+            "FSCTL_SET_REPARSE_POINT failed: {}",
+            std::io::Error::last_os_error()
+        );
+        drop(handle);
+        assert!(
+            is_reparse_point(path),
+            "the reparse point was set and the attribute did not appear"
+        );
+        content
+    }
+
+    /// Takes the reparse point off a file and leaves the file — and its data,
+    /// and its file id — exactly where it was.
+    ///
+    /// `FSCTL_DELETE_REPARSE_POINT` (`winioctl.h`, `0x900AC`) takes the same
+    /// `REPARSE_DATA_BUFFER` header as setting one, with `ReparseDataLength`
+    /// zero and no payload: the tag has to match what is actually there, which
+    /// is why this takes it as an argument rather than guessing. This is how a
+    /// test reaches the *agreed* half of the identity check without a filter
+    /// driver: the second open finds the very file the first one is holding, so
+    /// the two `FileIdInfo` answers cannot differ.
+    #[cfg(not(unix))]
+    fn delete_reparse_point(path: &Path, tag: u32) {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
+        /// `FSCTL_DELETE_REPARSE_POINT`, from `winioctl.h`.
+        const FSCTL_DELETE_REPARSE_POINT: u32 = 0x0009_00AC;
+
+        /// `REPARSE_DATA_BUFFER`'s header alone: deleting names a tag and
+        /// carries no data.
+        #[repr(C)]
+        struct ReparseDataHeader {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .expect("the test can open its own file for writing");
+        let buffer = ReparseDataHeader {
+            reparse_tag: tag,
+            reparse_data_length: 0,
+            reserved: 0,
+        };
+        let mut returned = 0u32;
+        // Safety: an open handle with write access, an input buffer whose
+        // declared length matches the payload it does not have, and no output
+        // buffer — which is what `FSCTL_DELETE_REPARSE_POINT` takes.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_DELETE_REPARSE_POINT,
+                (&raw const buffer).cast(),
+                size_of::<ReparseDataHeader>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            answered != 0,
+            "FSCTL_DELETE_REPARSE_POINT failed: {}",
+            std::io::Error::last_os_error()
+        );
+        drop(handle);
+        assert!(
+            !is_reparse_point(path),
+            "the reparse point was deleted and the attribute stayed"
+        );
+    }
+
+    /// What WOF itself says about a file, rather than what the attribute says.
+    ///
+    /// `FSCTL_GET_EXTERNAL_BACKING` (`winioctl.h`, `0x90310`) is the question
+    /// `WofIsExternalFile` wraps, and it is the one asked here: the wrapper
+    /// lives in `WofUtil.dll`, which would be a new link-time dependency for an
+    /// answer this gives without one. Success fills a `WOF_EXTERNAL_INFO`
+    /// (version, provider) and, for the file provider, a
+    /// `FILE_PROVIDER_EXTERNAL_INFO_V1` (version, algorithm, flags); failure is
+    /// reported as it came, because "what did Windows say" is the whole point
+    /// of asking.
+    #[cfg(not(unix))]
+    fn wof_external_backing(path: &Path) -> std::io::Result<(u32, u32, u32)> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+
+        /// `FSCTL_GET_EXTERNAL_BACKING`, from `winioctl.h`.
+        const FSCTL_GET_EXTERNAL_BACKING: u32 = 0x0009_0310;
+
+        /// `WOF_EXTERNAL_INFO` followed by `FILE_PROVIDER_EXTERNAL_INFO_V1`,
+        /// which is what the file provider answers with.
+        #[repr(C)]
+        #[derive(Default)]
+        struct WofFileProviderInfo {
+            wof_version: u32,
+            provider: u32,
+            provider_version: u32,
+            algorithm: u32,
+            flags: u32,
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        let handle = fs::File::open(path)?;
+        let mut info = WofFileProviderInfo::default();
+        let mut returned = 0u32;
+        // Safety: an open handle, one output buffer whose size is declared
+        // alongside it, and no input buffer — which is what
+        // `FSCTL_GET_EXTERNAL_BACKING` takes. `info` is only read once the call
+        // reports success.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_GET_EXTERNAL_BACKING,
+                std::ptr::null(),
+                0,
+                (&raw mut info).cast(),
+                size_of::<WofFileProviderInfo>() as u32,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        if answered == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((info.provider, info.provider_version, info.algorithm))
+    }
+
+    /// A tag this host trusts, that nothing on this machine claims. Nothing here
+    /// is registered to serve `IO_REPARSE_TAG_CLOUD`, so the second open is
+    /// refused and the entry the host already holds is the right answer rather
+    /// than a refusal.
+    ///
+    /// Through `_racing` with an empty seam rather than through
+    /// `open_entry_for_reading`, because the two differ by exactly the closure
+    /// and only one of them can report which answer it reached. What production
+    /// calls is covered where production is: the placeholder and
+    /// unrecognised-tag tests drive `read_file`.
+    ///
+    /// Asserted on the *outcome* and not only the bytes. The fallback and an
+    /// agreed identity both hand back the same bytes from the same file, so a
+    /// byte comparison alone would pass either way — and would have gone on
+    /// passing if the second open had started succeeding, or if the fallback had
+    /// stopped being reached at all.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_trusted_tag_nothing_claims_falls_back_to_the_entrys_own_bytes() {
+        let library = FixtureLibrary::new("reparse-fallback");
+        let entry = library.games.join("unclaimed.rom");
+        let content = plant_trusted_reparse_point(&entry);
+
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        let (mut file, outcome) =
+            windows_relative::open_entry_for_reading_racing(&directory, "unclaimed.rom", || {})
+                .unwrap();
+        assert_eq!(
+            outcome,
+            windows_relative::FollowOutcome::FellBackToEntry,
+            "the second open did not fail, so this is not the fallback it claims to be"
+        );
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes, content,
+            "a trusted tag nothing claims did not fall back to the entry's own bytes"
+        );
+    }
+
+    /// The race test's own control: the same trusted-but-unclaimed tag, the same
+    /// `_racing` entry point, and a seam that fires and does nothing. If this
+    /// failed, the race test's refusal would prove nothing about an attack —
+    /// only that its setup cannot be read at all.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_reparse_point_left_alone_between_the_two_opens_reads_its_own_bytes() {
+        let library = FixtureLibrary::new("reparse-witness");
+        let entry = library.games.join("witness.rom");
+        let content = plant_trusted_reparse_point(&entry);
+
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        let fired = std::cell::Cell::new(false);
+        let (mut file, outcome) =
+            windows_relative::open_entry_for_reading_racing(&directory, "witness.rom", || {
+                fired.set(true);
+            })
+            .unwrap();
+        assert!(fired.get(), "the seam between the two opens never fired");
+        assert_eq!(outcome, windows_relative::FollowOutcome::FellBackToEntry);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes, content,
+            "a placeholder left alone between the two opens did not read its own bytes"
+        );
+    }
+
+    /// The identity check has two halves and refusing is only one of them. This
+    /// is the other: two opens that reach the *same* file are followed, not
+    /// refused.
+    ///
+    /// Reaching it without a filter driver takes a different swap from the race
+    /// test's. Rather than pointing the name at another file, the seam takes the
+    /// reparse point *off* the file the first open is already holding, so the
+    /// second open finds that same file with nothing left to follow — same
+    /// `FileIdInfo`, by construction — and the followed handle is what comes
+    /// back.
+    ///
+    /// The assertion is the outcome, not the bytes: the fallback returns the
+    /// same bytes from the same file, so bytes cannot tell "the identities
+    /// agreed" from "the second open never happened". Before this test, nothing
+    /// reached line `Ok((followed, IdentityAgreed))` at all — a version of the
+    /// host that refused *every* second open would have passed the whole suite.
+    #[cfg(not(unix))]
+    #[test]
+    fn two_opens_that_reach_the_same_file_are_followed_rather_than_refused() {
+        let library = FixtureLibrary::new("reparse-agreed");
+        let entry = library.games.join("agreed.rom");
+        let content = plant_trusted_reparse_point(&entry);
+
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        let fired = std::cell::Cell::new(false);
+        let (mut file, outcome) =
+            windows_relative::open_entry_for_reading_racing(&directory, "agreed.rom", || {
+                fired.set(true);
+                delete_reparse_point(&entry, IO_REPARSE_TAG_CLOUD);
+            })
+            .expect("two opens that reach the same file must not be refused");
+
+        assert!(fired.get(), "the seam between the two opens never fired");
+        assert_eq!(
+            outcome,
+            windows_relative::FollowOutcome::IdentityAgreed,
+            "the second open succeeded but the identity comparison was not what returned"
+        );
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, content, "the followed handle read the wrong file");
+    }
+
+    /// A name is resolved twice inside `open_entry_for_reading` on Windows: once
+    /// to read the tag without following it, and again to read the file behind
+    /// it. The first open deliberately allows the entry to be deleted or renamed
+    /// while it is still held open — `FILE_SHARE_DELETE`, so a filter-backed
+    /// placeholder can be replaced without every reader closing first — which is
+    /// exactly what makes the realistic attack legal: a symbolic link, swapped in
+    /// for the entry between the two opens, that the second one would follow
+    /// straight out of the grant.
+    ///
+    /// A real race would only sometimes land inside that window, which is not
+    /// something a test can assert on. `open_entry_for_reading_racing`'s seam
+    /// fires exactly between the two opens, so the swap is certain rather than
+    /// probable — checked directly (`fired`), so a seam that silently never ran
+    /// cannot be mistaken for a race that was won.
+    ///
+    /// The entry needs a tag the *production* whitelist trusts, or the refusal
+    /// below would be the whitelist's rather than the identity check's — so
+    /// this test runs against `plant_trusted_reparse_point`'s tag, which is on
+    /// `reparse_tag_is_followed`'s list, rather than
+    /// `plant_unrecognised_reparse_point`'s, which is refused before the second
+    /// open is even attempted. The refusal is checked by its exact reason
+    /// (`ReparseRefusal::EntryChangedBetweenOpens`), not merely its `ErrorKind`.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_reparse_point_swapped_for_a_symlink_between_the_two_opens_is_refused() {
+        let library = FixtureLibrary::new("reparse-race");
+        let entry = library.games.join("swap.rom");
+        plant_trusted_reparse_point(&entry);
+
+        let secret = library.root.join("secret.txt");
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        let fired = std::cell::Cell::new(false);
+        let result =
+            windows_relative::open_entry_for_reading_racing(&directory, "swap.rom", || {
+                fired.set(true);
+                fs::remove_file(&entry).unwrap();
+                redirect_file(&entry, &secret);
+            });
+
+        assert!(fired.get(), "the seam between the two opens never fired");
+        let error = result.expect_err(
+            "a reparse point swapped for a symbolic link between the two opens was followed",
+        );
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<ReparseRefusal>())
+                .is_some_and(|refusal| matches!(refusal, ReparseRefusal::EntryChangedBetweenOpens)),
+            "refused, but not for the identity mismatch: {error}"
+        );
+    }
+
+    /// What `compact /c /exe:LZX` actually makes here, and what this host
+    /// actually sees of it — asked on the runner rather than inferred from a
+    /// compression ratio.
+    ///
+    /// Earlier rounds of this branch inferred, from `is_reparse_point` answering
+    /// "no", that no WOF placeholder had been produced at all. That inference
+    /// was not sound, and the log said so: NTFS's older compression stores each
+    /// sixteen-cluster unit in at least one cluster, so it cannot reach the 32:1
+    /// this runner reports, and wof.sys is documented to keep its own reparse
+    /// point out of what it answers about a file. So the question is asked three
+    /// ways instead: `FSCTL_GET_EXTERNAL_BACKING`, which asks WOF rather than the
+    /// attribute; production's own `reparse_tag`; and `is_reparse_point`. Each
+    /// answer is printed, because which of them a WOF file trips is the thing
+    /// this test exists to find out and the thing every claim about WOF in this
+    /// file rests on.
+    ///
+    /// Only what must hold is asserted: whatever this host makes of the tag, a
+    /// compacted file reads back byte for byte through the production path.
+    /// Nothing is asserted about *which* outcome it reaches, because that is the
+    /// finding, not the requirement — and `compact` declining outright is a
+    /// legitimate answer on a volume without WOF.
+    ///
+    /// What it found, on `windows-latest`: externally backed by the file provider
+    /// with LZX, no reparse point visible to either attribute query, and so
+    /// `FollowOutcome::NoReparsePoint` — a real WOF file never reaches the
+    /// whitelist at all and is read transparently, which is exactly what should
+    /// happen to it. The corollary is worth stating too: `IO_REPARSE_TAG_WOF`
+    /// stays on `reparse_tag_is_followed`'s list for the case where the tag *is*
+    /// visible, and no test here exercises it, because nothing here can make it
+    /// visible.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag() {
+        let library = FixtureLibrary::new("reparse-compacted");
+        // `.rom`, deliberately: `/exe:` was once thought to need an
+        // executable-shaped name, and the runner refuted it — a `.rom` of this
+        // size reports the same ratio.
+        let entry = library.games.join("compacted.rom");
+        let content = vec![b'A'; 128 * 1024];
+        fs::write(&entry, &content).unwrap();
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:LZX"])
+            .arg(&entry)
+            .output()
+            .expect("compact is on PATH");
+        println!(
+            "compact said: {}",
+            String::from_utf8_lossy(&compacted.stdout).trim()
+        );
+        match wof_external_backing(&entry) {
+            Ok((provider, provider_version, algorithm)) => println!(
+                "FSCTL_GET_EXTERNAL_BACKING: externally backed, \
+                 provider {provider}, provider version {provider_version}, algorithm {algorithm}"
+            ),
+            Err(error) => println!("FSCTL_GET_EXTERNAL_BACKING: {error}"),
+        }
+        println!("is_reparse_point: {}", is_reparse_point(&entry));
+
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        // Production's own tag read, the one every decision downstream is made
+        // from: `FileAttributeTagInfo` on a handle opened as itself.
+        let facts = windows_relative::open_entry_for_facts(&directory, "compacted.rom").unwrap();
+        match windows_relative::reparse_tag(&facts) {
+            Ok(Some(tag)) => println!("production reparse_tag: {tag:#010x}"),
+            Ok(None) => println!("production reparse_tag: no reparse point"),
+            Err(error) => println!("production reparse_tag: {error}"),
+        }
+        drop(facts);
+
+        let itself =
+            windows_relative::open_entry_for_reading_racing(&directory, "compacted.rom", || {});
+        match &itself {
+            Ok((_, outcome)) => println!("open_entry_for_reading reached: {outcome:?}"),
+            Err(error) => println!("open_entry_for_reading refused: {error}"),
+        }
+
+        let (mut file, _) = itself.expect("a compacted file is still a file this host can read");
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes, content,
+            "a compacted file did not read back its own bytes"
+        );
+    }
+
     /// A redirection *inside* the granted folder is skipped rather than followed,
     /// on both platforms: a symbolic link on Unix, a junction on Windows. The
     /// listing reports what an entry is, and a reparse point is not a file the
@@ -4238,22 +5539,16 @@ mod tests {
     #[test]
     fn a_redirect_inside_a_granted_directory_is_not_listed() {
         let library = FixtureLibrary::new("symlink");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(
-            library.root.join("secret.txt"),
-            library.games.join("zeta.rom"),
-        )
-        .unwrap();
-        #[cfg(not(unix))]
-        {
-            // A junction needs a directory to point at, and the name still has to
-            // end in `.rom` for the fixture to consider it a game at all.
-            let outside = library.root.join("outside");
-            fs::create_dir_all(&outside).unwrap();
-            fs::write(outside.join("secret.txt"), b"a keychain token").unwrap();
-            redirect_directory(&library.games.join("zeta.rom"), &outside);
-        }
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        // A *file* symbolic link, on both platforms. The Windows form of this used
+        // a junction, which points at a directory — and the fixture skips
+        // directories, so it would have been left out of the listing whether or not
+        // the host understood reparse points. This one is only excluded if the host
+        // recognises the redirection.
+        redirect_file(
+            &library.games.join("zeta.rom"),
+            &library.root.join("secret.txt"),
+        );
+        let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
             .call(PluginRequest::DiscoverPage {
                 profile_id: FIXTURE_PROFILE.into(),
@@ -4292,7 +5587,7 @@ mod tests {
         // library's own directory is removed.
         let _locked = plant_unopenable_file(&library.games.join("locked.rom"));
 
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:census").is_ok());
         let census = harness
             .runtime
@@ -4936,7 +6231,7 @@ mod tests {
     #[test]
     fn a_cancel_before_the_first_instruction_never_instantiates() {
         let library = FixtureLibrary::new("cancel-early");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let cancel = Arc::new(AtomicBool::new(true));
         assert_eq!(
             harness
@@ -4971,7 +6266,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_cursor_that_does_not_advance() {
         let library = FixtureLibrary::new("loop-cursor");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness
                 .call(PluginRequest::DiscoverPage {
@@ -4999,7 +6294,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_launch_mode_it_does_not_recognise() {
         let library = FixtureLibrary::new("bad-mode");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-mode").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent mode")
@@ -5009,7 +6304,7 @@ mod tests {
     #[test]
     fn the_host_refuses_an_intent_about_another_profile() {
         let library = FixtureLibrary::new("bad-target");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-target").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent profile")
@@ -5019,7 +6314,7 @@ mod tests {
     #[test]
     fn the_host_refuses_a_game_reference_that_is_really_a_path() {
         let library = FixtureLibrary::new("bad-id");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-id").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent game reference")
@@ -5029,7 +6324,7 @@ mod tests {
     #[test]
     fn the_host_refuses_an_intent_that_names_another_runner() {
         let library = FixtureLibrary::new("bad-runner");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:bad-runner").unwrap_err(),
             PluginRuntimeError::InvalidResult("intent runner")
@@ -5044,7 +6339,7 @@ mod tests {
     #[test]
     fn a_plugins_chatter_cannot_bury_the_hosts_decisions() {
         let library = FixtureLibrary::new("chatty");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:chatty").is_ok());
 
         let decisions = harness.runtime.journal().entries();
@@ -5086,7 +6381,7 @@ mod tests {
     #[test]
     fn the_same_refusal_earned_again_is_counted_and_not_repeated() {
         let library = FixtureLibrary::new("nag");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:nag").is_ok());
 
         let refusals = harness
@@ -5151,7 +6446,7 @@ mod tests {
     #[test]
     fn a_refusal_survives_the_traffic_that_earned_it() {
         let library = FixtureLibrary::new("bury");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:bury").is_ok());
 
         let decisions = harness.runtime.journal().entries();
@@ -5180,7 +6475,7 @@ mod tests {
     #[test]
     fn a_plugin_pays_for_the_text_it_hands_the_journal() {
         let library = FixtureLibrary::new("shout");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:shout").is_ok());
 
         // Sixty-four messages of 64 KiB. Counting calls, all sixty-four are free
@@ -5211,7 +6506,7 @@ mod tests {
         // And an ordinary line still costs one call, so metering by size does not
         // make the journal a capability a plugin has to ration.
         let library = FixtureLibrary::new("shout-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:ok").is_ok());
         assert_eq!(
             journal_cost(MAX_JOURNAL_MESSAGE_BYTES),
@@ -5232,7 +6527,7 @@ mod tests {
     #[test]
     fn an_oversized_host_call_argument_traps_before_it_is_copied() {
         let library = FixtureLibrary::new("megashout");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert_eq!(
             harness.prepare("fixture:megashout").unwrap_err(),
             PluginRuntimeError::Trapped,
@@ -5259,14 +6554,14 @@ mod tests {
         // if the ceiling is ever tightened to where real work lives.
         assert!(harness.runtime.limits().hostcall_bytes >= 1024 * 1024);
         let library = FixtureLibrary::new("megashout-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:shout").is_ok());
     }
 
     #[test]
     fn a_plugin_error_reaches_the_host_as_bounded_text() {
         let library = FixtureLibrary::new("fail");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let error = harness.prepare("fixture:fail").unwrap_err();
         assert_eq!(
             error,
@@ -5536,7 +6831,7 @@ mod tests {
     #[test]
     fn a_scheduled_invocation_returns_a_validated_result() {
         let library = FixtureLibrary::new("scheduled-ok");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let invocation = harness
             .runtime
             .submit(
@@ -5559,7 +6854,7 @@ mod tests {
     #[test]
     fn repeated_invalid_results_park_the_plugin() {
         let library = FixtureLibrary::new("scheduled-degraded");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
             let error = harness
                 .runtime
@@ -5659,11 +6954,7 @@ mod tests {
         both.insert("fixture-other".to_string(), second.other.clone());
 
         // `fixture:deny` reads the grant id `fixture-other`. Granted, it works.
-        let widened = Harness::with_directories(
-            PluginLimits::default(),
-            &[GAMES_GRANT, "fixture-other"],
-            &both,
-        );
+        let widened = Harness::with_directories(untimed(), &[GAMES_GRANT, "fixture-other"], &both);
         assert!(
             widened.prepare("fixture:deny").is_ok(),
             "a folder the user did grant was refused"
@@ -5671,7 +6962,7 @@ mod tests {
 
         // Not granted, the same call is refused — and the refusal is recorded
         // rather than inferred from the absence of a result.
-        let narrowed = Harness::with_directories(PluginLimits::default(), &[GAMES_GRANT], &both);
+        let narrowed = Harness::with_directories(untimed(), &[GAMES_GRANT], &both);
         assert!(matches!(
             narrowed.prepare("fixture:deny").unwrap_err(),
             PluginRuntimeError::Plugin {
@@ -5696,7 +6987,7 @@ mod tests {
     #[test]
     fn a_revoked_grant_stops_the_next_call_while_the_running_one_ends_on_its_own() {
         let library = FixtureLibrary::new("revoked");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         assert!(harness.prepare("fixture:read-alpha").is_ok());
 
         // The same runtime, the same component, and a grant set that no longer
@@ -5779,7 +7070,7 @@ mod tests {
         // keeps holds opaque ids and a closed mode, so there is no field for an
         // executable, a working directory or an argument to travel in.
         let library = FixtureLibrary::new("no-binary");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let PluginResponse::LaunchIntent(intent) = harness.prepare("fixture:ok").unwrap() else {
             panic!("expected an intent");
         };
@@ -6000,7 +7291,7 @@ mod tests {
                 interactive_fuel: 1 << 42,
                 interactive_deadline: Duration::from_secs(30),
                 epoch_tick: Duration::from_millis(5),
-                ..PluginLimits::default()
+                ..untimed()
             },
             Some(&library),
         );
@@ -6108,7 +7399,7 @@ mod tests {
     #[test]
     fn a_cancellation_racing_instantiation_is_always_one_of_two_answers() {
         let library = FixtureLibrary::new("cancel-instantiate");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         let mut cancelled = 0;
         for attempt in 0..60u32 {
             let cancel = Arc::new(AtomicBool::new(false));
@@ -6149,7 +7440,7 @@ mod tests {
             )
             .unwrap();
         }
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
 
         let whole = harness
             .call_with(
@@ -6169,7 +7460,7 @@ mod tests {
 
         // A *new* runtime: a restart, with nothing carried over but the cursor
         // the host wrote down.
-        let restarted = Harness::new(PluginLimits::default(), Some(&library));
+        let restarted = Harness::new(untimed(), Some(&library));
         let resumed = restarted
             .call_with(
                 PluginRequest::DiscoverPage {
@@ -6285,7 +7576,7 @@ mod tests {
     #[test]
     fn a_parked_plugin_is_never_called_again_on_its_own() {
         let library = FixtureLibrary::new("no-retry");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for _ in 0..DEFAULT_MAX_CONSECUTIVE_FAILURES {
             let _ = harness
                 .runtime
@@ -6347,7 +7638,7 @@ mod tests {
     #[test]
     fn a_hostile_page_is_refused_after_the_call_succeeded() {
         let library = FixtureLibrary::new("hostile-page");
-        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        let harness = Harness::new(untimed(), Some(&library));
         for (selector, cursor, limit, expected) in [
             ("fixture:dup", None, 10, "duplicate reference"),
             ("fixture:overfill", None, 2, "page longer than asked"),

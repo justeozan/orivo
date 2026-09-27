@@ -171,11 +171,16 @@ jobs:
       # caught, for instance,
       # `catalog::tests::a_profile_cannot_change_the_plugin_that_owns_it` — a test
       # in another module, which this step has no business gating on.
+      #
+      # `--nocapture`, because several of these tests report *how* they reached the
+      # thing they assert — which reparse-point mechanism the volume allowed,
+      # whether a cancellation landed inside the window it races — and on Windows
+      # this job is the only place anyone sees it.
       - name: Test the plugin host (Windows)
         if: matrix.platform == 'windows-latest'
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml --lib --
-          plugin_runtime:: plugin_scheduler:: plugin_compile_cache::
+          plugin_runtime:: plugin_scheduler:: plugin_compile_cache:: --nocapture
 
       # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
       # `wit_compatibility` test is the one thing here that is *supposed* to
