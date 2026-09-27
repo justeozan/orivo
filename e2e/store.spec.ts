@@ -1,172 +1,114 @@
 import { expect, test } from "@playwright/test";
 import {
   currentHash,
-  EDITORIAL_GAME_IDS,
   host,
   libraryGameIds,
   openRoute,
-  SHORT_SESSION_IDS,
+  STORE_CATALOG_SIZE,
+  STORE_FIRST_GAME_ID,
+  STORE_SECOND_GAME_ID,
   waitForPage,
 } from "./helpers";
 
 const storeHost = "#app-page-store:not([hidden])";
 
+/**
+ * The Store rebuild (`53c0d96`, `311a91f`) replaced the provider-pill filter
+ * bar with category/platform chips over the real, generated catalogue
+ * (`store-catalog.generated.ts`, refreshed by `pnpm store:refresh`), and
+ * dropped the synthetic "Price unavailable" / stale-offer / provider-notice
+ * copy that only made sense over the old all-null-price editorial fixture.
+ * Real prices are fetched from Steam, so the honesty rule now lives in
+ * `formatPrice`/`selectBestOffer` (covered by `store-model.test.ts`): the
+ * price slot is omitted rather than filled with a placeholder when no offer
+ * carries one. These specs assert the current chip/rail UI and the omission
+ * behaviour, not the retired provider-pill design.
+ */
 test.describe("Store filters", () => {
-  test("category and provider filters combine and land in the URL", async ({ page }) => {
+  test("category and platform filters combine and land in the URL", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(EDITORIAL_GAME_IDS.length);
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_CATALOG_SIZE);
 
     await page.locator("[data-focus-key='category-short-sessions']").click();
     await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions");
+    const shortSessionsCount = await page.locator(`${storeHost} .store-card`).count();
+    expect(shortSessionsCount).toBeGreaterThan(0);
+    expect(shortSessionsCount).toBeLessThan(STORE_CATALOG_SIZE);
 
-    await page.locator("[data-focus-key='provider-steam']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&provider=steam");
-
-    const ids = await page.evaluate(() =>
-      [...document.querySelectorAll<HTMLElement>("#app-page-store:not([hidden]) .store-card")].map(
-        (card) => card.dataset.gameId,
-      ),
-    );
-    expect(ids).toEqual([...SHORT_SESSION_IDS]);
+    await page.locator("[data-focus-key='platform-pc']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    const combinedCount = await page.locator(`${storeHost} .store-card`).count();
+    expect(combinedCount).toBeGreaterThan(0);
+    expect(combinedCount).toBeLessThanOrEqual(shortSessionsCount);
 
     await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await expect(page.locator("[data-focus-key='provider-steam']")).toHaveAttribute(
+    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
       "aria-pressed",
-      "true",
+      "false",
     );
-    await expect(page.locator(`${storeHost} .store-catalog__count`)).toHaveText("3 games shown");
-    await expect(page.locator(`${storeHost} .store-catalog__title`)).toHaveText("Short Sessions");
+    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
   });
 
   test("filter state survives a reload", async ({ page }) => {
-    await openRoute(page, "#/store?category=short-sessions&provider=steam", "store");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(3);
+    await openRoute(page, "#/store?category=short-sessions&platform=pc", "store");
+    const count = await page.locator(`${storeHost} .store-card`).count();
+    expect(count).toBeGreaterThan(0);
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&provider=steam");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(3);
+    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
     await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await expect(page.locator("[data-focus-key='provider-steam']")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    // Exactly one category and one provider are pressed — no leaked state.
-    await expect(page.locator(`${storeHost} .store-filter-pill[aria-pressed='true']`)).toHaveCount(1);
-    await expect(page.locator(`${storeHost} .store-provider-pill[aria-pressed='true']`)).toHaveCount(1);
+    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
+    // Exactly one category chip and one platform chip are pressed — no leaked state.
+    await expect(
+      page.locator(`${storeHost} .store-chipbar--categories .store-chip[aria-pressed='true']`),
+    ).toHaveCount(1);
+    await expect(
+      page.locator(`${storeHost} .store-chipbar--platforms .store-chip--platform[aria-pressed='true']`),
+    ).toHaveCount(1);
   });
 
-  test("a provider with no offers yields an explicit empty state, not a fabricated one", async ({
+  test("a search with no matches yields an explicit empty state, not a fabricated one", async ({
     page,
   }) => {
-    await openRoute(page, "#/store", "store");
-    await page.locator("[data-focus-key='provider-instant-gaming']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?provider=instant-gaming");
+    await openRoute(page, "#/store?q=zzzznotfound", "store");
 
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(0);
-    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText(
-      "No matching games in the saved catalog",
-    );
+    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("Aucun jeu ne correspond");
     await expect(page.locator(`${storeHost} .store-card__price`)).toHaveCount(0);
-    await expect(page.locator("[data-focus-key='provider-instant-gaming']")).toHaveAttribute(
-      "data-health",
-      "unavailable",
-    );
-    await expect(page.locator("[data-focus-key='provider-instant-gaming']")).toHaveAttribute(
-      "title",
-      "No authorized commercial feed is configured.",
-    );
   });
 });
 
-test.describe("Store offer honesty", () => {
-  test("an offer with no price shows no digits anywhere on the card", async ({ page }) => {
+test.describe("Store price honesty", () => {
+  test("every price shown is real, and no digits leak outside it", async ({ page }) => {
     await openRoute(page, "#/store", "store");
 
     const cards = await page.evaluate(() =>
       [...document.querySelectorAll<HTMLElement>("#app-page-store:not([hidden]) .store-card")].map(
         (card) => ({
           id: card.dataset.gameId ?? "",
-          price: card.querySelector(".store-card__price")?.textContent ?? "",
-          detail: card.querySelector(".store-card__offer-detail")?.textContent ?? "",
-          offerText: card.querySelector(".store-card__offer")?.textContent ?? "",
+          price: card.querySelector(".store-card__price")?.textContent ?? null,
         }),
       ),
     );
 
-    expect(cards.length).toBe(EDITORIAL_GAME_IDS.length);
+    expect(cards.length).toBe(STORE_CATALOG_SIZE);
     for (const card of cards) {
-      expect(card.price, `${card.id} must not invent a price`).toBe("Price unavailable");
-      expect(
-        card.offerText,
-        `${card.id} offer block must contain no digits and no currency symbol`,
-      ).not.toMatch(/[0-9]|[$€£¥₹]/);
-    }
-  });
-
-  test("Instant Gaming never renders a price", async ({ page }) => {
-    // The editorial catalog carries a single Steam offer per game; Instant
-    // Gaming is declared "unavailable". No card, filtered or not, may ever show
-    // an Instant Gaming price — and no card may show any price at all, since
-    // every editorial offer has `priceMinor: null`.
-    for (const hash of ["#/store", "#/store?provider=instant-gaming", "#/store?category=all-games"]) {
-      await openRoute(page, hash, "store");
-
-      const offers = await page.evaluate(() =>
-        [...document.querySelectorAll<HTMLElement>("#app-page-store:not([hidden]) .store-card")].map((card) => ({
-          id: card.dataset.gameId ?? "",
-          offer: (card.querySelector<HTMLElement>(".store-card__offer")?.innerText ?? "").replace(/\s+/g, " "),
-        })),
-      );
-      for (const offer of offers) {
-        expect(offer.offer, `${hash} / ${offer.id}: offer block shows a number`).not.toMatch(/[0-9]/);
-        expect(offer.offer, `${hash} / ${offer.id}: an Instant Gaming offer appeared`).not.toMatch(
-          /Instant Gaming/,
-        );
+      // A price slot only ever exists when `formatPrice` actually produced one
+      // (`selectBestOffer` + `formatPrice`, store-model.ts): "Gratuit" or a
+      // "12,34 €"-shaped amount, never a placeholder or a bare number.
+      if (card.price !== null) {
+        expect(card.price, `${card.id}: unrecognised price format`).toMatch(/^(Gratuit|\d+,\d{2}\s?€)$/);
       }
-      await expect(page.locator(`${storeHost} .store-card__price`).filter({ hasText: /[0-9]/ })).toHaveCount(0);
     }
-  });
-
-  test("a stale verifiedAt is visibly flagged", async ({ page }) => {
-    await openRoute(page, "#/store", "store");
-
-    const total = await page.locator(`${storeHost} .store-card`).count();
-    // Every editorial offer has `verifiedAt: null`, so every card is stale.
-    await expect(page.locator(`${storeHost} .store-card__offer--stale`)).toHaveCount(total);
-    await expect(page.locator(`${storeHost} .store-card__offer-detail`).first()).toHaveText(
-      "Steam · not recently verified",
-    );
-
-    const colors = await page.evaluate(() => {
-      const card = document.querySelector("#app-page-store:not([hidden]) .store-card")!;
-      return {
-        staleDetail: getComputedStyle(card.querySelector(".store-card__offer-detail")!).color,
-        description: getComputedStyle(card.querySelector(".store-card__description")!).color,
-      };
-    });
-    // The stale amber from store-page.css, distinct from ordinary body copy.
-    expect(colors.staleDetail).toBe("rgb(195, 162, 122)");
-    expect(colors.staleDetail).not.toBe(colors.description);
-  });
-
-  test("provider source notices are disclosed rather than hidden", async ({ page }) => {
-    await openRoute(page, "#/store", "store");
-
-    const summary = page.locator(`${storeHost} .store-provider-statuses__summary`);
-    await expect(summary).toHaveText("6 source notices");
-    await summary.click();
-    await expect(page.locator(`${storeHost} .store-provider-statuses__item`)).toHaveCount(6);
-    await expect(
-      page.locator(`${storeHost} .store-provider-statuses__item[data-health='available']`),
-    ).toHaveCount(0);
   });
 });
 
@@ -179,13 +121,13 @@ test.describe("Store never mutates the Library", () => {
     await page.locator("[data-nav-page='store']").click();
     await waitForPage(page, "store");
 
-    const wishlist = page.locator("[data-focus-key='wishlist-steam:1091500']");
+    const wishlist = page.locator(`[data-focus-key='wishlist-${STORE_FIRST_GAME_ID}']`);
     await expect(wishlist).toHaveAttribute("aria-pressed", "false");
     await wishlist.click();
     await expect(wishlist).toHaveAttribute("aria-pressed", "true");
 
     // Browse a detail page from the Store as well.
-    await page.locator("[data-focus-key='game-steam:1086940']").click();
+    await page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`).click();
     await waitForPage(page, "game");
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");
@@ -195,9 +137,12 @@ test.describe("Store never mutates the Library", () => {
 
     const after = await libraryGameIds(page);
     expect(after).toEqual(before);
-    for (const id of EDITORIAL_GAME_IDS) {
-      expect(after, `store id ${id} must not appear in the Library`).not.toContain(id);
-    }
+    expect(after, `store id ${STORE_FIRST_GAME_ID} must not appear in the Library`).not.toContain(
+      STORE_FIRST_GAME_ID,
+    );
+    expect(after, `store id ${STORE_SECOND_GAME_ID} must not appear in the Library`).not.toContain(
+      STORE_SECOND_GAME_ID,
+    );
   });
 });
 
@@ -205,8 +150,9 @@ test.describe("Store return state", () => {
   test("navigating away and back restores the filters", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await page.locator("[data-focus-key='category-short-sessions']").click();
-    await page.locator("[data-focus-key='provider-steam']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&provider=steam");
+    await page.locator("[data-focus-key='platform-pc']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    const count = await page.locator(`${storeHost} .store-card`).count();
 
     await page.locator("[data-nav-page='library']").click();
     await waitForPage(page, "library");
@@ -214,57 +160,40 @@ test.describe("Store return state", () => {
     await page.goBack();
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&provider=steam");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(3);
+    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
     await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await expect(page.locator("[data-focus-key='provider-steam']")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
   });
 
-  test("navigating away and back restores scroll position and focus", async ({ page }) => {
+  test("navigating away and back restores focus to the previously opened card", async ({ page }) => {
+    // The Store rebuild replaced the vertical grid with a single-row
+    // horizontal rail (`.store-rail__track`) that resets `scrollLeft` on every
+    // re-render, so there is no scroll offset left to restore — the intent
+    // that survives is focus, which `store-page.ts`'s `deactivate()` /
+    // `restorePageState()` still capture and reapply by `data-focus-key`.
     await openRoute(page, "#/store", "store");
-    // `.app-page--scroll` is the one scroll container: `.store-page` computes
-    // `overflow-y: visible` and cannot hold a scroll offset at all, so the host
-    // is both what gets scrolled and what has to be restored. How far it can
-    // scroll depends on the viewport, so aim for 300px but settle for the end.
-    const scrolled = await page.evaluate(() => {
-      const host = document.getElementById("app-page-store")!;
-      const target = Math.min(300, host.scrollHeight - host.clientHeight);
-      host.scrollTop = target;
-      return {
-        target,
-        host: host.scrollTop,
-        root: document.querySelector<HTMLElement>(".store-page")!.scrollTop,
-      };
-    });
-    expect(scrolled.target, "the Store must have somewhere to scroll to").toBeGreaterThan(0);
-    expect(scrolled.host, "the Store host must be the scroll container").toBe(scrolled.target);
-    expect(scrolled.root, ".store-page must not scroll independently").toBe(0);
-    await page.waitForTimeout(200);
 
-    const card = page.locator("[data-focus-key='game-steam:1145350']");
+    const card = page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`);
     await card.click();
     await waitForPage(page, "game");
 
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");
-    await page.waitForTimeout(400);
 
-    const restored = await page.evaluate(() => ({
-      scrollTop: document.getElementById("app-page-store")!.scrollTop,
-      focusKey: (document.activeElement as HTMLElement | null)?.dataset?.focusKey ?? null,
-    }));
-
-    expect(
-      restored.scrollTop,
-      `the Store returned at ${restored.scrollTop}px instead of ${scrolled.target}px`,
-    ).toBeCloseTo(scrolled.target, 0);
-    expect(restored.focusKey).toBe("game-steam:1145350");
+    // `activate()` schedules `restorePageState()` inside a `requestAnimationFrame`
+    // (store-page.ts), one tick the click handler and `waitForPage` do not wait
+    // out on their own, so the focus read polls rather than trusting a fixed
+    // pause — the same race as the compact form-factor's `matchMedia` listener
+    // (81ea15d) and the onboarding wordmark's image decode.
+    await expect
+      .poll(() =>
+        page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset?.focusKey ?? null),
+      )
+      .toBe(`game-${STORE_SECOND_GAME_ID}`);
   });
 
   test("the topbar search is wired to the Store while the Store is open", async ({ page }) => {
@@ -278,7 +207,7 @@ test.describe("Store return state", () => {
     await search.press("Enter");
     await expect.poll(() => currentHash(page)).toBe("#/store?q=hades");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(1);
-    await expect(page.locator(`${storeHost} .store-card__title`)).toHaveText("Hades II");
+    await expect(page.locator(`${storeHost} .store-card__title`)).toHaveText("Hades");
     await expect(host(page, "store")).toBeVisible();
   });
 });

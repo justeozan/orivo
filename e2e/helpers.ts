@@ -26,22 +26,18 @@ export const FALLBACK_LIBRARY_IDS = [
   "showcase-astro-duel-2",
 ] as const;
 
-/** Editorial Store ids, in `EDITORIAL_GAMES` order. */
-export const EDITORIAL_GAME_IDS = [
-  "steam:1245620",
-  "steam:1091500",
-  "steam:1086940",
-  "steam:1145350",
-  "steam:1174180",
-  "steam:292030",
-  "steam:2420110",
-  "steam:1593500",
-  "steam:1016920",
-  "steam:655350",
-] as const;
-
-/** Games tagged "Short Sessions" — the combined-filter fixture. */
-export const SHORT_SESSION_IDS = ["steam:1145350", "steam:1016920", "steam:655350"] as const;
+/**
+ * The Store's real, generated catalogue (`store-catalog.generated.ts`) is
+ * refreshed by `pnpm store:refresh` against the live Steam store, so its size
+ * and exact contents are a fixture, not a constant to hardcode a full id list
+ * against. Specs instead assert counts and a handful of stable, real titles
+ * that are unlikely to leave the curated list.
+ */
+export const STORE_CATALOG_SIZE = 47;
+/** Steam id for "Planet of Lana" — the first card of every unfiltered browse. */
+export const STORE_FIRST_GAME_ID = "steam:1608230";
+/** Steam id for "Firewatch" — used wherever a second, distinct card is needed. */
+export const STORE_SECOND_GAME_ID = "steam:383870";
 
 export const SETTINGS_SECTIONS = [
   { id: "general", title: "General" },
@@ -333,9 +329,9 @@ export interface RailVisibility {
 export async function storeCardVisibility(page: Page): Promise<RailVisibility> {
   return page.evaluate(() => {
     const viewport = { width: window.innerWidth, height: window.innerHeight };
-    const rail = document.querySelector("#app-page-store:not([hidden]) .store-card-rail");
+    const rail = document.querySelector("#app-page-store:not([hidden]) .store-rail__track");
     if (!rail) return { viewport, cards: [] };
-    const cards = [...rail.querySelectorAll<HTMLElement>(".store-card:not(.store-card--skeleton)")].map(
+    const cards = [...rail.querySelectorAll<HTMLElement>(".store-card")].map(
       (card) => {
         const rect = card.getBoundingClientRect();
         const aboveFold = Math.max(0, Math.min(rect.bottom, viewport.height) - Math.max(rect.top, 0));

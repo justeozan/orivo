@@ -27,10 +27,10 @@ test.describe("hash router", () => {
 
   test("in-app navigation encodes the id the same way a deep link does", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    await page.locator("[data-focus-key='game-steam:1091500']").click();
+    await page.locator("[data-focus-key='game-steam:1608230']").click();
     await waitForPage(page, "game");
 
-    expect(await currentHash(page)).toBe("#/games/steam%3A1091500?from=store");
+    expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
   });
 
   test("a game id containing a slash is rejected rather than half-decoded", async ({ page }) => {
@@ -81,15 +81,18 @@ test.describe("hash router", () => {
   test("Back and Forward move between Library, Store and Detail", async ({ page }) => {
     await openRoute(page, "#/library", "library");
 
+    // The Store nav link always requests the PC platform by default
+    // (app.ts's `navigate({ ..., platforms: ["pc"] })`), so the round trip
+    // carries that filter in the hash the same way a click always would.
     await page.locator("[data-nav-page='store']").click();
     await waitForPage(page, "store");
 
-    await page.locator("[data-focus-key='game-steam:1091500']").click();
+    await page.locator("[data-focus-key='game-steam:1608230']").click();
     await waitForPage(page, "game");
 
     await page.goBack();
     await waitForPage(page, "store");
-    expect(await currentHash(page)).toBe("#/store");
+    expect(await currentHash(page)).toBe("#/store?platform=pc");
 
     await page.goBack();
     await waitForPage(page, "library");
@@ -97,11 +100,11 @@ test.describe("hash router", () => {
 
     await page.goForward();
     await waitForPage(page, "store");
-    expect(await currentHash(page)).toBe("#/store");
+    expect(await currentHash(page)).toBe("#/store?platform=pc");
 
     await page.goForward();
     await waitForPage(page, "game");
-    expect(await currentHash(page)).toBe("#/games/steam%3A1091500?from=store");
+    expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
 
     // Exactly one host is ever mounted and visible.
     await expect(page.locator(".app-page:not([hidden])")).toHaveCount(1);
@@ -203,7 +206,14 @@ test.describe("hash router", () => {
 });
 
 test.describe("library keyboard shortcuts are scoped to the Library page", () => {
-  const libraryKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "i", "I", "Enter"];
+  // Arrow keys used to be exclusively the Library rail's, but the controller
+  // + keyboard navigation work (`9682b7c`) made them a shell-wide spatial nav
+  // affordance — `spatialNav.enterPage()` runs on every route — and Settings
+  // separately uses them for its own ARIA tablist (`app.ts`'s
+  // `refs.settingsPage` keydown handler). Both are real, working features on
+  // every page, so they are no longer a library-exclusive shortcut to test
+  // for leakage; only the library-only verbs (import/launch) still are.
+  const libraryKeys = ["i", "I", "Enter"];
 
   async function pressLibraryKeys(page: import("@playwright/test").Page): Promise<void> {
     await blurEverything(page);
@@ -223,7 +233,8 @@ test.describe("library keyboard shortcuts are scoped to the Library page", () =>
     await waitForPage(page, "store");
     await pressLibraryKeys(page);
 
-    expect(await currentHash(page)).toBe("#/store");
+    // The nav link's own default platform filter, not a leaked shortcut.
+    expect(await currentHash(page)).toBe("#/store?platform=pc");
     await expect(host(page, "store")).toBeVisible();
     await expect(page.locator("#toast.is-visible")).toHaveCount(0);
 

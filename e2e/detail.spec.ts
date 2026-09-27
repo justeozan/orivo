@@ -23,19 +23,22 @@ test.describe("game detail origins", () => {
   });
 
   test("opens from the Store with from=store and returns to the filtered Store", async ({ page }) => {
-    await openRoute(page, "#/store?category=short-sessions&provider=steam", "store");
+    // The provider-pill filter bar (`provider=steam`) was retired with the
+    // Store rebuild (`311a91f`); category + platform chips replaced it.
+    await openRoute(page, "#/store?category=short-sessions&platform=pc", "store");
+    const filteredCount = await page.locator("#app-page-store:not([hidden]) .store-card").count();
 
-    await page.locator("[data-focus-key='game-steam:1145350']").click();
+    await page.locator("[data-focus-key='game-steam:1608230']").click();
     await waitForPage(page, "game");
 
-    expect(await currentHash(page)).toBe("#/games/steam%3A1145350?from=store");
+    expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
     await expect(page.locator(`${detailHost} .gd-back__label`)).toHaveText("Back to Store");
     await expect(page.locator("header.topbar [aria-current]")).toHaveText("Store");
 
     await page.locator(`${detailHost} .gd-back`).click();
     await waitForPage(page, "store");
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&provider=steam");
-    await expect(page.locator("#app-page-store:not([hidden]) .store-card")).toHaveCount(3);
+    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    await expect(page.locator("#app-page-store:not([hidden]) .store-card")).toHaveCount(filteredCount);
   });
 
   test("the origin comes from the URL, not from the last visited page", async ({ page }) => {
@@ -49,83 +52,76 @@ test.describe("game detail origins", () => {
 });
 
 test.describe("game detail sections", () => {
-  test("sections with no data do not render at all", async ({ page }) => {
+  test("every section the fallback carries data for renders, in order", async ({ page }) => {
+    // The game detail rework (`01c8a8c`) gave the browser fallback its own
+    // friends, activity feed and related games instead of shipping none, so
+    // the panels these used to omit now render like every other section.
     await openRoute(page, DETAIL_ROUTE, "game");
 
-    // The browser fallback ships no friends, no activity and no related games.
-    await expect(page.locator(`${detailHost} .gd-friends`)).toHaveCount(0);
-    await expect(page.locator(`${detailHost} .gd-activity`)).toHaveCount(0);
-    await expect(page.locator(`${detailHost} .gd-related`)).toHaveCount(0);
-    // The wrapper is not emitted either, so there is no empty container left behind.
-    await expect(page.locator(`${detailHost} .gd-social`)).toHaveCount(0);
+    await expect(page.locator(`${detailHost} .gd-friends`)).toHaveCount(1);
+    await expect(page.locator(`${detailHost} .gd-activity`)).toHaveCount(1);
+    await expect(page.locator(`${detailHost} .gd-related`)).toHaveCount(1);
 
-    const headings = await page
-      .locator(`${detailHost} .gd-panel__title`)
-      .allTextContents();
-    expect(headings).not.toContain("Friends who play");
-    expect(headings).not.toContain("Activity feed");
-    expect(headings).not.toContain("Related games");
-    // The sections that do have data are still there.
-    expect(headings).toEqual(["About this game", "Game info", "Features", "Achievements"]);
+    const headings = await page.locator(`${detailHost} .gd-panel__title`).allTextContents();
+    expect(headings).toEqual([
+      "About this game",
+      "Game info",
+      "Features",
+      "Achievements",
+      "Friends who play",
+      "Activity feed",
+      "Related games",
+    ]);
   });
 
-  test("no placeholder or empty-state copy stands in for the missing sections", async ({ page }) => {
+  test("no generic placeholder copy stands in for a section's real content", async ({ page }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
     const text = await page.locator(detailHost).innerText();
 
-    expect(text).not.toMatch(/friends/i);
-    expect(text).not.toMatch(/activity/i);
     expect(text).not.toMatch(/coming soon|no data|placeholder/i);
   });
 });
 
-test.describe("game detail wallpaper dialog", () => {
+test.describe("game detail wallpaper rail", () => {
   const HERO_MEDIA = "media-media_fallback_wallpaper_hero";
   const LANDSCAPE_MEDIA = "media-media_fallback_wallpaper_landscape";
 
-  test("only wallpapers are offered in the hero rail", async ({ page }) => {
+  test("only wallpapers are offered, and adding one lives in the … menu", async ({ page }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
 
-    const thumbs = page.locator(`${detailHost} .gd-gallery__thumb`);
-    await expect(thumbs).toHaveCount(2);
-    await expect(thumbs.first().locator(".gd-gallery__thumb-image")).toBeVisible();
+    // The fallback now ships fourteen bundled wallpapers (two named plates
+    // plus twelve filler tiles), not two.
+    const tiles = page.locator(`${detailHost} .gd-gallery__tile`);
+    await expect(tiles).toHaveCount(14);
+    await expect(tiles.first().locator(".gd-gallery__tile-image")).toBeVisible();
     // No media tabs, no icon or cover slots, no video.
     await expect(page.locator(`${detailHost} .gd-media__tab`)).toHaveCount(0);
     await expect(page.locator(`${detailHost} video`)).toHaveCount(0);
-    await expect(page.locator(`${detailHost} .gd-gallery__search`)).toBeVisible();
+    // "Search cover & images" is gone from the rail itself: changing a
+    // wallpaper is a "…" menu action now (`renderMoreButton`), so the group
+    // never fetched art alongside the cover and the logo can end up wearing
+    // each other's images.
+    await expect(page.locator(`${detailHost} .gd-gallery__search`)).toHaveCount(0);
+    await expect(page.locator(`${detailHost} [data-focus-key='more-actions']`)).toBeVisible();
   });
 
-  test("a wallpaper click previews without persisting the selection", async ({ page }) => {
+  test("a rail click previews the wallpaper without persisting it", async ({ page }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
 
     const heroImage = page.locator(`${detailHost} .gd-hero__image`);
     await expect(heroImage).toHaveAttribute("src", "/media/igdb/heroes/elden-ring-wallpaper.png");
 
-    const landscapeThumb = page.locator(
-      `${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}']`,
-    );
-    await landscapeThumb.click();
+    const landscapeTile = page.locator(`${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}']`);
+    await landscapeTile.click();
 
-    // The preview swaps the hero art and the radio selection…
+    // The click swaps the hero art and the rail's own selection…
     await expect(heroImage).toHaveAttribute("src", "/media/igdb/landscapes/elden-ring.jpg");
-    await expect(landscapeThumb).toHaveAttribute("aria-checked", "true");
+    await expect(landscapeTile).toHaveClass(/gd-gallery__tile--selected/);
     await expect(
       page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`),
-    ).toHaveAttribute("aria-checked", "false");
+    ).not.toHaveClass(/gd-gallery__tile--selected/);
 
-    // …but the applied badge — the persisted choice — never moves.
-    await expect(
-      page.locator(
-        `${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}'] .gd-gallery__thumb-applied`,
-      ),
-    ).toHaveCount(1);
-    await expect(
-      page.locator(
-        `${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}'] .gd-gallery__thumb-applied`,
-      ),
-    ).toHaveCount(0);
-
-    // A reload proves nothing was written anywhere.
+    // …but a reload proves the browser fallback never wrote it anywhere.
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPage(page, "game");
 
@@ -133,75 +129,76 @@ test.describe("game detail wallpaper dialog", () => {
       "src",
       "/media/igdb/heroes/elden-ring-wallpaper.png",
     );
-    await expect(
-      page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`),
-    ).toHaveAttribute("aria-checked", "true");
+    await expect(page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`)).toHaveClass(
+      /gd-gallery__tile--selected/,
+    );
   });
+});
 
-  test("the dialog opens on the previewed wallpaper and slides through existing art", async ({
-    page,
-  }) => {
+test.describe("game detail change-wallpaper dialog", () => {
+  // The old slideshow ("N of M", Previous/Next through the wallpapers already
+  // on the game) was replaced by a category grid fed by a live search
+  // (`01c8a8c`), opened from the "…" menu instead of a rail button.
+  async function openWallpaperDialog(page: import("@playwright/test").Page): Promise<void> {
+    await page.locator(`${detailHost} [data-focus-key='more-actions']`).click();
+    await page.locator(`${detailHost} [data-focus-key='menu-wallpaper']`).click();
+    await expect(page.locator(`${detailHost} .gd-modal`)).toBeVisible();
+  }
+
+  test("opens from the … menu with the shape chips and a search field", async ({ page }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
+    await openWallpaperDialog(page);
 
-    await page
-      .locator(`${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}']`)
-      .click();
-    await page.locator(`${detailHost} .gd-gallery__search`).click();
-
-    const dialog = page.locator(`${detailHost} .gd-modal`);
-    await expect(dialog).toBeVisible();
     await expect(page.locator(`${detailHost} [role='dialog']`)).toHaveCount(1);
-    // Opens on the previewed landscape, so Use is armed and the counter says 2 of 2.
-    await expect(dialog.locator(".gd-slide__title")).toHaveText("Landscape");
-    await expect(dialog.locator(".gd-modal__counter")).toHaveText("2 of 2");
-    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-use']`)).toBeEnabled();
+    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-chip-cover']`)).toBeVisible();
+    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-chip-landscape']`)).toBeVisible();
+    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-chip-background']`)).toBeVisible();
+    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-chip-logo']`)).toBeVisible();
 
-    // Previous moves back to the hero art; Use then persists that selection.
-    await page.locator(`${detailHost} [data-focus-key='wallpaper-slide-previous']`).click();
-    await expect(dialog.locator(".gd-slide__title")).toHaveText("Key art");
-    await expect(dialog.locator(".gd-modal__counter")).toHaveText("1 of 2");
-    await page.locator(`${detailHost} [data-focus-key='wallpaper-use']`).click();
+    const input = page.locator(`${detailHost} [data-focus-key='wallpaper-search-input']`);
+    await expect(input).toBeVisible();
+    // Pre-filled with the game's own title, same as the retired dialog.
+    await expect(input).toHaveValue("Elden Ring");
+    // Nothing is ticked yet, so applying has nothing to do.
+    await expect(page.locator(`${detailHost} [data-focus-key='wallpaper-apply']`)).toBeDisabled();
 
-    // The dialog closes after the selection is committed.
-    await expect(dialog).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(page.locator(`${detailHost} .gd-modal`)).toHaveCount(0);
   });
 
-  test("searches wallpapers, imports a chosen candidate and can fetch more", async ({ page }) => {
+  test("searches, ticks one candidate per row and applies it in one pass", async ({ page }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
+    await openWallpaperDialog(page);
 
-    // The search toggle sits at the end of the wallpaper rail.
-    const toggle = page.locator(`${detailHost} [data-focus-key='wallpaper-search-toggle']`);
-    await expect(toggle).toBeVisible();
-    await toggle.click();
-
-    const form = page.locator(`${detailHost} .gd-search__form`);
-    await expect(form).toBeVisible();
-    // The fallback pre-fills the query with the game title.
     const input = page.locator(`${detailHost} [data-focus-key='wallpaper-search-input']`);
-    await expect(input).toHaveValue("Elden Ring");
-
+    await input.fill("elden ring");
     await page.locator(`${detailHost} [data-focus-key='wallpaper-search-button']`).click();
-    // The fresh results become slides, ahead of the existing wallpapers.
-    await expect(page.locator(`${detailHost} .gd-slide__title`)).toHaveText("Key art");
-    await expect(page.locator(`${detailHost} .gd-modal__counter`)).toHaveText("1 of 6");
 
-    // Fetch more: 4 candidates, then 2 more, then none.
-    await page.locator(`${detailHost} [data-focus-key='wallpaper-search-more']`).click();
-    await expect(page.locator(`${detailHost} .gd-modal__counter`)).toHaveText("1 of 8");
-    await page.locator(`${detailHost} [data-focus-key='wallpaper-search-more']`).click();
-    await expect(page.locator(`${detailHost} .gd-search__notice`)).toHaveText(
-      "No more wallpapers matched that search.",
-    );
-    await expect(page.locator(`${detailHost} .gd-modal__counter`)).toHaveText("1 of 8");
+    const firstBackground = page.locator(`${detailHost} [data-focus-key='wall-candidate-background-1']`);
+    await expect(firstBackground).toBeVisible();
+    await firstBackground.click();
+    await expect(firstBackground).toHaveAttribute("aria-pressed", "true");
 
-    // Import the first candidate: it is selected right away and the dialog closes.
-    await page.locator(`${detailHost} [data-focus-key='wallpaper-use']`).click();
-    const imported = page.locator(
-      `${detailHost} [data-focus-key='media-media_fallback_wallpaper_searched']`,
-    );
-    await expect(imported).toBeVisible();
-    await expect(imported.locator(".gd-gallery__thumb-applied")).toHaveCount(1);
+    // Ticking a second tile in the same row swaps the pick rather than adding
+    // to it — one row is one card slot, and picking across rows is what fills
+    // more than one slot in a single Apply.
+    const secondBackground = page.locator(`${detailHost} [data-focus-key='wall-candidate-background-2']`);
+    await secondBackground.click();
+    await expect(firstBackground).toHaveAttribute("aria-pressed", "false");
+    await expect(secondBackground).toHaveAttribute("aria-pressed", "true");
+
+    const apply = page.locator(`${detailHost} [data-focus-key='wallpaper-apply']`);
+    await expect(apply).toBeEnabled();
+    await expect(apply).toHaveText("Apply wallpaper");
+    await apply.click();
+
+    // The browser fallback's importer always answers with the same stand-in
+    // media (`createFallbackImportedWallpaper()`), which becomes the rail's
+    // only tile and the new hero art; the dialog closes on commit.
     await expect(page.locator(`${detailHost} .gd-modal`)).toHaveCount(0);
+    const imported = page.locator(`${detailHost} [data-focus-key='media-media_fallback_wallpaper_searched']`);
+    await expect(imported).toBeVisible();
+    await expect(imported).toHaveClass(/gd-gallery__tile--selected/);
   });
 });
 
