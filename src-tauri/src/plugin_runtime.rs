@@ -1369,6 +1369,12 @@ impl Drop for TickerLease<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// See [`PluginRuntime::compiles_on_this_thread`].
+    static COMPILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Who advances the epoch. `Manual` exists so a test can decide exactly when a
 /// deadline expires instead of racing a sleeping thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2270,7 +2276,13 @@ struct RuntimeInner {
     /// an application whose code signature it does not recognise reads one — so
     /// opening it has to happen where a component is actually being compiled,
     /// never on a path the user did not ask for.
-    compile_cache: OnceLock<Option<ComponentCache>>,
+    ///
+    /// A *success* is remembered and a refusal is not, which is the whole reason
+    /// this is not `OnceLock<Option<_>>`. This runtime is process-wide, and the
+    /// cache refuses to open until a user-initiated surface permits it: caching
+    /// the first refusal would mean that a background update installing before
+    /// the user touches anything leaves the session without a cache for good.
+    compile_cache: OnceLock<ComponentCache>,
 }
 
 impl Drop for RuntimeInner {
@@ -2394,14 +2406,22 @@ impl PluginRuntime {
         })
     }
 
-    /// The compile cache, or `None` when this process has none — no directory
-    /// configured, or no install key. `None` is the whole feature switched off:
-    /// every caller then behaves exactly as it did before the cache existed.
+    /// The compile cache, or `None` when this process has none yet — no
+    /// directory configured, nothing permitted, or no install key. `None` is the
+    /// whole feature switched off: every caller then behaves exactly as it did
+    /// before the cache existed, and asks again next time.
     fn compile_cache(&self) -> Option<&ComponentCache> {
-        self.inner
+        if let Some(cache) = self.inner.compile_cache.get() {
+            return Some(cache);
+        }
+        // Two callers can lose this race and both build one; that costs a hash of
+        // the engine configuration, and the install key behind it is memoised
+        // process-wide, so the keychain is still read at most once.
+        let _ = self
+            .inner
             .compile_cache
-            .get_or_init(|| crate::plugin_compile_cache::shared(&self.inner.engine))
-            .as_ref()
+            .set(crate::plugin_compile_cache::shared(&self.inner.engine)?);
+        self.inner.compile_cache.get()
     }
 
     /// The engine every component is compiled by. Only the compile cache needs
@@ -2417,7 +2437,7 @@ impl PluginRuntime {
     #[cfg(test)]
     pub(crate) fn use_compile_cache(&self, cache: ComponentCache) {
         assert!(
-            self.inner.compile_cache.set(Some(cache)).is_ok(),
+            self.inner.compile_cache.set(cache).is_ok(),
             "the compile cache was already resolved for this runtime"
         );
     }
@@ -2605,10 +2625,24 @@ impl PluginRuntime {
     /// that closes Orivo is an outage. Nothing is installed into the engine until
     /// compilation returns, so there is no half-registered module to inherit.
     fn compile(&self, bytes: &[u8]) -> Result<Component, PluginRuntimeError> {
+        #[cfg(test)]
+        COMPILES.with(|count| count.set(count.get() + 1));
         without_unwinding(|| {
             Component::new(&self.inner.engine, bytes)
                 .map_err(|_| PluginRuntimeError::InvalidComponent)
         })
+    }
+
+    /// How many components this thread has compiled.
+    ///
+    /// Per *thread*, not per process, and that is what makes it usable: the two
+    /// paths a test needs to hold to zero — the startup update check, the cache's
+    /// warm read — run synchronously on the caller's thread, while `cargo test`
+    /// runs every other test in parallel on its own. A process-wide counter would
+    /// be a race; this one is a fact about the work the test itself caused.
+    #[cfg(test)]
+    pub(crate) fn compiles_on_this_thread() -> u64 {
+        COMPILES.with(std::cell::Cell::get)
     }
 
     /// One call into a component, under grants and limits, from start to

@@ -67,11 +67,15 @@
 //! request that introduced this module, not as a comment nobody will find.
 //!
 //! One thing in that shape *was* a defect of this module rather than of the
-//! platform, and is fixed: replacing a damaged entry now deletes it and creates a
-//! new one. `SecKeychain::set_generic_password` finds an existing item and
-//! rewrites its password in place, keeping that item's access control list, so an
-//! item planted with garbage and an "any application" ACL would have been handed
-//! Orivo's real key. See [`create_key`].
+//! platform, and is fixed: replacing a damaged entry deletes it and creates a new
+//! one, and **gives up if the delete fails** rather than falling back to a write.
+//! `SecKeychain::set_generic_password` finds an existing item and rewrites its
+//! password in place, keeping that item's access control list, so an item planted
+//! with garbage and an "any application" ACL would otherwise have been handed
+//! Orivo's real key. What that closes is the in-place rewrite and nothing more:
+//! a program that recreates the item between the delete and the write, or that
+//! planted a plausible key in the first place, is the same residual case as
+//! everything else above. See [`create_key`].
 //!
 //! ## Everything else follows from "an artifact is regenerable"
 //!
@@ -83,9 +87,21 @@
 //! the plugin plan's sixth promise: a plugin's caches are the only thing Orivo
 //! may delete.
 //!
-//! And it is never opened on the startup path. Naming the directory is all
-//! `configure` does; a cache exists only after a user-initiated plugin surface
-//! calls [`permit`]. See there for what went wrong before that latch existed.
+//! And nothing opens it, or the keychain behind it, until the user does something
+//! about a plugin. Naming the directory is all `configure` does; a cache exists
+//! only once [`permit`] has been called, and that has exactly four callers, each
+//! an explicit action: opening Settings › Plugins, asking for a title to be
+//! installed, and the two runner doors (the emulator flow's listing, and every
+//! path that loads a runner package — a profile, a grant, an import, a launch).
+//!
+//! Stated that way rather than as "never on the startup path", because the first
+//! two attempts at that sentence were both false. The first missed that the
+//! startup update check reached `prepare_component` at all; the second permitted
+//! from `QuikyService::plugin`, which the Store page calls merely by being
+//! rendered — and a user whose start page is the Store renders it at launch.
+//! Rendering a page is not a gesture about a plugin. If this list grows, the
+//! question to ask of each entry is whether a user could reach it without having
+//! asked for anything.
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -367,9 +383,9 @@ impl ComponentCache {
         // them. Three things must hold, and all three are established above.
         //
         // * They came out of one regular file and nothing else.
-        //   `read_regular_file` opens with `O_NOFOLLOW` and asks the descriptor
-        //   what it is, so the artifact cannot have been swapped for a link, a
-        //   device or a directory between choosing the name and reading it.
+        //   `read_slot` opens with `O_NOFOLLOW` and asks the descriptor what it
+        //   is, so the artifact cannot have been swapped for a link, a device or
+        //   a directory between choosing the name and reading it.
         // * Orivo wrote them, in this installation, for this component. The tag
         //   is HMAC-SHA256 over the artifact, the source digest and the engine
         //   fingerprint, under a key held in the system keychain — so corruption,
@@ -848,21 +864,32 @@ fn create_key(store: &impl KeyStore) -> Option<[u8; KEY_BYTES]> {
     }
     let encoded = encode_key(&key);
 
-    // Delete first, and never update in place. On macOS
+    // Delete first, and **fail closed if the delete fails**. On macOS
     // `SecKeychain::set_generic_password` *finds* an existing item and rewrites
     // its password — `security-framework/src/os/macos/passwords.rs:275-277`,
     // `Ok((_, mut item)) => item.set_password(password)` — which keeps that
     // item's access control list. Another program of this user can create
     // `io.orivo.desktop.plugin-compile-cache.v1` before Orivo ever runs, with
-    // garbage in it and an ACL that lets any application read it; an in-place
-    // update would then hand Orivo's real key to whoever planted it. Deleting
-    // means the item holding the key is one this process created.
+    // garbage in it and an ACL that lets any application read it; writing into
+    // that item would hand it Orivo's real key. So a delete that does not
+    // succeed is the end of it: no key, no cache, and a compile on every open —
+    // which costs milliseconds, where the other costs the key.
     //
-    // It does not make the item *Orivo's* in any sense a signature would: an
+    // What this closes is only the *in-place* rewrite. Two things remain open
+    // and are not claimed otherwise: a program that recreates the item between
+    // this delete and the write below gets the same result, and one that simply
+    // planted a valid-looking key in the first place is never noticed at all.
+    // Both are the same residual case as the rest of the module header — a
+    // program running as this user — and neither is closeable from here: an
     // ad-hoc-signed build has no stable code identity for an ACL to name, and a
-    // program that makes its own keychain the default gets the new item anyway.
-    // The module header says what that leaves protected and what it does not.
-    let _ = store.delete();
+    // program that makes its own keychain the default receives whatever Orivo
+    // creates.
+    if store.delete().is_err() {
+        eprintln!(
+            "orivo: the plugin compile cache key could not be replaced; components will be compiled on every open"
+        );
+        return None;
+    }
     if store.write(&encoded).is_err() {
         return None;
     }
@@ -913,15 +940,19 @@ pub fn configure(directory: PathBuf) {
 /// in the direction that costs milliseconds rather than the one that costs a
 /// prompt, which also means a background path added later is cacheless until
 /// someone says otherwise, instead of quietly inheriting a key.
+///
+/// **The bar for a call site is an action, not a surface.** `get_quiky_status`
+/// looked like one and is not: the Store page calls it on render, and a user whose
+/// start page is the Store renders it at launch, so permitting there read the
+/// install key at every start. `start_quiky_install` is the same flow's actual
+/// gesture, and that is where it moved.
+///
+/// A refusal is never cached. `PluginRuntime::compile_cache` remembers a cache it
+/// obtained and not a `None`, because this runtime is process-wide: caching the
+/// first refusal would mean a background update installing before the user
+/// touched anything left the whole session without a cache.
 pub fn permit() {
     PERMITTED.store(true, Ordering::Release);
-}
-
-/// Whether a cache may be opened at all, given the two things that decide it.
-/// Split out so both halves of the rule have a test that does not need
-/// process-wide state.
-fn cache_directory(configured: Option<&PathBuf>, permitted: bool) -> Option<PathBuf> {
-    permitted.then(|| configured.cloned()).flatten()
 }
 
 /// The cache for `engine`, or `None` when no directory was configured, no
@@ -929,11 +960,35 @@ fn cache_directory(configured: Option<&PathBuf>, permitted: bool) -> Option<Path
 /// `None` is the whole feature off: every caller behaves exactly as it did
 /// before this module existed.
 pub fn shared(engine: &Engine) -> Option<ComponentCache> {
-    let directory = cache_directory(DIRECTORY.get(), PERMITTED.load(Ordering::Acquire))?;
+    open_shared(
+        engine,
+        DIRECTORY.get(),
+        PERMITTED.load(Ordering::Acquire),
+        install_key,
+    )
+}
+
+/// The body of [`shared`], with its three inputs as parameters so a test can
+/// drive the rule instead of the process.
+///
+/// The order matters and is the point: permission is decided **before** `key` is
+/// called, because reading the install key is the thing that must not happen
+/// unasked — on an ad-hoc-signed macOS build it is a password prompt. A test
+/// passes a `key` that panics if it is reached.
+fn open_shared(
+    engine: &Engine,
+    configured: Option<&PathBuf>,
+    permitted: bool,
+    key: impl FnOnce() -> Option<[u8; KEY_BYTES]>,
+) -> Option<ComponentCache> {
+    if !permitted {
+        return None;
+    }
+    let directory = configured?.clone();
     Some(ComponentCache::open(
         engine.clone(),
         directory,
-        install_key()?,
+        key()?,
         CacheLimits::default(),
     ))
 }
@@ -1968,6 +2023,55 @@ mod tests {
         );
     }
 
+    /// The read ceiling *can* be isolated, and here is the case that does it: an
+    /// artifact tagged correctly by this installation, for this component and this
+    /// engine, and one byte larger than any artifact may be. The tag verifies, so
+    /// nothing downstream refuses it — without the ceiling those bytes reach
+    /// `Component::deserialize`, which is exactly what the ceiling exists to keep
+    /// them out of. The refusal must therefore be `unauthenticated` and never
+    /// `unloadable`.
+    #[test]
+    fn an_authentic_artifact_over_the_ceiling_never_reaches_wasmtime() {
+        let scratch = Scratch::new("authentic-oversized");
+        let runtime = runtime();
+        let compiler = Compiler::new(&runtime);
+        let cache = ComponentCache::open(
+            runtime.engine().clone(),
+            scratch.cache_dir(),
+            KEY_A,
+            CacheLimits {
+                max_artifact_bytes: 2048,
+                max_total_bytes: 64 * 1024 * 1024,
+            },
+        );
+        let digest = digest_of(FIXTURE);
+        let oversized = vec![0x33; 2049];
+
+        fs::create_dir_all(scratch.cache_dir()).unwrap();
+        let slot = scratch.cache_dir().join(cache.slot_name(&digest));
+        let mut body = Vec::new();
+        body.extend_from_slice(ARTIFACT_MAGIC);
+        body.extend_from_slice(&cache.tag(&digest, &oversized));
+        body.extend_from_slice(&oversized);
+        fs::write(&slot, &body).unwrap();
+
+        cache
+            .component(FIXTURE, || compiler.compile(FIXTURE))
+            .unwrap();
+        assert_eq!(cache.counts().hits, 0);
+        assert_eq!(
+            cache.counts().unauthenticated,
+            1,
+            "an authentic artifact over the ceiling was not refused by the ceiling"
+        );
+        assert_eq!(
+            cache.counts().unloadable,
+            0,
+            "Wasmtime was handed an artifact larger than any artifact may be"
+        );
+        assert_eq!(compiler.calls(), 1);
+    }
+
     #[test]
     fn the_install_key_is_not_in_the_caches_debug_output() {
         let scratch = Scratch::new("debug");
@@ -2123,20 +2227,57 @@ mod tests {
     /// `prepare_component` a settings panel does — which with a cache behind it
     /// means reading the install key at launch, and on an ad-hoc-signed macOS
     /// build that is an unsolicited password prompt.
+    ///
+    /// Driven through [`open_shared`], the body `shared` calls, rather than
+    /// through a predicate beside it: a `shared` that read `DIRECTORY` and
+    /// ignored `PERMITTED` would leave a test of the predicate alone green.
     #[test]
     fn a_cache_opens_only_once_a_user_surface_has_permitted_one() {
-        let configured = PathBuf::from("/tmp/orivo-cache-rule");
-        assert_eq!(
-            cache_directory(Some(&configured), true),
-            Some(configured.clone())
-        );
-        assert_eq!(
-            cache_directory(Some(&configured), false),
-            None,
+        let scratch = Scratch::new("latch");
+        let runtime = runtime();
+        let configured = scratch.cache_dir();
+
+        // Not permitted: no cache, and — the half that matters — the key is never
+        // even asked for, so nothing prompts.
+        assert!(
+            open_shared(runtime.engine(), Some(&configured), false, || {
+                panic!("the install key was read before anything permitted a cache")
+            })
+            .is_none(),
             "a configured cache opened before anything asked for it"
         );
-        assert_eq!(cache_directory(None, true), None);
-        assert_eq!(cache_directory(None, false), None);
+
+        assert!(open_shared(runtime.engine(), None, true, || Some(KEY_A)).is_none());
+        assert!(open_shared(runtime.engine(), None, false, || Some(KEY_A)).is_none());
+
+        let opened = open_shared(runtime.engine(), Some(&configured), true, || Some(KEY_A))
+            .expect("permitted and configured");
+        assert_eq!(opened.directory, configured);
+    }
+
+    /// And an unavailable key is a refusal that does not stick: the next call asks
+    /// again. `PluginRuntime::compile_cache` used to memoise the first answer for
+    /// the life of the process-wide runtime, so a background update installing
+    /// before the user touched anything left the whole session uncached.
+    #[test]
+    fn a_refused_cache_is_not_remembered_by_the_runtime() {
+        let scratch = Scratch::new("retry");
+        let runtime = runtime();
+        let digest = format!("{:x}", Sha256::digest(FIXTURE));
+
+        // No cache attached, so `compile_cache` asks the process-wide rule and is
+        // refused — this is the startup shape.
+        runtime.prepare_component(FIXTURE, &digest).unwrap();
+        assert_eq!(runtime.compile_cache_counts(), None);
+
+        // Now a surface permits one. The same runtime must take it.
+        runtime.use_compile_cache(open_cache(&runtime, scratch.cache_dir(), KEY_A));
+        runtime.prepare_component(FIXTURE, &digest).unwrap();
+        assert_eq!(
+            runtime.compile_cache_counts().map(|counts| counts.stores),
+            Some(1),
+            "the runtime kept refusing after a cache became available"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2155,6 +2296,7 @@ mod tests {
         log: std::sync::Mutex<Vec<&'static str>>,
         read_fails: bool,
         write_fails: bool,
+        delete_fails: bool,
         /// What the store keeps when asked to write, if not what it was given.
         writes_instead: Option<String>,
     }
@@ -2200,6 +2342,9 @@ mod tests {
 
         fn delete(&self) -> Result<(), KeyStoreUnavailable> {
             self.log.lock().unwrap().push("delete");
+            if self.delete_fails {
+                return Err(KeyStoreUnavailable);
+            }
             *self.value.lock().unwrap() = None;
             Ok(())
         }
@@ -2251,6 +2396,29 @@ mod tests {
             store.log(),
             vec!["read"],
             "a store that could not be read was written to anyway"
+        );
+    }
+
+    /// The delete is not a formality. If it fails and the write goes ahead anyway,
+    /// macOS rewrites the existing item's password in place and keeps its access
+    /// control list — which is the whole defect the delete exists to close, back
+    /// again. No delete, no key, no cache.
+    #[test]
+    fn a_delete_that_fails_leaves_no_key_rather_than_writing_in_place() {
+        let store = FakeStore {
+            delete_fails: true,
+            ..FakeStore::holding(Some("not a key"))
+        };
+        assert_eq!(read_or_create_key(&store), None);
+        assert_eq!(
+            store.log(),
+            vec!["read", "delete"],
+            "the key was written into an item this process did not create"
+        );
+        assert_eq!(
+            store.stored().as_deref(),
+            Some("not a key"),
+            "the planted value was overwritten"
         );
     }
 

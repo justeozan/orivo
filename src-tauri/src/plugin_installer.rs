@@ -1834,9 +1834,18 @@ mod tests {
         assert_eq!(listed[0].id, "com.orivo.quiky");
         assert!(!listed[0].version.is_empty());
 
-        // And the consent rule still holds on top of it: a sideloaded package has
-        // no trust marker, so nothing is pending.
+        // And the whole call, at the call site, compiling nothing. Counted per
+        // thread, so the parallel suite cannot move it: putting `installed()`
+        // back here fails this line and nothing else would.
+        let before = PluginRuntime::compiles_on_this_thread();
+        // The consent rule still holds on top of it: a sideloaded package has no
+        // trust marker, so nothing is pending.
         assert_eq!(pending_automatic_updates(&service), Vec::new());
+        assert_eq!(
+            PluginRuntime::compiles_on_this_thread(),
+            before,
+            "the startup update check compiled a component"
+        );
         fs::remove_dir_all(&root).ok();
     }
 

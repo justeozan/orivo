@@ -261,11 +261,17 @@ moteur, c'est une recompilation silencieuse depuis les octets que le registre a
 déjà vérifiés — jamais une erreur que l'utilisateur voit, jamais un chargement
 douteux. Le cache est borné, écrit par `rename`, réclame ce qu'une version
 précédente de Wasmtime a laissé, et se purge en entier : la sixième promesse,
-enfin munie d'une porte. Et il n'est jamais ouvert au démarrage : nommer le
-dossier est tout ce que fait la configuration, et un cache n'existe qu'après
-qu'une surface ouverte par l'utilisateur l'a explicitement permis — parce que la
-tâche de maintenance du lancement demandait au registre ce qui est installé, et
-que ce passage atteignait le même `prepare_component` qu'un panneau de réglages.
+enfin munie d'une porte. Et rien ne l'ouvre — ni le trousseau derrière lui —
+avant que l'utilisateur ne fasse quelque chose *à propos d'un plugin* : nommer le
+dossier est tout ce que fait la configuration, et un cache n'existe qu'après un
+appel à `plugin_compile_cache::permit`, qui a exactement quatre appelants, tous
+des actions explicites (ouvrir Réglages → Plugins, demander l'installation d'un
+titre, et les deux portes des runners). Formulé ainsi plutôt que « jamais au
+démarrage », parce que les deux premières versions de cette phrase étaient
+fausses : la tâche de maintenance du lancement atteignait `prepare_component`, et
+`get_quiky_status` — que la page Boutique appelle simplement en s'affichant, donc
+au lancement pour qui a la Boutique en page de départ — permettait le cache.
+Afficher une page n'est pas un geste à propos d'un plugin.
 
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
 bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune

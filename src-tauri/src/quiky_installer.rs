@@ -193,9 +193,13 @@ impl QuikyService {
     }
 
     fn plugin(&self) -> Option<InstallerPlugin> {
-        // Acquiring a game is user-initiated, so the compile cache may open here
-        // too — see `plugin_compile_cache::permit`.
-        crate::plugin_compile_cache::permit();
+        // Deliberately *not* `plugin_compile_cache::permit()`. `get_quiky_status`
+        // reaches this from the Store page, and a user whose `startPage` is the
+        // Store opens that page at launch — so permitting here would read the
+        // install key at every start, which is the thing the latch exists to
+        // prevent. Rendering a page is not a gesture about a plugin. The permit
+        // lives on `start_quiky_install`, which is one.
+        //
         // The process-wide runtime: a fresh one here would give this path its own
         // compiled-component cache, its own memory ceiling and its own failure
         // counter, so a plugin parked as degraded would answer again on the next
@@ -422,6 +426,11 @@ pub async fn start_quiky_install(
     game_id: Option<String>,
     service: State<'_, Arc<QuikyService>>,
 ) -> Result<(), String> {
+    // Asking for a game to be installed is a gesture about a plugin, so the
+    // compile cache may open from here on — unlike `get_quiky_status`, which the
+    // Store page calls merely by being rendered. See
+    // `plugin_compile_cache::permit`.
+    crate::plugin_compile_cache::permit();
     let service = Arc::clone(&service);
     let plugin = {
         let service = Arc::clone(&service);
