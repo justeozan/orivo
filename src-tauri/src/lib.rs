@@ -21,6 +21,8 @@ pub mod plugin_runtime;
 mod plugin_scheduler;
 mod preferences;
 mod quiky_installer;
+mod runner_commands;
+mod runner_host;
 mod source_epic;
 mod source_gog;
 mod source_instant_gaming;
@@ -811,6 +813,18 @@ pub fn run() {
             DETAIL_PROJECTION
                 .set(Arc::clone(&detail))
                 .map_err(|_| "the game detail projection is already initialised")?;
+            // Third-party runners write through the same catalog lease the rest
+            // of the backend takes, so the service is handed the live catalog
+            // rather than a second one it would have to keep in step.
+            app.manage(Arc::new(runner_commands::ThirdPartyRunnerService::new(
+                runner_host::CatalogStore::new(
+                    Arc::clone(&state.catalog),
+                    state.catalog_path.clone(),
+                    Arc::clone(&state.catalog_mutation),
+                ),
+                state.plugin_root.clone(),
+                HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+            )));
             app.manage(state);
             app.manage(detail);
             app.manage(media);
@@ -947,7 +961,17 @@ pub fn run() {
             plugin_installer::get_plugin_catalog,
             plugin_installer::install_plugin_from_registry,
             plugin_installer::install_plugin_from_file,
-            plugin_installer::uninstall_plugin
+            plugin_installer::uninstall_plugin,
+            runner_commands::get_installed_runners,
+            runner_commands::create_runner_profile,
+            runner_commands::rename_runner_profile,
+            runner_commands::set_runner_profile_enabled,
+            runner_commands::delete_runner_profile,
+            runner_commands::grant_runner_profile_directory,
+            runner_commands::revoke_runner_profile_directory,
+            runner_commands::start_runner_import,
+            runner_commands::get_runner_import_status,
+            runner_commands::cancel_runner_import
         ])
         .run(tauri::generate_context!())
         .expect("error while running Orivo");
@@ -6089,8 +6113,9 @@ async fn launch_game(
     app: AppHandle,
     game_id: String,
     state: State<'_, AppState>,
+    runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
 ) -> Result<LaunchResult, String> {
-    let (game, mut wine_launch, winlator_launch) = {
+    let (game, mut wine_launch, winlator_launch, runner_launch) = {
         let catalog = state
             .catalog
             .read()
@@ -6152,9 +6177,42 @@ async fn launch_game(
             | LaunchTarget::Runner { .. }
             | LaunchTarget::Provider { .. } => None,
         };
-        (game, wine_launch, winlator_launch)
+        // A runner target that is neither of the two native adapters belongs to
+        // an installed plugin. Only its opaque ids leave the read lock: the
+        // profile, the grant ledger and the inventory are read again by the
+        // host, under the mutation lease, when it prepares the launch.
+        let runner_launch = match &game.launch_target {
+            LaunchTarget::Runner {
+                runner_id,
+                profile_id,
+                game_ref,
+            } if runner_id != WINE_STAGING_RUNNER_ID && runner_id != WINLATOR_RUNNER_ID => {
+                Some((runner_id.clone(), profile_id.clone(), game_ref.clone()))
+            }
+            LaunchTarget::Direct
+            | LaunchTarget::Steam { .. }
+            | LaunchTarget::Runner { .. }
+            | LaunchTarget::Provider { .. } => None,
+        };
+        (game, wine_launch, winlator_launch, runner_launch)
     };
     let title = game.title.clone();
+
+    if let Some((runner_id, profile_id, game_ref)) = runner_launch {
+        let service = Arc::clone(&runners);
+        // Loading and probing the component, asking it to prepare the launch and
+        // resolving the game file are all blocking work, and none of it may run
+        // on the command executor.
+        let resolved_title = tauri::async_runtime::spawn_blocking(move || {
+            service.launch(&runner_id, &profile_id, &game_ref)
+        })
+        .await
+        .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
+        .map_err(|error| error.to_string())?;
+        return Ok(LaunchResult {
+            status: format!("Launching {resolved_title}"),
+        });
+    }
 
     if let Some((profile, inventory, game_ref)) = winlator_launch {
         require_winlator_runner_platform()?;
@@ -6949,8 +7007,11 @@ fn load_or_migrate_catalog(
     if path.is_file() {
         let loaded = Catalog::load_with_migration(path)?;
         if let Some(migrated_from) = loaded.migrated_from {
-            backup_catalog(path, migrated_from)?;
-            loaded.commit_migration(path, game_state_path)?;
+            // The backup is not only an archive: it is what the commit falls
+            // back to, so a migration that cannot be published leaves the
+            // library exactly as the older build wrote it.
+            let backup = backup_catalog(path, migrated_from)?;
+            loaded.commit_migration_with_backup(path, game_state_path, &backup)?;
         }
         return Ok(loaded.catalog);
     }
@@ -7785,6 +7846,9 @@ fn showcase_catalog() -> Catalog {
         wine_inventory: Vec::new(),
         winlator_profiles: Vec::new(),
         winlator_inventory: Vec::new(),
+        runner_profiles: Vec::new(),
+        runner_inventory: Vec::new(),
+        plugin_grants: Vec::new(),
         extra: BTreeMap::new(),
     }
 }
