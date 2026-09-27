@@ -509,6 +509,40 @@ fn reparse_tag_redirects(tag: u32) -> bool {
     tag & NAME_SURROGATE != 0
 }
 
+/// Whether the host follows this reparse point to read the file behind it,
+/// rather than the entry it already holds.
+///
+/// `IsReparseTagNameSurrogate` says only that a tag is not a *name* — it says
+/// nothing about who serves the bytes behind one that isn't. Data
+/// Deduplication, single-instance storage and the container-layer filter can
+/// all, in principle, serve the data of a *different* file on the volume
+/// through a reparse point that clears that one bit exactly as a OneDrive
+/// placeholder does, so "not a name" is not "safe to trust". The host follows
+/// only the mechanisms this codebase has read about and can name, each
+/// checked against Microsoft's own values:
+///
+/// - `IO_REPARSE_TAG_DEDUP` — Data Deduplication (`ntifs.h`, `0x80000013`);
+/// - `IO_REPARSE_TAG_WOF` — the Windows Overlay Filter, what `compact`
+///   produces (`ntifs.h`, `0x80000017`);
+/// - the cloud-file family, `IO_REPARSE_TAG_CLOUD` and its sixteen provider
+///   variants `IO_REPARSE_TAG_CLOUD_1`..`_F` — OneDrive and other Cloud Files
+///   API providers (`cfapi.h`, base `0x9000001A`, provider nibble at
+///   `IO_REPARSE_TAG_CLOUD_MASK = 0x0000F000`).
+///
+/// Everything else — `IO_REPARSE_TAG_STORAGE_SYNC`, `IO_REPARSE_TAG_NFS`, a
+/// tag this host has never seen — is refused rather than followed. The
+/// consequence is stated in [`fixtures/README.md`](../fixtures/README.md):
+/// a file behind a mechanism not on this list is not read, and the reason is
+/// journalled.
+#[allow(dead_code)]
+fn reparse_tag_is_followed(tag: u32) -> bool {
+    const DEDUP: u32 = 0x8000_0013;
+    const WOF: u32 = 0x8000_0017;
+    const CLOUD_BASE: u32 = 0x9000_001A;
+    const CLOUD_PROVIDER_MASK: u32 = 0x0000_F000;
+    tag == DEDUP || tag == WOF || (tag & !CLOUD_PROVIDER_MASK) == CLOUD_BASE
+}
+
 /// Handle-relative file access on Windows.
 ///
 /// `openat` has an exact equivalent here, and the pattern in this module is the
@@ -700,22 +734,77 @@ mod windows_relative {
     /// Two steps, because the first answer decides the second. The entry is opened
     /// as itself so its reparse tag can be read without following anything; a tag
     /// that names another object is handed back as the link it is, for the caller
-    /// to refuse. A tag that only says where the bytes live — OneDrive, dedup, WOF
-    /// — is opened again *following* it, which is what lets the filter driver serve
-    /// the file the user actually has.
+    /// to refuse. A tag on [`super::reparse_tag_is_followed`]'s list — OneDrive,
+    /// dedup, WOF — is opened again *following* it, which is what lets the filter
+    /// driver serve the file the user actually has. Anything else is refused
+    /// outright: this host does not know what serves the bytes behind it, and the
+    /// one bit already checked never promised that it was safe.
     pub(super) fn open_entry_for_reading(directory: &File, name: &str) -> io::Result<File> {
+        open_entry_for_reading_seamed(directory, name, || {})
+    }
+
+    /// The same, with a seam fired between the two opens this function makes.
+    ///
+    /// A real attacker only sometimes lands inside the window between them, which
+    /// is not something a test can assert on; [`open_entry_for_reading_racing`]
+    /// hands a test this exact seam so the swap is certain rather than probable.
+    /// `open_entry_for_reading` is what production calls, with nothing to run
+    /// there.
+    fn open_entry_for_reading_seamed(
+        directory: &File,
+        name: &str,
+        between_opens: impl FnOnce(),
+    ) -> io::Result<File> {
         let entry = open_relative(directory, name, FILE_GENERIC_READ, Reparse::AsItself)?;
-        match reparse_tag(&entry)? {
-            Some(tag) if !super::reparse_tag_redirects(tag) => {
-                // Followed, so a filter driver serves the file the user has. If
-                // nothing owns the tag, NTFS refuses the followed open
-                // (`IO_REPARSE_TAG_NOT_HANDLED`) — and the data under the point is
-                // still this file's own, in this folder, so the entry the host
-                // already holds is the right answer rather than a refusal.
-                open_relative(directory, name, FILE_GENERIC_READ, Reparse::Following).or(Ok(entry))
-            }
-            _ => Ok(entry),
+        let Some(tag) = reparse_tag(&entry)? else {
+            return Ok(entry);
+        };
+        if super::reparse_tag_redirects(tag) {
+            // A link, for the caller's kind check to refuse.
+            return Ok(entry);
         }
+        if !super::reparse_tag_is_followed(tag) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("reparse tag {tag:#010x} is not one this host follows"),
+            ));
+        }
+        between_opens();
+        // Followed, so a filter driver serves the file the user has. If nothing
+        // owns the tag, NTFS refuses the followed open
+        // (`IO_REPARSE_TAG_NOT_HANDLED`) — and the data under the point is
+        // still this file's own, in this folder, so the entry the host already
+        // holds is the right answer rather than a refusal.
+        let Ok(followed) = open_relative(directory, name, FILE_GENERIC_READ, Reparse::Following)
+        else {
+            return Ok(entry);
+        };
+        // The name was resolved twice, and anything can happen to it in between —
+        // the realistic thing being a symbolic link swapped in for the entry,
+        // which an ordinary open follows without a filter's help. A driver
+        // serving this file's own bytes behind a redirection hands back the same
+        // file every time `FileIdInfo` is asked; two different answers mean the
+        // second open reached a different file than the first one reported on,
+        // and its data is refused rather than trusted.
+        if full_identity(&entry)? != full_identity(&followed)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the entry changed between the two opens needed to read it",
+            ));
+        }
+        Ok(followed)
+    }
+
+    /// [`open_entry_for_reading`], with the seam a test needs to swap the entry
+    /// deterministically between its two opens rather than racing a thread
+    /// against it.
+    #[cfg(test)]
+    pub(super) fn open_entry_for_reading_racing(
+        directory: &File,
+        name: &str,
+        between_opens: impl FnOnce(),
+    ) -> io::Result<File> {
+        open_entry_for_reading_seamed(directory, name, between_opens)
     }
 
     /// Opens for attributes only, which is not "opening" in any of the senses a
@@ -1774,11 +1863,25 @@ impl host_files::Host for HostState {
         // a character device has no size to bound. The open refuses the first
         // two, and the kind, size and ownership below are asked of the
         // descriptor rather than of the name.
-        let Ok(file) = directory.open_entry(&name) else {
-            return Err(plugin_error(
-                wit_types::PluginErrorCode::Unavailable,
-                "That file is no longer available.",
-            ));
+        let file = match directory.open_entry(&name) {
+            Ok(file) => file,
+            Err(error) => {
+                // An unrecognised reparse tag is a decision, not an ordinary
+                // "gone": worth a reason in the journal, the same way a
+                // truncated listing is.
+                if error.kind() == std::io::ErrorKind::Unsupported {
+                    self.journal.record(
+                        self.correlation_id,
+                        &self.plugin_id,
+                        "reparse-tag-refused",
+                        error.to_string(),
+                    );
+                }
+                return Err(plugin_error(
+                    wit_types::PluginErrorCode::Unavailable,
+                    "That file is no longer available.",
+                ));
+            }
         };
         let Ok(facts) = EntryFacts::of_handle(&file) else {
             return Err(plugin_error(
@@ -4483,6 +4586,50 @@ mod tests {
         assert!(!reparse_tag_redirects(0xDFFF_FFFF));
     }
 
+    /// Clearing the name-surrogate bit is not a whitelist. `reparse_tag_redirects`
+    /// above answers "is this a name"; this is the second, separate question —
+    /// "is this a mechanism the host has read about" — and it runs on every
+    /// platform for the same reason: no CI runner can produce most of these tags
+    /// either way, so the rule has to be tested as a pure function to be tested at
+    /// all.
+    #[test]
+    fn the_host_follows_only_the_reparse_tags_it_recognises() {
+        // Cited against Microsoft's own values, not guessed: `ntifs.h` for the
+        // first two, `cfapi.h` for the cloud family.
+        for (tag, what) in [
+            (0x8000_0013u32, "IO_REPARSE_TAG_DEDUP"),
+            (0x8000_0017, "IO_REPARSE_TAG_WOF"),
+            (0x9000_001A, "IO_REPARSE_TAG_CLOUD"),
+            (0x9000_101A, "IO_REPARSE_TAG_CLOUD_1"),
+            (0x9000_901A, "IO_REPARSE_TAG_CLOUD_9"),
+            (0x9000_F01A, "IO_REPARSE_TAG_CLOUD_F"),
+        ] {
+            assert!(
+                reparse_tag_is_followed(tag),
+                "{what} is a mechanism this host understands and was refused"
+            );
+        }
+
+        // Real, documented, and still refused: a tag naming no object is not
+        // enough on its own, and these are exactly the ones the brief warns are
+        // capable of serving another file's data through a mechanism nobody here
+        // has read about.
+        for (tag, what) in [
+            (0x8000_001Eu32, "IO_REPARSE_TAG_STORAGE_SYNC"),
+            (0x8000_0014, "IO_REPARSE_TAG_NFS"),
+            (0x0000_1234, "a tag with no meaning at all"),
+        ] {
+            assert!(
+                !reparse_tag_is_followed(tag),
+                "{what} was followed without the host knowing what serves it"
+            );
+        }
+
+        // A name surrogate is never on this list either — following one is a
+        // different bug, but it would be worse to have both checks agree on it.
+        assert!(!reparse_tag_is_followed(0xA000_000C));
+    }
+
     /// Not every reparse point is a redirection, and treating them alike loses the
     /// user their library.
     ///
@@ -4537,31 +4684,34 @@ mod tests {
         );
     }
 
+    /// Whether the reparse attribute is set, regardless of what its tag means.
+    /// Shared by every helper below that plants one by hand and needs to know
+    /// whether the plant actually took.
+    #[cfg(not(unix))]
+    fn is_reparse_point(path: &Path) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        fs::metadata(path)
+            .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .unwrap_or(false)
+    }
+
     /// Plants a reparse point that is **not** a redirection, and says how.
     ///
     /// Two mechanisms, because one of them is faithful and the other is certain.
-    /// `compact /c /exe:LZX` produces a WOF reparse point, which a real filter
-    /// driver owns — the same shape as a OneDrive placeholder, and it exercises the
-    /// *followed* open. It also silently declines on some volumes, and the CI
-    /// runner's is one of them. So if it does, the test sets a reparse point itself
-    /// with a non-Microsoft tag whose name-surrogate bit is clear: no driver owns
-    /// it, which means the followed open is refused and the host has to fall back
-    /// to the data under the point. Either way the file must be listed and read.
+    /// `compact /c /exe:LZX` produces a real WOF reparse point, which the driver
+    /// itself owns — the same shape as a OneDrive placeholder, and it exercises
+    /// the *followed* open through a real filter. It also silently declines on
+    /// some volumes, and the CI runner's is one of them. So if it does, the test
+    /// sets the same tag by hand instead: `IO_REPARSE_TAG_WOF` is on
+    /// `reparse_tag_is_followed`'s list, so the host still attempts the followed
+    /// open — nothing owns a tag no real `compact` ever processed, which means
+    /// that attempt is refused (`IO_REPARSE_TAG_NOT_HANDLED`) and the host falls
+    /// back to the data under the point. Either way the file must be listed and
+    /// read.
     #[cfg(not(unix))]
     fn plant_storage_reparse_point(path: &Path) -> &'static str {
-        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
-        };
-
-        let is_reparse_point = |path: &Path| {
-            fs::metadata(path)
-                .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-                .unwrap_or(false)
-        };
-
         let compacted = std::process::Command::new("compact")
             .args(["/c", "/exe:LZX"])
             .arg(path)
@@ -4575,14 +4725,117 @@ mod tests {
             String::from_utf8_lossy(&compacted.stdout).trim()
         );
 
+        /// `ntifs.h`. The same tag `compact` sets — checked against
+        /// `reparse_tag_is_followed` below so this fallback stays a tag the host
+        /// actually trusts rather than a stand-in for one.
+        const IO_REPARSE_TAG_WOF: u32 = 0x8000_0017;
+        assert!(
+            reparse_tag_is_followed(IO_REPARSE_TAG_WOF),
+            "the tag this fallback plants is not one the host follows"
+        );
+        plant_reparse_point_with_tag(path, IO_REPARSE_TAG_WOF);
+        assert!(
+            is_reparse_point(path),
+            "the reparse point was set and the attribute did not appear"
+        );
+        "WOF, through FSCTL_SET_REPARSE_POINT"
+    }
+
+    /// Sets a reparse point whose tag is Microsoft's own, by hand.
+    ///
+    /// `REPARSE_DATA_BUFFER`'s generic arm (`ntifs.h`): no GUID, which is the
+    /// layout `IsReparseTagMicrosoft` says a tag with bit 31 set takes —
+    /// `IO_REPARSE_TAG_WOF` and `IO_REPARSE_TAG_DEDUP` both qualify.
+    /// `FSCTL_SET_REPARSE_POINT` itself does not validate what a filter behind
+    /// the tag would expect to find, which is exactly why this can plant a tag
+    /// no filter on this machine claims: the point is the reparse *attribute*,
+    /// not a working placeholder.
+    #[cfg(not(unix))]
+    fn plant_reparse_point_with_tag(path: &Path, tag: u32) {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
         /// `FSCTL_SET_REPARSE_POINT`, from `winioctl.h`.
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+
+        #[repr(C)]
+        struct ReparseDataBuffer {
+            reparse_tag: u32,
+            reparse_data_length: u16,
+            reserved: u16,
+            data: [u8; 8],
+        }
+
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: HANDLE,
+                control_code: u32,
+                in_buffer: *const std::ffi::c_void,
+                in_size: u32,
+                out_buffer: *mut std::ffi::c_void,
+                out_size: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        let handle = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .expect("the test can open its own file for writing");
+        let buffer = ReparseDataBuffer {
+            reparse_tag: tag,
+            reparse_data_length: 8,
+            reserved: 0,
+            data: *b"nodriver",
+        };
+        let mut returned = 0u32;
+        // Safety: an open handle with write access, one input buffer whose declared
+        // length matches its `data` field, and no output buffer — which is what
+        // `FSCTL_SET_REPARSE_POINT` takes.
+        let answered = unsafe {
+            DeviceIoControl(
+                handle.as_raw_handle() as HANDLE,
+                FSCTL_SET_REPARSE_POINT,
+                (&raw const buffer).cast(),
+                size_of::<ReparseDataBuffer>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(
+            answered != 0,
+            "FSCTL_SET_REPARSE_POINT failed: {}",
+            std::io::Error::last_os_error()
+        );
+        drop(handle);
+    }
+
+    /// Sets a reparse point whose tag is neither a name surrogate nor one
+    /// `reparse_tag_is_followed` recognises — the shape a container-layer filter,
+    /// or a mechanism this host has simply never read about, would carry.
+    /// `REPARSE_GUID_DATA_BUFFER` is the layout a tag with bit 31 clear takes:
+    /// that is what makes the GUID legal, and bit 29 clear is the whole point —
+    /// this tag names no other object, exactly as a OneDrive placeholder names
+    /// none. Returns the tag, for the assertion message.
+    #[cfg(not(unix))]
+    fn plant_unrecognised_reparse_point(path: &Path) -> u32 {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
         const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
         /// A tag of this test's own. Bit 31 clear marks it non-Microsoft, which is
         /// what makes a GUID buffer legal; bit 29 clear is the whole point — this
         /// names no other object, exactly as a OneDrive placeholder names none.
         const TAG: u32 = 0x0000_1234;
 
-        /// `REPARSE_GUID_DATA_BUFFER`, with a payload of this test's size.
         #[repr(C)]
         struct ReparseGuidDataBuffer {
             reparse_tag: u32,
@@ -4606,6 +4859,10 @@ mod tests {
         }
 
         assert!(!reparse_tag_redirects(TAG), "the test's own tag redirects");
+        assert!(
+            !reparse_tag_is_followed(TAG),
+            "the test's own tag is one the host follows"
+        );
         let handle = fs::OpenOptions::new()
             .write(true)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -4644,7 +4901,105 @@ mod tests {
             is_reparse_point(path),
             "the reparse point was set and the attribute did not appear"
         );
-        "a non-Microsoft tag, through FSCTL_SET_REPARSE_POINT"
+        TAG
+    }
+
+    /// Clearing the name-surrogate bit is not enough to be trusted either: an
+    /// entry with a tag this host has never read about is refused, closed,
+    /// rather than followed and hoped safe. Deduplication, single-instance
+    /// storage and the container-layer filter can all in principle serve a
+    /// *different* file's data through a mechanism exactly this shape.
+    ///
+    /// It is still listed — a listing only opens attributes, and this tag is
+    /// not a name surrogate, so `EntryFacts` reports an ordinary file — which is
+    /// what makes "refused on read, not on listing" the property worth pinning
+    /// rather than "the folder looks empty".
+    #[cfg(not(unix))]
+    #[test]
+    fn an_unrecognised_reparse_tag_is_refused_rather_than_followed() {
+        let library = FixtureLibrary::new("reparse-unrecognised");
+        let unusual = library.games.join("epsilon.rom");
+        fs::write(&unusual, b"Epsilon Run\n").unwrap();
+        let tag = plant_unrecognised_reparse_point(&unusual);
+
+        let harness = Harness::new(untimed(), Some(&library));
+        let PluginResponse::DiscoveryPage(page) = harness
+            .call(PluginRequest::DiscoverPage {
+                profile_id: FIXTURE_PROFILE.into(),
+                cursor: None,
+                limit: 10,
+            })
+            .unwrap()
+        else {
+            panic!("expected a page");
+        };
+        assert!(
+            page.games.iter().any(|game| game.external_id == "epsilon"),
+            "an entry with an unrecognised reparse tag ({tag:#010x}) was left out of the listing"
+        );
+
+        let error = harness.prepare("fixture:read-epsilon").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "a file behind an unrecognised reparse tag ({tag:#010x}) was read: {error:?}"
+        );
+        let refused = harness
+            .runtime
+            .journal()
+            .entries()
+            .iter()
+            .any(|entry| entry.decision == "reparse-tag-refused");
+        assert!(
+            refused,
+            "an unrecognised reparse tag ({tag:#010x}) was refused with no reason in the journal"
+        );
+    }
+
+    /// A name is resolved twice inside `open_entry_for_reading` on Windows: once
+    /// to read the tag without following it, and again to read the file behind
+    /// it. The first open deliberately allows the entry to be deleted or renamed
+    /// while it is still held open — `FILE_SHARE_DELETE`, so a filter-backed
+    /// placeholder can be replaced without every reader closing first — which is
+    /// exactly what makes the realistic attack legal: a symbolic link, swapped in
+    /// for the entry between the two opens, that the second one would follow
+    /// straight out of the grant.
+    ///
+    /// A real race would only sometimes land inside that window, which is not
+    /// something a test can assert on. `open_entry_for_reading_racing`'s seam
+    /// fires exactly between the two opens, so the swap is certain rather than
+    /// probable.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_reparse_point_swapped_for_a_symlink_between_the_two_opens_is_refused() {
+        let library = FixtureLibrary::new("reparse-race");
+        let entry = library.games.join("swap.rom");
+        fs::write(&entry, b"Swap Quest\n").unwrap();
+        // `IO_REPARSE_TAG_DEDUP` (`ntifs.h`, `0x80000013`): on
+        // `reparse_tag_is_followed`'s list, so the host attempts the followed
+        // open at all — the race is inside that attempt, not in whether one
+        // happens.
+        const IO_REPARSE_TAG_DEDUP: u32 = 0x8000_0013;
+        plant_reparse_point_with_tag(&entry, IO_REPARSE_TAG_DEDUP);
+
+        let secret = library.root.join("secret.txt");
+        let directory = windows_relative::open_directory(&library.games).unwrap();
+        let result =
+            windows_relative::open_entry_for_reading_racing(&directory, "swap.rom", || {
+                fs::remove_file(&entry).unwrap();
+                redirect_file(&entry, &secret);
+            });
+
+        assert!(
+            matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied),
+            "a reparse point swapped for a symbolic link between the two opens was followed: \
+             {result:?}"
+        );
     }
 
     /// A redirection *inside* the granted folder is skipped rather than followed,
