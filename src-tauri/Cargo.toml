@@ -50,7 +50,18 @@ ndk-context = "0.1"
 core-graphics = "0.25"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+# `Win32_Foundation` is `HANDLE`, `FILETIME` and the other shared scalars that
+# `Win32_Storage_FileSystem`'s own signatures are written in — notably
+# `GetFileInformationByHandle` and `BY_HANDLE_FILE_INFORMATION`, which is how the
+# plugin host learns a granted folder's identity and an entry's link count from a
+# handle rather than from a path. Generated types and link declarations only: no
+# code, no transitive crate, same version, Windows-only. The alternative was
+# hand-declaring a ten-field struct for a platform this repository cannot compile
+# locally, which is the risk it exists to avoid.
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 wit-parser = "=0.246.2"
