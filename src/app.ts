@@ -1974,20 +1974,44 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       resume.textContent = "Resume";
       actions.append(resume);
     }
-    if (plugin.updateTo) {
+    const updateProgress = pluginManager.progressFor(plugin.id);
+    const updateBusy = isPluginInstallBusy(updateProgress);
+    if (plugin.updateTo || updateBusy) {
       const update = document.createElement("button");
       update.type = "button";
       update.className = "settings-button settings-button--quiet";
       update.dataset.pluginUpdate = plugin.id;
-      update.textContent = `Update to v${plugin.updateTo}`;
+      // A second click while one is already running must not restart it — the
+      // controller itself ignores it too, but the button should already look
+      // like there is nothing left to click.
+      update.disabled = updateBusy;
+      update.textContent = updateBusy
+        ? updateProgress?.phase === "downloading"
+          ? `Downloading ${pluginPercent(updateProgress)}%`
+          : updateProgress?.phase === "verifying"
+            ? "Verifying…"
+            : "Installing…"
+        : `Update to v${plugin.updateTo}`;
       actions.append(update);
+      if (updateProgress?.phase === "failed") {
+        const failed = document.createElement("small");
+        failed.className = "plugin-row__update-error";
+        failed.textContent = updateProgress.message || "This update did not finish.";
+        copy.append(failed);
+      }
     }
     if (plugin.rollbackTo) {
       const rollback = document.createElement("button");
       rollback.type = "button";
       rollback.className = "settings-button settings-button--quiet";
       rollback.dataset.pluginRollback = plugin.id;
-      rollback.textContent = `Go back to v${plugin.rollbackTo}`;
+      // Said in the button itself, before the click that would act on it: a
+      // rollback is allowed to put a development build back in place of a
+      // signed one, and that is not the same kind of "previous version".
+      rollback.textContent =
+        plugin.rollbackTrusted === false
+          ? `Go back to v${plugin.rollbackTo} (unsigned)`
+          : `Go back to v${plugin.rollbackTo}`;
       actions.append(rollback);
     }
 
@@ -2038,21 +2062,54 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   /**
    * Health is a second command from a second module, so a freshly rendered
    * registry list re-fetches it only when the id set actually changed — a
-   * caller that wants a forced re-check (after `resume`) calls this directly
-   * instead of going through that guard.
+   * caller that wants a forced re-check (after `resume`, after an import
+   * settles, or on opening the Plugins section) calls this directly instead
+   * of going through that guard.
    */
   const refreshPluginHealth = async (pluginIds: string[]): Promise<void> => {
-    pluginHealthIdsKey = pluginIds.join(",");
     if (pluginIds.length === 0) {
+      pluginHealthIdsKey = "";
       pluginHealthById = new Map();
       return;
     }
-    const rows = await pluginHealthClient
-      .getHealthReport(pluginIds, new AbortController().signal)
-      .catch(() => []);
+    const rows = await pluginHealthClient.getHealthReport(
+      pluginIds,
+      new AbortController().signal,
+    );
+    if (rows.length === 0) {
+      // The default client collapses every failure — no Tauri, an older host
+      // binary, a dropped IPC call — to an empty list, the same as a host
+      // with no health commands at all. A real report always answers one row
+      // per id it was given, so an empty one back for a non-empty request
+      // means the read failed, not that every plugin is healthy. The id key
+      // is left unset so the next render retries instead of caching this as
+      // "nothing to report".
+      return;
+    }
+    pluginHealthIdsKey = pluginIds.join(",");
     pluginHealthById = new Map(rows.map((row) => [row.pluginId, row]));
     renderDiscoveredPlugins();
   };
+
+  // A runner import can push the plugin that ran it towards `degraded`
+  // (repeated `discover-page` failures), so health is worth a fresh read as
+  // soon as one settles — not continuously while it runs, only at the
+  // transition away from "running", which is what this tracks per profile.
+  const runnerImportPhaseByProfile = new Map<string, string>();
+  runnerManager.onChange(() => {
+    let settled = false;
+    for (const runner of runnerManager.runners()) {
+      for (const profile of runner.profiles) {
+        const phase = runnerManager.importFor(profile.id)?.phase ?? null;
+        const previous = runnerImportPhaseByProfile.get(profile.id) ?? null;
+        if (previous === "running" && phase !== null && phase !== "running") settled = true;
+        if (phase !== null) runnerImportPhaseByProfile.set(profile.id, phase);
+      }
+    }
+    if (settled) {
+      void refreshPluginHealth(pluginManager.catalog().installed.map((entry) => entry.id));
+    }
+  });
 
   const resumeInstalledPlugin = async (pluginId: string): Promise<void> => {
     try {
@@ -2063,21 +2120,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     await refreshPluginHealth(pluginManager.catalog().installed.map((plugin) => plugin.id));
   };
 
-  const updateInstalledPlugin = async (pluginId: string): Promise<void> => {
-    const name = pluginName(pluginId);
-    try {
-      await pluginManager.update(pluginId);
-      showToast(`${name} has been updated.`);
-    } catch (error) {
-      showToast(pluginErrorMessage(error));
-    }
+  // The row itself shows progress and any failure (renderInstalledPluginRow
+  // reads pluginManager.progressFor), the same way a registry install already
+  // does — so this has nothing left to guess about the outcome, and nothing
+  // to toast on success either. The controller rejects on failure so this does
+  // not also print a lying "updated" toast; it is caught and dropped here.
+  const updateInstalledPlugin = (pluginId: string): void => {
+    void pluginManager.update(pluginId).catch(() => {});
   };
 
   const rollbackInstalledPlugin = async (pluginId: string): Promise<void> => {
     const name = pluginName(pluginId);
+    const target = pluginManager.catalog().installed.find((entry) => entry.id === pluginId);
+    const unsigned = target?.rollbackTrusted === false;
     try {
       await pluginManager.rollback(pluginId);
-      showToast(`${name} went back to a previous version.`);
+      showToast(
+        unsigned
+          ? `${name} went back to an unsigned build.`
+          : `${name} went back to a previous version.`,
+      );
     } catch (error) {
       showToast(pluginErrorMessage(error));
     }
@@ -5772,7 +5834,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (route.section === "plugins") void refreshWineRunnerSettings();
       // The catalogue is re-read on every visit: a plugin installed from the
       // file picker in a previous session has to show up without a restart.
-      if (route.section === "plugins") void pluginManager.load(activation.signal);
+      if (route.section === "plugins") {
+        // A plugin can turn `degraded` while Settings is closed — during a
+        // background import, say — so its health is worth a fresh read on
+        // every visit too, not only when the installed id set has changed.
+        pluginHealthIdsKey = "";
+        void pluginManager.load(activation.signal);
+      }
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
@@ -5950,7 +6018,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     const updateId = target?.closest<HTMLButtonElement>("[data-plugin-update]")?.dataset.pluginUpdate;
     if (updateId) {
-      void updateInstalledPlugin(updateId);
+      updateInstalledPlugin(updateId);
       return;
     }
     const rollbackId = target?.closest<HTMLButtonElement>("[data-plugin-rollback]")?.dataset
@@ -6011,7 +6079,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void savePreferences({ motion: target.value as MotionPreference });
     }
     if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
-      void pluginManager.setAutomaticUpdates(target.checked);
+      // The controller repaints the checkbox back to the host's own value
+      // either way; this only needs to say why it did not stick.
+      void pluginManager.setAutomaticUpdates(target.checked).catch((error) => {
+        showToast(pluginErrorMessage(error));
+      });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.

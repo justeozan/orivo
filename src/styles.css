@@ -1912,6 +1912,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-row__state--error { color: #f0a3a3; }
 .plugin-row__health { display: block; margin-top: 2px; color: #a9e6b3; }
 .plugin-row__health--degraded { color: #f0a3a3; }
+.plugin-row__update-error { display: block; margin-top: 2px; color: #f0a3a3; }
 /* Replaces the single Uninstall button as the row's fourth grid column, so a
    row with an update, a rollback and a log toggle still lines up with one
    that only has Uninstall. */
