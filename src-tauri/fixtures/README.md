@@ -196,15 +196,21 @@ Closed, and asserted on the runner:
   is what lets the entry be replaced while it is still held) is refused rather
   than trusted (`reparse-entry-changed`).
 
-  Both halves are asserted against a *real* WOF placeholder on the runner, not
-  only a hand-planted stand-in: `compact /c /exe:LZX` on a 128 KiB file
-  produces one, `open_entry_for_reading` reads it back byte-for-byte with the
-  production whitelist in force, and the same placeholder is what the race is
-  staged against. An earlier version of this claimed the opposite — that no
-  Windows runner can produce a real WOF placeholder at all — because the check
-  used to confirm one existed followed the reparse point through the filter
-  instead of stopping at it, and so never saw the attribute on a placeholder
-  a real driver was already serving.
+  All three of the fallback (nothing claims the tag), the identity match (a
+  redirection to the *same* file), and the identity mismatch (a redirection
+  to a different one) are asserted against a tag `reparse_tag_is_followed`
+  actually trusts, not against `plant_unrecognised_reparse_point`'s stand-in —
+  `IO_REPARSE_TAG_CLOUD`, hand-planted the same way `IO_REPARSE_TAG_DEDUP`
+  proved plantable before dedup came off the list. `compact /c /exe:LZX` was
+  tried first, on the theory that its own compression-ratio report meant a
+  real WOF placeholder had been made; no size or name tried on this runner's
+  volume ever produced one, `compact`'s ratio and `is_reparse_point`'s answer
+  never once agreeing. Nothing here is registered to claim `IO_REPARSE_TAG_CLOUD`
+  either, so every read through it lands on the fallback rather than a real
+  filter's data — a real cloud provider or a WOF-capable volume, neither
+  available on any runner this file has run on, is what would exercise the
+  *other* half of a successful second open, and that remains open, stated
+  here rather than implied by a green tick.
 - **A listing still opens nothing that matters.** Entries are opened for
   `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
   another opener's share mode. Only `read_file` follows a placeholder, which is
@@ -212,6 +218,19 @@ Closed, and asserted on the runner:
 
 Still open:
 
+- **A real filter successfully serving a trusted tag's data is untested.**
+  Every test that follows a trusted reparse tag lands on the fallback here —
+  nothing registered claims `IO_REPARSE_TAG_CLOUD`, and no runner this file
+  has run on can produce a real `IO_REPARSE_TAG_WOF` placeholder either. The
+  identity check's *success* half (`full_identity(&entry)? ==
+  full_identity(&followed)?`, the two opens agreeing because a filter
+  legitimately served the same file twice) has no test: a hard link cannot
+  stand in for the filter, because reparse data belongs to the file itself,
+  so a hard link of a trusted-but-unclaimed entry inherits the very tag
+  nothing claims and hits the same fallback rather than a successful follow.
+  A real cloud-sync provider registered through the Cloud Files API, or a
+  Windows image whose volume actually supports WOF, is what would exercise
+  it; neither is available in CI today.
 - **`FolderTrust` is unknown on Windows**, because telling a private folder from a
   shared one means reading the DACL — `GetSecurityInfo`, walking the ACEs, and then
   deciding which well-known SIDs count as somebody else, which is security policy
