@@ -58,6 +58,33 @@ s’affiche comme non signé partout. Un paquet ne peut pas transporter de binai
 natif : `blocked_payload_path` refuse `.exe`, `.dylib`, `.so`, `.dll` et les
 scripts, et toute entrée non déclarée dans le manifeste invalide l’archive.
 
+L’étape 3.1 est faite pour sa première moitié. Un **index de registry signé**
+(`plugin_index.rs`) complète le registre compilé dans le binaire : enveloppe
+versionnée dont la signature Ed25519 couvre les octets exacts du document,
+récupération HTTPS limitée à une allowlist compilée et revérifiée à chaque
+redirection, cache ETag/TTL sur disque, et un numéro de séquence qui ne recule
+jamais — parce qu’une signature reste valide pour toujours et que rejouer un
+index ancien est la façon dont un registre cache une mise à jour. Le chemin
+d’affichage ne lit que le cache ; rafraîchir est une commande séparée et
+annulable. Un document *vérifié* repasse malgré tout la même grammaire qu’un
+document inconnu : une signature dit qui a écrit, jamais que ce qui est écrit
+est sensé.
+
+L’installation, la mise à jour et le rollback sont devenus **une transaction**
+(`plugin_update.rs`). Le candidat est déballé dans un répertoire de staging,
+noté une première fois hors du chemin — contrat et empreintes, sans exécuter le
+composant —, puis la version vivante est *archivée* au lieu d’être supprimée, le
+candidat est basculé, et le host le sonde à son emplacement définitif : identité
+et `health-check` sous budget de sonde, sans aucun grant. Un refus là déclenche
+le rollback automatiquement ; un rollback manuel rejoue la même séquence à
+l’envers. Chaque étape est un `rename`, et un fichier de journal écrit avant la
+première dit laquelle était en cours : au démarrage suivant, une coupure à
+n’importe quelle étape laisse soit l’ancienne version intacte, soit la nouvelle
+complète et sondée. Le point de non-retour est un seul `rename` du journal sur
+`previous.json`, qui est aussi la description de la version conservée. Orivo ne
+garde qu’**une** version précédente : une mise à jour annulée dépense le
+créneau, jamais la version qui tourne.
+
 Une extension `installer` complète le contrat v1. Le plugin ne fournit que des
 données — un catalogue borné de titres avec URL, empreinte et tailles — et le
 host exécute lui-même chaque étape privilégiée : téléchargement HTTPS restreint
@@ -160,7 +187,10 @@ v8). Les grants, les profils et les références externes y vivent, parce
 qu’accorder un dossier et enregistrer la permission de le lire doivent réussir ou
 échouer ensemble ; l’état des jobs reste dans le scheduler et le journal reste un
 anneau borné en mémoire, parce que rien de ce que le host en tire n’avait besoin
-de survivre au processus. Révoquer écrit une date au lieu de supprimer une ligne,
+de survivre au processus. Ce que l’installateur persiste en propre — la version
+conservée, le journal de transaction, le marqueur de canal et le cache d’index —
+vit en fichiers sous la racine des plugins, dans des répertoires pointés que la
+découverte ignore. Révoquer écrit une date au lieu de supprimer une ligne,
 de sorte que « ce plugin pouvait lire ce dossier entre ces deux dates » reste une
 question à laquelle le registre répond.
 
