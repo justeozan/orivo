@@ -48,12 +48,46 @@ making the two modules this SDK reuses `pub` (see `src-tauri/src/lib.rs`).
 
 ```sh
 cargo test --manifest-path sdk/orivo-plugin-sdk/Cargo.toml
+# or, from the repository root:
+cargo test -p orivo-plugin-sdk
 ```
+
+CI runs this on Linux only, as one extra step in the `rust` job
+(`.github/workflows/ci.yml`), right after `cargo check --manifest-path
+src-tauri/Cargo.toml`: the crate has no platform-specific code, so one
+platform is enough, and this is what actually exercises
+`wit_compatibility.rs` — a compatibility guard nobody runs is not a
+guard.
 
 `tests/simulate_against_the_real_fixture.rs` packages the committed
 `src-tauri/fixtures/orivo-runner-fixture.wasm` and runs it through this SDK's
 `simulate`/`check` against the real host — the same component
 `plugin_runtime.rs`'s own adversarial suite uses, not a stand-in.
+
 `tests/wit_compatibility.rs` freezes `orivo-plugin@1` against
 `tests/wit-v1-baseline.json` and fails on a breaking change to the published
-contract; see that file's module doc for what counts as breaking and why.
+contract; see that file's module doc for what counts as breaking and why. The
+one `#[ignore]`d test in that file, `dump_current_snapshot_for_rebaselining`,
+is not part of the suite: it prints the current contract's snapshot so it can
+be pasted into `wit-v1-baseline.json`, and it exists for exactly one occasion
+— `wit/orivo-plugin.wit` gaining a deliberate, reviewed v2. Run it by hand
+with
+`cargo test -p orivo-plugin-sdk --test wit_compatibility -- --ignored --nocapture dump_current_snapshot`;
+never to make the frozen-baseline test above pass.
+
+## The cost of reuse
+
+This crate depends on `orivo` (`src-tauri`) as a path dependency, which is the
+whole point — `plugin_manifest`/`plugin_runtime` cannot drift from a second
+copy that does not exist — but it means building or testing this crate builds
+the *entire* app crate first: Tauri, Wasmtime, the platform-specific
+dependencies in `src-tauri/Cargo.toml`, and `dist/` has to exist before that
+compiles at all (`tauri::generate_context!()` embeds it; run `pnpm exec vite
+build` first, same as any other `cargo` invocation against this repository).
+A change to this SDK alone still costs a full app build, and pulling in
+`orivo` also pulls in a Node/pnpm step this crate's own logic never touches.
+The alternative — copying `plugin_manifest`/`plugin_runtime` instead of
+depending on them — trades that build cost for exactly the drift this SDK
+exists to prevent, which is the worse trade. See **Out of scope /
+follow-ups** in the PR for the real fix (a small shared crate), which is
+follow-up work, not something to improvise here.

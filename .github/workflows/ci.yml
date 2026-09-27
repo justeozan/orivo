@@ -147,6 +147,15 @@ jobs:
       - name: Check the Rust crate
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
+      # `wit_compatibility` test is the one thing here that is *supposed* to
+      # fail on a breaking change to wit/orivo-plugin.wit — a check that never
+      # runs is not a guard. One platform is enough: the crate has no
+      # platform-specific code, unlike the app it links.
+      - name: Test the plugin SDK
+        if: matrix.platform == 'ubuntu-22.04'
+        run: cargo test -p orivo-plugin-sdk
+
   android:
     name: Android (cargo check)
     runs-on: ubuntu-latest
