@@ -447,7 +447,82 @@ pub struct GrantedDirectory {
     #[cfg(unix)]
     handle: File,
     trust: FolderTrust,
+    identity: Option<DirectoryIdentity>,
 }
+
+/// Which folder a grant names, as the filesystem identifies it rather than as a
+/// path spells it.
+///
+/// A held descriptor pins a folder for as long as a [`PluginGrants`] value lives,
+/// and that is the whole of what #41 bought: nothing outlives the value, because
+/// nothing persists a grant yet. Whatever does will store a *path*, and a path is
+/// answered by whatever happens to be at it — so the approval records this
+/// alongside, and the reload checks it.
+///
+/// Both halves are public and plain integers so grant storage can keep them. They
+/// are not a secret and not a capability: knowing a device and inode number
+/// grants nothing, and a mismatch is refused rather than resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryIdentity {
+    volume: u64,
+    file_id: u64,
+}
+
+#[allow(dead_code)]
+impl DirectoryIdentity {
+    /// Rebuilds what grant storage kept. Deliberately not `Default`: an identity
+    /// nobody recorded is [`None`], not zero.
+    pub fn new(volume: u64, file_id: u64) -> Self {
+        Self { volume, file_id }
+    }
+
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+
+    pub fn file_id(&self) -> u64 {
+        self.file_id
+    }
+
+    /// `None` where the host cannot ask. On Windows that needs
+    /// `GetFileInformationByHandle`, which cannot be type-checked on this machine
+    /// at all — see the note on [`FolderTrust::of_path`] — so a stored identity
+    /// there is refused rather than waved through.
+    fn of_directory(handle_or_path: &GrantedDirectoryHandle<'_>) -> Option<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = handle_or_path.0.metadata().ok()?;
+            Some(Self {
+                volume: metadata.dev(),
+                file_id: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = handle_or_path;
+            None
+        }
+    }
+}
+
+/// A path and, when it came from storage rather than from a picker, the folder it
+/// is supposed to lead to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedDirectory {
+    pub path: PathBuf,
+    /// `None` for a folder the user is approving right now: there is nothing to
+    /// check it against, and [`PluginGrants::directory_identity`] is what the
+    /// caller reads afterwards to store.
+    pub identity: Option<DirectoryIdentity>,
+}
+
+/// The thing an identity is asked of, so the unix and non-unix bodies above read
+/// the same. A handle where there is one, and nothing where there is not.
+#[cfg(unix)]
+struct GrantedDirectoryHandle<'directory>(&'directory File);
+#[cfg(not(unix))]
+struct GrantedDirectoryHandle<'directory>(&'directory Path);
 
 /// Whether this account is the only one that can put something in the granted
 /// folder. Captured once, from the handle, at the moment the grant is made.
@@ -583,10 +658,15 @@ impl GrantedDirectory {
                 .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
                 .open(path)?;
             let trust = FolderTrust::of_handle(&handle);
+            // Asked of the descriptor, after the open: a path could have been
+            // answered by something else in between, and this is the answer that
+            // was actually given.
+            let identity = DirectoryIdentity::of_directory(&GrantedDirectoryHandle(&handle));
             Ok(Self {
                 path: path.to_path_buf(),
                 handle,
                 trust,
+                identity,
             })
         }
         #[cfg(not(unix))]
@@ -600,6 +680,7 @@ impl GrantedDirectory {
             Ok(Self {
                 path: path.to_path_buf(),
                 trust: FolderTrust::of_path(path),
+                identity: DirectoryIdentity::of_directory(&GrantedDirectoryHandle(path)),
             })
         }
     }
@@ -728,25 +809,73 @@ impl PluginGrants {
         grants: &[CapabilityGrant],
         directories: &BTreeMap<String, PathBuf>,
     ) -> Result<Self, GrantValidationError> {
+        let pinned = directories
+            .iter()
+            .map(|(id, path)| {
+                (
+                    id.clone(),
+                    PinnedDirectory {
+                        path: path.clone(),
+                        identity: None,
+                    },
+                )
+            })
+            .collect();
+        Self::resolve_pinned(manifest, grants, &pinned)
+    }
+
+    /// The same, for a grant that came back from storage.
+    ///
+    /// A path is not a folder. Whatever persists grants keeps the path the user
+    /// picked, and on the next start that path is answered by whatever is at it —
+    /// a different library, a folder somebody put there, the same name on another
+    /// volume. Where the caller kept the identity the approval recorded, this
+    /// refuses anything else, and it checks *after* opening so the answer is the
+    /// one actually given rather than one a second lookup might agree with.
+    ///
+    /// The identity follows the folder, not the path, so a library the user moved
+    /// still resolves at its new location.
+    #[allow(dead_code)]
+    pub fn resolve_pinned(
+        manifest: &ValidatedPluginManifest,
+        grants: &[CapabilityGrant],
+        directories: &BTreeMap<String, PinnedDirectory>,
+    ) -> Result<Self, GrantValidationError> {
         let mut resolved = Self::declared_only(manifest);
         for grant in grants {
             manifest.validate_grant(grant)?;
             resolved.granted.insert(grant.capability);
             if let CapabilityScope::DirectoryGrants(ids) = &grant.scope {
                 for id in ids {
-                    let path = directories
+                    let pinned = directories
                         .get(id)
                         .ok_or(GrantValidationError::InvalidScope(grant.capability))?;
                     // Opened here rather than at the call, because this is the
                     // moment the grant is made. A folder the host cannot open as
                     // a directory now is not a scope it can honour later.
-                    let directory = GrantedDirectory::open(path)
+                    let directory = GrantedDirectory::open(&pinned.path)
                         .map_err(|_| GrantValidationError::InvalidScope(grant.capability))?;
+                    // A recorded identity the host cannot confirm is refused, not
+                    // assumed: `None` here means this platform cannot ask, and a
+                    // grant that was pinned somewhere it could is not one to
+                    // honour blindly somewhere it cannot.
+                    if let Some(expected) = pinned.identity
+                        && directory.identity != Some(expected)
+                    {
+                        return Err(GrantValidationError::InvalidScope(grant.capability));
+                    }
                     resolved.directories.insert(id.clone(), Arc::new(directory));
                 }
             }
         }
         Ok(resolved)
+    }
+
+    /// What the approval should store beside the path it stores. `None` where the
+    /// host could not ask — see [`DirectoryIdentity::of_directory`].
+    #[allow(dead_code)]
+    pub fn directory_identity(&self, id: &str) -> Option<DirectoryIdentity> {
+        self.directories.get(id).and_then(|entry| entry.identity)
     }
 
     pub fn declares(&self, capability: PluginCapability) -> bool {
@@ -3778,6 +3907,66 @@ mod tests {
             error,
             GrantValidationError::InvalidScope(PluginCapability::FilesRead)
         );
+    }
+
+    /// A held descriptor pins a folder for as long as a `PluginGrants` value
+    /// lives, and no longer. Whatever persists grants will reload a *path*, and a
+    /// path is answered by whatever is at it — so the approval has to record
+    /// which folder it was, and the reload has to check.
+    #[cfg(unix)]
+    #[test]
+    fn a_reloaded_grant_is_pinned_to_the_folder_that_was_approved() {
+        let root = temporary_root("pinned");
+        let approved = root.join("library");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(&approved).unwrap();
+        fs::create_dir_all(&decoy).unwrap();
+        let manifest = fixture_manifest(vec![
+            PluginCapability::RunnerPrepare,
+            PluginCapability::FilesRead,
+        ]);
+
+        // What the approval writes down, for whoever stores the grant.
+        let grants = PluginGrants::resolve(
+            &manifest,
+            &[files_grant(&[GAMES_GRANT])],
+            &BTreeMap::from([(GAMES_GRANT.to_string(), approved.clone())]),
+        )
+        .unwrap();
+        let recorded = grants
+            .directory_identity(GAMES_GRANT)
+            .expect("an approved folder has an identity");
+
+        // Reloaded against the same folder, it still resolves.
+        let reload = |path: &Path, identity: Option<DirectoryIdentity>| {
+            PluginGrants::resolve_pinned(
+                &manifest,
+                &[files_grant(&[GAMES_GRANT])],
+                &BTreeMap::from([(
+                    GAMES_GRANT.to_string(),
+                    PinnedDirectory {
+                        path: path.to_path_buf(),
+                        identity,
+                    },
+                )]),
+            )
+        };
+        assert!(reload(&approved, Some(recorded)).is_ok());
+
+        // The swap a stored path cannot see: the approved folder is moved away and
+        // another one takes its place. Same path, different folder.
+        fs::rename(&approved, root.join("library-moved")).unwrap();
+        fs::rename(&decoy, &approved).unwrap();
+        assert_eq!(
+            reload(&approved, Some(recorded)).unwrap_err(),
+            GrantValidationError::InvalidScope(PluginCapability::FilesRead),
+            "a stored grant resolved to a folder the user never approved"
+        );
+        // And the folder that *was* approved is still recognised at its new path,
+        // because the identity is the folder's and not the path's.
+        assert!(reload(&root.join("library-moved"), Some(recorded)).is_ok());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     // -----------------------------------------------------------------------
