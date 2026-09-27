@@ -40,6 +40,33 @@ pub const DIRECTORY_MIME_TYPE: &str = "vnd.android.document/directory";
 const MAX_DOCUMENT_ID_BYTES: usize = 1_024;
 const MAX_TREE_URI_BYTES: usize = 2_048;
 
+/// The shared-storage folders any app writes into without asking — where a
+/// browser saves a download and a messaging app saves an attachment — plus, in
+/// [`DocumentTreeGrant::refuse_if_too_broad`], the volume root itself.
+///
+/// None of them can be Winlator's export folder. A `.desktop` file is not data:
+/// it carries an `Exec=` line Winlator runs inside a container that can reach
+/// the whole of storage and the network, so a folder where anything can leave
+/// one is a folder where anything can leave a program. Winlator's export folder
+/// is one Winlator or the user made, and it is always inside one of these
+/// rather than one of these.
+const OPEN_DROP_DIRECTORIES: [&str; 14] = [
+    "alarms",
+    "android",
+    "audiobooks",
+    "dcim",
+    "documents",
+    "download",
+    "downloads",
+    "movies",
+    "music",
+    "notifications",
+    "pictures",
+    "podcasts",
+    "recordings",
+    "ringtones",
+];
+
 /// One folder the user granted through `ACTION_OPEN_DOCUMENT_TREE`, already
 /// resolved to the filesystem directory it stands for.
 ///
@@ -112,6 +139,36 @@ impl DocumentTreeGrant {
             child_prefix,
             directory,
         })
+    }
+
+    /// Refuse a grant too broad to be an export folder.
+    ///
+    /// The volume root is the obvious one — granting it makes every `.desktop`
+    /// anywhere on shared storage a candidate — but the shared drop folders are
+    /// the dangerous one, because a file arrives in `Download/` with no
+    /// permission at all on any Android. Orivo is what would make such a file
+    /// visible, named and one tap from running, so it does not read them.
+    ///
+    /// Anything *inside* them is fine: Winlator's own default,
+    /// `Download/Winlator/Frontend`, is exactly that.
+    pub fn refuse_if_too_broad(&self) -> Result<(), WinlatorRunnerError> {
+        let relative = self
+            .tree_document_id
+            .strip_prefix(PRIMARY_VOLUME_PREFIX)
+            .unwrap_or_default()
+            .trim_matches('/');
+        if relative.is_empty() {
+            return Err(WinlatorRunnerError::ExportFolderTooBroad);
+        }
+        let mut components = relative.split('/');
+        let first = components.next().unwrap_or_default().to_ascii_lowercase();
+        let nested = components.next().is_some();
+        // `Android/` is refused whole: nothing under it is a folder a user
+        // exported to, and it is where other apps keep their private data.
+        if first == "android" || (!nested && OPEN_DROP_DIRECTORIES.contains(&first.as_str())) {
+            return Err(WinlatorRunnerError::ExportFolderTooBroad);
+        }
+        Ok(())
     }
 
     pub fn tree_uri(&self) -> &str {
@@ -230,10 +287,81 @@ pub trait DocumentTree {
     fn read(&self, document_id: &str, max_bytes: u64) -> Result<Vec<u8>, WinlatorRunnerError>;
 }
 
+/// Android 7 — this app's `minSdk` — promises only 512 live JNI local
+/// references per frame, and overflowing that table is not an error a caller
+/// sees: ART aborts the process. A listing of a few thousand documents is
+/// therefore not "a big loop", it is a crash on every launch, so the rows below
+/// are read one frame at a time.
+pub(crate) const MAX_LOCAL_REFERENCES_PER_FRAME: usize = 512;
+
+/// How many local references reading one row takes: the document id, the display
+/// name and the MIME type are three Java strings.
+pub(crate) const LOCAL_REFERENCES_PER_ROW: usize = 3;
+
+/// The whole scheme rests on one row fitting in one frame. It is checked at
+/// compile time because the alternative — noticing at runtime — is a process
+/// Android kills rather than an error anybody reads.
+const _: () = assert!(LOCAL_REFERENCES_PER_ROW < MAX_LOCAL_REFERENCES_PER_FRAME);
+
+/// One children query, read row by row, with the references each row takes
+/// handed back before the next one is read.
+///
+/// The Android implementation of this is three JNI calls and a frame; the host
+/// test's counts references instead of taking them, which is the only way the
+/// loop below can be shown to hold its budget without a device.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) trait DocumentRows {
+    type Error;
+
+    /// `Cursor.moveToNext`: no reference of its own.
+    fn advance(&mut self) -> Result<bool, Self::Error>;
+
+    /// Open a reference frame for the row the cursor is on.
+    fn enter_row(&mut self) -> Result<(), Self::Error>;
+
+    /// Read the current row. Everything it returns is owned, so nothing it took
+    /// has to outlive the frame.
+    fn read_row(&mut self) -> Result<Option<TreeDocument>, Self::Error>;
+
+    /// Give the row's references back.
+    fn leave_row(&mut self) -> Result<(), Self::Error>;
+}
+
+/// Collect a whole listing while never holding more than one row's references.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn collect_rows<R: DocumentRows>(rows: &mut R) -> Result<Vec<TreeDocument>, R::Error> {
+    let mut documents = Vec::new();
+    while rows.advance()? {
+        rows.enter_row()?;
+        let row = rows.read_row();
+        // The frame is left even when the row failed: a frame that was pushed
+        // and not popped costs more than the error that caused it.
+        rows.leave_row()?;
+        if let Some(document) = row? {
+            documents.push(document);
+        }
+    }
+    Ok(documents)
+}
+
 #[cfg(target_os = "android")]
-pub use android::{external_storage_root, persisted_read_tree_uris};
+pub use android::{external_storage_root, persisted_read_tree_uris, release_persisted_tree};
 #[cfg(not(target_os = "android"))]
-pub use desktop::{external_storage_root, persisted_read_tree_uris};
+pub use desktop::{external_storage_root, persisted_read_tree_uris, release_persisted_tree};
+
+/// The persisted grants Orivo holds and no longer has a reason to hold.
+///
+/// A persistable permission outlives the folder that justified it: nothing
+/// expires it, and a grant on a folder no profile points at any more is read
+/// access Orivo kept for nothing. Comparing the two lists is the whole rule, so
+/// it is written here, once, where it can be tested.
+pub fn stale_persisted_trees<'a>(persisted: &'a [String], in_use: &[String]) -> Vec<&'a str> {
+    persisted
+        .iter()
+        .filter(|granted| !in_use.iter().any(|used| used == *granted))
+        .map(String::as_str)
+        .collect()
+}
 
 /// The reader for one granted tree on this platform.
 ///
@@ -269,6 +397,10 @@ mod desktop {
         Err(WinlatorRunnerError::ExportFolderUnsupported)
     }
 
+    pub fn release_persisted_tree(_tree_uri: &str) -> Result<(), WinlatorRunnerError> {
+        Err(WinlatorRunnerError::ExportFolderUnsupported)
+    }
+
     pub struct NoDocumentProvider;
 
     impl DocumentTree for NoDocumentProvider {
@@ -291,7 +423,7 @@ mod desktop {
 /// no business on the thread that draws the library.
 #[cfg(target_os = "android")]
 mod android {
-    use super::{DocumentTree, TreeDocument};
+    use super::{DocumentRows, DocumentTree, LOCAL_REFERENCES_PER_ROW, TreeDocument, collect_rows};
     use crate::winlator_runner::WinlatorRunnerError;
     use jni::{
         JNIEnv, JavaVM,
@@ -314,6 +446,10 @@ mod android {
     /// constants; reading them through JNI would cost three calls to learn what
     /// the documentation already pins.
     const COLUMNS: [&str; 4] = ["document_id", "_display_name", "mime_type", "_size"];
+
+    /// `Intent.FLAG_GRANT_READ_URI_PERMISSION` — the only flag the plugin's
+    /// Kotlin ever takes, and so the only one there is to give back.
+    const FLAG_GRANT_READ_URI_PERMISSION: i32 = 0x0000_0001;
 
     struct AndroidContext {
         vm: JavaVM,
@@ -466,31 +602,59 @@ mod android {
             let count = env.call_method(&permissions, "size", "()I", &[])?.i()?;
             let mut trees = Vec::new();
             for index in 0..count {
-                let permission = env
-                    .call_method(
-                        &permissions,
-                        "get",
-                        "(I)Ljava/lang/Object;",
-                        &[JValue::Int(index)],
-                    )?
-                    .l()?;
-                if !env
-                    .call_method(&permission, "isReadPermission", "()Z", &[])?
-                    .z()?
-                {
-                    continue;
-                }
-                let uri = env
-                    .call_method(&permission, "getUri", "()Landroid/net/Uri;", &[])?
-                    .l()?;
-                let uri = env
-                    .call_method(&uri, "toString", "()Ljava/lang/String;", &[])?
-                    .l()?;
-                if let Some(uri) = java_string(env, &uri) {
+                // Short list or not, one frame per entry: the rule about local
+                // references is the same here as in a children listing.
+                let granted = env.with_local_frame::<_, _, jni::errors::Error>(
+                    LOCAL_REFERENCES_PER_ROW as i32,
+                    |env| {
+                        let permission = env
+                            .call_method(
+                                &permissions,
+                                "get",
+                                "(I)Ljava/lang/Object;",
+                                &[JValue::Int(index)],
+                            )?
+                            .l()?;
+                        if !env
+                            .call_method(&permission, "isReadPermission", "()Z", &[])?
+                            .z()?
+                        {
+                            return Ok(None);
+                        }
+                        let uri = env
+                            .call_method(&permission, "getUri", "()Landroid/net/Uri;", &[])?
+                            .l()?;
+                        let uri = env
+                            .call_method(&uri, "toString", "()Ljava/lang/String;", &[])?
+                            .l()?;
+                        Ok(java_string(env, &uri))
+                    },
+                )?;
+                if let Some(uri) = granted {
                     trees.push(uri);
                 }
             }
             Ok(trees)
+        })
+    }
+
+    /// Hand a persisted grant back.
+    ///
+    /// Taking one is a deliberate act with a picker in front of it; giving it
+    /// back has no UI at all, so it has to be something the host does by itself —
+    /// when a folder is replaced, and when one stops being referenced.
+    pub fn release_persisted_tree(tree_uri: &str) -> Result<(), WinlatorRunnerError> {
+        let tree_uri = tree_uri.to_string();
+        with_env(move |env, activity| {
+            let resolver = content_resolver(env, activity)?;
+            let uri = parse_uri(env, &tree_uri)?;
+            env.call_method(
+                &resolver,
+                "releasePersistableUriPermission",
+                "(Landroid/net/Uri;I)V",
+                &[(&uri).into(), JValue::Int(FLAG_GRANT_READ_URI_PERMISSION)],
+            )?;
+            Ok(())
         })
     }
 
@@ -505,6 +669,94 @@ mod android {
             Self {
                 tree_uri: tree_uri.to_string(),
             }
+        }
+    }
+
+    /// One `Cursor` walked row by row, each row inside its own local reference
+    /// frame. See [`super::MAX_LOCAL_REFERENCES_PER_FRAME`] for why this is not
+    /// a plain loop.
+    struct CursorRows<'env, 'local> {
+        env: &'env mut JNIEnv<'local>,
+        cursor: JObject<'local>,
+    }
+
+    impl DocumentRows for CursorRows<'_, '_> {
+        type Error = jni::errors::Error;
+
+        fn advance(&mut self) -> jni::errors::Result<bool> {
+            self.env
+                .call_method(&self.cursor, "moveToNext", "()Z", &[])?
+                .z()
+        }
+
+        fn enter_row(&mut self) -> jni::errors::Result<()> {
+            // SAFETY: every frame pushed here is popped by `leave_row`, which
+            // `collect_rows` calls on both the success and the failure path, and
+            // nothing local escapes the frame: `read_row` copies each Java
+            // string into a Rust `String` before it returns.
+            unsafe { self.env.push_local_frame(LOCAL_REFERENCES_PER_ROW as i32) }
+        }
+
+        fn leave_row(&mut self) -> jni::errors::Result<()> {
+            // SAFETY: paired with the push in `enter_row`; the frame's result is
+            // deliberately null because no reference is carried out of it.
+            unsafe { self.env.pop_local_frame(&JObject::null()) }.map(|_| ())
+        }
+
+        fn read_row(&mut self) -> jni::errors::Result<Option<TreeDocument>> {
+            let identifier = self
+                .env
+                .call_method(
+                    &self.cursor,
+                    "getString",
+                    "(I)Ljava/lang/String;",
+                    &[JValue::Int(0)],
+                )?
+                .l()?;
+            let display_name = self
+                .env
+                .call_method(
+                    &self.cursor,
+                    "getString",
+                    "(I)Ljava/lang/String;",
+                    &[JValue::Int(1)],
+                )?
+                .l()?;
+            let mime_type = self
+                .env
+                .call_method(
+                    &self.cursor,
+                    "getString",
+                    "(I)Ljava/lang/String;",
+                    &[JValue::Int(2)],
+                )?
+                .l()?;
+            let size = if self
+                .env
+                .call_method(&self.cursor, "isNull", "(I)Z", &[JValue::Int(3)])?
+                .z()?
+            {
+                None
+            } else {
+                u64::try_from(
+                    self.env
+                        .call_method(&self.cursor, "getLong", "(I)J", &[JValue::Int(3)])?
+                        .j()?,
+                )
+                .ok()
+            };
+            let (Some(document_id), Some(display_name)) = (
+                java_string(self.env, &identifier),
+                java_string(self.env, &display_name),
+            ) else {
+                return Ok(None);
+            };
+            Ok(Some(TreeDocument {
+                document_id,
+                display_name,
+                mime_type: java_string(self.env, &mime_type).unwrap_or_default(),
+                size,
+            }))
         }
     }
 
@@ -553,59 +805,12 @@ mod android {
                     return Ok(Vec::new());
                 }
 
-                let mut documents = Vec::new();
-                while env.call_method(&cursor, "moveToNext", "()Z", &[])?.z()? {
-                    let identifier = env
-                        .call_method(
-                            &cursor,
-                            "getString",
-                            "(I)Ljava/lang/String;",
-                            &[JValue::Int(0)],
-                        )?
-                        .l()?;
-                    let display_name = env
-                        .call_method(
-                            &cursor,
-                            "getString",
-                            "(I)Ljava/lang/String;",
-                            &[JValue::Int(1)],
-                        )?
-                        .l()?;
-                    let mime_type = env
-                        .call_method(
-                            &cursor,
-                            "getString",
-                            "(I)Ljava/lang/String;",
-                            &[JValue::Int(2)],
-                        )?
-                        .l()?;
-                    let size = if env
-                        .call_method(&cursor, "isNull", "(I)Z", &[JValue::Int(3)])?
-                        .z()?
-                    {
-                        None
-                    } else {
-                        u64::try_from(
-                            env.call_method(&cursor, "getLong", "(I)J", &[JValue::Int(3)])?
-                                .j()?,
-                        )
-                        .ok()
-                    };
-                    let (Some(identifier), Some(display_name)) = (
-                        java_string(env, &identifier),
-                        java_string(env, &display_name),
-                    ) else {
-                        continue;
-                    };
-                    documents.push(TreeDocument {
-                        document_id: identifier,
-                        display_name,
-                        mime_type: java_string(env, &mime_type).unwrap_or_default(),
-                        size,
-                    });
-                }
-                env.call_method(&cursor, "close", "()V", &[])?;
-                Ok(documents)
+                let mut rows = CursorRows { env, cursor };
+                let documents = collect_rows(&mut rows);
+                // The cursor is closed whether or not the walk finished: one
+                // left open holds the provider's own resources.
+                let _ = rows.env.call_method(&rows.cursor, "close", "()V", &[]);
+                Ok(documents?)
             })
         }
 
@@ -970,6 +1175,191 @@ mod tests {
             grant.path_for("primary:Download/Celeste.desktop").unwrap(),
             Path::new("/storage/emulated/0/Download/Celeste.desktop")
         );
+    }
+
+    /// A folder every app can write into cannot be the export folder: a
+    /// `.desktop` file is a program Winlator will run, and `Download/` is where
+    /// a browser or a messaging app leaves a file with no permission at all.
+    #[test]
+    fn refuses_a_folder_anything_can_drop_a_file_into() {
+        for document_id in [
+            "primary:",
+            "primary:Download",
+            "primary:download",
+            "primary:Downloads",
+            "primary:DCIM",
+            "primary:Documents",
+            "primary:Pictures",
+            "primary:Movies",
+            "primary:Music",
+            "primary:Android",
+            // Nothing under `Android/` is a folder a user exported into, and it
+            // is where other apps keep their own data.
+            "primary:Android/data/com.winlator.cmod/files",
+        ] {
+            let grant = DocumentTreeGrant::parse(
+                &format!(
+                    "content://{EXTERNAL_STORAGE_AUTHORITY}/tree/{}",
+                    encode(document_id)
+                ),
+                Path::new("/storage/emulated/0"),
+            )
+            .unwrap();
+            assert_eq!(
+                grant.refuse_if_too_broad(),
+                Err(WinlatorRunnerError::ExportFolderTooBroad),
+                "accepted {document_id}"
+            );
+        }
+    }
+
+    /// The folder Winlator actually exports into is inside one of those, and so
+    /// is anything else a user would make on purpose.
+    #[test]
+    fn accepts_a_folder_somebody_made_on_purpose() {
+        for document_id in [
+            "primary:Download/Winlator/Frontend",
+            "primary:Download/WinlatorShortcuts",
+            "primary:Games/Winlator",
+            "primary:Winlator",
+        ] {
+            let grant = DocumentTreeGrant::parse(
+                &format!(
+                    "content://{EXTERNAL_STORAGE_AUTHORITY}/tree/{}",
+                    encode(document_id)
+                ),
+                Path::new("/storage/emulated/0"),
+            )
+            .unwrap();
+            assert_eq!(grant.refuse_if_too_broad(), Ok(()), "refused {document_id}");
+        }
+    }
+
+    /// Percent-encode a document identifier the way the picker hands one back.
+    fn encode(document_id: &str) -> String {
+        document_id
+            .chars()
+            .map(|character| match character {
+                ':' => "%3A".to_string(),
+                '/' => "%2F".to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    /// A grant Orivo no longer has a reason to hold is one it should hand back.
+    #[test]
+    fn names_the_grants_no_profile_points_at_any_more() {
+        let persisted = [
+            "content://a/tree/one".to_string(),
+            "content://a/tree/two".to_string(),
+            "content://a/tree/three".to_string(),
+        ];
+        let in_use = ["content://a/tree/two".to_string()];
+        assert_eq!(
+            stale_persisted_trees(&persisted, &in_use),
+            ["content://a/tree/one", "content://a/tree/three"]
+        );
+        assert!(stale_persisted_trees(&persisted, &persisted).is_empty());
+        assert!(stale_persisted_trees(&[], &in_use).is_empty());
+    }
+
+    /// Android 7 aborts the process when a frame holds more than 512 local
+    /// references, and a listing of a few thousand documents is ordinary. This
+    /// counts the references the loop takes and gives back, which is the only
+    /// way to see the discipline without a device.
+    #[test]
+    fn hands_back_every_reference_a_row_took_before_reading_the_next() {
+        /// The scanner's own ceiling: if the loop can survive this many rows it
+        /// can survive any listing the scanner will accept.
+        const ROWS: usize = crate::winlator_runner::DEFAULT_MAX_SCAN_FILES;
+
+        let mut rows = CountedRows::new(ROWS);
+        let documents = collect_rows(&mut rows).unwrap();
+
+        assert_eq!(documents.len(), ROWS);
+        assert_eq!(rows.live, 0, "references were left behind");
+        assert!(
+            rows.peak <= MAX_LOCAL_REFERENCES_PER_FRAME,
+            "held {} references at once, Android 7 aborts above {MAX_LOCAL_REFERENCES_PER_FRAME}",
+            rows.peak
+        );
+    }
+
+    /// A row that fails mid-read must still give its frame back, or one unlucky
+    /// document poisons every listing after it.
+    #[test]
+    fn hands_back_the_frame_of_a_row_that_failed() {
+        let mut rows = CountedRows::new(8);
+        rows.fail_at = Some(4);
+        assert!(collect_rows(&mut rows).is_err());
+        assert_eq!(rows.live, 0);
+    }
+
+    /// A double for the JNI local reference table: it counts what a row takes,
+    /// what a frame gives back, and aborts the way ART does when the table
+    /// overflows.
+    struct CountedRows {
+        rows: usize,
+        read: usize,
+        live: usize,
+        peak: usize,
+        frames: Vec<usize>,
+        fail_at: Option<usize>,
+    }
+
+    impl CountedRows {
+        fn new(rows: usize) -> Self {
+            Self {
+                rows,
+                read: 0,
+                live: 0,
+                peak: 0,
+                frames: Vec::new(),
+                fail_at: None,
+            }
+        }
+    }
+
+    impl DocumentRows for CountedRows {
+        type Error = WinlatorRunnerError;
+
+        fn advance(&mut self) -> Result<bool, Self::Error> {
+            Ok(self.read < self.rows)
+        }
+
+        fn enter_row(&mut self) -> Result<(), Self::Error> {
+            self.frames.push(self.live);
+            Ok(())
+        }
+
+        fn leave_row(&mut self) -> Result<(), Self::Error> {
+            self.live = self.frames.pop().unwrap_or(0);
+            Ok(())
+        }
+
+        fn read_row(&mut self) -> Result<Option<TreeDocument>, Self::Error> {
+            self.read += 1;
+            self.live += LOCAL_REFERENCES_PER_ROW;
+            self.peak = self.peak.max(self.live);
+            if self.live > MAX_LOCAL_REFERENCES_PER_FRAME {
+                // ART does not return an error here, it aborts the process; an
+                // error is the closest a test can come to that.
+                return Err(WinlatorRunnerError::AccessDenied);
+            }
+            if self.fail_at == Some(self.read) {
+                return Err(WinlatorRunnerError::ShortcutMissing);
+            }
+            Ok(Some(TreeDocument {
+                document_id: format!(
+                    "primary:Download/Winlator/Frontend/Game{}.desktop",
+                    self.read
+                ),
+                display_name: format!("Game{}.desktop", self.read),
+                mime_type: "application/octet-stream".into(),
+                size: Some(64),
+            }))
+        }
     }
 
     #[test]
