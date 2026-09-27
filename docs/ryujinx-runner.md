@@ -77,6 +77,17 @@ has to be one here. Two deliberate differences from Ryujinx's own scan:
   folder may not become a door to an ungranted one. So subfolders are not
   imported; allow the folder that holds the files, or make one profile per
   folder.
+- **It never offers a hidden file**, and that is parity with Ryujinx rather than
+  a departure from it: its `EnumerationOptions` sets `RecurseSubdirectories` and
+  `IgnoreInaccessible` but leaves `AttributesToSkip` at the default
+  `Hidden | System`, so a dot‑file never reaches its game list. `host-files` has
+  no such default and reports them, so both the plugin and the host apply the rule
+  themselves. What it costs to get wrong is concrete: on an exFAT or FAT volume —
+  which a shared ROM drive usually is — macOS writes an AppleDouble sidecar
+  `._<name>` beside every file. It carries the dump's own name *and* its `.nsp`
+  suffix, so nothing but the leading dot tells the two apart; it would earn a
+  second card with the same title and the same title id, and Play would hand its
+  four kilobytes to the emulator.
 - **It stops at 256 entries.** `MAX_DIRECTORY_ENTRIES` in `plugin_runtime.rs`
   bounds what *any* plugin may be told about a folder, so a folder with more
   readable entries than that is truncated by name and the rest is invisible.
@@ -87,9 +98,9 @@ has to be one here. Two deliberate differences from Ryujinx's own scan:
 ## The reference is the file name, in hex
 
 The host resolves the game file itself. A plugin returns an opaque external
-reference, and `runner_host::resolve_game_file` matches it against the names it
-read out of the granted folder — the plugin never gets a path and the host never
-joins anything the plugin said onto one.
+reference, and `runner_host::GrantedLibrary` matches it against the names it read
+out of the granted folder — the plugin never gets a path and the host never joins
+anything the plugin said onto one.
 
 That reference has to pass the catalogue's opaque‑id grammar,
 `[A-Za-z0-9._\-:]` (`plugin_manifest::valid_opaque_id`). A Switch dump is
@@ -100,28 +111,52 @@ Super Mario Odyssey [0100000000010000][v0].nsp
 ```
 
 — spaces and square brackets, neither of which the grammar allows. Before this
-lot there was simply no reference a plugin could return for that file, so a
-normally named library imported **nothing**. The reference is therefore the
-entry name **hex‑encoded**: `53757065722…`. Hex is grammar‑safe, injective (so
-it can never name two files) and order‑preserving (so the same encoding works as
-a page cursor). `resolve_game_file` learned that one encoding, beside the plain
-name it already accepted:
+there was simply no reference a plugin could return for that file, so a normally
+named library imported **nothing**. The reference is therefore
 
-- a plain name, or a name without its final extension, still wins — a library
-  that resolved before resolves to the same file now, including when "before"
-  meant "ambiguous, refused";
-- otherwise, the one entry whose name the reference is the hex of;
-- anything matching more than once is refused rather than guessed.
+```
+x:5375706572204d6172696f…
+```
+
+— the literal prefix `x:`, then the entry name in **lower‑case hexadecimal**.
+
+Three properties, and none of them is decoration. A reference is the key of a
+library card (`runner_host::runner_game_id`), so anything that lets one file have
+two references, or one reference mean two files, is not a resolution detail: it
+is a duplicated card, or a card silently re‑pointed at something else the next
+time the library is refreshed.
+
+- **`x:` is a namespace no file name can enter.** `host-files` never reports a
+  name containing `:` (`plugin_runtime::valid_entry_name`), so no identifier a
+  plugin could have learned from a listing begins with it. A plain name and a hex
+  reference therefore cannot describe one file between them — which is why there
+  is no precedence rule here. An earlier draft had one, and precedence is exactly
+  how a file that merely *happened* to be called `6162` could have taken over the
+  card belonging to the file called `ab`.
+- **Lower case is the only spelling.** `char::to_digit(16)` accepts both cases, so
+  a name with *k* hex‑significant bytes would have had 2^k references, and the
+  catalogue keys a card by the reference rather than by the path: every variant
+  would have become its own card for one file.
+- **More than one match is refused, never ranked.** Two granted folders holding
+  the same file name answer one reference, and neither is the obvious choice.
 
 Nothing about the security boundary moves. The reference stays an opaque token,
 the file still comes out of the host's own listing of a granted folder,
-canonicalised and checked to be inside it, and a decoded `../prod.keys` is just
-a string no directory entry is equal to. What widened is *which names a plugin
-can say*.
+canonicalised and checked to be inside it, and a decoded `../prod.keys` is just a
+string no directory entry is equal to.
+
+**A reference can only name what the host could have shown.** `GrantedLibrary`
+lists only entries that pass `valid_entry_name` and do not begin with a dot, and
+`decoded_entry_name` holds a decoded name to the same rule. A plain identifier
+already could not reach a hidden file — the grammar makes an id start with an
+alphanumeric — so this is that rule restated for the hex form rather than a new
+policy. It is also what stops the AppleDouble problem below from being reachable
+by naming it directly.
 
 The plugin refuses a reference it could not have issued before it prepares a
-launch at all — odd length, a non‑hex digit, bytes that are not UTF‑8, or a name
-with no extension Ryujinx opens — which costs no directory scan and keeps
+launch at all — a missing prefix, an odd length, an upper‑case or non‑hex digit,
+bytes that are not UTF‑8, a name it could never have listed, or a name with no
+extension Ryujinx opens — which costs no directory scan and keeps
 `prepare-launch` inside the interactive budget.
 
 ## The cursor is a position, not a name
@@ -138,6 +173,13 @@ beginning, which is how a library that gained files is noticed at all. An
 interrupted import resumes from the cursor `commit_resolved_page` persisted
 beside the page it describes.
 
+A page is also *one* reading of the granted folders. Resolution used to walk them
+again for every candidate, so a page of fifty cost fifty directory reads of the
+same folder — measured at roughly five times the per‑game catalogue write it was
+supposed to be dominated by. Besides being faster, that makes a page internally
+consistent: its second half can no longer disagree with its first about what is
+in the folder.
+
 ## The title, and the title id
 
 Both come from the file name. Nothing is read out of the file, so there is no
@@ -150,9 +192,21 @@ NACP, no icon and no per‑region name — see **Seams** below.
 | `Celeste (USA).nsp` | `Celeste (USA)` | `Nintendo Switch` |
 | `hb-launcher.nro` | `hb-launcher` | `Nintendo Switch` |
 
+| ` .nsp` | `.nsp` | `Nintendo Switch` |
+| `[0100000000010000].nsp` | `[0100000000010000]` | `Nintendo Switch · 0100000000010000` |
+
 Square‑bracket groups come off, because that is where a dump puts its title id
 and its version. Parentheses stay, because that is where the region usually is
 and a region is part of what tells two dumps apart.
+
+The last two rows are fallbacks, and they exist because of what an empty title
+costs. The host refuses a candidate whose title is blank
+(`plugin_runtime`'s `sanitise_text`) and refuses **the whole page** with it, and
+an import retries the same page every time — so one file called ` .nsp`, or named
+with a no‑break space or U+3000, used to stop every game behind it, and since it
+sorts first, "behind it" meant all of them. So: the cleaned title, else the stem,
+else the whole file name, and only if even that is blank is the one file dropped
+instead of the page.
 
 A title id is recognised only as a bracketed group of exactly sixteen
 hexadecimal digits, and it is upper‑cased — sixteen is specific enough that
@@ -217,10 +271,26 @@ allowlist.
 Rebuilding the component:
 
 ```sh
-rustup target add wasm32-unknown-unknown
+rustup toolchain install 1.98.1 --target wasm32-unknown-unknown
 cargo install wasm-tools --locked --version 1.246.2
 plugins/ryujinx/build.sh     # prints component.wasm's sha256 and byte size
 ```
+
+Three things make that digest reproducible rather than a local accident, and
+`build.sh` applies or verifies all three rather than describing them:
+
+- **the compiler is pinned**, by `plugins/ryujinx/rust-toolchain.toml`. `stable`
+  floats, so the artefact would change six weeks later with no source change to
+  explain it; the script refuses to run under any other version. The pin is
+  scoped to this crate — it is its own workspace — so nothing else in Orivo is
+  held to it.
+- **`wasm-tools`' version is checked**, not just its presence. Its component
+  encoding has to match the host's wasmtime, and a different release changes the
+  bytes.
+- **absolute paths are remapped** (`--remap-path-prefix` for the toolchain's own
+  sources, the cargo registry and the crate directory), so the artefact does not
+  carry whoever built it. The script greps the result for `$HOME` afterwards,
+  because a remap that quietly stopped working would be invisible in the digest.
 
 Paste both into `package/manifest.json`. `cargo test` never runs that script: it
 reads the committed `component.wasm` and checks the digest the manifest declares,
@@ -270,12 +340,14 @@ That check is the user's, and it is four steps:
 - **No subfolders**, per the listing rule above.
 - **No file is read**, so no NACP title, no icon, no version, no DLC or update
   awareness, and a file whose name carries no title id has none.
-- **Names longer than 128 bytes** cannot be addressed: hex doubles every byte
-  and a reference may be 256. They are counted in the plugin's own journal line.
-- **Two files whose names differ only outside the grammar** — `Game A.nsp` and
-  `Game-A.nsp` — are distinct references and resolve distinctly; but two files
-  with the *same* name in two granted folders of one profile are ambiguous and
-  neither is imported, which is `resolve_game_file`'s existing rule.
+- **Names longer than 127 bytes** cannot be addressed: hex spends two digits per
+  byte inside the 256 a reference may be, minus the `x:` prefix. They are counted
+  in the plugin's own journal line.
+- **Two files with the same name in two granted folders of one profile** are
+  ambiguous and neither is imported, which is the resolver's existing rule.
+  Names that differ at all — including only outside the grammar, `Game A.nsp`
+  against `Game-A.nsp` — are distinct references and resolve distinctly, because
+  hex is injective.
 - **`validate-profile` is nearly vacuous**, because the v1 `runner-profile`
   record is an id and a display name. The plugin refuses an empty one and
   nothing else: the application and the folders are the host's to validate, and

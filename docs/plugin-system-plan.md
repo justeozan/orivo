@@ -291,12 +291,22 @@ La référence externe qu’un plugin rend doit passer la grammaire d’id opaqu
 (`[A-Za-z0-9._\-:]`), et un dump Switch s’appelle par convention
 `Titre [0100…][v0].nsp` — espaces et crochets. Aucune référence n’existait donc
 pour ces fichiers, et une bibliothèque nommée normalement importait zéro jeu.
-`resolve_game_file` accepte désormais, à côté du nom en clair qui garde la
-priorité, **le nom d’entrée encodé en hexadécimal** : injectif, ordonné (donc
-utilisable comme curseur) et sans rien changer à la frontière — l’id reste
-opaque, le fichier sort toujours du listing du host dans un dossier accordé, et
-rien de ce que le plugin dit n’est joint à un chemin. Ce qui s’élargit, c’est
-seulement *quels noms un plugin peut prononcer*. Élargir `runner-profile` ou
+Le résolveur accepte désormais, à côté du nom en clair, **`x:` suivi du nom
+d’entrée en hexadécimal minuscule**, sans rien changer à la frontière — l’id
+reste opaque, le fichier sort toujours du listing du host dans un dossier
+accordé, et rien de ce que le plugin dit n’est joint à un chemin. Ce qui
+s’élargit, c’est seulement *quels noms un plugin peut prononcer*. Les trois
+détails de cette forme sont là parce qu’une référence est la clé d’une carte de
+bibliothèque (`runner_game_id`) : `x:` est un espace de noms qu’aucun nom de
+fichier ne peut atteindre (le host ne liste jamais un nom contenant `:`), donc
+les deux formes ne peuvent pas décrire un même fichier et il n’y a aucune
+priorité à arbitrer ; la casse minuscule est la seule orthographe, sinon un
+fichier aurait eu 2^k références et donc 2^k cartes ; et plus d’une
+correspondance est refusée au lieu d’être classée. Une référence ne peut nommer
+que ce que le host aurait pu montrer : ni nom caché — le sidecar AppleDouble
+`._<nom>` qu’écrit macOS sur une clé exFAT porte le même suffixe que le dump
+qu’il double — ni nom que `valid_entry_name` refuserait. Une page ne lit
+désormais ses dossiers accordés qu’une fois, au lieu d’une fois par candidat. Élargir `runner-profile` ou
 ajouter un mode de lancement reste une décision ouverte, hors de ce palier :
 `docs/ryujinx-runner.md` dit ce que Ryujinx accepte, ce que le contrat v1 ne
 peut pas exprimer (plein écran, dossier de données) et ce que publier ce plugin
