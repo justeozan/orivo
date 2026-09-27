@@ -485,6 +485,51 @@ impl GrantedDirectory {
         }
     }
 
+    /// What one entry of this directory is, without opening it.
+    ///
+    /// A listing needs the kind, the size and nothing else, and opening is a
+    /// different question from describing: an entry Orivo has no permission to
+    /// open still exists, a folder cannot be opened on Windows without
+    /// `FILE_FLAG_BACKUP_SEMANTICS`, and a cloud-backed file may be *downloaded*
+    /// by the attempt. Up to 4,096 of those per host call, inside a call nothing
+    /// can interrupt, is the wrong shape for a listing whatever it returns.
+    fn entry_facts(&self, name: &str) -> std::io::Result<EntryFacts> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::AsRawFd;
+
+            let raw_name = CString::new(name)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            let mut raw = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // Safety: `handle` is an open directory descriptor borrowed for the
+            // length of the call, `raw_name` is NUL-terminated, and `fstatat`
+            // either fills `raw` or returns non-zero.
+            let answered = unsafe {
+                libc::fstatat(
+                    self.handle.as_raw_fd(),
+                    raw_name.as_ptr(),
+                    raw.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if answered != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Safety: `fstatat` returned zero, so `raw` is initialised.
+            Ok(EntryFacts::of_stat(&unsafe { raw.assume_init() }))
+        }
+        #[cfg(not(unix))]
+        {
+            // No handle to be relative to here — see the note on `open`. The link
+            // count this cannot reach is not used by a listing.
+            self.path
+                .join(name)
+                .symlink_metadata()
+                .map(|metadata| EntryFacts::of(&metadata))
+        }
+    }
+
     /// Opens one entry of this directory, relative to the handle.
     ///
     /// `O_NOFOLLOW` refuses a symbolic link instead of resolving it, and
@@ -519,9 +564,17 @@ impl GrantedDirectory {
         #[cfg(not(unix))]
         {
             use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+            // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be opened at
+            // all (`std/src/sys/fs/windows/dir.rs`). Without it, asking for one
+            // fails at the open and the caller cannot tell "that is a folder"
+            // from "that is gone" — so the refusal below is the kind check on the
+            // handle, as it is on Unix, rather than an accident of the flags.
             fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
                 .open(self.path.join(name))
         }
     }
@@ -1033,25 +1086,22 @@ impl host_files::Host for HostState {
             }
             // `read_dir` walks a path, and a path is what a swapped parent
             // redirects. The name is therefore only a suggestion: every fact
-            // reported below is asked of a descriptor opened relative to the
-            // granted directory's own handle, so an entry the approved folder
-            // does not have cannot be listed at all, and a symbolic link is
-            // refused by the open rather than described. The worst a swap can
-            // still do is *hide* entries, which is not a way out of the grant.
-            let Ok(opened) = directory.open_entry(&name) else {
+            // reported below is asked *of the granted directory's own handle*, so
+            // an entry the approved folder does not have cannot be listed at all.
+            // The worst a swap can still do is hide entries, which is not a way
+            // out of the grant.
+            let Ok(facts) = directory.entry_facts(&name) else {
                 continue;
             };
-            let Ok(metadata) = opened.metadata() else {
+            // A link is skipped rather than resolved, so a granted folder cannot
+            // be used as a door to an ungranted one.
+            if facts.symlink {
                 continue;
-            };
+            }
             listing.push(host_files::DirectoryEntry {
                 name,
-                byte_size: if metadata.is_file() {
-                    metadata.len()
-                } else {
-                    0
-                },
-                directory: metadata.is_dir(),
+                byte_size: if facts.file { facts.byte_size } else { 0 },
+                directory: facts.directory,
             });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1214,6 +1264,8 @@ fn is_windows_device_name(resolved: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EntryFacts {
     file: bool,
+    directory: bool,
+    symlink: bool,
     byte_size: u64,
     /// How many names this file answers to. More than one is a hard link.
     links: u64,
@@ -1221,12 +1273,16 @@ struct EntryFacts {
 }
 
 impl EntryFacts {
+    /// From metadata the host already holds — a descriptor it opened, or, on
+    /// Windows, a path it asked about without following a link.
     fn of(metadata: &fs::Metadata) -> Self {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             Self {
                 file: metadata.is_file(),
+                directory: metadata.is_dir(),
+                symlink: metadata.file_type().is_symlink(),
                 byte_size: metadata.len(),
                 links: metadata.nlink(),
                 owner: metadata.uid(),
@@ -1234,15 +1290,32 @@ impl EntryFacts {
         }
         #[cfg(not(unix))]
         {
-            // Windows reports a link count only through a separate query and has
-            // no uid to compare, so the ownership rule below never fires there.
-            // Said out loud rather than silently approximated.
+            // Windows has no uid, and the link count is only reachable through a
+            // handle query, which a listing deliberately does not do. Said out
+            // loud rather than silently approximated: `read_file` fills both in
+            // from the handle it opens.
             Self {
                 file: metadata.is_file(),
+                directory: metadata.is_dir(),
+                symlink: metadata.file_type().is_symlink(),
                 byte_size: metadata.len(),
                 links: 1,
                 owner: 0,
             }
+        }
+    }
+
+    /// From a `stat` the host asked for without opening anything.
+    #[cfg(unix)]
+    fn of_stat(raw: &libc::stat) -> Self {
+        let kind = raw.st_mode & libc::S_IFMT;
+        Self {
+            file: kind == libc::S_IFREG,
+            directory: kind == libc::S_IFDIR,
+            symlink: kind == libc::S_IFLNK,
+            byte_size: raw.st_size.max(0) as u64,
+            links: u64::from(raw.st_nlink),
+            owner: raw.st_uid,
         }
     }
 }
@@ -2551,7 +2624,7 @@ mod tests {
     /// target and no component tool; `build.sh` beside it is how it changes.
     const FIXTURE: &[u8] = include_bytes!("../fixtures/orivo-runner-fixture.wasm");
     /// Regenerated by `build.sh`, which prints this digest.
-    const FIXTURE_SHA256: &str = "36ba4a71ad5a7973dd7e54cd702eb1926d5c3fa2f1268cf25b2cc8a4802d7dde";
+    const FIXTURE_SHA256: &str = "885587f0ac0d4ecd7066747ca90bddc0d3508224e64447947bedba0c1389b6ea";
     /// A component whose only import is WASI. Also built by `build.sh`, from
     /// hand-written component text rather than a second Rust guest.
     const WASI_IMPORT: &[u8] = include_bytes!("../fixtures/wasi-import.wasm");
@@ -3313,6 +3386,8 @@ mod tests {
         let theirs = ours.wrapping_add(1);
         let entry = |links, owner| EntryFacts {
             file: true,
+            directory: false,
+            symlink: false,
             byte_size: 32,
             links,
             owner,
@@ -3426,6 +3501,58 @@ mod tests {
             page.games.iter().all(|game| game.external_id != "zeta"),
             "a symlink out of the grant was listed"
         );
+    }
+
+    /// A listing says what an entry *is*. Opening each one to find out was how
+    /// this was written, and opening is not the same question: an entry Orivo has
+    /// no permission to open still exists, and on Windows a folder cannot be
+    /// opened at all without `FILE_FLAG_BACKUP_SEMANTICS`, so every subdirectory
+    /// silently left the listing there. Opening is also the expensive answer — up
+    /// to 4,096 of them per call on a network share or a cloud-backed folder,
+    /// inside a host call nothing can interrupt.
+    ///
+    /// The unopenable file is how that is reproducible here: `stat` describes it,
+    /// `open` refuses it. The folder beside it is the Windows half, in the one
+    /// form this platform can check.
+    #[cfg(unix)]
+    #[test]
+    fn a_listing_describes_entries_it_does_not_open() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if host_account() == 0 {
+            // Root opens anything, so the interesting entry would not be
+            // interesting. Better skipped than passing for the wrong reason.
+            return;
+        }
+        let library = FixtureLibrary::new("census");
+        fs::write(library.games.join("locked.rom"), b"Locked\n").unwrap();
+        fs::set_permissions(
+            library.games.join("locked.rom"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        fs::create_dir(library.games.join("nested")).unwrap();
+
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:census").is_ok());
+        let census = harness
+            .runtime
+            .journal()
+            .plugin_messages()
+            .into_iter()
+            .map(|entry| entry.detail)
+            .find(|detail| detail.contains("census n="))
+            .expect("the fixture reported no census");
+
+        assert!(
+            census.contains("locked.rom:file:7"),
+            "an entry the host cannot open was left out of the listing: {census}"
+        );
+        assert!(
+            census.contains("nested:dir:0"),
+            "a subdirectory was not described as one: {census}"
+        );
+        assert!(census.contains("alpha.rom:file:"), "{census}");
     }
 
     #[test]

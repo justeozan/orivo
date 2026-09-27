@@ -18,6 +18,9 @@
 //! | `fixture:bad-runner`  | claims to be preparing another runner's launch     |
 //! | `fixture:chatty`      | floods the host journal after earning a refusal    |
 //! | `fixture:shout`       | logs messages far larger than the host will keep   |
+//! | `fixture:megashout`   | hands one host call megabytes of argument          |
+//! | `fixture:nag`         | earns the same refusal over and over               |
+//! | `fixture:census`      | reports what the listing said, entry by entry      |
 //! | `fixture:churn`       | spends the whole call inside host calls            |
 //! | `fixture:bury`        | earns a refusal, then churns to evict it           |
 //! | `fixture:bad-id`      | returns a reference that is really a path          |
@@ -268,6 +271,37 @@ fn misbehave(selector: &str) -> Result<(), PluginError> {
                 host_journal::log(JournalLevel::Info, &shout);
                 sent += 1;
             }
+        }
+        // One host call with an argument far larger than any message: what the
+        // host keeps is bounded, what wasmtime *copies* before the host is
+        // reached is a separate budget, and this is what spends it.
+        "fixture:megashout" => {
+            let shout = "x".repeat(4 * 1024 * 1024);
+            host_journal::log(JournalLevel::Info, &shout);
+        }
+        // The same refusal, as many times as the budget allows. The host's record
+        // of it must be one entry and a count rather than one entry per attempt.
+        "fixture:nag" => {
+            let mut sent = 0u32;
+            while sent < 400 {
+                let _ = host_files::list_directory("fixture-other");
+                sent += 1;
+            }
+        }
+        // Repeats the listing back through the journal, so a test can assert on
+        // what the host said an entry *is* without opening it itself.
+        "fixture:census" => {
+            let entries = host_files::list_directory(GAMES_GRANT)?;
+            let mut census = format!("census n={}", entries.len());
+            for entry in &entries {
+                census.push_str(&format!(
+                    " {}:{}:{}",
+                    entry.name,
+                    if entry.directory { "dir" } else { "file" },
+                    entry.byte_size
+                ));
+            }
+            host_journal::log(JournalLevel::Info, &census);
         }
         // Spends the whole invocation inside host calls rather than computing.
         // Fuel barely moves; only a clock notices this.

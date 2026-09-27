@@ -53,6 +53,9 @@ the nominal path and every refusal:
 | `fixture:fail` | returns a plain WIT error |
 | `fixture:chatty` | earns a refusal, swallows it, then floods the journal |
 | `fixture:shout` | logs messages far larger than the host will keep |
+| `fixture:megashout` | hands one host call a four-megabyte argument |
+| `fixture:nag` | earns the same refusal four hundred times |
+| `fixture:census` | reports the listing back, entry by entry, through the journal |
 | `fixture:churn` | spends the whole call inside host calls, computing almost nothing |
 | `fixture:bury` | earns a refusal, then churns until the ring should have lost it |
 | `fixture:read-NAME` | reads `NAME.rom` by name, whatever the host planted there |
