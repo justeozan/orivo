@@ -84,7 +84,7 @@ qu'un retour anticipé sur liste vide).
 | `Catalog::load_with_migration` (lecture + parse JSON) | 90 µs | 418 µs | 4,6 ms |
 | `Catalog::save_atomically` (sérialisation + écriture atomique) | 554 µs | 1,4 ms | 11,5 ms |
 | `auto_apply_wine_to_direct_games` | 26,2 ms\* | 22,5 ms\* | 25,9 ms\* |
-| `adopt_exported_winlator_shortcuts`\*\* | — | — | — |
+| ~~`auto_apply_winlator_shortcuts`~~\*\* | — | — | — |
 
 \* Ce chiffre ne dépend pas de `n` : c'est le coût fixe d'une sonde disque
 (`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
@@ -96,13 +96,12 @@ concurrents) : à surveiller si ce chiffre revient sur une machine calme, mais
 pas traité comme une régression ici.
 
 \*\* Cette ligne mesurait `auto_apply_winlator_shortcuts` — un no-op vérifié
-hors Android (`cfg!(target_os = "android")`), à 0 ns quelle que soit `n` —
-tant que la passe tournait dans `AppState::load`. Depuis M1 (#44) elle tourne
-en tâche de fond après le premier rendu : ce n'est plus un coût de démarrage.
-Le banc la mesure toujours, sous le nom de la fonction qui fait le travail, et
-s'arrête désormais sur un `is_dir()` du dossier d'export plutôt que sur un
-`cfg!` — quelques microsecondes au lieu de zéro, hors du chemin de démarrage.
-Les chiffres seront repris au prochain passage du banc, sur une machine calme.
+hors Android (`cfg!(target_os = "android")`), à 0 ns quelle que soit `n` — tant
+que la passe tournait dans `AppState::load`. Depuis M1 (#44) elle n'y tourne
+plus du tout : elle est passée en tâche de fond après le premier rendu, ne lit
+que le dossier que l'utilisateur a connecté par SAF, et n'écrit rien. Le banc
+ne la mesure donc plus ici, faute de pouvoir synthétiser un grant ; le coût de
+démarrage qu'elle représentait est zéro par construction.
 
 **Lecture :** le parse/sérialisation JSON croît linéairement et reste sous la
 milliseconde jusqu'à 1 000 jeux, environ 4-12 ms à 10 000 — largement sous un

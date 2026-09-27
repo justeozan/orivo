@@ -136,6 +136,7 @@ pub enum WinlatorRunnerError {
     /// into a path — but all three carry their sentence everywhere, so a desktop
     /// build cannot drift out of sync with what a device says.
     ExportFolderUnsupported,
+    ExportFolderTooBroad,
     ExportFolderNotConnected,
     ExportFolderAccessLost,
 }
@@ -179,6 +180,14 @@ impl std::fmt::Display for WinlatorRunnerError {
             Self::LaunchFailed => "Winlator could not start this game. Try again.",
             Self::ExportFolderUnsupported => {
                 "Orivo can only read a folder in this device's own storage. Choose the folder Winlator exports its shortcuts into."
+            }
+            // The one sentence that names a path, because it is the one the
+            // user has to go and find. It is the constant, not a copy of it.
+            Self::ExportFolderTooBroad => {
+                return write!(
+                    formatter,
+                    "That folder is one every app can drop files into. Choose the folder Winlator exports its shortcuts into — {DEFAULT_FRONTEND_SHORTCUT_DIRECTORY} by default."
+                );
             }
             Self::ExportFolderNotConnected => {
                 "Connect the folder Winlator exports its shortcuts into, then try again."
@@ -555,6 +564,11 @@ fn document_tree_source_with(
             return Err(WinlatorRunnerError::ExportFolderAccessLost);
         }
         let grant = DocumentTreeGrant::parse(tree_uri, external_storage_root)?;
+        // Re-checked on every use, not only when the folder was picked: a grant
+        // persisted by an older build, or one whose folder turned out to be a
+        // drop folder, must stop being read rather than be trusted because it is
+        // already in the catalog.
+        grant.refuse_if_too_broad()?;
         source = source.with_tree(grant, reader(tree_uri));
     }
     Ok(source)
@@ -569,6 +583,7 @@ fn document_tree_source_with(
 pub fn grant_for_picked_folder(tree_uri: &str) -> Result<DocumentTreeGrant, WinlatorRunnerError> {
     let external_storage_root = crate::winlator_saf::external_storage_root()?;
     let grant = DocumentTreeGrant::parse(tree_uri, &external_storage_root)?;
+    grant.refuse_if_too_broad()?;
     if !crate::winlator_saf::persisted_read_tree_uris()?
         .iter()
         .any(|granted| granted == grant.tree_uri())
@@ -2284,6 +2299,44 @@ mod tests {
                     |_| Box::new(FakeDocumentTree::new(FRONTEND_DOCUMENT)),
                 )
                 .is_ok()
+            );
+        }
+
+        /// Every use of a grant re-checks how broad it is, not only the moment
+        /// it was picked: a grant persisted by an older build, or one whose
+        /// folder is a drop folder, must stop being read rather than be trusted
+        /// because it is already in the catalog.
+        #[test]
+        fn refuses_to_read_a_grant_on_a_folder_anything_can_write_into() {
+            let mut profile = granted_profile();
+            for tree_uri in [
+                "content://com.android.externalstorage.documents/tree/primary%3A",
+                "content://com.android.externalstorage.documents/tree/primary%3ADownload",
+                "content://com.android.externalstorage.documents/tree/primary%3ADCIM",
+            ] {
+                profile.shortcut_trees = vec![tree_uri.into()];
+                assert_eq!(
+                    document_tree_source_with(
+                        &profile,
+                        Path::new(EXTERNAL_ROOT),
+                        &profile.shortcut_trees,
+                        |_| Box::new(FakeDocumentTree::default()),
+                    )
+                    .err(),
+                    Some(WinlatorRunnerError::ExportFolderTooBroad),
+                    "read {tree_uri}"
+                );
+            }
+        }
+
+        /// The sentence has to name the folder to look for, and name it once:
+        /// the constant is the only place that path is written.
+        #[test]
+        fn the_refusal_names_winlators_own_export_folder() {
+            assert!(
+                WinlatorRunnerError::ExportFolderTooBroad
+                    .to_string()
+                    .contains(DEFAULT_FRONTEND_SHORTCUT_DIRECTORY)
             );
         }
 

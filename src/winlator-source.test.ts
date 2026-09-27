@@ -3,9 +3,19 @@ import { describe, expect, it } from "vitest";
 import {
   isWinlatorHost,
   normaliseWinlatorExportFolder,
-  readWinlatorAdoptedCount,
-  winlatorAdoptionToast,
+  normaliseWinlatorImportResult,
+  winlatorReviewList,
+  winlatorReviewPrompt,
+  winlatorShortcutsToOffer,
+  winlatorWaitingToast,
 } from "./winlator-source";
+
+const folder = (found: unknown[]): unknown => ({
+  connected: true,
+  folderLabel: "Frontend",
+  found,
+  message: "Connected Frontend.",
+});
 
 describe("isWinlatorHost", () => {
   it("offers the entry point on Android and nowhere else", () => {
@@ -26,64 +36,109 @@ describe("isWinlatorHost", () => {
 });
 
 describe("normaliseWinlatorExportFolder", () => {
-  it("reads a connected folder", () => {
+  it("reads a connected folder and what is in it", () => {
     expect(
-      normaliseWinlatorExportFolder({
-        connected: true,
-        folderLabel: "Frontend",
-        adopted: 2,
-        message: "Connected Frontend. 2 Winlator games are in your library.",
-      }),
+      normaliseWinlatorExportFolder(
+        folder([
+          { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
+          { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+        ]),
+      ),
     ).toEqual({
       connected: true,
       folderLabel: "Frontend",
-      adopted: 2,
-      message: "Connected Frontend. 2 Winlator games are in your library.",
+      found: [
+        { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
+        { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+      ],
+      message: "Connected Frontend.",
     });
   });
 
-  it("reads a chooser the user backed out of", () => {
-    const answer = normaliseWinlatorExportFolder({
-      connected: false,
-      folderLabel: null,
-      adopted: 0,
-      message: "No folder was connected.",
-    });
-    expect(answer?.connected).toBe(false);
-    expect(answer?.folderLabel).toBe(null);
+  it("drops a shortcut it cannot read rather than offering a nameless one", () => {
+    const answer = normaliseWinlatorExportFolder(
+      folder([
+        { gameRef: "shortcut:aa", title: "Celeste" },
+        { gameRef: "", title: "No reference" },
+        { gameRef: "shortcut:cc", title: "" },
+        "not a shortcut",
+        null,
+      ]),
+    );
+    expect(answer?.found).toEqual([
+      { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
+    ]);
   });
 
   it("refuses an answer it cannot read rather than inventing a cheerful one", () => {
-    for (const payload of [
-      null,
-      "connected",
-      {},
-      { connected: "yes", message: "hello" },
-      { connected: true },
-    ]) {
+    for (const payload of [null, "connected", {}, { connected: "yes", message: "hello" }, { connected: true }]) {
       expect(normaliseWinlatorExportFolder(payload)).toBe(null);
-    }
-  });
-
-  it("does not let a broken count become a negative or fractional one", () => {
-    for (const adopted of [-3, 1.5, Number.NaN, "2"]) {
-      expect(
-        normaliseWinlatorExportFolder({ connected: true, adopted, message: "Connected." })?.adopted,
-      ).toBe(0);
     }
   });
 });
 
-describe("the background adoption pass", () => {
-  it("only speaks up when it actually found something", () => {
-    expect(readWinlatorAdoptedCount({ adopted: 3 })).toBe(3);
-    for (const payload of [null, {}, { adopted: 0 }, { adopted: -1 }, { adopted: "3" }]) {
-      expect(readWinlatorAdoptedCount(payload)).toBe(null);
-    }
+describe("what the user is asked", () => {
+  it("offers only the shortcuts that are not already cards", () => {
+    const answer = normaliseWinlatorExportFolder(
+      folder([
+        { gameRef: "shortcut:aa", title: "Celeste", alreadyImported: false },
+        { gameRef: "shortcut:bb", title: "Braid", alreadyImported: true },
+      ]),
+    )!;
+    expect(winlatorShortcutsToOffer(answer).map((shortcut) => shortcut.title)).toEqual(["Celeste"]);
   });
 
-  it("counts in the singular when there is one game", () => {
-    expect(winlatorAdoptionToast(1)).toBe("One Winlator game was added to your library.");
-    expect(winlatorAdoptionToast(4)).toBe("4 Winlator games were added to your library.");
+  // A `.desktop` file runs a command, so the confirmation names what it would
+  // add: a count alone hides the one thing the user is vouching for.
+  it("names the games instead of only counting them", () => {
+    const shortcuts = [
+      { gameRef: "a", title: "Celeste", alreadyImported: false },
+      { gameRef: "b", title: "Braid", alreadyImported: false },
+    ];
+    expect(winlatorReviewPrompt(shortcuts)).toBe("Add these 2 Winlator games to your library?");
+    expect(winlatorReviewPrompt(shortcuts.slice(0, 1))).toBe("Add “Celeste” to your library?");
+    expect(winlatorReviewList(shortcuts).titles).toEqual(["Celeste", "Braid"]);
+  });
+
+  it("keeps a long list readable without hiding that it is long", () => {
+    const shortcuts = Array.from({ length: 9 }, (_, index) => ({
+      gameRef: `shortcut:${index}`,
+      title: `Game ${index}`,
+      alreadyImported: false,
+    }));
+    const { titles, remaining } = winlatorReviewList(shortcuts);
+    expect(titles).toHaveLength(6);
+    expect(remaining).toBe(3);
+  });
+});
+
+describe("the background pass", () => {
+  it("invites the user to look instead of announcing a change", () => {
+    expect(winlatorWaitingToast({ pending: 2, changed: 0 })).toBe(
+      "Winlator has 2 new shortcuts. Open Sources to review them.",
+    );
+    expect(winlatorWaitingToast({ pending: 1, changed: 1 })).toBe(
+      "Winlator has one new shortcut and one that changed. Open Sources to review them.",
+    );
+  });
+
+  it("stays silent when there is nothing waiting", () => {
+    for (const payload of [null, {}, { pending: 0, changed: 0 }, { pending: -1 }, { pending: "2" }]) {
+      expect(winlatorWaitingToast(payload)).toBe(null);
+    }
+  });
+});
+
+describe("normaliseWinlatorImportResult", () => {
+  it("reads what was added", () => {
+    expect(
+      normaliseWinlatorImportResult({ importedIds: ["runner:a", 7, ""], message: "One added." }),
+    ).toEqual({ importedIds: ["runner:a"], message: "One added." });
+  });
+
+  it("refuses an answer it cannot read", () => {
+    for (const payload of [null, "added", {}, { importedIds: ["a"] }]) {
+      expect(normaliseWinlatorImportResult(payload)).toBe(null);
+    }
   });
 });
