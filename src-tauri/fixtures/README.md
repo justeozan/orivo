@@ -150,7 +150,9 @@ Windows used to be three gaps and is now one. `plugin_runtime`'s tests run on
 `windows-latest` in CI (`Test the plugin host (Windows)`), so what is described
 here as closed has been *executed* there rather than reasoned about.
 
-Closed, and asserted on the runner:
+Closed. Each of these is executed on the runner; where a bullet's *mechanism*
+cannot be produced there — a real filter driver serving a placeholder is the one
+that cannot — the bullet says so rather than letting the heading imply otherwise:
 
 - **A granted folder is a handle on Windows too.** `NtCreateFile` with the
   directory handle as `RootDirectory` is the `openat` equivalent, the same pattern
@@ -171,8 +173,10 @@ Closed, and asserted on the runner:
   that has not been downloaded, a deduplicated or WOF-compressed file. Refusing all
   of them alike made a granted folder under OneDrive-managed Documents look empty
   to a plugin, and every read in it fail. A non-redirecting reparse point is now
-  reopened relative to the handle *following* it, so the filter driver serves the
-  file the user actually has.
+  reopened relative to the handle *following* it, which is what lets a filter
+  driver serve the file the user actually has. Executed on the runner as far as
+  the listing goes; the served-by-a-real-driver half is the gap named under
+  "Still open", because no runner here has a driver to do the serving.
 - **Not every non-surrogate tag is followed, and the two opens that follow one
   are compared.** Clearing the name-surrogate bit says a tag is not a *name*; it
   says nothing about who serves the bytes behind it, and single-instance storage
@@ -196,21 +200,30 @@ Closed, and asserted on the runner:
   is what lets the entry be replaced while it is still held) is refused rather
   than trusted (`reparse-entry-changed`).
 
-  All three of the fallback (nothing claims the tag), the identity match (a
-  redirection to the *same* file), and the identity mismatch (a redirection
-  to a different one) are asserted against a tag `reparse_tag_is_followed`
-  actually trusts, not against `plant_unrecognised_reparse_point`'s stand-in —
-  `IO_REPARSE_TAG_CLOUD`, hand-planted the same way `IO_REPARSE_TAG_DEDUP`
-  proved plantable before dedup came off the list. `compact /c /exe:LZX` was
-  tried first, on the theory that its own compression-ratio report meant a
-  real WOF placeholder had been made; no size or name tried on this runner's
-  volume ever produced one, `compact`'s ratio and `is_reparse_point`'s answer
-  never once agreeing. Nothing here is registered to claim `IO_REPARSE_TAG_CLOUD`
-  either, so every read through it lands on the fallback rather than a real
-  filter's data — a real cloud provider or a WOF-capable volume, neither
-  available on any runner this file has run on, is what would exercise the
-  *other* half of a successful second open, and that remains open, stated
-  here rather than implied by a green tick.
+  Three of the four answers `open_entry_for_reading` can reach are asserted on
+  the runner, against a tag `reparse_tag_is_followed` actually trusts rather than
+  `plant_unrecognised_reparse_point`'s stand-in: the fallback (nothing claims the
+  tag, the first handle stands), the identity *match* (the seam takes the reparse
+  point off the same file, so the second open reaches it and the two `FileIdInfo`
+  answers agree), and the identity *mismatch* (the seam points the name at
+  another file). Each is asserted on which answer was reached and not on the
+  bytes, because the fallback and the match return the same bytes from the same
+  file — a byte comparison would pass either way, and did, while the match was
+  in fact unreachable.
+
+  The trusted tag is `IO_REPARSE_TAG_CLOUD`, hand-planted through
+  `FSCTL_SET_REPARSE_POINT` the same way `IO_REPARSE_TAG_DEDUP` proved plantable
+  before dedup came off the list. Nothing on the runner is registered to *claim*
+  it, which is what makes the fallback reachable and the served-by-a-driver path
+  not; see "Still open". `compact /c /exe:LZX` was tried before it, and what the
+  runner actually shows is narrower than an earlier version of this file claimed:
+  after compacting, no attribute query sees a reparse point. Whether that is
+  because none was made or because wof.sys hides the one it owns is asked
+  directly — `FSCTL_GET_EXTERNAL_BACKING`, production's own `reparse_tag`, and
+  the attribute, all three printed by
+  `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` — and
+  whichever it is, that test asserts the thing that matters either way: a
+  compacted file reads back byte for byte.
 - **A listing still opens nothing that matters.** Entries are opened for
   `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
   another opener's share mode. Only `read_file` follows a placeholder, which is
@@ -218,19 +231,15 @@ Closed, and asserted on the runner:
 
 Still open:
 
-- **A real filter successfully serving a trusted tag's data is untested.**
-  Every test that follows a trusted reparse tag lands on the fallback here —
-  nothing registered claims `IO_REPARSE_TAG_CLOUD`, and no runner this file
-  has run on can produce a real `IO_REPARSE_TAG_WOF` placeholder either. The
-  identity check's *success* half (`full_identity(&entry)? ==
-  full_identity(&followed)?`, the two opens agreeing because a filter
-  legitimately served the same file twice) has no test: a hard link cannot
-  stand in for the filter, because reparse data belongs to the file itself,
-  so a hard link of a trusted-but-unclaimed entry inherits the very tag
-  nothing claims and hits the same fallback rather than a successful follow.
-  A real cloud-sync provider registered through the Cloud Files API, or a
-  Windows image whose volume actually supports WOF, is what would exercise
-  it; neither is available in CI today.
+- **A real filter serving a trusted tag's data is untested**, as distinct from
+  the identity check, which is not. Nothing registered on the runner claims
+  `IO_REPARSE_TAG_CLOUD`, and no attribute query there has ever seen a
+  `IO_REPARSE_TAG_WOF` placeholder to follow, so no test reaches the second open
+  by way of a driver *serving* anything: the identity-match test gets there by
+  removing the reparse point instead, which proves the comparison and not the
+  filter. A real cloud-sync provider registered through the Cloud Files API, or a
+  Windows image where a WOF placeholder stays visible, is what would close the
+  difference; neither is available in CI today.
 - **`FolderTrust` is unknown on Windows**, because telling a private folder from a
   shared one means reading the DACL — `GetSecurityInfo`, walking the ACEs, and then
   deciding which well-known SIDs count as somebody else, which is security policy
