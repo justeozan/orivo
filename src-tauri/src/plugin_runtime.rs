@@ -4655,7 +4655,7 @@ mod tests {
         // interest WOF fails that check instead of this test's, which is how the
         // runner reported it the first time.
         fs::write(&unusual, b"Delta Drift\n").unwrap();
-        let mechanism = plant_storage_reparse_point(&unusual);
+        let (trusted, mechanism) = plant_storage_reparse_point(&unusual);
         println!("reparse point planted as {mechanism}");
 
         let harness = Harness::new(untimed(), Some(&library));
@@ -4674,14 +4674,24 @@ mod tests {
             "a file whose only peculiarity is where its bytes live was left out of \
              the listing ({mechanism})"
         );
-        // And its contents come back, which a listing cannot prove: a driver-backed
-        // placeholder has to be opened *following* the reparse point, and a tag no
-        // driver owns has to fall back to the data under it. Both are this one
-        // assertion.
-        assert!(
-            harness.prepare("fixture:read-delta").is_ok(),
-            "a file behind a storage reparse point could not be read ({mechanism})"
-        );
+        // Reading is where the two mechanisms diverge. A real WOF placeholder is
+        // a tag `reparse_tag_is_followed` trusts, so the host opens it following
+        // the redirection and the driver serves the file the user has. The
+        // by-hand fallback plants a tag nobody has ever read about, which is
+        // refused before that second open is even attempted — proof that "not a
+        // name" alone no longer buys a read.
+        let read = harness.prepare("fixture:read-delta");
+        if trusted {
+            assert!(
+                read.is_ok(),
+                "a file behind a trusted storage reparse point could not be read ({mechanism})"
+            );
+        } else {
+            assert!(
+                read.is_err(),
+                "a file behind an untrusted, hand-planted reparse tag was read ({mechanism})"
+            );
+        }
     }
 
     /// Whether the reparse attribute is set, regardless of what its tag means.
@@ -4697,123 +4707,39 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// Plants a reparse point that is **not** a redirection, and says how.
+    /// Plants a reparse point that is **not** a redirection, and says how, and
+    /// whether the tag is one [`reparse_tag_is_followed`] trusts.
     ///
     /// Two mechanisms, because one of them is faithful and the other is certain.
     /// `compact /c /exe:LZX` produces a real WOF reparse point, which the driver
     /// itself owns — the same shape as a OneDrive placeholder, and it exercises
     /// the *followed* open through a real filter. It also silently declines on
-    /// some volumes, and the CI runner's is one of them. So if it does, the test
-    /// sets the same tag by hand instead: `IO_REPARSE_TAG_WOF` is on
-    /// `reparse_tag_is_followed`'s list, so the host still attempts the followed
-    /// open — nothing owns a tag no real `compact` ever processed, which means
-    /// that attempt is refused (`IO_REPARSE_TAG_NOT_HANDLED`) and the host falls
-    /// back to the data under the point. Either way the file must be listed and
-    /// read.
+    /// some volumes for a file this small, and the CI runner's is one of them.
+    /// So if it does, the test falls back to a tag of its own
+    /// (`plant_unrecognised_reparse_point`) instead: `FSCTL_SET_REPARSE_POINT`
+    /// refuses to set a Microsoft-owned tag by hand at all
+    /// (`ERROR_INVALID_PARAMETER`) — proven on the runner, not assumed — so a
+    /// hand-planted stand-in can only ever be a tag this host does *not* trust,
+    /// and the read is refused rather than served from it.
     #[cfg(not(unix))]
-    fn plant_storage_reparse_point(path: &Path) -> &'static str {
+    fn plant_storage_reparse_point(path: &Path) -> (bool, &'static str) {
         let compacted = std::process::Command::new("compact")
             .args(["/c", "/exe:LZX"])
             .arg(path)
             .output()
             .expect("compact is on PATH");
         if is_reparse_point(path) {
-            return "WOF, through `compact /c /exe:LZX`";
+            return (true, "WOF, through `compact /c /exe:LZX`");
         }
         println!(
             "compact produced no reparse point here, so one is set by hand: {}",
             String::from_utf8_lossy(&compacted.stdout).trim()
         );
-
-        /// `ntifs.h`. The same tag `compact` sets — checked against
-        /// `reparse_tag_is_followed` below so this fallback stays a tag the host
-        /// actually trusts rather than a stand-in for one.
-        const IO_REPARSE_TAG_WOF: u32 = 0x8000_0017;
-        assert!(
-            reparse_tag_is_followed(IO_REPARSE_TAG_WOF),
-            "the tag this fallback plants is not one the host follows"
-        );
-        plant_reparse_point_with_tag(path, IO_REPARSE_TAG_WOF);
-        assert!(
-            is_reparse_point(path),
-            "the reparse point was set and the attribute did not appear"
-        );
-        "WOF, through FSCTL_SET_REPARSE_POINT"
-    }
-
-    /// Sets a reparse point whose tag is Microsoft's own, by hand.
-    ///
-    /// `REPARSE_DATA_BUFFER`'s generic arm (`ntifs.h`): no GUID, which is the
-    /// layout `IsReparseTagMicrosoft` says a tag with bit 31 set takes —
-    /// `IO_REPARSE_TAG_WOF` and `IO_REPARSE_TAG_DEDUP` both qualify.
-    /// `FSCTL_SET_REPARSE_POINT` itself does not validate what a filter behind
-    /// the tag would expect to find, which is exactly why this can plant a tag
-    /// no filter on this machine claims: the point is the reparse *attribute*,
-    /// not a working placeholder.
-    #[cfg(not(unix))]
-    fn plant_reparse_point_with_tag(path: &Path, tag: u32) {
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
-
-        /// `FSCTL_SET_REPARSE_POINT`, from `winioctl.h`.
-        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
-
-        #[repr(C)]
-        struct ReparseDataBuffer {
-            reparse_tag: u32,
-            reparse_data_length: u16,
-            reserved: u16,
-            data: [u8; 8],
-        }
-
-        unsafe extern "system" {
-            fn DeviceIoControl(
-                device: HANDLE,
-                control_code: u32,
-                in_buffer: *const std::ffi::c_void,
-                in_size: u32,
-                out_buffer: *mut std::ffi::c_void,
-                out_size: u32,
-                returned: *mut u32,
-                overlapped: *mut std::ffi::c_void,
-            ) -> i32;
-        }
-
-        let handle = fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .expect("the test can open its own file for writing");
-        let buffer = ReparseDataBuffer {
-            reparse_tag: tag,
-            reparse_data_length: 8,
-            reserved: 0,
-            data: *b"nodriver",
-        };
-        let mut returned = 0u32;
-        // Safety: an open handle with write access, one input buffer whose declared
-        // length matches its `data` field, and no output buffer — which is what
-        // `FSCTL_SET_REPARSE_POINT` takes.
-        let answered = unsafe {
-            DeviceIoControl(
-                handle.as_raw_handle() as HANDLE,
-                FSCTL_SET_REPARSE_POINT,
-                (&raw const buffer).cast(),
-                size_of::<ReparseDataBuffer>() as u32,
-                std::ptr::null_mut(),
-                0,
-                &mut returned,
-                std::ptr::null_mut(),
-            )
-        };
-        assert!(
-            answered != 0,
-            "FSCTL_SET_REPARSE_POINT failed: {}",
-            std::io::Error::last_os_error()
-        );
-        drop(handle);
+        plant_unrecognised_reparse_point(path);
+        (
+            false,
+            "an unrecognised tag, through FSCTL_SET_REPARSE_POINT",
+        )
     }
 
     /// Sets a reparse point whose tag is neither a name surrogate nor one
@@ -4974,18 +4900,34 @@ mod tests {
     /// something a test can assert on. `open_entry_for_reading_racing`'s seam
     /// fires exactly between the two opens, so the swap is certain rather than
     /// probable.
+    ///
+    /// The entry needs a tag `reparse_tag_is_followed` trusts, or the race never
+    /// starts — the whitelist refuses it before the second open is attempted at
+    /// all. `FSCTL_SET_REPARSE_POINT` cannot hand-plant one:
+    /// `plant_storage_reparse_point`'s doc comment is where that was proved.
+    /// `compact /c /exe:LZX` is the one real mechanism available, and it needs a
+    /// file worth compressing — large and repetitive — where the placeholder test
+    /// needed one small enough for a title. If the volume declines it here too,
+    /// the race has nothing to stand on and the test says so and returns, the
+    /// same way the placeholder test's first version did.
     #[cfg(not(unix))]
     #[test]
     fn a_reparse_point_swapped_for_a_symlink_between_the_two_opens_is_refused() {
         let library = FixtureLibrary::new("reparse-race");
         let entry = library.games.join("swap.rom");
-        fs::write(&entry, b"Swap Quest\n").unwrap();
-        // `IO_REPARSE_TAG_DEDUP` (`ntifs.h`, `0x80000013`): on
-        // `reparse_tag_is_followed`'s list, so the host attempts the followed
-        // open at all — the race is inside that attempt, not in whether one
-        // happens.
-        const IO_REPARSE_TAG_DEDUP: u32 = 0x8000_0013;
-        plant_reparse_point_with_tag(&entry, IO_REPARSE_TAG_DEDUP);
+        fs::write(&entry, vec![b'A'; 128 * 1024]).unwrap();
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:LZX"])
+            .arg(&entry)
+            .output()
+            .expect("compact is on PATH");
+        if !is_reparse_point(&entry) {
+            println!(
+                "compact produced no reparse point here, so this race cannot be staged: {}",
+                String::from_utf8_lossy(&compacted.stdout).trim()
+            );
+            return;
+        }
 
         let secret = library.root.join("secret.txt");
         let directory = windows_relative::open_directory(&library.games).unwrap();
