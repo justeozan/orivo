@@ -131,6 +131,16 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
+import {
+  createDefaultPluginHealthClient,
+  phraseJournalEntry,
+  pluginHealthErrorMessage,
+  pluginHealthSummary,
+  type PluginHealthView,
+  type PluginJournalEntryView,
+} from "./plugin-health";
+import { createDefaultRunnerManagerClient, createRunnerManagerController } from "./runner-manager";
+import { mountRunnerPanel } from "./runner-view";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
@@ -240,7 +250,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher";
+type PluginId = "wine" | "wallpaper-searcher" | "runners";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
@@ -568,10 +578,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
+    runnersPanel: get<HTMLElement>("#runners-panel"),
+    runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
+    pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
@@ -1836,6 +1849,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const pluginManager = createPluginManagerController(createDefaultPluginManagerClient());
   pluginManager.onChange(() => renderPluginList());
 
+  // Health and the journal are a second, smaller surface (`plugin_health.rs`):
+  // whether a plugin is degraded, and the sentences behind why. Kept apart
+  // from the catalogue above so a registry with no health commands — an older
+  // host binary — still renders the rest of the panel exactly as before.
+  const pluginHealthClient = createDefaultPluginHealthClient();
+  let pluginHealthById = new Map<string, PluginHealthView>();
+  let pluginHealthIdsKey = "";
+  let pluginJournalById = new Map<string, PluginJournalEntryView[]>();
+  let openPluginLogId: string | null = null;
+
+  // "Add an emulator" and the runner profiles inside Plugins & Runners own
+  // their whole subtree (`runner-view.ts`): this call is the only thing this
+  // file does with them beyond toggling the panel's `hidden` attribute.
+  const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
+  mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
+
   const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
     row.className = "settings-row plugin-catalog-row";
@@ -1916,6 +1945,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         .join(" · ") || "Plugin tiers";
     copy.append(name, details);
 
+    const health = pluginHealthById.get(plugin.id) ?? null;
+    const healthSummary = pluginHealthSummary(health);
+    if (healthSummary) {
+      const healthLine = document.createElement("small");
+      healthLine.className = "plugin-row__health";
+      if (health?.degraded) healthLine.classList.add("plugin-row__health--degraded");
+      healthLine.textContent = healthSummary;
+      copy.append(healthLine);
+    }
+
     const state = document.createElement("span");
     state.className = "plugin-row__state";
     // A plugin the host refused to load must not read in the same green as one
@@ -1924,15 +1963,141 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (plugin.state === "invalid") state.classList.add("plugin-row__state--error");
     state.textContent = formatPluginStatus(plugin);
 
+    const actions = document.createElement("div");
+    actions.className = "plugin-row__actions";
+
+    if (health?.degraded) {
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "settings-button settings-button--quiet";
+      resume.dataset.pluginResume = plugin.id;
+      resume.textContent = "Resume";
+      actions.append(resume);
+    }
+    if (plugin.updateTo) {
+      const update = document.createElement("button");
+      update.type = "button";
+      update.className = "settings-button settings-button--quiet";
+      update.dataset.pluginUpdate = plugin.id;
+      update.textContent = `Update to v${plugin.updateTo}`;
+      actions.append(update);
+    }
+    if (plugin.rollbackTo) {
+      const rollback = document.createElement("button");
+      rollback.type = "button";
+      rollback.className = "settings-button settings-button--quiet";
+      rollback.dataset.pluginRollback = plugin.id;
+      rollback.textContent = `Go back to v${plugin.rollbackTo}`;
+      actions.append(rollback);
+    }
+
+    const log = document.createElement("button");
+    log.type = "button";
+    log.className = "settings-button settings-button--quiet";
+    log.dataset.pluginLog = plugin.id;
+    log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
+    log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
+    actions.append(log);
+
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "settings-button settings-button--quiet plugin-uninstall-button";
     remove.dataset.pluginUninstall = plugin.id;
     remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
     remove.textContent = "Uninstall";
+    actions.append(remove);
 
-    row.append(mark, copy, state, remove);
+    row.append(mark, copy, state, actions);
+
+    if (openPluginLogId === plugin.id) {
+      row.append(renderPluginLogPanel(plugin.id));
+    }
     return row;
+  };
+
+  const renderPluginLogPanel = (pluginId: string): HTMLElement => {
+    const panel = document.createElement("div");
+    panel.className = "plugin-row__log";
+    const entries = pluginJournalById.get(pluginId);
+    if (!entries) {
+      panel.textContent = "Loading…";
+    } else if (entries.length === 0) {
+      panel.textContent = "No recent activity.";
+    } else {
+      const list = document.createElement("ul");
+      for (const line of entries) {
+        const item = document.createElement("li");
+        item.textContent = phraseJournalEntry(line);
+        list.append(item);
+      }
+      panel.append(list);
+    }
+    return panel;
+  };
+
+  /**
+   * Health is a second command from a second module, so a freshly rendered
+   * registry list re-fetches it only when the id set actually changed — a
+   * caller that wants a forced re-check (after `resume`) calls this directly
+   * instead of going through that guard.
+   */
+  const refreshPluginHealth = async (pluginIds: string[]): Promise<void> => {
+    pluginHealthIdsKey = pluginIds.join(",");
+    if (pluginIds.length === 0) {
+      pluginHealthById = new Map();
+      return;
+    }
+    const rows = await pluginHealthClient
+      .getHealthReport(pluginIds, new AbortController().signal)
+      .catch(() => []);
+    pluginHealthById = new Map(rows.map((row) => [row.pluginId, row]));
+    renderDiscoveredPlugins();
+  };
+
+  const resumeInstalledPlugin = async (pluginId: string): Promise<void> => {
+    try {
+      await pluginHealthClient.resume(pluginId, new AbortController().signal);
+    } catch (error) {
+      showToast(pluginHealthErrorMessage(error));
+    }
+    await refreshPluginHealth(pluginManager.catalog().installed.map((plugin) => plugin.id));
+  };
+
+  const updateInstalledPlugin = async (pluginId: string): Promise<void> => {
+    const name = pluginName(pluginId);
+    try {
+      await pluginManager.update(pluginId);
+      showToast(`${name} has been updated.`);
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
+  };
+
+  const rollbackInstalledPlugin = async (pluginId: string): Promise<void> => {
+    const name = pluginName(pluginId);
+    try {
+      await pluginManager.rollback(pluginId);
+      showToast(`${name} went back to a previous version.`);
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
+  };
+
+  const togglePluginLog = async (pluginId: string): Promise<void> => {
+    if (openPluginLogId === pluginId) {
+      openPluginLogId = null;
+      renderDiscoveredPlugins();
+      return;
+    }
+    openPluginLogId = pluginId;
+    renderDiscoveredPlugins();
+    if (!pluginJournalById.has(pluginId)) {
+      const entries = await pluginHealthClient
+        .getJournal(pluginId, new AbortController().signal)
+        .catch(() => []);
+      pluginJournalById.set(pluginId, entries);
+      if (openPluginLogId === pluginId) renderDiscoveredPlugins();
+    }
   };
 
   // Quiky is the Store's installer, not a plugin the user manages: it has no
@@ -1961,6 +2126,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const installed = pluginManager.catalog().installed;
     const rows = installed.map(renderInstalledPluginRow);
     refs.pluginsInstalledList.append(...rows);
+
+    const ids = installed.map((plugin) => plugin.id);
+    if (ids.join(",") !== pluginHealthIdsKey) {
+      void refreshPluginHealth(ids);
+    }
   };
 
   /**
@@ -2005,8 +2175,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    refs.runnersPanel.hidden = state.pluginView !== "runners";
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
+    refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
     const matches = available.filter(
@@ -2065,6 +2237,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
+    // Cheap and always fresh: a background import or a plugin update can
+    // change a profile's status between visits, so every open re-reads it.
+    if (id === "runners") void runnerManager.load(new AbortController().signal);
   };
 
   const renderWineSettingsPanel = (): void => {
@@ -5736,7 +5911,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "runners") {
       openPluginDetail(pluginId);
       return;
     }
@@ -5762,6 +5937,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     if (target?.closest("[data-plugin-install-file]")) {
       void installPluginFromFile();
+      return;
+    }
+    if (target?.closest("[data-plugin-refresh-registry]")) {
+      void pluginManager.refreshCatalog();
+      return;
+    }
+    const resumeId = target?.closest<HTMLButtonElement>("[data-plugin-resume]")?.dataset.pluginResume;
+    if (resumeId) {
+      void resumeInstalledPlugin(resumeId);
+      return;
+    }
+    const updateId = target?.closest<HTMLButtonElement>("[data-plugin-update]")?.dataset.pluginUpdate;
+    if (updateId) {
+      void updateInstalledPlugin(updateId);
+      return;
+    }
+    const rollbackId = target?.closest<HTMLButtonElement>("[data-plugin-rollback]")?.dataset
+      .pluginRollback;
+    if (rollbackId) {
+      void rollbackInstalledPlugin(rollbackId);
+      return;
+    }
+    const logId = target?.closest<HTMLButtonElement>("[data-plugin-log]")?.dataset.pluginLog;
+    if (logId) {
+      void togglePluginLog(logId);
       return;
     }
 
@@ -5809,6 +6009,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       target.checked
     ) {
       void savePreferences({ motion: target.value as MotionPreference });
+    }
+    if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
+      void pluginManager.setAutomaticUpdates(target.checked);
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -7200,13 +7403,29 @@ function shell(): string {
                       <span class="plugin-row__state">Installed</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
+                    <div class="settings-row plugin-row">
+                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("gamepad")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Third-party runners</strong>
+                        <small>Emulator plugins, and the profiles you build for them</small>
+                      </div>
+                      <span class="plugin-row__state">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="runners" aria-label="Open third-party runner settings">${icon("chevron-right")}</button>
+                    </div>
                   </div>
                 </div>
 
                 <div class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <p class="plugins-group__label">Available</p>
-                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    <div class="plugins-group__header-actions">
+                      <label class="plugins-automatic-updates">
+                        <input id="plugins-automatic-updates" type="checkbox" />
+                        <span>Automatic updates</span>
+                      </label>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>Check for updates</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    </div>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
@@ -7281,6 +7500,18 @@ function shell(): string {
                     <small>Saved keys are picked up immediately — no restart needed.</small>
                   </div>
                 </div>
+              </section>
+
+              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" hidden>
+                <header class="settings-card__header">
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
+                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="runners-panel-title">Third-party runners</strong>
+                    <small>Add an emulator: pick its application, the folders it should read, and import your games</small>
+                  </div>
+                </header>
+                <div id="runners-panel-body"></div>
               </section>
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>

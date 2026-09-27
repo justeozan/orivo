@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- "Add an emulator" and runner profiles, inside Settings › Plugins & Runners. A third-party runner plugin installed from the registry now has a working row of its own: pick its emulation application through the system's own file picker, add one or more game folders the same way, then import — with live progress and a cancel button, resumable if it stops partway. Each profile shows whether the plugin accepted it, its granted folders (revocable without deleting the profile or losing the games already imported), and how many games it holds.
+- Settings › Plugins & Runners now shows what the plugin host already knew but had nowhere to say: a plugin paused after repeated failures, with a Resume button; a readable log of what the host refused and what the plugin logged itself; an available update or a way back to the version that was working, when the cached registry index knows of one; and a once-per-install toggle for automatic updates on the official channel.
+
 ## [0.3.6] - 2026-08-28
 
 ### Changed
