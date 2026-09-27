@@ -9,6 +9,11 @@ chiffres est un lot séparé. Chaque nombre ci-dessous est reproductible avec le
 commandes données en fin de document, et daté de sa mesure : un chiffre sans
 date ni condition machine n'est qu'une anecdote.
 
+Ce préambule est celui du lot de mesure (O1). Le premier lot d'optimisation à
+partir de ces chiffres est arrivé depuis : la section **3 bis** porte
+l'avant/après du cache de compilation des composants (P5), mesuré avec le même
+banc que la section 3 et dans le même run.
+
 ## Méthode
 
 - **Préchauffage puis répétitions.** Chaque mesure sépare une première
@@ -144,11 +149,14 @@ Coût par composant : ~31 ms, constant, cohérent avec le test déjà présent d
 (`reports_what_a_prepared_component_costs_against_a_cold_one`, qui a mesuré
 30,98 ms de compilation Wasmtime à froid pour ce même fixture le même jour).
 Ce coût est celui d'une compilation Cranelift à froid, payée une fois par
-composant à chaque appel de ces deux commandes — il n'y a pas de cache de
-compilation inter-appels (`Component::new` recompile toujours), et pas de
-palier observé à `MAX_PROBED_PLUGINS` (16) : ce plafond réduit l'étape
-interactive (`get-identity`/`health-check`), pas la compilation, qui reste
-payée pour chaque composant découvert.
+composant à chaque appel de ces deux commandes, et sans palier observé à
+`MAX_PROBED_PLUGINS` (16) : ce plafond réduit l'étape interactive
+(`get-identity`/`health-check`), pas la compilation, qui reste payée pour chaque
+composant découvert. Les chiffres de ce tableau sont ceux d'un processus **sans
+cache de compilation** — ce qu'était Orivo quand ils ont été pris, et ce que
+reste un processus dont le cache n'est pas configuré ou dont la clé
+d'installation est indisponible. La section suivante mesure ce que le cache leur
+retire.
 
 **Pourquoi ceci ne dégrade jamais premier rendu, rail ou recherche locale :**
 ce n'est pas une hypothèse, c'est ce que montre le code. `get_plugin_catalog`
@@ -158,6 +166,57 @@ ouvre Réglages → Plugins ou le flux « Ajouter un émulateur »
 (`src-tauri/src/lib.rs:1235`, `src-tauri/src/plugin_installer.rs:192`) — jamais
 depuis `AppState::load` ni depuis un chemin de rendu. Le tableau ci-dessus
 borne donc le pire cas de ces deux écrans, pas un coût caché du démarrage.
+
+## 3 bis. Plugins — ce que le cache de compilation retire (P5)
+
+Banc : `src-tauri/src/perf_bench.rs`, `bench_plugin_compile_cache_*`. Même
+commande, même machine et même run que la section 3, mais avec une différence
+assumée dans la fixture : **les copies portent des octets distincts** (une
+section custom WebAssembly ajoutée au composant fixture, ignorée par le modèle de
+composants et par Cranelift). La section 3 installe N copies d'un même composant,
+ce qui est la bonne forme pour mesurer une compilation et la mauvaise pour
+mesurer un cache — N paquets partageraient *un* artefact et flatteraient un cache
+censé en garder un par composant. Ici, N composants distincts occupent N
+emplacements distincts.
+
+Trois lignes pour le même travail : sans cache du tout (l'état d'avant ce lot),
+un cache qui voit chaque composant pour la première fois, et un cache qui les
+détient déjà.
+
+| Composants installés | Sans cache (médiane) | Cache froid (une fois) | Cache chaud (médiane) |
+| --- | --- | --- | --- |
+| 1 | 32,8 ms | 40,3 ms | **1,9 ms** |
+| 8 | 258,9 ms | 305,3 ms | **14,4 ms** |
+| 20 | 645,8 ms | 763,2 ms | **36,2 ms** |
+
+Par composant : **~32 ms → ~1,8 ms**, soit un facteur ~18, et le coût par
+composant reste plat de 1 à 20 (1,88 / 1,80 / 1,81 ms) — c'est ce qui valide la
+lecture ci-dessus, puisque N artefacts distincts se rechargent au même prix
+unitaire qu'un seul.
+
+Trois choses que ce tableau ne dit pas, et qu'il faut lire avec lui.
+
+- **Le cache froid est plus lent que l'absence de cache**, de 8 à 117 ms selon N :
+  la première passe compile *et* sérialise *et* écrit. C'est payé une fois par
+  composant et par version du moteur, pas une fois par ouverture, et c'est la
+  raison pour laquelle cette colonne est mesurée à part au lieu d'être noyée dans
+  une médiane.
+- **Le chaud n'est pas du pur `deserialize`.** La découverte sonde aussi
+  `get-identity` et `health-check`, donc les ~1,8 ms restants par composant
+  contiennent l'instanciation et deux appels invités. Ce qui change vraiment :
+  l'écran à 20 composants passe sous le budget interactif de 150 ms du plan
+  (36 ms), alors qu'il était à 646 ms.
+- **Rien de ceci n'est lu au démarrage.** Le cache est ouvert par la première
+  compilation de composant, et `prepare_component` n'a que trois appelants
+  (`plugin_registry.rs`, `runner_host.rs`, plus `preflight_component` côté
+  installateur qui, lui, ne passe pas par le cache) — tous sur un worker
+  `spawn_blocking`, jamais depuis `AppState::load`. Les chiffres de la section 2
+  ont été repris dans le même run et n'ont pas bougé
+  (`load_with_migration` 4,06 ms et `save_atomically` 10,29 ms à n=10 000, contre
+  4,6 et 11,5 ms avant) ; et les lignes `bench_plugin_surfaces_*` de la section 3,
+  prises dans ce même processus, sont restées à ~32 ms par composant parce
+  qu'aucun dossier de cache n'y est configuré — ce qui mesure aussi, au passage,
+  qu'un processus sans cache se comporte exactement comme avant.
 
 ## 4. Taille du bundle
 
@@ -251,7 +310,8 @@ une marge :
 | `Catalog::load_with_migration` à 10 000 jeux | < 20 ms | 4,6 ms |
 | `Catalog::save_atomically` à 10 000 jeux | < 30 ms | 11,5 ms |
 | Tâches longues pendant la navigation au clavier dans le rail | 0 | 0 |
-| `get_plugin_catalog` / `get_runner_plugins`, par composant | < 60 ms | ~31 ms |
+| `get_plugin_catalog` / `get_runner_plugins`, par composant, sans cache | < 60 ms | ~32 ms |
+| `get_plugin_catalog` / `get_runner_plugins`, par composant, cache chaud | < 5 ms | ~1,8 ms |
 
 ## Reproduire ces mesures
 
@@ -262,6 +322,10 @@ pnpm exec playwright test -c perf/web/playwright.perf.config.ts
 
 # Rust, catalogue et plugins — --release, sinon les chiffres ne veulent rien dire
 cargo test --manifest-path src-tauri/Cargo.toml --release perf_bench -- --ignored --nocapture --test-threads=1
+
+# L'avant/après du cache de compilation (section 3 bis)
+cargo test --manifest-path src-tauri/Cargo.toml --release \
+  perf_bench::bench_plugin_compile_cache -- --ignored --nocapture --test-threads=1
 
 # Le coût de compilation à froid d'un seul composant, déjà présent dans le dépôt
 cargo test --manifest-path src-tauri/Cargo.toml --release \

@@ -216,6 +216,29 @@ bibliothèque. Ce que ce palier n’apporte pas : l’interface « Ajouter un
 émulateur » et l’écran Réglages → Plugins, qui consommeront ces commandes, ainsi
 que l’import de ROMs par métadonnées et les runners GPTK/CrossOver.
 
+Le contrat de performance a gagné sa première optimisation. Un composant n'est
+plus recompilé à chaque ouverture : `plugin_compile_cache.rs` garde l'artefact
+que Wasmtime sait sérialiser dans un dossier de cache appartenant à l'hôte, et
+ouvrir une surface qui découvre vingt composants passe de 646 ms à 37 ms
+([`docs/performance.md`](performance.md), section 3 bis). Ce module est aussi le
+seul endroit du dépôt où une erreur ne refuse pas un plugin mais exécute du code
+natif : `Component::deserialize` est `unsafe` parce qu'il fait confiance à ses
+octets — ils *sont* du code machine, et il les rend exécutables sans revalider ce
+qu'un compilateur aurait validé. Un fichier de cache qu'un autre processus du
+même utilisateur pourrait écrire serait donc une exécution de code arbitraire
+dans Orivo, avec l'autorité d'Orivo et hors de tout bac à sable — pire que tout
+ce qu'un plugin peut faire, justement parce qu'un plugin est derrière un bac à
+sable et que ceci ne le serait pas. La règle est donc étroite et absolue : un
+artefact n'est désérialisé que si un HMAC-SHA256 sous une clé par installation,
+née au premier usage et conservée dans le trousseau système — jamais dans un
+fichier, jamais dans la WebView — prouve qu'Orivo l'a écrit, pour *ce* composant
+et *ce* moteur. Tout le reste découle de « un artefact est régénérable » :
+absent, altéré, étranger, illisible ou produit par un autre moteur, c'est une
+recompilation silencieuse depuis les octets que le registre a déjà vérifiés —
+jamais une erreur que l'utilisateur voit, jamais un chargement douteux. Le cache
+est borné, écrit par `rename`, réclame ce qu'une version précédente de Wasmtime a
+laissé, et se purge en entier : la sixième promesse, enfin munie d'une porte.
+
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
 bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune
 dépendance SQLite et son catalogue est un JSON versionné (`catalog.rs`, schéma
