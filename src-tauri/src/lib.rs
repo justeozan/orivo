@@ -104,6 +104,9 @@ const AUTO_WINLATOR_PROFILE_NAME: &str = "Jeux Windows (Winlator)";
 /// One adoption pass commits its cards in pages of this size, mirroring the
 /// bounded `discover-page` half of the runner contract.
 const WINLATOR_ADOPTION_PAGE_SIZE: usize = 50;
+/// The background Wine auto-apply pass commits at most this many pending
+/// `.exe` games per catalog mutation lease, for the same reason.
+const WINE_AUTO_APPLY_PAGE_SIZE: usize = 50;
 const MAX_WINE_SETUP_SESSIONS: usize = 12;
 const MAX_WINE_SCAN_JOBS: usize = 12;
 const MAX_WINE_IMPORT_SELECTION: usize = 2_000;
@@ -270,6 +273,10 @@ struct AppState {
     /// stopped. It is state rather than a fire-and-forget spawn because two
     /// passes walking the same folder would fight over one catalog write.
     winlator_adoption: Arc<WinlatorAdoption>,
+    /// The Wine auto-apply pass runs once per launch, in the background, in
+    /// pages — the same reason `winlator_adoption` is state and not a bare
+    /// spawn.
+    wine_auto_apply: Arc<WineAutoApply>,
     /// The last folder scan, waiting for the user to say which of it they want.
     /// It holds host-private paths and fingerprints; the WebView sees only the
     /// opaque references and titles projected out of it.
@@ -652,19 +659,14 @@ impl AppState {
             catalog.save_atomically(&catalog_path)?;
         }
 
-        // Bring every local Windows .exe under the managed default Wine profile
-        // so it launches through Wine-Staging without a manual setup step. This
-        // is a no-op off macOS and on machines without a detected Wine-Staging
-        // installation, so the first paint is never blocked waiting for Wine.
-        if auto_apply_wine_to_direct_games(&mut catalog, &wine_prefix_root) {
-            catalog.save_atomically(&catalog_path)?;
-        }
-
-        // Winlator's side of this — adopting whatever shortcuts it has exported
-        // for a frontend — deliberately does *not* happen here. It reads a folder
-        // the user granted, over a `ContentResolver`, which is exactly the kind
-        // of work that has no business between the process starting and the first
-        // frame. `spawn_winlator_adoption` runs it once the shell is on screen.
+        // Bringing every local Windows .exe under the managed default Wine
+        // profile deliberately does *not* happen here any more. Once a managed
+        // profile already exists this is a canonicalise-and-hash per pending
+        // `.exe`; when none exists yet it is a disk probe for Wine-Staging —
+        // either way, work with no business between the process starting and
+        // the first frame. `spawn_wine_auto_apply` runs it once the shell is on
+        // screen, the same way `spawn_winlator_adoption` runs Winlator's side of
+        // this below.
 
         Ok(Self {
             catalog_path,
@@ -678,6 +680,7 @@ impl AppState {
             source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
+            wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
@@ -987,6 +990,7 @@ pub fn run() {
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Finished {
                 spawn_winlator_adoption(webview.app_handle().clone());
+                spawn_wine_auto_apply(webview.app_handle().clone());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -2624,6 +2628,37 @@ async fn associate_direct_game_with_wine_profile(
     })
 }
 
+/// Every pending local Direct Windows `.exe` the auto-apply pass has not
+/// converted to a Wine-Staging card yet.
+///
+/// Computed once and handed to `apply_wine_auto_apply_to_candidates` rather
+/// than recomputed per page: pending status can only shrink as candidates are
+/// applied, so a fixed snapshot pages cleanly by offset (like
+/// `page_winlator_inventory`) instead of risking a candidate that never
+/// validates crowding out the rest of the backlog forever.
+fn wine_auto_apply_candidates(catalog: &Catalog) -> Vec<(String, PathBuf)> {
+    if !cfg!(target_os = "macos") {
+        // The built-in Wine-Staging runner is macOS-only.
+        return Vec::new();
+    }
+    catalog
+        .games
+        .iter()
+        .filter(|game| is_local_direct_windows_game(game))
+        .filter(|game| {
+            !catalog
+                .wine_inventory
+                .iter()
+                .any(|entry| entry.origin_direct_game_id.as_deref() == Some(game.id.as_str()))
+        })
+        .filter_map(|game| {
+            game.executable_path
+                .clone()
+                .map(|executable| (game.id.clone(), executable))
+        })
+        .collect()
+}
+
 /// Best-effort conversion of every local Direct Windows `.exe` in the catalog
 /// into a card backed by the Orivo-managed default Wine profile, so Windows
 /// games launch through Wine-Staging without the user creating a profile or
@@ -2641,32 +2676,34 @@ async fn associate_direct_game_with_wine_profile(
 /// Returns `true` when the catalog was modified. The caller owns locking and
 /// persistence.
 fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Path) -> bool {
-    if !cfg!(target_os = "macos") {
-        // The built-in Wine-Staging runner is macOS-only.
+    let candidates = wine_auto_apply_candidates(catalog);
+    apply_wine_auto_apply_to_candidates(
+        catalog,
+        wine_prefix_root,
+        &candidates,
+        &AtomicBool::new(false),
+    )
+}
+
+/// The bounded, cancellable half of the pass above: apply Wine-Staging to
+/// exactly the given candidates, never more. A single call from an import or
+/// a fresh install hands it every pending candidate (there is rarely more
+/// than one); the background startup pass hands it one page at a time so a
+/// large backlog cannot hold the catalog mutation lease — or the Wine
+/// detection probe — for longer than one page takes.
+///
+/// Returns `true` when the catalog was modified. The caller owns locking and
+/// persistence.
+fn apply_wine_auto_apply_to_candidates(
+    catalog: &mut Catalog,
+    wine_prefix_root: &Path,
+    candidates: &[(String, PathBuf)],
+    cancelled: &AtomicBool,
+) -> bool {
+    if candidates.is_empty() {
         return false;
     }
 
-    let pending = catalog
-        .games
-        .iter()
-        .filter(|game| is_local_direct_windows_game(game))
-        .filter(|game| {
-            !catalog
-                .wine_inventory
-                .iter()
-                .any(|entry| entry.origin_direct_game_id.as_deref() == Some(game.id.as_str()))
-        })
-        .filter_map(|game| {
-            game.executable_path
-                .clone()
-                .map(|executable| (game.id.clone(), executable))
-        })
-        .collect::<Vec<_>>();
-    if pending.is_empty() {
-        return false;
-    }
-
-    let cancelled = AtomicBool::new(false);
     let apple_silicon = macos_is_apple_silicon();
 
     // Reuse the persisted managed default profile, or provision a new one. A
@@ -2677,8 +2714,8 @@ fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Pat
         // Respect an explicit user disable of the managed default profile.
         Some(_) => return false,
         None => {
-            let wine_binary = match wine_runner::detect_wine_staging(&cancelled) {
-                Ok(Some(binary)) => match wine_runner::probe_wine_staging(&binary, &cancelled) {
+            let wine_binary = match wine_runner::detect_wine_staging(cancelled) {
+                Ok(Some(binary)) => match wine_runner::probe_wine_staging(&binary, cancelled) {
                     Ok(validated) => validated,
                     Err(_) => return false,
                 },
@@ -2726,7 +2763,14 @@ fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Pat
         .unwrap_or_default();
 
     let mut changed = false;
-    for (direct_game_id, executable) in pending {
+    for (direct_game_id, executable) in candidates.iter().cloned() {
+        // A page-driven pass can be told to stop between candidates, without
+        // waiting for the whole page — the same grain `scan_wine_games` already
+        // checks at, and the same reason: a cancellation should be seen in one
+        // file's worth of work, not one page's.
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         // Canonicalise the stored path and derive a grant no broader than the
         // executable's own directory — the folder the user already pointed
         // Orivo at when importing this game. This never widens scope to a
@@ -2749,7 +2793,7 @@ fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Pat
             continue;
         }
         let candidate =
-            match wine_runner::validate_wine_game_for_profile(&trial, &canonical, &cancelled) {
+            match wine_runner::validate_wine_game_for_profile(&trial, &canonical, cancelled) {
                 Ok(candidate) => candidate,
                 Err(_) => continue,
             };
@@ -2814,6 +2858,99 @@ fn auto_apply_wine_to_direct_games(catalog: &mut Catalog, wine_prefix_root: &Pat
     changed
 }
 
+/// Run the whole backlog computed by `wine_auto_apply_candidates`, one bounded
+/// page at a time.
+///
+/// Each page is applied by `apply_wine_auto_apply_page_locked`, which takes
+/// the catalog mutation lease only for that page, so a large backlog of
+/// unmigrated Direct games cannot make an import, a manual association or a
+/// launch wait behind the whole pass — only behind whichever page happens to
+/// be running. The candidate list itself is a fixed snapshot taken once up
+/// front: pending status only shrinks as pages apply, so paging through a
+/// fixed offset always makes progress, even past a candidate that never
+/// validates.
+fn run_wine_auto_apply(state: &AppState) {
+    if state.wine_auto_apply.in_flight.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Unlike `winlator_adoption.cancelled`, which is cleared before every one
+    // of a Winlator scan's several runs, nothing here resets it: this pass
+    // runs at most once per launch (guarded by `started`), so a cancellation
+    // set before it starts must still be honoured rather than papered over.
+
+    let candidates = match state.catalog.read() {
+        Ok(catalog) => wine_auto_apply_candidates(&catalog),
+        Err(_) => Vec::new(),
+    };
+
+    let mut offset = 0;
+    while offset < candidates.len() {
+        if state.wine_auto_apply.cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        let page_end = (offset + WINE_AUTO_APPLY_PAGE_SIZE).min(candidates.len());
+        apply_wine_auto_apply_page_locked(state, &candidates[offset..page_end]);
+        offset = page_end;
+    }
+
+    state
+        .wine_auto_apply
+        .in_flight
+        .store(false, Ordering::Release);
+}
+
+/// Take the mutation lease for exactly one page: clone, apply, persist, swap,
+/// then let go.
+fn apply_wine_auto_apply_page_locked(state: &AppState, page: &[(String, PathBuf)]) {
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return;
+    };
+    let mut next = match state.catalog.read() {
+        Ok(catalog) => catalog.clone(),
+        Err(_) => return,
+    };
+    if !apply_wine_auto_apply_to_candidates(
+        &mut next,
+        &state.wine_prefix_root,
+        page,
+        &state.wine_auto_apply.cancelled,
+    ) {
+        return;
+    }
+    if persist_catalog(&next, &state.catalog_path).is_err() {
+        return;
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+}
+
+/// Start the deferred Wine pass, once, after the shell is on screen.
+///
+/// Its predecessor ran inside `AppState::load`: a disk probe for Wine-Staging
+/// when no managed profile exists yet, or a canonicalise-and-hash per pending
+/// `.exe` once one does, on every single startup — whether or not the user
+/// was about to look at a Windows game at all. M1 moved Winlator's own
+/// adoption pass off the same path for the same reason: nothing before the
+/// first paint should wait on the filesystem.
+fn spawn_wine_auto_apply(app: AppHandle) {
+    if !cfg!(target_os = "macos") {
+        // The built-in Wine-Staging runner is macOS-only: nothing to defer
+        // anywhere else, and startup pays nothing for this call on those
+        // platforms.
+        return;
+    }
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if state.wine_auto_apply.started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        run_wine_auto_apply(&app.state::<AppState>());
+    });
+}
+
 fn winlator_game_id(profile_id: &str, game_ref: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(profile_id.as_bytes());
@@ -2867,6 +3004,16 @@ fn winlator_catalog_game(
 /// folder, and by the scanner's own bounds.
 #[derive(Debug, Default)]
 struct WinlatorAdoption {
+    started: AtomicBool,
+    in_flight: AtomicBool,
+    cancelled: AtomicBool,
+}
+
+/// The background Wine auto-apply pass. Same shape as `WinlatorAdoption`, and
+/// for the same reason: it must run once per launch, never twice at once, and
+/// be stoppable between pages rather than only between launches.
+#[derive(Debug, Default)]
+struct WineAutoApply {
     started: AtomicBool,
     in_flight: AtomicBool,
     cancelled: AtomicBool,
@@ -9586,6 +9733,244 @@ mod tests {
         )
     }
 
+    /// A Direct game pointing at a local `.exe` — the exact shape both the
+    /// launch guard (`is_local_direct_windows_game`) and the auto-apply pass
+    /// look for.
+    fn direct_windows_game_fixture(id: &str, executable: PathBuf) -> Game {
+        Game {
+            id: id.into(),
+            title: "A Windows Game".into(),
+            executable_path: Some(executable),
+            source: GameSource::Local,
+            source_id: None,
+            launch_target: LaunchTarget::Direct,
+            installation_path: None,
+            working_directory: None,
+            arguments: Vec::new(),
+            description: None,
+            metadata: None,
+            artwork_path: None,
+            artwork_source_path: None,
+            cover_path: None,
+            cover_source_path: None,
+            home_image_path: None,
+            landscape_image_path: None,
+            logo_path: None,
+            hidden: false,
+            hero_video_path: None,
+            last_played_at: None,
+            play_time_seconds: 0,
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// A managed default profile that already carries a validated
+    /// Wine-Staging binary, the shape every startup after the first one
+    /// finds. Seeding it directly is what lets these tests skip
+    /// `detect_wine_staging`'s disk probe (a dozen conventional macOS paths,
+    /// none of which exist on a bench or CI machine) and exercise the part of
+    /// the pass that is actually under test.
+    fn seeded_auto_wine_profile(home: &Path, wine_binary: PathBuf) -> WineProfile {
+        WineProfile {
+            id: AUTO_WINE_PROFILE_ID.to_string(),
+            display_name: AUTO_WINE_PROFILE_NAME.to_string(),
+            wine_binary,
+            prefix: home.join("wine-prefixes").join(AUTO_WINE_PROFILE_ID),
+            game_directories: Vec::new(),
+            graphics: WineGraphicsOptions::default(),
+            dxmt_engine_supported: None,
+            macos_retina_mode_enabled: None,
+            enabled: true,
+            last_imported_at: None,
+        }
+    }
+
+    /// The launch guard's own predicate must still see a pending `.exe` as a
+    /// Windows game right up until the background pass converts it — this is
+    /// what keeps `launch_game` from ever handing it to the generic direct
+    /// launcher during the window between the first paint and the pass
+    /// completing (see `spawn_wine_auto_apply`'s doc comment).
+    #[test]
+    fn is_local_direct_windows_game_flags_a_pending_exe_before_the_pass_runs() {
+        let game = direct_windows_game_fixture("pending-exe", PathBuf::from("/Games/Foo/Foo.exe"));
+        assert!(is_local_direct_windows_game(&game));
+
+        // A native macOS/Linux binary, or a game already handed to another
+        // launch target, must never trip the same guard.
+        let mut native = game.clone();
+        native.executable_path = Some(PathBuf::from("/Games/Foo/Foo"));
+        assert!(!is_local_direct_windows_game(&native));
+
+        let mut already_runner = game;
+        already_runner.launch_target = LaunchTarget::Runner {
+            runner_id: WINE_STAGING_RUNNER_ID.into(),
+            game_ref: "exe:deadbeef".into(),
+            profile_id: AUTO_WINE_PROFILE_ID.into(),
+        };
+        assert!(!is_local_direct_windows_game(&already_runner));
+    }
+
+    /// The core contract this lot changes: the pass, run explicitly rather
+    /// than on the synchronous startup path, still converts a pending `.exe`
+    /// into a Wine-Staging card — and the original Direct record survives
+    /// underneath it, so the association stays reversible.
+    #[test]
+    fn background_wine_auto_apply_converts_a_pending_exe_and_keeps_it_reversible() {
+        let home = temporary_directory("wine-auto-apply-convert");
+        let games = home.join("Games");
+        fs::create_dir_all(&games).unwrap();
+        let executable = games.join("Foo.exe");
+        fs::write(&executable, "pretend windows binary").unwrap();
+
+        let state = state_for(&home);
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            catalog
+                .games
+                .push(direct_windows_game_fixture("direct-foo", executable));
+            catalog.wine_profiles.push(seeded_auto_wine_profile(
+                &home,
+                wine_runner::write_staging_binary(&home),
+            ));
+        }
+
+        // Nothing has run yet: the game is still exactly what import left it as.
+        {
+            let catalog = state.catalog.read().unwrap();
+            assert_eq!(catalog.wine_inventory.len(), 0);
+            assert!(
+                catalog
+                    .games
+                    .iter()
+                    .any(|game| game.id == "direct-foo" && is_local_direct_windows_game(game))
+            );
+        }
+
+        run_wine_auto_apply(&state);
+
+        let catalog = state.catalog.read().unwrap();
+        assert_eq!(catalog.wine_inventory.len(), 1);
+        assert_eq!(
+            catalog.wine_inventory[0].origin_direct_game_id.as_deref(),
+            Some("direct-foo")
+        );
+        // The original Direct record is untouched: deleting the managed
+        // profile would restore exactly this card.
+        assert!(
+            catalog
+                .games
+                .iter()
+                .any(|game| game.id == "direct-foo" && game.launch_target == LaunchTarget::Direct)
+        );
+        // And its Wine-Staging card is what the library now also carries.
+        assert!(catalog.games.iter().any(|game| matches!(
+            &game.launch_target,
+            LaunchTarget::Runner { runner_id, .. } if runner_id == WINE_STAGING_RUNNER_ID
+        )));
+        // Persisted, not just applied in memory: a restart must see the same
+        // association without waiting for the pass to run again.
+        let persisted = Catalog::load_with_migration(&state.catalog_path)
+            .unwrap()
+            .catalog;
+        assert_eq!(persisted.wine_inventory.len(), 1);
+    }
+
+    /// A backlog bigger than one page must not lose or starve candidates past
+    /// the first page — the risk a fixed-offset, snapshot-once design exists
+    /// to avoid (see `wine_auto_apply_candidates`'s doc comment).
+    #[test]
+    fn background_wine_auto_apply_pages_through_a_backlog_larger_than_one_page() {
+        let home = temporary_directory("wine-auto-apply-paging");
+        let total = WINE_AUTO_APPLY_PAGE_SIZE + 5;
+        let state = state_for(&home);
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            for index in 0..total {
+                let directory = home.join(format!("Games/Game{index}"));
+                fs::create_dir_all(&directory).unwrap();
+                let executable = directory.join("Game.exe");
+                fs::write(&executable, format!("binary {index}")).unwrap();
+                catalog.games.push(direct_windows_game_fixture(
+                    &format!("direct-{index}"),
+                    executable,
+                ));
+            }
+            catalog.wine_profiles.push(seeded_auto_wine_profile(
+                &home,
+                wine_runner::write_staging_binary(&home),
+            ));
+        }
+
+        run_wine_auto_apply(&state);
+
+        let catalog = state.catalog.read().unwrap();
+        assert_eq!(catalog.wine_inventory.len(), total);
+    }
+
+    /// Two overlapping passes must not both mutate the catalog: the `in_flight`
+    /// guard is what `spawn_wine_auto_apply`'s `started` check relies on to make
+    /// "runs once per launch" true even if it were ever called twice.
+    #[test]
+    fn background_wine_auto_apply_does_not_run_twice_at_once() {
+        let home = temporary_directory("wine-auto-apply-in-flight");
+        let games = home.join("Games");
+        fs::create_dir_all(&games).unwrap();
+        let executable = games.join("Foo.exe");
+        fs::write(&executable, "pretend windows binary").unwrap();
+
+        let state = state_for(&home);
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            catalog
+                .games
+                .push(direct_windows_game_fixture("direct-foo", executable));
+            catalog.wine_profiles.push(seeded_auto_wine_profile(
+                &home,
+                wine_runner::write_staging_binary(&home),
+            ));
+        }
+        state
+            .wine_auto_apply
+            .in_flight
+            .store(true, Ordering::Release);
+
+        run_wine_auto_apply(&state);
+
+        assert_eq!(state.catalog.read().unwrap().wine_inventory.len(), 0);
+    }
+
+    /// A pass told to stop before it starts must leave the catalog untouched —
+    /// "bounded and cancellable" means a cancellation is honoured before the
+    /// first page, not only between pages.
+    #[test]
+    fn background_wine_auto_apply_stops_when_cancelled_before_it_starts() {
+        let home = temporary_directory("wine-auto-apply-cancelled");
+        let games = home.join("Games");
+        fs::create_dir_all(&games).unwrap();
+        let executable = games.join("Foo.exe");
+        fs::write(&executable, "pretend windows binary").unwrap();
+
+        let state = state_for(&home);
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            catalog
+                .games
+                .push(direct_windows_game_fixture("direct-foo", executable));
+            catalog.wine_profiles.push(seeded_auto_wine_profile(
+                &home,
+                wine_runner::write_staging_binary(&home),
+            ));
+        }
+        state
+            .wine_auto_apply
+            .cancelled
+            .store(true, Ordering::Release);
+
+        run_wine_auto_apply(&state);
+
+        assert_eq!(state.catalog.read().unwrap().wine_inventory.len(), 0);
+    }
+
     /// An `AppState` with nothing behind it but a temporary directory. It is
     /// what lets the Winlator flow — which is all state, locks and a folder —
     /// be exercised without a device or a Tauri app.
@@ -9602,6 +9987,7 @@ mod tests {
             source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
+            wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
