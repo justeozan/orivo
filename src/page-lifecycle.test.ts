@@ -73,4 +73,31 @@ describe("PageLifecycleHost", () => {
     expect(first.isCurrent()).toBe(false);
     expect(activations[1].isCurrent()).toBe(true);
   });
+
+  it("remains hidden if deactivated before mount completes", async () => {
+    const container = document.createElement("section");
+    let resolveMount!: () => void;
+    const mountPromise = new Promise<void>((resolve) => {
+      resolveMount = resolve;
+    });
+    const page: AppPage = {
+      mount: () => mountPromise,
+      activate: () => undefined,
+      deactivate: () => null,
+    };
+    const host = new PageLifecycleHost(container, page);
+
+    const activatePromise = host.activate(libraryRoute);
+
+    // Let activate start the mount without completing it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    host.deactivate();
+    expect(container.hidden).toBe(true);
+
+    resolveMount();
+    await activatePromise;
+
+    expect(container.hidden).toBe(true);
+  });
 });
