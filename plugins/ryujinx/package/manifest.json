@@ -11,8 +11,8 @@
     {
       "path": "component.wasm",
       "kind": "component",
-      "sha256": "371d5b142b26265e67323b3b2797e2b4b0177098905d3c109232f771dcfaa0c4",
-      "byteSize": 45383
+      "sha256": "d5b6f95c7eb702609203cf6a8681dd62142a832dd50f0058c2737146ecbd32da",
+      "byteSize": 45804
     }
   ]
 }

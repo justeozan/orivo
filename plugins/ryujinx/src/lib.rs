@@ -7,9 +7,9 @@
 //! on the single grant the user approved and nothing more: no `read-file`, so the
 //! user's `prod.keys`, firmware dump and save folder are unreachable *by
 //! construction* rather than by promise, and the host's own `bytes_read` counter
-//! is the proof (see `plugin_ryujinx_runner.rs`). There is no WASI here at all —
-//! no clock, no random source, no socket — because the host would refuse to
-//! instantiate a component that asked for one.
+//! is the proof (see `src-tauri/src/ryujinx_plugin.rs`). There is no WASI here at
+//! all — no clock, no random source, no socket — because the host would refuse
+//! to instantiate a component that asked for one.
 //!
 //! ## Why a file name is hex
 //!
@@ -18,11 +18,15 @@
 //! folder. That reference has to pass the catalogue's opaque-id grammar
 //! (`[A-Za-z0-9._\-:]`, `plugin_manifest::valid_opaque_id`), and a Switch dump is
 //! conventionally named `Title [0100…][v0].nsp` — spaces and brackets, neither
-//! of which the grammar allows. So a reference here is the entry name
-//! **hex-encoded**: grammar-safe, injective, and order-preserving, which is what
-//! makes it usable as a page cursor too. `runner_host::resolve_game_file` knows
-//! that encoding; it still resolves the file from its own listing and never
-//! joins anything this component said onto a path.
+//! of which the grammar allows. So a reference here is `x:` followed by the entry
+//! name in **lower-case hexadecimal**: grammar-safe, and one spelling per file.
+//! Both halves of that matter, and neither is decoration. `x:` is a namespace no
+//! plain name can enter, because the host never lists a name containing `:`, so a
+//! hex reference and a name can never describe one file between them; lower case
+//! is the single canonical spelling, and a reference is the key of a library card,
+//! so a second spelling would have been a second card for one file.
+//! `runner_host::GrantedLibrary` knows that encoding; it still resolves the file
+//! from its own listing and never joins anything this component said onto a path.
 //!
 //! ## What Ryujinx accepts, and where that list comes from
 //!
@@ -68,6 +72,12 @@ const GAMES_GRANT: &str = "games";
 /// them.
 const GAME_SUFFIXES: [&str; 6] = [".nsp", ".pfs0", ".xci", ".nca", ".nro", ".nso"];
 
+/// What puts a reference in a namespace no plain file name can reach: the host
+/// refuses to list a name containing `:`, so nothing it could ever show this
+/// component collides with one of these.
+const REFERENCE_PREFIX: &str = "x:";
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
 const PLATFORM: &str = "Nintendo Switch";
 
 /// A Switch title id is sixteen hexadecimal digits, and a dump conventionally
@@ -75,11 +85,12 @@ const PLATFORM: &str = "Nintendo Switch";
 /// `[US]` cannot be mistaken for one.
 const TITLE_ID_DIGITS: usize = 16;
 
-/// Hex spends two bytes per byte, and the host refuses an external reference
-/// longer than 256 bytes, so a name past this cannot be addressed at all. It is
+/// Hex spends two digits per byte inside the 256 an external reference may be,
+/// minus the prefix, so a name past this cannot be addressed at all. It is
 /// reported in the journal rather than silently dropped: a library that came
-/// back short should say why.
-const MAX_NAME_BYTES: usize = 128;
+/// back short should say why. The host bounds a decoded reference at the same
+/// number for the same reason.
+const MAX_NAME_BYTES: usize = (256 - REFERENCE_PREFIX.len()) / 2;
 
 /// More candidates than one page will ever carry — the host's own ceiling is
 /// 100 — kept here so a caller asking for `u32::MAX` cannot make this component
@@ -173,7 +184,14 @@ impl RunnerGuest for Ryujinx {
                 next_cursor = Some(index.to_string());
                 break;
             }
-            games.push(candidate(&entry.name, suffix));
+            // A file with nothing to call it is skipped alone rather than being
+            // allowed to take the page with it: the host rejects a whole page
+            // over one empty title, and an import retries that same page every
+            // time, so one unnameable file would stop a library dead.
+            match candidate(&entry.name, suffix) {
+                Some(candidate) => games.push(candidate),
+                None => unaddressable += 1,
+            }
         }
 
         // One bounded line per page, not one per entry: this is what the
@@ -182,8 +200,8 @@ impl RunnerGuest for Ryujinx {
         host_journal::log(
             JournalLevel::Info,
             &format!(
-                "{} Switch game(s) on this page; skipped {unsupported} file(s) Ryujinx does not \
-                 open and {unaddressable} name(s) longer than {MAX_NAME_BYTES} bytes",
+                "{} Switch game(s) on this page; skipped {unsupported} entr(y|ies) Ryujinx does \
+                 not open and {unaddressable} name(s) Orivo cannot refer to",
                 games.len()
             ),
         );
@@ -210,11 +228,12 @@ impl RunnerGuest for Ryujinx {
         profile_id: String,
         game_reference: String,
     ) -> Result<LaunchIntent, PluginError> {
-        if decode_name(&game_reference)
-            .as_deref()
-            .and_then(recognised_suffix)
-            .is_none()
-        {
+        let offerable = decode_name(&game_reference).is_some_and(|name| {
+            name.len() <= MAX_NAME_BYTES
+                && listable_name(&name)
+                && recognised_suffix(&name).is_some()
+        });
+        if !offerable {
             return Err(error(
                 PluginErrorCode::InvalidInput,
                 "That is not a Nintendo Switch game file this runner offered.",
@@ -233,15 +252,19 @@ impl RunnerGuest for Ryujinx {
 /// file itself is read: a title id printed in the name is the only identity a
 /// runner needs, and reading an `.nsp` header would mean opening a file the user
 /// allowed this plugin to *list*.
-fn candidate(name: &str, suffix_len: usize) -> GameCandidate {
+///
+/// `None` when there is nothing to put on the card. The host refuses a candidate
+/// whose title is blank, and it refuses the whole page with it.
+fn candidate(name: &str, suffix_len: usize) -> Option<GameCandidate> {
     let stem = &name[..name.len() - suffix_len];
+    let title = readable_title(name, stem)?;
     let title_id = title_id(stem);
-    GameCandidate {
+    Some(GameCandidate {
         reference: ExternalReference {
             provider_id: PLUGIN_ID.into(),
             external_id: encode_name(name),
         },
-        title: readable_title(stem),
+        title,
         sort_title: None,
         // The v1 `game-candidate` has no field for an external title id, and
         // `platform` is the one that lands on the card's own metadata line, so
@@ -251,17 +274,42 @@ fn candidate(name: &str, suffix_len: usize) -> GameCandidate {
             None => PLATFORM.to_string(),
         }),
         installed: true,
-    }
+    })
 }
 
 /// The recognised suffix's byte length, or `None` for anything else in the
 /// folder. Matched case-insensitively because Ryujinx's own scanner lowercases
 /// before it compares, so `GAME.NSP` is a game there and has to be one here.
+///
+/// Hidden entries are skipped, and that *is* parity with Ryujinx rather than a
+/// departure from it: its `EnumerationOptions` leaves `AttributesToSkip` at the
+/// default `Hidden | System`, so a dot-file never reaches its game list.
+/// `host-files` has no such default and reports them, which is why the rule has
+/// to live here. What it costs to get wrong is concrete: on an exFAT or FAT
+/// volume macOS writes an AppleDouble sidecar `._<name>` beside every file, it
+/// carries the same `.nsp` suffix as the dump it shadows, and it would earn a
+/// second card with the same title and the same title id whose four kilobytes
+/// Play would hand to the emulator.
 fn game_suffix(entry: &DirectoryEntry) -> Option<usize> {
-    if entry.directory {
+    if entry.directory || !listable_name(&entry.name) {
         return None;
     }
     recognised_suffix(&entry.name)
+}
+
+/// A name the host could have shown this component, and therefore one it could
+/// have offered.
+///
+/// The host asks the same question of a decoded reference and is the authority;
+/// this is the plugin declining to say something it could never have meant. A
+/// single ordinary component, not hidden: no separator, no `:` (which a platform
+/// reads as a drive or a stream), no control character, and no leading dot — see
+/// `game_suffix` for what the dot costs on an exFAT volume.
+fn listable_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', ':'])
+        && !name.chars().any(char::is_control)
 }
 
 fn recognised_suffix(name: &str) -> Option<usize> {
@@ -274,29 +322,35 @@ fn recognised_suffix(name: &str) -> Option<usize> {
     })
 }
 
+/// One reference per file, spelled one way. The digit table is explicit because
+/// the canonical spelling is the whole point: the host accepts lower case only,
+/// and a card is keyed by its reference, so a second spelling of one name would
+/// be a second card for one file.
 fn encode_name(name: &str) -> String {
-    let mut encoded = String::with_capacity(name.len() * 2);
+    let mut encoded = String::with_capacity(REFERENCE_PREFIX.len() + name.len() * 2);
+    encoded.push_str(REFERENCE_PREFIX);
     for byte in name.as_bytes() {
-        encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap_or('0'));
-        encoded.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap_or('0'));
+        encoded.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
     }
     encoded
 }
 
-/// The inverse, used only to judge a reference the host handed back. It has to
-/// refuse anything that is not exactly what `encode_name` produces — an odd
-/// length, a non-hex digit, or bytes that are not UTF-8 — because a reference
-/// that decodes to something else is not a reference this component issued.
+/// The inverse, used only to judge a reference the host handed back. It refuses
+/// anything that is not exactly what `encode_name` produces — a missing prefix, an
+/// odd length, an upper-case or non-hex digit, or bytes that are not UTF-8 —
+/// because a reference that decodes to something else is not one this component
+/// issued.
 fn decode_name(reference: &str) -> Option<String> {
-    if reference.is_empty() || !reference.len().is_multiple_of(2) {
+    let digits = reference.strip_prefix(REFERENCE_PREFIX)?.as_bytes();
+    if digits.is_empty() || !digits.len().is_multiple_of(2) {
         return None;
     }
-    let mut bytes = Vec::with_capacity(reference.len() / 2);
-    let digits = reference.as_bytes();
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
     for pair in digits.chunks(2) {
-        let high = (pair[0] as char).to_digit(16)?;
-        let low = (pair[1] as char).to_digit(16)?;
-        bytes.push(((high << 4) | low) as u8);
+        let high = lower_hex_digit(pair[0])?;
+        let low = lower_hex_digit(pair[1])?;
+        bytes.push((high << 4) | low);
     }
     String::from_utf8(bytes).ok()
 }
@@ -337,7 +391,7 @@ fn title_id(stem: &str) -> Option<String> {
 /// its title id and version, so they come off; parentheses stay, because that is
 /// where the region usually is and a region is part of what tells two dumps
 /// apart.
-fn readable_title(stem: &str) -> String {
+fn readable_title(name: &str, stem: &str) -> Option<String> {
     let mut title = String::with_capacity(stem.len());
     let mut depth = 0_usize;
     for character in stem.chars() {
@@ -354,14 +408,27 @@ fn readable_title(stem: &str) -> String {
         .join(" ")
         .trim_matches(['-', '_', '.', ' '])
         .to_string();
-    // A file called only `[0100000000010000].nsp` has no readable title in it.
-    // Its own stem is a worse label than nothing would be honest, but it is the
-    // only thing there is, and a card with no title is one the catalogue
-    // refuses.
-    if collapsed.is_empty() {
-        stem.trim().to_string()
-    } else {
-        collapsed
+    // Three fallbacks, in order, because the host rejects an empty title and
+    // takes the whole page down with it. A file called only
+    // `[0100000000010000].nsp` has nothing left once the brackets come off, so
+    // its stem is the label; a file called ` .nsp` — or one named with a
+    // no-break space, or U+3000 — has a stem that is blank as well, and its own
+    // file name is all there is. Only if even that is blank is there no card to
+    // make, and the caller drops that one file rather than the page.
+    [collapsed.as_str(), stem.trim(), name.trim()]
+        .into_iter()
+        .find(|candidate| !candidate.is_empty())
+        .map(str::to_owned)
+}
+
+/// Lower case only, so one file has one reference. `char::to_digit(16)` takes
+/// both cases, which would have given a name of *k* hex-significant bytes 2^k of
+/// them.
+fn lower_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
     }
 }
 

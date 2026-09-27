@@ -54,8 +54,10 @@ pub(crate) const PLUGIN_ID: &str = "com.orivo.ryujinx";
 pub(crate) const GAMES_SLOT: &str = "games";
 const PROFILE_ID: &str = "runner-ryujinx-1";
 
-/// Names a real dumped library actually uses. Every one of them is a file the
-/// opaque-id grammar cannot spell, which is why the reference is hex.
+/// Names a real dumped library actually uses. The first three are files the
+/// opaque-id grammar cannot spell, which is why the reference is hex; the fourth
+/// can be spelled plainly and is here so both forms are exercised by the same
+/// import.
 const LIBRARY: &[(&str, &str)] = &[
     (
         "Super Mario Odyssey [0100000000010000][v0].nsp",
@@ -80,6 +82,12 @@ const NOT_GAMES: &[&str] = &[
     "cover.jpg",
     "notes.txt",
     "backup.zip",
+    // The AppleDouble sidecar macOS writes beside every file on an exFAT volume.
+    // It carries the dump's own name and suffix, so nothing but the leading dot
+    // tells it apart — and Play would hand its four kilobytes to the emulator.
+    "._Super Mario Odyssey [0100000000010000][v0].nsp",
+    // Hidden, with a name that is otherwise a perfectly good game.
+    ".Celeste (USA).nsp",
 ];
 
 // ---------------------------------------------------------------------------
@@ -318,10 +326,20 @@ pub(crate) fn fake_application(root: &Path) -> PathBuf {
 /// encoder ever disagree, this is the line that has to be wrong for the test to
 /// pass.
 pub(crate) fn reference(name: &str) -> String {
-    name.as_bytes()
+    let digits: String = name
+        .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .collect();
+    format!("x:{digits}")
+}
+
+/// The same reference with its digits upper-cased, which `char::to_digit(16)`
+/// used to accept on both sides. One file has to have one reference: a card is
+/// keyed by it, so a second spelling would have been a second card.
+fn shouted(reference: &str) -> String {
+    let (prefix, digits) = reference.split_at(2);
+    format!("{prefix}{}", digits.to_ascii_uppercase())
 }
 
 /// One call straight through `PluginRuntime`, for the questions only the host's
@@ -431,9 +449,9 @@ fn the_installed_plugin_is_offered_as_a_configurable_runner() {
 // Import
 // ---------------------------------------------------------------------------
 
-/// The whole import, on names a real dumped library uses. None of these four
-/// file names passes the opaque-id grammar, so every one of them is a game the
-/// host could not have resolved before the hex reference existed.
+/// The whole import, on names a real dumped library uses. Three of the four do
+/// not pass the opaque-id grammar, so they are games the host could not have
+/// resolved before the hex reference existed.
 #[test]
 fn a_realistically_named_switch_library_imports_with_readable_titles() {
     let harness = Harness::new("import");
@@ -538,6 +556,98 @@ fn nothing_beside_the_games_is_offered_and_no_file_is_ever_read() {
     match invocation.response {
         PluginResponse::DiscoveryPage(page) => assert_eq!(page.games.len(), LIBRARY.len()),
         other => panic!("expected a discovery page, got {other:?}"),
+    }
+}
+
+/// The AppleDouble sidecar. On any exFAT or FAT volume — which is what a shared
+/// ROM drive usually is — macOS writes `._<name>` beside every file, carrying the
+/// dump's own name and `.nsp` suffix. Nothing but the leading dot tells the two
+/// apart, so it would earn a second card with the same title and the same title
+/// id, and Play would hand its four kilobytes to the emulator.
+///
+/// Ryujinx never sees one: its `EnumerationOptions` leaves `AttributesToSkip` at
+/// the default `Hidden | System`. `host-files` has no such default, so both the
+/// plugin and the host apply the rule themselves.
+#[test]
+fn a_hidden_file_never_becomes_a_card_or_a_launch() {
+    let harness = Harness::new("hidden");
+    harness.configure();
+    harness.import();
+
+    let catalog = harness.catalog();
+    let sidecar = "._Super Mario Odyssey [0100000000010000][v0].nsp";
+    assert_eq!(
+        catalog
+            .games
+            .iter()
+            .filter(|game| game.title == "Super Mario Odyssey")
+            .count(),
+        1,
+        "the sidecar must not earn a second card under the dump's own title"
+    );
+    assert!(
+        !catalog
+            .runner_inventory
+            .iter()
+            .any(|entry| entry.game_path.file_name().unwrap() == sidecar)
+    );
+    // And it cannot be reached by naming it either: a plain id could never start
+    // with a dot, and the hex form must not be the way around that.
+    let package = harness.service.package(PLUGIN_ID).unwrap();
+    let cancelled = AtomicBool::new(false);
+    assert!(
+        prepare_runner_launch(
+            &package,
+            &catalog,
+            PROFILE_ID,
+            &reference(sidecar),
+            &cancelled,
+        )
+        .is_err()
+    );
+}
+
+/// A file with nothing to call it must cost that one file, not the library.
+///
+/// The host refuses a candidate whose title is blank and refuses the whole page
+/// with it (`plugin_runtime`'s `sanitise_text`), and an import retries the same
+/// page every time — so a single ` .nsp`, or a name made of a no-break space or
+/// U+3000, used to stop every game behind it. It sorts first, too, so "behind it"
+/// meant all of them.
+#[test]
+fn a_name_with_no_title_in_it_costs_one_card_and_not_the_page() {
+    const AWKWARD: &[(&str, &str)] = &[
+        // Blank before the extension, three ways: ASCII space, no-break space,
+        // and the ideographic space.
+        (" .nsp", ".nsp"),
+        ("\u{a0}.xci", ".xci"),
+        ("\u{3000}.nsp", ".nsp"),
+        // Nothing left once the brackets come off, so the stem is the label.
+        ("[0100000000010000].nsp", "[0100000000010000]"),
+        // And a real game, which is what must survive all of the above.
+        (
+            "Super Mario Odyssey [0100000000010000][v0].nsp",
+            "Super Mario Odyssey",
+        ),
+    ];
+    let harness = Harness::with_library("awkward", AWKWARD, RunnerImportLimits::default());
+    harness.configure();
+    let outcome = harness.import();
+
+    assert!(outcome.complete);
+    assert_eq!(
+        outcome.progress.imported,
+        AWKWARD.len(),
+        "one unnameable file must not refuse the page the rest of the library is on"
+    );
+    let catalog = harness.catalog();
+    for (name, title) in AWKWARD {
+        let entry = catalog
+            .runner_inventory
+            .iter()
+            .find(|entry| entry.game_ref == reference(name))
+            .unwrap_or_else(|| panic!("{name:?} was not imported"));
+        assert_eq!(entry.title, *title, "for {name:?}");
     }
 }
 
@@ -660,11 +770,20 @@ fn prepare_launch_refuses_a_reference_this_plugin_never_issued() {
     for reference in [
         // Not hex at all.
         "not-a-reference",
-        // Hex, but of a name with no extension Ryujinx opens.
+        // Hex, and of a real file, but not one with an extension Ryujinx opens:
+        // the refusal is the extension, not the path shape.
         reference("prod.keys").as_str(),
-        // Hex of a traversal, which decodes to a name no entry has and is
-        // refused here before the host ever compares it to one.
-        reference("../prod.keys").as_str(),
+        // A traversal that *does* end in a suffix Ryujinx opens, so only the
+        // decoded name's shape can refuse it. The host would refuse it too — no
+        // entry is called this — but the plugin declines to say it at all.
+        reference("../Celeste (USA).nsp").as_str(),
+        // Hidden, and the plugin never offered it, so it will not prepare it.
+        reference("._Celeste (USA).nsp").as_str(),
+        // The right bytes in the wrong case: one file, one reference.
+        shouted(&reference("Celeste (USA).nsp")).as_str(),
+        // The prefix alone, and a plain name with no prefix at all.
+        "x:",
+        "Celeste.nsp",
     ] {
         let outcome = runtime
             .submit(
@@ -683,5 +802,10 @@ fn prepare_launch_refuses_a_reference_this_plugin_never_issued() {
             outcome.is_err(),
             "{reference} should not become a launch intent"
         );
+        // Every refusal here is the plugin declining, which the scheduler counts
+        // against it: three in a row is `degraded`, and the fourth would never be
+        // dispatched. That is the scheduler behaving correctly, so the test
+        // clears it between references rather than working around it.
+        runtime.scheduler().resume(PLUGIN_ID);
     }
 }

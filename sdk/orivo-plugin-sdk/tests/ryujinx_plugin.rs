@@ -64,11 +64,17 @@ fn library(tag: &str) -> PathBuf {
     dir
 }
 
+/// What the component issues for a file name: the `x:` namespace no plain name
+/// can enter, then the name in lower-case hex. Written out here rather than
+/// imported, because this encoding is the contract between two separately built
+/// artefacts.
 fn reference(name: &str) -> String {
-    name.as_bytes()
+    let digits: String = name
+        .as_bytes()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .collect();
+    format!("x:{digits}")
 }
 
 /// The committed manifest, validated where it lives. A relative path is enough:
