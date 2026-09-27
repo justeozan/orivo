@@ -682,10 +682,18 @@ fn read_slot(path: &Path, ceiling: u64) -> Stored {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // Opens a junction or a symbolic link as itself, so the check below sees
-        // the link rather than whatever it points at.
+        // `FILE_FLAG_OPEN_REPARSE_POINT` opens a junction or a symbolic link as
+        // itself, so the check below sees the link rather than whatever it points
+        // at. `FILE_FLAG_BACKUP_SEMANTICS` is what permits opening a *directory*
+        // at all on Windows, and it is not optional here: without it a directory
+        // sitting at a slot name cannot be opened, so it reads as absent, the
+        // `remove_dir` fallback in `refuse` never runs, and `rename` cannot
+        // replace it — that component recompiles on every open for the life of
+        // the installation. `plugin_runtime.rs` needs the same flag for the same
+        // reason.
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
     }
     // A refused open — a link (`ELOOP`), a permission, a device that will not
     // answer — is `Absent` rather than `Unusable`, because telling those apart
@@ -1760,8 +1768,9 @@ mod tests {
             .component(SECOND, || compiler.compile(SECOND))
             .unwrap();
         // Modification times are the eviction order, so the two writes must be
-        // distinguishable by the filesystem's clock.
-        std::thread::sleep(Duration::from_millis(20));
+        // distinguishable by the filesystem's clock — which on NTFS is coarser
+        // than on APFS, and this test now runs on Windows too.
+        std::thread::sleep(Duration::from_millis(50));
         cache
             .component(FIXTURE, || compiler.compile(FIXTURE))
             .unwrap();

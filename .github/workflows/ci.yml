@@ -156,18 +156,26 @@ jobs:
       # would have caught it were `#[cfg(unix)]`. This runs the plugin host's own
       # tests where nothing else does.
       #
+      # `plugin_compile_cache::` is here for the same reason and was missed once:
+      # it opens slots without following a link, refuses a directory sitting at
+      # one, and sets a directory's mode, and every one of those is spelled
+      # differently on Windows. Its tests had never run there — a directory at a
+      # slot name could not even be *opened* without
+      # `FILE_FLAG_BACKUP_SEMANTICS`, so the slot stayed obstructed forever, and
+      # nothing said so.
+      #
       # Deliberately not the whole suite: the rest of the crate is
       # platform-independent and already covered on macOS and Linux, and a
-      # Windows runner is the slowest in this matrix. The two module paths are
-      # spelled out rather than filtered on `plugin_`, which is a substring match
-      # and also caught, for instance,
+      # Windows runner is the slowest in this matrix. The module paths are spelled
+      # out rather than filtered on `plugin_`, which is a substring match and also
+      # caught, for instance,
       # `catalog::tests::a_profile_cannot_change_the_plugin_that_owns_it` — a test
       # in another module, which this step has no business gating on.
       - name: Test the plugin host (Windows)
         if: matrix.platform == 'windows-latest'
         run: >
           cargo test --manifest-path src-tauri/Cargo.toml --lib --
-          plugin_runtime:: plugin_scheduler::
+          plugin_runtime:: plugin_scheduler:: plugin_compile_cache::
 
       # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
       # `wit_compatibility` test is the one thing here that is *supposed* to
