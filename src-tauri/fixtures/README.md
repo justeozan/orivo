@@ -175,20 +175,36 @@ Closed, and asserted on the runner:
   file the user actually has.
 - **Not every non-surrogate tag is followed, and the two opens that follow one
   are compared.** Clearing the name-surrogate bit says a tag is not a *name*; it
-  says nothing about who serves the bytes behind it, and deduplication,
-  single-instance storage and the container-layer filter can all in principle
-  serve a *different* file's data through a tag shaped exactly like a OneDrive
-  placeholder. `reparse_tag_is_followed` follows only `IO_REPARSE_TAG_DEDUP`
-  (`ntifs.h`, `0x80000013`), `IO_REPARSE_TAG_WOF` (`ntifs.h`, `0x80000017`) and
-  the cloud-file family `IO_REPARSE_TAG_CLOUD`..`_F` (`cfapi.h`, base
-  `0x9000001A`, provider nibble at `0x0000F000`); anything else is refused before
-  the second open is even attempted, and the journal is told why
-  (`reparse-tag-refused`). And because the same name is resolved twice — once to
-  read the tag, again to read the file — anything can happen to it in between:
-  the entry the second open reaches is now checked against the first one's
-  `FileIdInfo`, and a mismatch (a symbolic link swapped in for a placeholder, the
-  realistic case, since the first open's `FILE_SHARE_DELETE` is what lets the
-  entry be replaced while it is still held) is refused rather than trusted.
+  says nothing about who serves the bytes behind it, and single-instance storage
+  and the container-layer filter can in principle serve a *different* file's
+  data through a tag shaped exactly like a OneDrive placeholder.
+  `reparse_tag_is_followed` follows only `IO_REPARSE_TAG_WOF` (`ntifs.h`,
+  `0x80000017`) and the cloud-file family `IO_REPARSE_TAG_CLOUD`..`_F`
+  (`winnt.h`, base `0x9000001A`, provider nibble at `0x0000F000`).
+  `IO_REPARSE_TAG_DEDUP` is deliberately excluded even though it is a real,
+  documented Microsoft tag: Data Deduplication can hand back a chunk shared
+  with another file, and the identity check below cannot see that — it only
+  confirms the second open reached the same *file*, never that dedup served
+  that file's own bytes rather than a collision — and Windows client, which is
+  what Orivo ships to, does not have the feature at all. Anything not on the
+  list is refused before the second open is even attempted, and the journal is
+  told why (`reparse-tag-refused`). And because the same name is resolved
+  twice — once to read the tag, again to read the file — anything can happen to
+  it in between: the entry the second open reaches is now checked against the
+  first one's `FileIdInfo`, and a mismatch (a symbolic link swapped in for a
+  placeholder, the realistic case, since the first open's `FILE_SHARE_DELETE`
+  is what lets the entry be replaced while it is still held) is refused rather
+  than trusted (`reparse-entry-changed`).
+
+  Both halves are asserted against a *real* WOF placeholder on the runner, not
+  only a hand-planted stand-in: `compact /c /exe:LZX` on a 128 KiB file
+  produces one, `open_entry_for_reading` reads it back byte-for-byte with the
+  production whitelist in force, and the same placeholder is what the race is
+  staged against. An earlier version of this claimed the opposite — that no
+  Windows runner can produce a real WOF placeholder at all — because the check
+  used to confirm one existed followed the reparse point through the filter
+  instead of stopping at it, and so never saw the attribute on a placeholder
+  a real driver was already serving.
 - **A listing still opens nothing that matters.** Entries are opened for
   `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
   another opener's share mode. Only `read_file` follows a placeholder, which is
