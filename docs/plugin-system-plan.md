@@ -130,23 +130,39 @@ composant exporte le monde runner, n’importe rien que le host ne sache servir,
 demande pas plus que son manifeste, et répond à `get-identity` et `health-check`
 avec une identité qui concorde avec le paquet installé.
 
-Restent volontairement hors de cette intégration : l’import de ROMs, les runners
-GPTK/CrossOver, et le lancement d’un runner tiers. Les targets `Runner` tiers
-continuent donc à échouer explicitement au lieu d’accepter une commande libre :
-sans le flux « Ajouter un émulateur », aucun profil runner tiers n’existe contre
-lequel résoudre un intent, et le host n’inventera pas d’exécutable. Wine-Staging
-ne charge pas un faux composant Wasm : il applique le contrat WIT
+Wine-Staging ne charge pas un faux composant Wasm : il applique le contrat WIT
 `prepare-launch` comme adapter natif, puis le host valide les IDs opaques et
 possède le processus.
 
+Un runner tiers est désormais utilisable de bout en bout, côté host. Le catalogue
+passe au schéma **v8** et porte trois tables privées : un `RunnerProfile` — le
+plugin qui prépare, l’application d’émulation choisie au sélecteur natif, les
+dossiers accordés, les réglages et le statut que `validate-profile` a rendu —,
+l’inventaire qui relie une référence de jeu opaque au fichier que le host a
+résolu lui-même, et `plugin_grants`, le registre des permissions. Le lancement
+suit l’ordre du contrat : profil accepté par le plugin, grant en vigueur,
+`prepare-launch` sous le budget interactif, intent validé contre l’appel, puis —
+seulement alors — le host résout l’application et le fichier de jeu, canonique,
+sans jamais suivre un lien qui sort du dossier accordé, et construit un processus
+sans shell dont l’unique argument est ce fichier. `launcher.rs` refuse toujours un
+target `Runner` qui lui arrive non résolu ; c’est le filet, pas le chemin.
+L’import passe par `discover-page` et le scheduler, une page par transaction,
+avec un curseur persisté à côté de la page qu’il décrit : une annulation ou un
+redémarrage reprend là où il s’était arrêté au lieu de reparcourir la
+bibliothèque. Ce que ce palier n’apporte pas : l’interface « Ajouter un
+émulateur » et l’écran Réglages → Plugins, qui consommeront ces commandes, ainsi
+que l’import de ROMs par métadonnées et les runners GPTK/CrossOver.
+
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
-bas (`plugin_grants`, `plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt
-n’a aucune dépendance SQLite et son catalogue est un JSON versionné
-(`catalog.rs`, schéma v7). Rien de ce que le host produit n’avait besoin d’être
-persisté pour ce palier : les grants sont résolus par appel, l’état des jobs vit
-dans le scheduler et le journal est un anneau borné en mémoire. La première
-persistance à créer sera celle des grants, avec le flux « Ajouter un émulateur »
-qui les fabrique.
+bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune
+dépendance SQLite et son catalogue est un JSON versionné (`catalog.rs`, schéma
+v8). Les grants, les profils et les références externes y vivent, parce
+qu’accorder un dossier et enregistrer la permission de le lire doivent réussir ou
+échouer ensemble ; l’état des jobs reste dans le scheduler et le journal reste un
+anneau borné en mémoire, parce que rien de ce que le host en tire n’avait besoin
+de survivre au processus. Révoquer écrit une date au lieu de supprimer une ligne,
+de sorte que « ce plugin pouvait lire ce dossier entre ces deux dates » reste une
+question à laquelle le registre répond.
 
 ## Les promesses à préserver
 
