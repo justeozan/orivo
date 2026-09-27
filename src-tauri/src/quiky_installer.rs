@@ -193,6 +193,9 @@ impl QuikyService {
     }
 
     fn plugin(&self) -> Option<InstallerPlugin> {
+        // Acquiring a game is user-initiated, so the compile cache may open here
+        // too — see `plugin_compile_cache::permit`.
+        crate::plugin_compile_cache::permit();
         // The process-wide runtime: a fresh one here would give this path its own
         // compiled-component cache, its own memory ceiling and its own failure
         // counter, so a plugin parked as degraded would answer again on the next

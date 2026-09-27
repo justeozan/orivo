@@ -123,6 +123,29 @@ impl PluginRegistry {
             })
     }
 
+    /// Every installed plugin as its own manifest describes it, with no
+    /// component compiled and no host consulted.
+    ///
+    /// This is the listing for a caller that only needs to know *what is
+    /// installed* — an id, a version, a name. The update check at startup is one:
+    /// it compares installed versions against the registry index and reads
+    /// nothing a component could answer. Asking [`Self::installed_plugins`] for
+    /// that meant compiling every installed component at launch, ~31 ms of
+    /// Cranelift each, to arrive at fields the manifest already held; and once a
+    /// compile cache existed it also meant reading that cache's install key at
+    /// launch, which the plugin plan forbids and which macOS turns into a
+    /// password prompt on an ad-hoc-signed build.
+    ///
+    /// A `Ready` here therefore means "the package is well-formed", not "the
+    /// component answers for itself" — the stronger verdict is
+    /// [`Self::installed_plugins`]'s and stays there.
+    pub fn installed_manifests(&self) -> Vec<PluginRecord> {
+        self.discover_internal()
+            .into_iter()
+            .map(|(_, plugin)| plugin.record)
+            .collect()
+    }
+
     /// Every installed plugin, whatever it extends. The Settings surface needs
     /// the full list to offer removal, including packages that turned out to
     /// be invalid or built for a newer host.
@@ -777,6 +800,32 @@ mod tests {
         let mut hash = Sha256::new();
         hash.update(bytes);
         format!("{:x}", hash.finalize())
+    }
+
+    /// The startup update check must not compile anything, and the only way to
+    /// show that from outside is to install a component that *cannot* compile and
+    /// watch the two listings disagree about it.
+    #[test]
+    fn the_manifest_listing_never_compiles_a_component() {
+        let root = temporary_root();
+        write_runner(&root, EMPTY_COMPONENT, sha256_of(EMPTY_COMPONENT));
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+
+        let manifests = registry.installed_manifests();
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].id, RUNNER_ID);
+        assert_eq!(manifests[0].version, "1.0.0");
+        assert_eq!(
+            manifests[0].state,
+            PluginState::Ready,
+            "the manifest listing reached the component"
+        );
+
+        // The same package, through the listing that does compile.
+        let runtime = PluginRuntime::new().unwrap();
+        let preflighted = registry.installed_plugins(&runtime);
+        assert_eq!(preflighted[0].state, PluginState::Invalid);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

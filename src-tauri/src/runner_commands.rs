@@ -192,6 +192,12 @@ impl ThirdPartyRunnerService {
     }
 
     fn runtime(&self) -> Result<PluginRuntime, RunnerHostError> {
+        // Every path that loads a runner package comes through here, and every one
+        // of them is something the user asked for: listing runners, creating a
+        // profile, granting a folder, importing, launching. None of them runs at
+        // startup, which is why this is where the compile cache is allowed to
+        // open — see `plugin_compile_cache::permit`.
+        crate::plugin_compile_cache::permit();
         match self.runtime.as_ref() {
             Some(runtime) => Ok(runtime.clone()),
             None => PluginRuntime::shared().map_err(|_| RunnerHostError::RuntimeUnavailable),

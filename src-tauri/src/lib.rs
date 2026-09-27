@@ -1418,6 +1418,9 @@ async fn get_runner_plugins(state: State<'_, AppState>) -> Result<Vec<RunnerPlug
     let root = state.plugin_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = PluginDiscoveryLease(lease_flag);
+        // The "Add an emulator" flow is user-initiated, so the compile cache may
+        // open from here on — see `plugin_compile_cache::permit`.
+        plugin_compile_cache::permit();
         let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
         Ok::<_, String>(
             PluginRegistry::new(root, HostCompatibility::v1(env!("CARGO_PKG_VERSION")))

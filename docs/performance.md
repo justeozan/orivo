@@ -206,17 +206,22 @@ Trois choses que ce tableau ne dit pas, et qu'il faut lire avec lui.
   contiennent l'instanciation et deux appels invités. Ce qui change vraiment :
   l'écran à 20 composants passe sous le budget interactif de 150 ms du plan
   (36 ms), alors qu'il était à 646 ms.
-- **Rien de ceci n'est lu au démarrage.** Le cache est ouvert par la première
-  compilation de composant, et `prepare_component` n'a que trois appelants
-  (`plugin_registry.rs`, `runner_host.rs`, plus `preflight_component` côté
-  installateur qui, lui, ne passe pas par le cache) — tous sur un worker
-  `spawn_blocking`, jamais depuis `AppState::load`. Les chiffres de la section 2
-  ont été repris dans le même run et n'ont pas bougé
+- **Rien de ceci n'est lu au démarrage — mais il a fallu le rendre vrai.** La
+  première version de ce lot l'affirmait à tort : `start_background_maintenance`
+  demande au registre ce qui est installé pour voir si une mise à jour consentie
+  attend, et ce passage atteignait `prepare_component` comme un panneau de
+  réglages, donc une compilation par plugin à chaque lancement — sur le runtime
+  async, et avec un cache derrière, la lecture de la clé au lancement. Deux
+  corrections : ce passage lit désormais les manifestes et ne compile plus rien
+  (`PluginRegistry::installed_manifests`), et le cache ne s'ouvre qu'après qu'une
+  surface ouverte par l'utilisateur l'a permis (`plugin_compile_cache::permit`),
+  de sorte qu'un chemin de fond ajouté plus tard est sans cache par défaut. Les
+  chiffres de la section 2 ont été repris dans le même run et n'ont pas bougé
   (`load_with_migration` 4,06 ms et `save_atomically` 10,29 ms à n=10 000, contre
   4,6 et 11,5 ms avant) ; et les lignes `bench_plugin_surfaces_*` de la section 3,
   prises dans ce même processus, sont restées à ~32 ms par composant parce
-  qu'aucun dossier de cache n'y est configuré — ce qui mesure aussi, au passage,
-  qu'un processus sans cache se comporte exactement comme avant.
+  qu'aucun cache n'y est permis — ce qui mesure aussi, au passage, qu'un processus
+  sans cache se comporte exactement comme avant.
 
 ## 4. Taille du bundle
 
