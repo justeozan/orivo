@@ -170,9 +170,12 @@ that cannot — the bullet says so rather than letting the heading imply otherwi
 - **A reparse point is only a redirection when its tag names one.**
   `IsReparseTagNameSurrogate` (`ntifs.h`, one bit) separates a symbolic link or a
   junction from a file whose bytes merely live elsewhere: a OneDrive placeholder
-  that has not been downloaded, a deduplicated or WOF-compressed file. Refusing all
-  of them alike made a granted folder under OneDrive-managed Documents look empty
-  to a plugin, and every read in it fail. A non-redirecting reparse point is now
+  that has not been downloaded, or a deduplicated file. Refusing all of them alike
+  made a granted folder under OneDrive-managed Documents look empty to a plugin,
+  and every read in it fail. (A WOF-compressed file has the same shape on paper
+  and turns out not to be a case this host ever saw: wof.sys hides the tag, so
+  such a file was never mistaken for a link in the first place — see the WOF
+  paragraph below.) A non-redirecting reparse point is now
   reopened relative to the handle *following* it, which is what lets a filter
   driver serve the file the user actually has. Executed on the runner as far as
   the listing goes; the served-by-a-real-driver half is the gap named under
@@ -215,15 +218,22 @@ that cannot — the bullet says so rather than letting the heading imply otherwi
   `FSCTL_SET_REPARSE_POINT` the same way `IO_REPARSE_TAG_DEDUP` proved plantable
   before dedup came off the list. Nothing on the runner is registered to *claim*
   it, which is what makes the fallback reachable and the served-by-a-driver path
-  not; see "Still open". `compact /c /exe:LZX` was tried before it, and what the
-  runner actually shows is narrower than an earlier version of this file claimed:
-  after compacting, no attribute query sees a reparse point. Whether that is
-  because none was made or because wof.sys hides the one it owns is asked
-  directly — `FSCTL_GET_EXTERNAL_BACKING`, production's own `reparse_tag`, and
-  the attribute, all three printed by
-  `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` — and
-  whichever it is, that test asserts the thing that matters either way: a
-  compacted file reads back byte for byte.
+  not; see "Still open".
+
+  `compact /c /exe:LZX` was tried before it, and three earlier rounds of this
+  work concluded from `is_reparse_point` answering "no" that it produced no WOF
+  placeholder at all. That was an inference, and the runner has since contradicted
+  it: `FSCTL_GET_EXTERNAL_BACKING` reports a compacted file **externally backed**,
+  provider 2 and algorithm 1 — the file provider, LZX — while both attribute
+  queries, `is_reparse_point`'s and production's own `reparse_tag`, answer "no
+  reparse point". wof.sys keeps its own tag out of what this host can ask. The
+  consequence is stated because it is the useful part: a real WOF file reaches
+  `FollowOutcome::NoReparsePoint`, never the whitelist, and is read
+  transparently — which is correct, and is what
+  `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` asserts, byte
+  for byte. `IO_REPARSE_TAG_WOF` therefore stays on the followed list for the
+  case where the tag *is* visible, with no test exercising it, because nothing
+  available here can make it visible.
 - **A listing still opens nothing that matters.** Entries are opened for
   `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
   another opener's share mode. Only `read_file` follows a placeholder, which is

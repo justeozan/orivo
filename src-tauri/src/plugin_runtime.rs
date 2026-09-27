@@ -4817,13 +4817,14 @@ mod tests {
     /// query (`GetFileAttributesEx`) rather than a handle-level one.
     ///
     /// What none of the three can tell you is whether a filter is *hiding* a
-    /// reparse point it owns, which is a thing wof.sys does. "This says no" and
-    /// "there is none" are therefore not the same statement, and an earlier
-    /// version of this file treated them as one. What the three actually answer
-    /// for a real `compact`ed file is printed by
-    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag`,
-    /// alongside `FSCTL_GET_EXTERNAL_BACKING`, which is the only one of them that
-    /// asks WOF instead of the attribute.
+    /// reparse point it owns, and on the runner wof.sys does exactly that:
+    /// `FSCTL_GET_EXTERNAL_BACKING` reports a `compact`ed file externally backed
+    /// (provider 2, algorithm 1 — the file provider, LZX) while this query and
+    /// production's own `reparse_tag` both answer "no reparse point". "This says
+    /// no" and "there is none" are therefore not the same statement, and an
+    /// earlier version of this file treated them as one. The three answers are
+    /// printed side by side by
+    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag`.
     #[cfg(not(unix))]
     fn is_reparse_point(path: &Path) -> bool {
         use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -4846,12 +4847,14 @@ mod tests {
     /// `compact /c /exe:LZX` is tried first: on a volume where WOF applies it
     /// makes a real placeholder a driver actually owns, the closest thing to a
     /// real OneDrive placeholder this file can produce. What decides the branch
-    /// below is not whether `compact` compressed anything — it reports a ratio
-    /// here either way — but whether `is_reparse_point` can *see* a reparse
-    /// point afterwards, and on this runner it cannot; whether that is because
-    /// none was made or because wof.sys hides its own is the question
-    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` asks
-    /// directly. Either way this helper then falls back to a tag of its own
+    /// below is not whether `compact` compressed anything — on the runner it
+    /// really does, `FSCTL_GET_EXTERNAL_BACKING` confirms it — but whether
+    /// `is_reparse_point` can *see* a reparse point afterwards, and it cannot,
+    /// because wof.sys keeps its own tag out of every attribute query this host
+    /// makes. A WOF file is therefore never a placeholder *this* code has to
+    /// follow: it reads transparently, and
+    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` is where
+    /// that is asserted. So this helper falls back to a tag of its own
     /// (`plant_unrecognised_reparse_point`), which is refused before the second
     /// open is even attempted: `reparse_tag_is_followed` does not trust it,
     /// unlike the tag `plant_trusted_reparse_point` hand-plants for the tests
@@ -5028,16 +5031,14 @@ mod tests {
     /// does not need to be running on real cloud-sync software or a WOF-capable
     /// volume to test against.
     ///
-    /// `compact /c /exe:LZX` was the first thing tried here. It is not usable for
-    /// this, but not for the reason an earlier version of this comment gave: what
-    /// is actually true on the runner is that no attribute query afterwards can
-    /// see a reparse point, in every size and name tried. That is consistent with
-    /// two different worlds — no placeholder was made, or wof.sys is hiding the
-    /// one it owns — and this helper needs neither of them settled, because a tag
-    /// nothing hides is a tag a test can reason about. What `compact` really
-    /// produces here is reported by
-    /// `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag`, which
-    /// asks WOF directly rather than asking the attribute and inferring.
+    /// `compact /c /exe:LZX` was the first thing tried here, and it is not usable
+    /// for this — but not for the reason three earlier rounds of this branch
+    /// gave. They inferred from the attribute answering "no reparse point" that
+    /// no WOF placeholder had been made; asking WOF instead
+    /// (`FSCTL_GET_EXTERNAL_BACKING`) shows one was, provider 2 and algorithm 1,
+    /// and that wof.sys simply does not let this host see the tag. A tag no query
+    /// can see is a tag no test can drive the whitelist with, which is the real
+    /// reason `compact` cannot serve here; a hand-planted tag nothing hides can.
     ///
     /// `IO_REPARSE_TAG_CLOUD` (`winnt.h`, `0x9000001A`) does not have that
     /// problem: `FSCTL_SET_REPARSE_POINT` already proved it accepts a
@@ -5467,6 +5468,15 @@ mod tests {
     /// Nothing is asserted about *which* outcome it reaches, because that is the
     /// finding, not the requirement — and `compact` declining outright is a
     /// legitimate answer on a volume without WOF.
+    ///
+    /// What it found, on `windows-latest`: externally backed by the file provider
+    /// with LZX, no reparse point visible to either attribute query, and so
+    /// `FollowOutcome::NoReparsePoint` — a real WOF file never reaches the
+    /// whitelist at all and is read transparently, which is exactly what should
+    /// happen to it. The corollary is worth stating too: `IO_REPARSE_TAG_WOF`
+    /// stays on `reparse_tag_is_followed`'s list for the case where the tag *is*
+    /// visible, and no test here exercises it, because nothing here can make it
+    /// visible.
     #[cfg(not(unix))]
     #[test]
     fn a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag() {
