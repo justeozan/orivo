@@ -23,6 +23,15 @@ export interface InstalledPluginView {
   message: string;
   /** True when the package carried a trusted Ed25519 signature. */
   trusted: boolean;
+  /** The version Orivo kept when this one was installed, if any. */
+  rollbackTo: string | null;
+  /** A newer release the cached registry index knows about. */
+  updateTo: string | null;
+}
+
+/** Whether automatic updates are on for the whole official channel. */
+export interface PluginUpdatePolicy {
+  automatic: boolean;
 }
 
 export interface AvailablePluginView {
@@ -65,6 +74,14 @@ export interface PluginManagerClient {
   /** Opens a native picker. Resolves to the installed id, or null if cancelled. */
   installFromFile(signal: AbortSignal): Promise<string | null>;
   uninstall(pluginId: string, signal: AbortSignal): Promise<void>;
+  /** Asks the registry over the network for anything newer. Cancellable. */
+  refreshCatalog(signal: AbortSignal): Promise<PluginCatalogView>;
+  cancelRefresh(): void;
+  update(pluginId: string, signal: AbortSignal): Promise<void>;
+  /** Resolves to the version that is live again. */
+  rollback(pluginId: string, signal: AbortSignal): Promise<string>;
+  getUpdatePolicy(signal: AbortSignal): Promise<PluginUpdatePolicy>;
+  setUpdatePolicy(automatic: boolean, signal: AbortSignal): Promise<PluginUpdatePolicy>;
   subscribe(onProgress: (progress: PluginInstallProgress) => void): () => void;
 }
 
@@ -78,9 +95,22 @@ export interface PluginManagerController {
   installFromFile(): Promise<string | null>;
   /** Rejects with the host's message; the catalogue reloads on success. */
   uninstall(pluginId: string): Promise<void>;
+  /** Rejects with the host's message; the catalogue reloads either way. */
+  refreshCatalog(): Promise<void>;
+  cancelRefresh(): void;
+  /** Rejects with the host's message; the catalogue reloads on success. */
+  update(pluginId: string): Promise<void>;
+  /** Rejects with the host's message; the catalogue reloads on success. */
+  rollback(pluginId: string): Promise<void>;
+  updatePolicy(): PluginUpdatePolicy;
+  setAutomaticUpdates(automatic: boolean): Promise<void>;
   onChange(callback: () => void): () => void;
   dispose(): void;
 }
+
+export const DEFAULT_UPDATE_POLICY: Readonly<PluginUpdatePolicy> = Object.freeze({
+  automatic: false,
+});
 
 /** The single event the host pushes while an install runs. */
 export const PLUGIN_INSTALL_EVENT = "plugin-install-status";
@@ -153,8 +183,16 @@ function readInstalled(value: unknown): InstalledPluginView[] {
       message: typeof raw.message === "string" ? raw.message : "",
       // Trust is opt-in: anything that is not an explicit `true` is unsigned.
       trusted: raw.trusted === true,
+      rollbackTo: typeof raw.rollbackTo === "string" && raw.rollbackTo ? raw.rollbackTo : null,
+      updateTo: typeof raw.updateTo === "string" && raw.updateTo ? raw.updateTo : null,
     },
   ];
+}
+
+export function readUpdatePolicy(value: unknown): PluginUpdatePolicy {
+  if (!value || typeof value !== "object") return { ...DEFAULT_UPDATE_POLICY };
+  const raw = value as Partial<PluginUpdatePolicy>;
+  return { automatic: raw.automatic === true };
 }
 
 function readAvailable(value: unknown): AvailablePluginView[] {
@@ -242,6 +280,46 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
       if (!isTauriRuntime()) return;
       assertActive(signal);
       await invoke("uninstall_plugin", { pluginId });
+    },
+
+    async refreshCatalog(signal) {
+      if (!isTauriRuntime()) return emptyPluginCatalog();
+      assertActive(signal);
+      const view = await invoke<PluginCatalogView>("refresh_plugin_registry");
+      return readPluginCatalog(view);
+    },
+
+    cancelRefresh() {
+      if (!isTauriRuntime()) return;
+      void invoke("cancel_plugin_update").catch(() => {});
+    },
+
+    async update(pluginId, signal) {
+      if (!isTauriRuntime()) {
+        throw new Error("L'installation de plugins est réservée à l'application Orivo.");
+      }
+      assertActive(signal);
+      await invoke("update_plugin", { pluginId });
+    },
+
+    async rollback(pluginId, signal) {
+      if (!isTauriRuntime()) {
+        throw new Error("Le retour à une version précédente est réservé à l'application Orivo.");
+      }
+      assertActive(signal);
+      return await invoke<string>("rollback_plugin", { pluginId });
+    },
+
+    async getUpdatePolicy(signal) {
+      if (!isTauriRuntime()) return { ...DEFAULT_UPDATE_POLICY };
+      assertActive(signal);
+      return readUpdatePolicy(await invoke("get_plugin_update_policy"));
+    },
+
+    async setUpdatePolicy(automatic, signal) {
+      if (!isTauriRuntime()) return { ...DEFAULT_UPDATE_POLICY };
+      assertActive(signal);
+      return readUpdatePolicy(await invoke("set_plugin_update_policy", { automatic }));
     },
 
     subscribe(onProgress) {
@@ -340,6 +418,7 @@ export function createPluginManagerController(
   // controller rather than to the activation signal `load` was handed.
   const lifetime = new AbortController();
   let catalog = emptyPluginCatalog();
+  let policy: PluginUpdatePolicy = { ...DEFAULT_UPDATE_POLICY };
   let unsubscribe: (() => void) | null = null;
   let disposed = false;
 
@@ -397,6 +476,12 @@ export function createPluginManagerController(
       }
       if (disposed || signal.aborted) return;
       catalog = next;
+      try {
+        policy = await client.getUpdatePolicy(signal);
+      } catch {
+        policy = { ...DEFAULT_UPDATE_POLICY };
+      }
+      if (disposed || signal.aborted) return;
       // One channel per controller, opened on the first load and held until
       // dispose: a second activation must not double every progress tick.
       if (!unsubscribe) unsubscribe = client.subscribe(onProgress);
@@ -405,6 +490,10 @@ export function createPluginManagerController(
 
     catalog() {
       return catalog;
+    },
+
+    updatePolicy() {
+      return policy;
     },
 
     progressFor(pluginId) {
@@ -449,6 +538,56 @@ export function createPluginManagerController(
       // must start from "Installer" rather than from the old bar.
       progress.delete(pluginId);
       await refresh();
+    },
+
+    async refreshCatalog() {
+      if (disposed) return;
+      let next: PluginCatalogView;
+      try {
+        next = await client.refreshCatalog(lifetime.signal);
+      } catch {
+        // A registry that cannot be reached is not an error the catalogue has
+        // to carry: whatever the cache already held is still the truth.
+        next = catalog;
+      }
+      if (disposed) return;
+      catalog = next;
+      notify();
+    },
+
+    cancelRefresh() {
+      client.cancelRefresh();
+    },
+
+    async update(pluginId) {
+      if (disposed) return;
+      record({ pluginId, phase: "downloading", percent: 0, message: "" });
+      try {
+        await client.update(pluginId, lifetime.signal);
+      } catch (error) {
+        if (disposed) return;
+        record(failure(pluginId, error));
+        return;
+      }
+      if (disposed) return;
+      record({ pluginId, phase: "installed", percent: 100, message: "" });
+      await refresh();
+    },
+
+    async rollback(pluginId) {
+      if (disposed) return;
+      await client.rollback(pluginId, lifetime.signal);
+      if (disposed) return;
+      // The version string comes back for the caller that wants to name it in
+      // a toast; the row itself only needs the catalogue reloaded.
+      await refresh();
+    },
+
+    async setAutomaticUpdates(automatic) {
+      if (disposed) return;
+      policy = await client.setUpdatePolicy(automatic, lifetime.signal);
+      if (disposed) return;
+      notify();
     },
 
     onChange(callback) {
