@@ -1634,15 +1634,38 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* The review's two answers carry no icon, so they take the whole row instead of
    being squeezed into the 32px icon column. */
 .library-source-action--review { grid-template-columns: minmax(0, 1fr); }
+/* The whole list, not the first few: the button below it imports every row, so
+   the list has to be complete and is scrollable rather than truncated. Taller
+   than one screenful of a menu on purpose — the rows that need reading are
+   sorted to the top, and the rest are a scroll away rather than hidden. */
 .library-source-review__list {
   margin: 0 12px 8px;
   padding-left: 16px;
   color: #b7b1c2;
   font-size: 12px;
   line-height: 1.5;
-  max-height: 132px;
+  max-height: 232px;
   overflow-y: auto;
 }
+.library-source-review__note {
+  display: block;
+  margin-top: 4px;
+  color: #8f8a9b;
+  font-size: 11px;
+}
+.library-source-review__list li + li { margin-top: 6px; }
+.library-source-review__list strong { color: #efeaf6; font-weight: 600; }
+/* The file and its folder sit under the title rather than beside it: they are
+   long, and truncating the one thing that distinguishes two identical names
+   would undo the point of showing it. */
+.library-source-review__origin,
+.library-source-review__collision {
+  display: block;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.library-source-review__origin { color: #8f8a9b; }
+.library-source-review__collision { color: #e8b86b; }
 
 /* ---------------------------------------------------------------------------
    Settings page (a normal page: no backdrop, no focus trap, no Escape-to-close)

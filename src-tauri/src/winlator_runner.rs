@@ -846,6 +846,14 @@ pub fn validate_winlator_shortcut_for_profile(
 /// Recheck a scan snapshot at the exact moment it crosses into persistence. A
 /// scan is only a preview: Winlator may have re-exported the shortcut, or a
 /// symlink may have been inserted, before the user pressed Import.
+///
+/// The game reference is a hash of the *path*, so on its own it says nothing
+/// about what is at that path now — and the title and the container the user was
+/// shown come out of the file's bytes. The content digest is therefore part of
+/// what is being confirmed: a file rewritten between the preview and the
+/// confirmation is refused, so the shortcut that gets imported, and whose
+/// fingerprint the launch guard then pins, is the one the user actually read a
+/// name for.
 pub fn revalidate_winlator_import_candidate(
     profile: &WinlatorProfile,
     source: &dyn WinlatorShortcutSource,
@@ -858,7 +866,7 @@ pub fn revalidate_winlator_import_candidate(
         &candidate.shortcut_path,
         cancelled,
     )?;
-    if candidate.game_ref != current.game_ref {
+    if candidate.game_ref != current.game_ref || candidate.fingerprint != current.fingerprint {
         return Err(WinlatorRunnerError::ShortcutNotLaunchable);
     }
     Ok(ScannedWinlatorShortcut {
@@ -1263,17 +1271,26 @@ fn shortcut_title_from_filename(path: &Path) -> String {
         .unwrap_or_else(|| "Winlator game".into())
 }
 
+/// Text out of a shortcut file, reduced to what may be shown. The rule — a
+/// control character refuses the string, a character nobody can see is removed —
+/// is shared, because a title that *reads* identically has to *compare*
+/// identically on both sides of the duplicate check.
 fn display_text(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
-        .then(|| trimmed.chars().take(MAX_SHORTCUT_TITLE_CHARS).collect())
+    crate::source_review::display_text(value, MAX_SHORTCUT_TITLE_CHARS)
+}
+
+/// How a shortcut is named on the confirmation: the file itself, and the folders
+/// between the connected one and it.
+///
+/// `Name=` is not an identity — any file may carry any name, including one a game
+/// already in the library uses — so the rule is shared with every other source
+/// that asks this question, and lives in `source_review`.
+pub fn shortcut_origin(root: &Path, shortcut: &Path) -> crate::source_review::FileOrigin {
+    crate::source_review::file_origin(root, shortcut, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 fn safe_label(path: &Path, fallback: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(display_text)
-        .unwrap_or_else(|| fallback.into())
+    crate::source_review::folder_label(path, fallback, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 /// Hash the shortcut bytes independently from the persistent game reference.
@@ -1663,6 +1680,81 @@ mod tests {
             prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent),
             Err(WinlatorRunnerError::ShortcutNotLaunchable)
         );
+    }
+
+    /// The file the user vouched for is the file that gets imported.
+    ///
+    /// The preview names a game; between that sentence and "Add this game" the
+    /// file behind it can be rewritten, and every reference Orivo holds — the
+    /// game reference included — is derived from the *path*. So the content
+    /// digest is the only thing that can tell the two files apart, and a
+    /// mismatch is a refusal rather than an import of whatever is there now.
+    #[test]
+    fn refuses_to_import_a_shortcut_rewritten_after_the_user_was_shown_it() {
+        let granted = temporary_directory("rewritten-before-import");
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Celeste", 4),
+        );
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        // The same pathname, a different program, a different name on the
+        // confirmation the user already read.
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Not Celeste", 9),
+        );
+        assert_eq!(
+            revalidate_winlator_import_candidate(
+                &profile,
+                &filesystem(&profile),
+                &previewed,
+                &AtomicBool::new(false),
+            ),
+            Err(WinlatorRunnerError::ShortcutNotLaunchable)
+        );
+    }
+
+    /// The same file still imports, so the check above is a content check and
+    /// not a ban on importing at all.
+    #[test]
+    fn imports_the_shortcut_the_preview_actually_showed() {
+        let granted = temporary_directory("unchanged-before-import");
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Celeste", 4),
+        );
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        let imported = revalidate_winlator_import_candidate(
+            &profile,
+            &filesystem(&profile),
+            &previewed,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(imported, previewed);
     }
 
     /// The same check has to hold between preparing the intent and sending it,

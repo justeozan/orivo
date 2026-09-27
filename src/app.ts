@@ -51,6 +51,18 @@ import {
   winlatorWaitingToast,
   type WinlatorShortcut,
 } from "./winlator-source";
+import {
+  CONSOLE_EMULATORS,
+  consoleReviewList,
+  consoleReviewPrompt,
+  consoleEmulatorNote,
+  consoleRomsToOffer,
+  isConsoleEmulatorHost,
+  normaliseConsoleImportResult,
+  normaliseConsoleRomFolder,
+  type ConsoleRom,
+} from "./console-source";
+import type { SourceReviewEntry } from "./source-review";
 
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
@@ -375,7 +387,22 @@ interface State {
   libraryMenuOpen: boolean;
   // What Winlator's export folder holds that the library does not, waiting for
   // the user to say yes: a shortcut is a command, so it is never assumed.
-  winlatorReview: { folderLabel: string | null; shortcuts: WinlatorShortcut[] } | null;
+  winlatorReview: {
+    token: number;
+    folderLabel: string | null;
+    shortcuts: WinlatorShortcut[];
+  } | null;
+  // The same question for a console emulator's ROM folder, held separately
+  // because it names the emulator that would open them.
+  consoleReview: {
+    token: number;
+    emulator: string;
+    emulatorLabel: string;
+    emulatorInstalled: boolean;
+    emulatorInstaller: string | null;
+    folderLabel: string | null;
+    roms: ConsoleRom[];
+  } | null;
   steam: SteamPanelState;
   steamAccount: SteamAccountState;
   sourceAccounts: SourceAccountsState;
@@ -479,6 +506,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     },
     libraryMenuOpen: false,
     winlatorReview: null,
+    consoleReview: null,
     steam: {
       open: false,
       phase: "idle",
@@ -1507,45 +1535,73 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // action beyond "sync now".
 
     renderWinlatorReview(list);
+    renderConsoleReview(list);
   };
 
-  // Every title here came out of a file on shared storage, so all of it goes in
-  // through `textContent`: `innerHTML` would let a file name write markup.
-  const renderWinlatorReview = (list: HTMLElement): void => {
-    const review = state.winlatorReview;
-    if (!review || review.shortcuts.length === 0) {
-      return;
-    }
+  /**
+   * One confirmation, for either source that turns a file in a shared folder into
+   * a card. Everything in it came out of such a file, so all of it goes in through
+   * `textContent`: `innerHTML` would let a file name write markup.
+   */
+  const renderSourceReview = (
+    list: HTMLElement,
+    review: {
+      heading: string;
+      prompt: string;
+      /** One line about the source itself, above the files it found. */
+      note?: string | null;
+      entries: SourceReviewEntry[];
+      importAction: string;
+      dismissAction: string;
+    },
+  ): void => {
     const heading = document.createElement("p");
     heading.className = "library-source-menu__label";
-    heading.textContent = review.folderLabel ? `Winlator · ${review.folderLabel}` : "Winlator";
+    heading.textContent = review.heading;
     const prompt = document.createElement("p");
     prompt.className = "library-source-review__prompt";
-    prompt.textContent = winlatorReviewPrompt(review.shortcuts);
-    const { titles, remaining } = winlatorReviewList(review.shortcuts);
+    prompt.textContent = review.prompt;
+    if (review.note) {
+      const note = document.createElement("small");
+      note.className = "library-source-review__note";
+      note.textContent = review.note;
+      prompt.append(note);
+    }
     const found = document.createElement("ul");
     found.className = "library-source-review__list";
-    for (const title of titles) {
+    for (const entry of review.entries) {
       const item = document.createElement("li");
-      item.textContent = title;
+      const title = document.createElement("strong");
+      title.textContent = entry.title;
+      // The file and its folder: the title is whatever the file says, so this is
+      // the part the user can actually go and check.
+      const origin = document.createElement("span");
+      origin.className = "library-source-review__origin";
+      origin.textContent = entry.origin;
+      item.append(title, origin);
+      if (entry.collision) {
+        const collision = document.createElement("span");
+        collision.className = "library-source-review__collision";
+        collision.textContent = entry.collision;
+        item.append(collision);
+      }
       found.append(item);
-    }
-    if (remaining > 0) {
-      const more = document.createElement("li");
-      more.textContent = `and ${remaining} more`;
-      found.append(more);
     }
 
     const add = document.createElement("button");
     add.type = "button";
     add.className = "library-source-action library-source-action--review";
     add.setAttribute("role", "menuitem");
-    add.dataset.libraryAction = "winlator-import";
+    add.dataset.libraryAction = review.importAction;
     const addCopy = document.createElement("span");
     addCopy.className = "library-source-action__copy";
     const addLabel = document.createElement("strong");
+    // The count is the list's, not a separate number: the button imports exactly
+    // the rows above it, and saying so with the same value is what keeps that true.
     addLabel.textContent =
-      review.shortcuts.length === 1 ? "Add this game" : `Add these ${review.shortcuts.length} games`;
+      review.entries.length === 1
+        ? "Add this game"
+        : `Add these ${review.entries.length} games`;
     addCopy.append(addLabel);
     add.append(addCopy);
 
@@ -1553,7 +1609,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     dismiss.type = "button";
     dismiss.className = "library-source-action library-source-action--review";
     dismiss.setAttribute("role", "menuitem");
-    dismiss.dataset.libraryAction = "winlator-dismiss";
+    dismiss.dataset.libraryAction = review.dismissAction;
     const dismissCopy = document.createElement("span");
     dismissCopy.className = "library-source-action__copy";
     const dismissLabel = document.createElement("strong");
@@ -1562,6 +1618,41 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     dismiss.append(dismissCopy);
 
     list.append(heading, prompt, found, add, dismiss);
+  };
+
+  const renderWinlatorReview = (list: HTMLElement): void => {
+    const review = state.winlatorReview;
+    if (!review || review.shortcuts.length === 0) {
+      return;
+    }
+    const { entries } = winlatorReviewList(review.shortcuts, review.folderLabel);
+    renderSourceReview(list, {
+      heading: review.folderLabel ? `Winlator · ${review.folderLabel}` : "Winlator",
+      prompt: winlatorReviewPrompt(review.shortcuts),
+      entries,
+      importAction: "winlator-import",
+      dismissAction: "winlator-dismiss",
+    });
+  };
+
+  const renderConsoleReview = (list: HTMLElement): void => {
+    const review = state.consoleReview;
+    if (!review || review.roms.length === 0) {
+      return;
+    }
+    const { entries } = consoleReviewList(review.roms, review.folderLabel);
+    renderSourceReview(list, {
+      heading: review.folderLabel
+        ? `${review.emulatorLabel} · ${review.folderLabel}`
+        : review.emulatorLabel,
+      prompt: consoleReviewPrompt(review.roms, review.emulatorLabel),
+      // What the emulator's own install looks like from here. A game is about to
+      // be handed to that app, so who put it on the device is worth a line.
+      note: consoleEmulatorNote(review),
+      entries,
+      importAction: "console-import",
+      dismissAction: "console-dismiss",
+    });
   };
 
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
@@ -1709,7 +1800,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
       const waiting = winlatorShortcutsToOffer(answer);
       state.winlatorReview = waiting.length
-        ? { folderLabel: answer.folderLabel, shortcuts: waiting }
+        ? { token: answer.token, folderLabel: answer.folderLabel, shortcuts: waiting }
         : null;
       // Nothing was imported: the host found shortcuts and is asking. The menu
       // stays open, now carrying that question, instead of closing on a toast
@@ -1736,6 +1827,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     try {
       const result = normaliseWinlatorImportResult(
         await invoke<unknown>("import_winlator_shortcuts", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
           gameRefs: review.shortcuts.map((shortcut) => shortcut.gameRef),
         }),
       );
@@ -1749,6 +1843,78 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       showToast(result.message);
     } catch (error) {
       showToast(messageFromError(error, "Orivo could not add those Winlator games."));
+    }
+  };
+
+  const connectConsoleRomFolder = async (emulator: string): Promise<void> => {
+    if (!isTauriRuntime()) {
+      closeLibraryMenu();
+      showToast("Connecting a folder is available in the Orivo app.");
+      return;
+    }
+
+    try {
+      const answer = normaliseConsoleRomFolder(
+        await invoke<unknown>("connect_console_rom_folder", { emulator }),
+      );
+      if (!answer) {
+        closeLibraryMenu();
+        showToast("Orivo could not read the folder you chose.");
+        return;
+      }
+      const waiting = consoleRomsToOffer(answer);
+      state.consoleReview = waiting.length
+        ? {
+            token: answer.token,
+            emulator: answer.emulator,
+            emulatorLabel: answer.emulatorLabel,
+            emulatorInstalled: answer.emulatorInstalled,
+            emulatorInstaller: answer.emulatorInstaller,
+            folderLabel: answer.folderLabel,
+            roms: waiting,
+          }
+        : null;
+      // Nothing was imported: the host found files and is asking. The menu stays
+      // open, now carrying that question, instead of closing on a toast the user
+      // would have to act on from memory.
+      if (state.consoleReview) {
+        setLibraryMenuOpen(true);
+      } else {
+        closeLibraryMenu();
+      }
+      showToast(answer.message);
+    } catch (error) {
+      closeLibraryMenu();
+      showToast(messageFromError(error, "Orivo could not connect that folder."));
+    }
+  };
+
+  const importConsoleRoms = async (): Promise<void> => {
+    const review = state.consoleReview;
+    if (!review || !isTauriRuntime()) {
+      return;
+    }
+    closeLibraryMenu();
+    state.consoleReview = null;
+    try {
+      const result = normaliseConsoleImportResult(
+        await invoke<unknown>("import_console_roms", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
+          gameRefs: review.roms.map((rom) => rom.gameRef),
+        }),
+      );
+      if (!result) {
+        showToast("Orivo could not add those games.");
+        return;
+      }
+      if (result.importedIds.length > 0) {
+        await refreshLibrary(result.importedIds[0]);
+      }
+      showToast(result.message);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not add those games."));
     }
   };
 
@@ -5244,6 +5410,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       void connectWinlatorExportFolder();
     } else if (action === "winlator-import") {
       void importWinlatorShortcuts();
+    } else if (action === "console-folder") {
+      // The slug names a menu row; the host refuses anything outside its own
+      // closed set, so nothing here has to be trusted.
+      void connectConsoleRomFolder(trigger.dataset.consoleEmulator ?? "");
+    } else if (action === "console-import") {
+      void importConsoleRoms();
+    } else if (action === "console-dismiss") {
+      closeLibraryMenu();
+      state.consoleReview = null;
     } else if (action === "winlator-dismiss") {
       // Declining is not a refusal to see them again: the shortcuts stay in the
       // folder, and the same entry lists them next time.
@@ -7153,6 +7328,19 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Winlator shortcuts</strong><small>Review what Winlator exported, and add what you want</small></span>
               </button>`
+                  : ""
+              }
+              <!-- One row per emulator, Android only and for the same reason: the
+                   emulator is an Android application and so is the chooser. The
+                   slug is the host's own token for it. -->
+              ${
+                isConsoleEmulatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? CONSOLE_EMULATORS.map(
+                      (emulator) => `<button type="button" class="library-source-action" role="menuitem" data-library-action="console-folder" data-console-emulator="${emulator.slug}">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>${emulator.label} games</strong><small>${emulator.description}</small></span>
+              </button>`,
+                    ).join("")
                   : ""
               }
             </div>

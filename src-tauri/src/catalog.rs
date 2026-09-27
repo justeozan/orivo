@@ -32,6 +32,21 @@ pub const WINE_STAGING_RUNNER_ID: &str = "com.orivo.wine-staging";
 /// or an intent.
 pub const WINLATOR_RUNNER_ID: &str = "com.orivo.winlator";
 
+/// The stable identities of Orivo's console-emulator runners on Android.
+///
+/// One id per *emulator*, not per console and not one for all of them. Per
+/// console would claim Orivo knows which app the user wants to play an NES game
+/// in; one shared id would make the identity say nothing about which package
+/// receives the intent — and that package, with its exported activity and the
+/// extras it reads, is the whole of the contract.
+pub const RETROARCH_RUNNER_ID: &str = "com.orivo.retroarch";
+pub const PPSSPP_RUNNER_ID: &str = "com.orivo.ppsspp";
+
+/// Is this one of the console-emulator runners Orivo ships natively?
+pub fn is_console_runner_id(runner_id: &str) -> bool {
+    runner_id == RETROARCH_RUNNER_ID || runner_id == PPSSPP_RUNNER_ID
+}
+
 fn default_wine_profile_enabled() -> bool {
     true
 }
@@ -41,6 +56,10 @@ fn default_winlator_profile_enabled() -> bool {
 }
 
 fn default_runner_profile_enabled() -> bool {
+    true
+}
+
+fn default_console_profile_enabled() -> bool {
     true
 }
 
@@ -224,6 +243,16 @@ pub struct Catalog {
     /// exported shortcut file Orivo hands back to Winlator at launch.
     #[serde(default)]
     pub winlator_inventory: Vec<WinlatorShortcutInventoryEntry>,
+    /// Host-private references to the console emulators already installed on
+    /// this Android device. Like Winlator these own no engine and no data
+    /// directory of Orivo's: a profile is an emulator, a console, and the ROM
+    /// folders the user granted.
+    #[serde(default)]
+    pub console_profiles: Vec<ConsoleEmulatorProfile>,
+    /// Host-private mapping from opaque console game references to the ROM file
+    /// Orivo hands the emulator at launch.
+    #[serde(default)]
+    pub console_inventory: Vec<ConsoleRomInventoryEntry>,
     /// Host-private profiles for runners provided by third-party plugin
     /// components. Unlike the two native adapters above, nothing here is
     /// launchable until the owning plugin has accepted the profile.
@@ -709,6 +738,211 @@ pub struct WinlatorShortcutInventoryEntry {
     pub imported_at: Option<u64>,
 }
 
+/// Which installed Android emulator a profile hands a game to.
+///
+/// Closed, because each entry is a different package whose *exported* launch
+/// surface was read from that project's own manifest and then from the APK that
+/// was installed to verify it. An emulator can never be a package name the
+/// WebView supplied. What each one actually reads is in
+/// `docs/console-emulators.md`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleEmulator {
+    /// RetroArch: one app, many consoles, the console chosen by libretro core.
+    #[default]
+    RetroArch,
+    /// PPSSPP: the PSP, and the one emulator here that opens a content URI.
+    Ppsspp,
+}
+
+impl ConsoleEmulator {
+    /// The name the app calls itself, for a sentence the user reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RetroArch => "RetroArch",
+            Self::Ppsspp => "PPSSPP",
+        }
+    }
+
+    /// A stable token for an identifier the host composes. Separate from the
+    /// serde name so renaming one cannot silently move every managed profile.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::RetroArch => "retroarch",
+            Self::Ppsspp => "ppsspp",
+        }
+    }
+
+    /// The consoles this emulator runs, in the order a menu lists them.
+    pub fn systems(self) -> &'static [ConsoleSystem] {
+        match self {
+            Self::RetroArch => &[
+                ConsoleSystem::Nes,
+                ConsoleSystem::Snes,
+                ConsoleSystem::GameBoy,
+                ConsoleSystem::GameBoyAdvance,
+                ConsoleSystem::MegaDrive,
+            ],
+            Self::Ppsspp => &[ConsoleSystem::PlayStationPortable],
+        }
+    }
+
+    /// Which of those consoles a file's name belongs to, if any.
+    ///
+    /// This is an answer and not a guess: no extension in
+    /// [`ConsoleSystem::rom_extensions`] is claimed by two of these consoles,
+    /// which `no_console_claims_another_console_s_extension` holds to.
+    pub fn system_for(self, path: &Path) -> Option<ConsoleSystem> {
+        self.systems()
+            .iter()
+            .copied()
+            .find(|system| system.recognises_rom(path))
+    }
+
+    /// Does this emulator run that console at all?
+    pub fn runs(self, system: ConsoleSystem) -> bool {
+        self.systems().contains(&system)
+    }
+
+    /// The emulator a WebView token names, or nothing.
+    ///
+    /// The WebView may name an emulator — it is choosing a menu row, not a
+    /// package — and this is the only door that token comes through.
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        [Self::RetroArch, Self::Ppsspp]
+            .into_iter()
+            .find(|emulator| emulator.slug() == slug)
+    }
+}
+
+/// The console a profile's games are for.
+///
+/// This is not cosmetic: it decides which file extensions are a ROM at all, and
+/// for RetroArch which core the intent names. Both come out of closed tables
+/// rather than from anything a user or a file can write.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleSystem {
+    #[default]
+    Nes,
+    Snes,
+    GameBoy,
+    GameBoyAdvance,
+    MegaDrive,
+    PlayStationPortable,
+}
+
+impl ConsoleSystem {
+    /// The file extensions a ROM for this console has, lowercase and without a
+    /// dot. Deliberately narrow: an archive is not on the list, because Orivo
+    /// would then be offering a file whose contents it never looked at, and a
+    /// generic extension such as `bin` is not either, because every console
+    /// claims it and the folder is shared storage.
+    pub fn rom_extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Nes => &["nes", "fds", "unf", "unif"],
+            Self::Snes => &["smc", "sfc", "swc", "fig"],
+            Self::GameBoy => &["gb", "gbc"],
+            Self::GameBoyAdvance => &["gba"],
+            // `md` is deliberately absent: it is a Mega Drive dump to one person
+            // and a README to everyone else, and this list decides what Orivo
+            // offers out of a folder on shared storage.
+            Self::MegaDrive => &["smd", "gen", "sms", "gg"],
+            Self::PlayStationPortable => &["iso", "cso", "chd", "pbp", "elf"],
+        }
+    }
+
+    /// Is this file name one this console's ROMs use?
+    pub fn recognises_rom(self, path: &Path) -> bool {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                self.rom_extensions()
+                    .iter()
+                    .any(|known| extension.eq_ignore_ascii_case(known))
+            })
+    }
+
+    /// A stable token for an identifier the host composes.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Self::Nes => "nes",
+            Self::Snes => "snes",
+            Self::GameBoy => "gb",
+            Self::GameBoyAdvance => "gba",
+            Self::MegaDrive => "megadrive",
+            Self::PlayStationPortable => "psp",
+        }
+    }
+
+    /// The name a menu uses for this console.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nes => "NES",
+            Self::Snes => "SNES",
+            Self::GameBoy => "Game Boy",
+            Self::GameBoyAdvance => "Game Boy Advance",
+            Self::MegaDrive => "Mega Drive",
+            Self::PlayStationPortable => "PSP",
+        }
+    }
+}
+
+/// One console emulator already installed on this device, and the ROM folders
+/// the user pointed Orivo at.
+///
+/// Like a Winlator profile this is a *reference* and not an installation: the
+/// emulator owns its cores, its BIOS files and its save states, in storage Orivo
+/// can neither read nor validate. What Orivo owns is the granted folder and the
+/// decision to send an intent at all.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsoleEmulatorProfile {
+    /// Opaque, stable Orivo profile identifier.
+    pub id: String,
+    /// User-facing label, distinct from any filesystem component.
+    pub display_name: String,
+    #[serde(default)]
+    pub emulator: ConsoleEmulator,
+    #[serde(default)]
+    pub system: ConsoleSystem,
+    /// Directories explicitly granted to this profile, where the ROMs are. No
+    /// implicit device-wide fallback, and never a shared drop folder: the runner
+    /// refuses those on every use of a grant, not only when one was picked.
+    #[serde(default)]
+    pub rom_directories: Vec<PathBuf>,
+    /// Android storage access grants covering those same directories. Held *in
+    /// addition to* the directory, never instead of it — the directory is the
+    /// scope every check uses and, for an emulator that takes a path, the thing
+    /// the emulator itself opens.
+    #[serde(default)]
+    pub rom_trees: Vec<String>,
+    #[serde(default = "default_console_profile_enabled")]
+    pub enabled: bool,
+    /// Unix milliseconds of the last completed import, if one has completed.
+    #[serde(default)]
+    pub last_imported_at: Option<u64>,
+}
+
+/// The private ROM inventory behind a console runner game. `game_ref` is the
+/// sole value copied into `LaunchTarget::Runner`; `rom_path` never crosses the
+/// WebView boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConsoleRomInventoryEntry {
+    pub profile_id: String,
+    pub game_ref: String,
+    pub title: String,
+    /// The ROM inside a granted directory. Orivo reads enough of it to know it
+    /// is still the same file; it never parses it.
+    pub rom_path: PathBuf,
+    /// A namespaced content digest of the ROM, so a file swapped after the user
+    /// confirmed it is refused until a deliberate reimport. What the digest
+    /// covers — and what it cannot, for an image too large to hash whole — is the
+    /// runner's decision, recorded in `console_runner.rs`.
+    pub fingerprint: String,
+    #[serde(default)]
+    pub imported_at: Option<u64>,
+}
+
 /// One folder the user handed to a third-party runner profile through a native
 /// picker, and the opaque id the plugin knows it by.
 ///
@@ -1046,6 +1280,8 @@ impl Default for Catalog {
             wine_inventory: Vec::new(),
             winlator_profiles: Vec::new(),
             winlator_inventory: Vec::new(),
+            console_profiles: Vec::new(),
+            console_inventory: Vec::new(),
             runner_profiles: Vec::new(),
             runner_inventory: Vec::new(),
             plugin_grants: Vec::new(),
@@ -1152,6 +1388,9 @@ impl Catalog {
             }
             if runner_id == WINLATOR_RUNNER_ID {
                 self.validate_winlator_runner_reference(profile_id, game_ref)?;
+            }
+            if is_console_runner_id(runner_id) {
+                self.validate_console_runner_reference(profile_id, game_ref, runner_id)?;
             }
             if self.games.iter().any(|existing| {
                 runner_target_key(existing)
@@ -1377,6 +1616,9 @@ impl Catalog {
         if runner_id == WINLATOR_RUNNER_ID {
             self.validate_winlator_runner_reference(profile_id, game_ref)?;
         }
+        if is_console_runner_id(runner_id) {
+            self.validate_console_runner_reference(profile_id, game_ref, runner_id)?;
+        }
 
         if let Some(index) = self.games.iter().position(|existing| {
             runner_target_key(existing)
@@ -1557,6 +1799,82 @@ impl Catalog {
         }
 
         self.winlator_inventory.push(entry);
+        Ok(true)
+    }
+
+    /// Return a console emulator profile by its opaque host identifier. Callers
+    /// must not project it, or any of its paths, into a WebView response.
+    pub fn console_profile(&self, profile_id: &str) -> Option<&ConsoleEmulatorProfile> {
+        self.console_profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+    }
+
+    /// Return the private inventory entry for a typed console runner reference.
+    pub fn console_inventory_entry(
+        &self,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Option<&ConsoleRomInventoryEntry> {
+        self.console_inventory
+            .iter()
+            .find(|entry| entry.profile_id == profile_id && entry.game_ref == game_ref)
+    }
+
+    /// Insert or replace a console emulator profile after structural validation.
+    /// Narrowing a profile's grant cannot leave an inventory entry outside it:
+    /// the full candidate catalog is validated before it is adopted.
+    pub fn upsert_console_profile(
+        &mut self,
+        mut profile: ConsoleEmulatorProfile,
+    ) -> Result<bool, CatalogError> {
+        profile.validate()?;
+        if let Some(index) = self
+            .console_profiles
+            .iter()
+            .position(|existing| existing.id == profile.id)
+        {
+            if profile.last_imported_at.is_none() {
+                profile.last_imported_at = self.console_profiles[index].last_imported_at;
+            }
+            let mut candidate = self.clone();
+            candidate.console_profiles[index] = profile;
+            candidate.validate()?;
+            *self = candidate;
+            return Ok(false);
+        }
+
+        let mut candidate = self.clone();
+        candidate.console_profiles.push(profile);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(true)
+    }
+
+    /// Insert or refresh a private console ROM inventory entry. The entry is
+    /// scoped to an existing profile and its ROM must stay inside one of that
+    /// profile's granted directories.
+    pub fn upsert_console_inventory(
+        &mut self,
+        mut entry: ConsoleRomInventoryEntry,
+    ) -> Result<bool, CatalogError> {
+        entry.validate()?;
+        let profile = self.console_profile(&entry.profile_id).ok_or_else(|| {
+            CatalogError::Invalid("console inventory entry references an unknown profile".into())
+        })?;
+        validate_console_inventory_scope(&entry, profile)?;
+
+        if let Some(index) = self.console_inventory.iter().position(|existing| {
+            existing.profile_id == entry.profile_id && existing.game_ref == entry.game_ref
+        }) {
+            if entry.imported_at.is_none() {
+                entry.imported_at = self.console_inventory[index].imported_at;
+            }
+            self.console_inventory[index] = entry;
+            return Ok(false);
+        }
+
+        self.console_inventory.push(entry);
         Ok(true)
     }
 
@@ -2099,6 +2417,37 @@ impl Catalog {
             }
         }
 
+        let mut console_profiles = BTreeMap::new();
+        for profile in &self.console_profiles {
+            profile.validate()?;
+            if console_profiles
+                .insert(profile.id.as_str(), profile)
+                .is_some()
+            {
+                return Err(CatalogError::Invalid(
+                    "duplicate console emulator profile id".into(),
+                ));
+            }
+        }
+
+        let mut console_inventory = BTreeSet::new();
+        for entry in &self.console_inventory {
+            entry.validate()?;
+            let profile = console_profiles
+                .get(entry.profile_id.as_str())
+                .ok_or_else(|| {
+                    CatalogError::Invalid(
+                        "console inventory entry references an unknown profile".into(),
+                    )
+                })?;
+            validate_console_inventory_scope(entry, profile)?;
+            if !console_inventory.insert((entry.profile_id.as_str(), entry.game_ref.as_str())) {
+                return Err(CatalogError::Invalid(
+                    "duplicate console inventory game reference for profile".into(),
+                ));
+            }
+        }
+
         let mut runner_profiles = BTreeMap::new();
         for profile in &self.runner_profiles {
             profile.validate()?;
@@ -2207,6 +2556,24 @@ impl Catalog {
                     }
                     profile.validate()?;
                 }
+                if is_console_runner_id(runner_id) {
+                    let profile = console_profiles.get(profile_id).ok_or_else(|| {
+                        CatalogError::Invalid("console game references an unknown profile".into())
+                    })?;
+                    // A card that named the other emulator's runner would be a
+                    // PSP image handed to RetroArch, or the reverse.
+                    if profile.runner_id() != runner_id {
+                        return Err(CatalogError::Invalid(
+                            "console game names a profile that belongs to another emulator".into(),
+                        ));
+                    }
+                    if !console_inventory.contains(&(profile_id, game_ref)) {
+                        return Err(CatalogError::Invalid(
+                            "console game is missing its private inventory entry".into(),
+                        ));
+                    }
+                    profile.validate()?;
+                }
                 // A third-party runner card whose profile is gone is kept, not
                 // refused: uninstalling a plugin or deleting its profile must
                 // not cost the user the games it imported, and an orphan simply
@@ -2214,6 +2581,7 @@ impl Catalog {
                 // pointing at a profile that exists and disagrees with it.
                 if runner_id != WINE_STAGING_RUNNER_ID
                     && runner_id != WINLATOR_RUNNER_ID
+                    && !is_console_runner_id(runner_id)
                     && let Some(profile) = runner_profiles.get(profile_id)
                 {
                     if profile.plugin_id != runner_id {
@@ -2255,6 +2623,30 @@ impl Catalog {
         if self.wine_inventory_entry(profile_id, game_ref).is_none() {
             return Err(CatalogError::Invalid(
                 "Wine game is missing its private inventory entry".into(),
+            ));
+        }
+        profile.validate()
+    }
+
+    fn validate_console_runner_reference(
+        &self,
+        profile_id: &str,
+        game_ref: &str,
+        runner_id: &str,
+    ) -> Result<(), CatalogError> {
+        let profile = self.console_profile(profile_id).ok_or_else(|| {
+            CatalogError::Invalid("console game references an unknown profile".into())
+        })?;
+        // A profile belongs to one emulator, and so does a runner id. A card that
+        // named the other one would be a PSP ISO handed to RetroArch.
+        if profile.runner_id() != runner_id {
+            return Err(CatalogError::Invalid(
+                "console game names a profile that belongs to another emulator".into(),
+            ));
+        }
+        if self.console_inventory_entry(profile_id, game_ref).is_none() {
+            return Err(CatalogError::Invalid(
+                "console game is missing its private inventory entry".into(),
             ));
         }
         profile.validate()
@@ -2491,6 +2883,131 @@ fn validate_winlator_container_id(container_id: Option<u32>) -> Result<(), Catal
         Some(_) | None => Ok(()),
     }
 }
+
+impl ConsoleEmulatorProfile {
+    /// Validate only the stable on-disk shape. There is no engine binary, no
+    /// core and no BIOS to check here: all three live in the emulator's own
+    /// storage. The runner rechecks the granted folders and the ROM immediately
+    /// before an import or a launch.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.id, MAX_PROFILE_ID_LENGTH)?;
+        validate_display_text(
+            "console emulator profile name",
+            &self.display_name,
+            MAX_CONSOLE_PROFILE_NAME_LENGTH,
+        )?;
+        // An emulator and a console that disagree would make the runner choose
+        // one of them, and either choice would be a guess about what the user
+        // meant. PPSSPP is a PSP emulator and nothing else; RetroArch covers the
+        // cartridge-era consoles through its cores and Orivo names no libretro
+        // PSP core.
+        if !self.emulator.runs(self.system) {
+            return Err(CatalogError::Invalid(
+                "console emulator profile names a console that emulator does not run".into(),
+            ));
+        }
+        if self.rom_directories.is_empty() {
+            return Err(CatalogError::Invalid(
+                "console emulator profile needs at least one granted ROM directory".into(),
+            ));
+        }
+        let mut rom_directories = BTreeSet::new();
+        for directory in &self.rom_directories {
+            validate_private_absolute_path("console ROM directory", directory)?;
+            if !rom_directories.insert(directory) {
+                return Err(CatalogError::Invalid(
+                    "console emulator profile has duplicate granted ROM directories".into(),
+                ));
+            }
+        }
+        // Only the durable shape of a storage access grant is checked here. What
+        // a tree URI may actually name — which provider, which volume, and the
+        // folder it resolves to — is the runner's to decide, against the device.
+        if self.rom_trees.len() > MAX_CONSOLE_ROM_TREES {
+            return Err(CatalogError::Invalid(
+                "console emulator profile has too many granted ROM folders".into(),
+            ));
+        }
+        let mut rom_trees = BTreeSet::new();
+        for tree in &self.rom_trees {
+            if tree.len() > MAX_CONSOLE_ROM_TREE_LENGTH
+                || !tree.starts_with("content://")
+                || tree.chars().any(|character| {
+                    character.is_control() || character.is_whitespace() || !character.is_ascii()
+                })
+            {
+                return Err(CatalogError::Invalid(
+                    "console granted ROM folder must be a content URI".into(),
+                ));
+            }
+            if !rom_trees.insert(tree) {
+                return Err(CatalogError::Invalid(
+                    "console emulator profile has duplicate granted ROM folders".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The runner that starts this profile's games.
+    pub fn runner_id(&self) -> &'static str {
+        match self.emulator {
+            ConsoleEmulator::RetroArch => RETROARCH_RUNNER_ID,
+            ConsoleEmulator::Ppsspp => PPSSPP_RUNNER_ID,
+        }
+    }
+}
+
+impl ConsoleRomInventoryEntry {
+    /// The path here is private host data. This verifies its durable shape; the
+    /// runner canonicalises it, rechecks it against a live grant and re-reads the
+    /// file before it hands anything to an emulator.
+    pub fn validate(&self) -> Result<(), CatalogError> {
+        validate_opaque_runner_token("profile id", &self.profile_id, MAX_PROFILE_ID_LENGTH)?;
+        validate_opaque_runner_token("game reference", &self.game_ref, MAX_GAME_REF_LENGTH)?;
+        validate_display_text(
+            "console game title",
+            &self.title,
+            MAX_CONSOLE_GAME_TITLE_LENGTH,
+        )?;
+        validate_private_absolute_path("console ROM", &self.rom_path)?;
+        validate_opaque_runner_token(
+            "console game fingerprint",
+            &self.fingerprint,
+            MAX_CONSOLE_FINGERPRINT_LENGTH,
+        )
+    }
+}
+
+/// A ROM has to be inside one of its profile's granted folders *and* be a file
+/// that profile's console recognises. The second half is checked here as well as
+/// in the runner, because a catalog written by hand is the one path that does not
+/// go through a scan.
+fn validate_console_inventory_scope(
+    entry: &ConsoleRomInventoryEntry,
+    profile: &ConsoleEmulatorProfile,
+) -> Result<(), CatalogError> {
+    if !profile.system.recognises_rom(&entry.rom_path) {
+        return Err(CatalogError::Invalid(
+            "console ROM is not a file this console uses".into(),
+        ));
+    }
+    if profile.rom_directories.iter().any(|directory| {
+        entry.rom_path.as_path() != directory.as_path() && entry.rom_path.starts_with(directory)
+    }) {
+        Ok(())
+    } else {
+        Err(CatalogError::Invalid(
+            "console ROM is outside the profile's granted directories".into(),
+        ))
+    }
+}
+
+const MAX_CONSOLE_PROFILE_NAME_LENGTH: usize = 120;
+const MAX_CONSOLE_ROM_TREES: usize = 8;
+const MAX_CONSOLE_ROM_TREE_LENGTH: usize = 2_048;
+const MAX_CONSOLE_GAME_TITLE_LENGTH: usize = 512;
+const MAX_CONSOLE_FINGERPRINT_LENGTH: usize = 256;
 
 fn validate_winlator_inventory_scope(
     entry: &WinlatorShortcutInventoryEntry,

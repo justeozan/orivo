@@ -14,16 +14,30 @@
  * only the references that come back from this list.
  */
 
+import {
+  type SourceReviewEntry,
+  type TitleCollision,
+  normaliseTitleCollision,
+  sourceReviewList,
+} from "./source-review";
+
 /** One shortcut the host found in the connected folder. */
 export interface WinlatorShortcut {
   gameRef: string;
   title: string;
+  /** The file itself. A `Name=` line is not an identity; this is. */
+  fileName: string;
+  /** The folders between the connected one and the file, `/`-joined. */
+  folderPath: string;
+  duplicateTitle: TitleCollision;
   alreadyImported: boolean;
 }
 
 /** What `connect_winlator_export_folder` answers. */
 export interface WinlatorExportFolder {
   connected: boolean;
+  /** Which scan this list came from; handed back with the answer. */
+  token: number;
   folderLabel: string | null;
   found: WinlatorShortcut[];
   message: string;
@@ -34,9 +48,6 @@ export interface WinlatorImportResult {
   importedIds: string[];
   message: string;
 }
-
-/** At most this many titles are listed before the rest become a count. */
-export const MAX_LISTED_WINLATOR_SHORTCUTS = 6;
 
 /**
  * Is this the platform Winlator runs on?
@@ -59,6 +70,13 @@ export function normaliseWinlatorExportFolder(payload: unknown): WinlatorExportF
   if (typeof record.connected !== "boolean" || typeof record.message !== "string") return null;
   return {
     connected: record.connected,
+    // A token that is not a safe integer is read as none: the host refuses that
+    // and asks for the folder again, which beats an answer landing on a list
+    // nobody is looking at.
+    token:
+      typeof record.token === "number" && Number.isSafeInteger(record.token) && record.token > 0
+        ? record.token
+        : 0,
     folderLabel: typeof record.folderLabel === "string" && record.folderLabel.trim() ? record.folderLabel : null,
     found: normaliseWinlatorShortcuts(record.found),
     message: record.message,
@@ -73,9 +91,16 @@ function normaliseWinlatorShortcuts(payload: unknown): WinlatorShortcut[] {
     const record = entry as Record<string, unknown>;
     if (typeof record.gameRef !== "string" || !record.gameRef) continue;
     if (typeof record.title !== "string" || !record.title) continue;
+    // The file name is what makes a planted shortcut answerable at all, so an
+    // entry arriving without one is dropped rather than shown under its own
+    // `Name=` — which is exactly the thing that cannot be trusted.
+    if (typeof record.fileName !== "string" || !record.fileName) continue;
     shortcuts.push({
       gameRef: record.gameRef,
       title: record.title,
+      fileName: record.fileName,
+      folderPath: typeof record.folderPath === "string" ? record.folderPath : "",
+      duplicateTitle: normaliseTitleCollision(record.duplicateTitle),
       alreadyImported: record.alreadyImported === true,
     });
   }
@@ -112,13 +137,19 @@ export function winlatorReviewPrompt(shortcuts: WinlatorShortcut[]): string {
   return `Add these ${shortcuts.length} Winlator games to your library?`;
 }
 
-/** The titles to show, and how many were left out of that list. */
-export function winlatorReviewList(shortcuts: WinlatorShortcut[]): {
-  titles: string[];
-  remaining: number;
-} {
-  const titles = shortcuts.slice(0, MAX_LISTED_WINLATOR_SHORTCUTS).map((shortcut) => shortcut.title);
-  return { titles, remaining: Math.max(0, shortcuts.length - titles.length) };
+/**
+ * The lines to show, and how many were left out of that list.
+ *
+ * Each line names the file and the folder holding it, because the title came out
+ * of the file and a file can claim any title. `folderLabel` is the connected
+ * folder's own name as the host reported it; without one the line starts at the
+ * grant rather than inventing a root.
+ */
+export function winlatorReviewList(
+  shortcuts: WinlatorShortcut[],
+  folderLabel: string | null,
+): { entries: SourceReviewEntry[] } {
+  return sourceReviewList(shortcuts, folderLabel);
 }
 
 /**
