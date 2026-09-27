@@ -83,17 +83,31 @@ qu'un retour anticipé sur liste vide).
 | --- | --- | --- | --- |
 | `Catalog::load_with_migration` (lecture + parse JSON) | 90 µs | 418 µs | 4,6 ms |
 | `Catalog::save_atomically` (sérialisation + écriture atomique) | 554 µs | 1,4 ms | 11,5 ms |
-| `auto_apply_wine_to_direct_games` | 26,2 ms\* | 22,5 ms\* | 25,9 ms\* |
+| ~~`auto_apply_wine_to_direct_games`~~\* | — | — | — |
 | ~~`auto_apply_winlator_shortcuts`~~\*\* | — | — | — |
 
-\* Ce chiffre ne dépend pas de `n` : c'est le coût fixe d'une sonde disque
-(`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
-canonicalisés) qui s'exécute une seule fois par appel dès qu'un jeu Windows
-local existe et qu'aucun profil Wine managé n'est encore associé — jamais une
-fois par jeu. Sur la machine partagée de cette mesure, une répétition sur
-cinq a atteint 960 ms au lieu de ~25 ms (contention disque avec sept builds
-concurrents) : à surveiller si ce chiffre revient sur une machine calme, mais
-pas traité comme une régression ici.
+\* Cette ligne mesurait `auto_apply_wine_to_direct_games` — 26,2 ms, 22,5 ms et
+25,9 ms respectivement (médiane des cinq répétitions), coût fixe d'une sonde
+disque (`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
+canonicalisés) qui s'exécutait une seule fois par appel dès qu'un jeu Windows
+local existait et qu'aucun profil Wine managé n'était encore associé — jamais
+une fois par jeu — tant que la passe tournait dans `AppState::load`. Depuis
+O2b elle n'y tourne plus du tout, pour la même raison et de la même façon que
+Winlator ci-dessous (M1, #44) : elle est passée en tâche de fond après le
+premier rendu, en pages bornées et annulables (`WINE_AUTO_APPLY_PAGE_SIZE`).
+`bench_catalog_at_size` ne la mesure donc plus ici — le coût de démarrage
+qu'elle représentait est zéro par construction, prouvé par ce même banc
+(`cargo test --release perf_bench::bench_catalog -- --ignored --nocapture`) :
+les trois tailles tournent maintenant en ~0,1 s au total contre plusieurs
+centaines de ms avant, l'écart étant exactement les cinq répétitions × 3
+tailles de sonde disque qui s'exécutaient ici. Son coût réel, inchangé, est
+mesuré séparément par `bench_wine_auto_apply_at_size` :
+28,2 ms / 27,4 ms / 29,9 ms (médiane, n=10 / 1 000 / 10 000) — la même sonde,
+au même prix, simplement plus sur le chemin de démarrage. Sur la machine
+partagée de cette mesure, une répétition sur cinq a occasionnellement dépassé
+largement la médiane (jusqu'à 85-100 ms selon le run, contention disque avec
+sept builds concurrents) : à surveiller si ce chiffre revient sur une machine
+calme, mais pas traité comme une régression ici.
 
 \*\* Cette ligne mesurait `auto_apply_winlator_shortcuts` — un no-op vérifié
 hors Android (`cfg!(target_os = "android")`), à 0 ns quelle que soit `n` — tant
@@ -105,10 +119,9 @@ démarrage qu'elle représentait est zéro par construction.
 
 **Lecture :** le parse/sérialisation JSON croît linéairement et reste sous la
 milliseconde jusqu'à 1 000 jeux, environ 4-12 ms à 10 000 — largement sous un
-budget de premier rendu perçu. La seule passe d'auto-application encore sur le
-chemin de démarrage (Wine) a un coût fixe indépendant de la taille de la
-bibliothèque, jamais une boucle par jeu qui écrirait sur le disque ; celle de
-Winlator a quitté ce chemin.
+budget de premier rendu perçu. Les deux passes d'auto-application — Wine et
+Winlator — ont maintenant quitté le chemin de démarrage : aucune boucle par
+jeu qui écrirait sur le disque ne reste synchrone avec le premier rendu.
 
 ## 3. Plugins — coût de découverte, avec et sans composants installés
 
