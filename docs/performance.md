@@ -308,6 +308,78 @@ mesurés dans Chromium desktop (section 1) : l'écart est cohérent avec un
 rendu logiciel d'émulateur plutôt qu'avec un défaut de l'application — mais
 seul un vrai appareil pourra le confirmer ou l'infirmer.
 
+## 7. Le runner Ryujinx en plugin, installé (étape 2.4)
+
+Banc : `src-tauri/src/perf_bench.rs`, fonctions `bench_ryujinx_*`. Mesuré le
+2026-09-27 sur la même machine partagée et dans les mêmes conditions que les
+sections 2 et 3, en profil `release`, `--test-threads=1`.
+
+C’est le premier plugin réel que le dépôt contient (`plugins/ryujinx/`, voir
+[`docs/ryujinx-runner.md`](ryujinx-runner.md)), donc la première fois que
+« avec un plugin installé » désigne autre chose que N copies du fixture
+adversarial. Le paquet est installé par la vraie transaction, sur le canal
+développeur ; le dossier accordé contient N fausses ROMs nommées comme un dump
+l’est vraiment (`Bench Game 12 [010000000000000C][v0].nsp`) ; l’application
+d’émulation est un bundle `.app` fabriqué par le banc. Aucun vrai Ryujinx,
+aucune vraie clé, aucun vrai jeu.
+
+| Mesure | n=1 | n=100 | n=1000 |
+| --- | --- | --- | --- |
+| Import complet, composant à froid | 33,2 ms | 41,8 ms | 164,0 ms |
+| Import relancé (rafraîchit au lieu d’insérer, médiane) | 33,1 ms | 42,3 ms | 161,6 ms |
+| Jeux réellement importés / pages | 1 / 1 | 100 / 2 | **256 / 6** |
+| `prepare_runner_launch` du premier jeu (médiane) | 226 µs | 217 µs | 189 µs |
+| `Catalog::load_with_migration` après import (médiane) | 14 µs | 224 µs | 563 µs |
+
+Ouverture de Réglages → Plugins et du flux émulateur, avec ce seul plugin
+installé :
+
+| Commande | Médiane |
+| --- | --- |
+| `get_plugin_catalog` (Réglages → Plugins) | 33,0 ms |
+| `get_runner_plugins` (flux « Ajouter un émulateur ») | 33,8 ms |
+
+**Quatre lectures, dont une mauvaise nouvelle.**
+
+1. **1000 fichiers n’en font pas 1000.** À n=1000, l’import en écrit **256** :
+   `MAX_DIRECTORY_ENTRIES` (256, `plugin_runtime.rs`) borne ce que le host
+   accepte de dire à *n’importe quel* plugin d’un dossier, donc le reste de la
+   bibliothèque est invisible — pas lent, invisible. La coupe laisse une ligne
+   `files-truncated` dans le journal, que Réglages → Plugins affiche, mais le
+   contrat n’a aucun champ pour le dire au plugin. C’est la limite produit la
+   plus dure de ce palier ; elle est consignée dans
+   [`docs/ryujinx-runner.md`](ryujinx-runner.md) et reste à trancher (pagination
+   de `list-directory` en v2, ou plusieurs dossiers accordés par profil).
+2. **L’import est dominé par une compilation, pas par la bibliothèque.** À n=1,
+   33 ms pour un seul jeu — c’est le coût Cranelift à froid du composant
+   (≈ 31-33 ms, section 3), payé une fois par appel de `RunnerPackage::load`
+   parce que `Component::new` recompile toujours. Les 256 jeux de n=1000 coûtent
+   les 131 ms restantes, soit ≈ 0,5 ms par jeu, transaction catalogue comprise
+   (six commits atomiques). Un cache de compilation inter-appels (lot P5, non
+   mergé sur cette base) retirerait donc l’essentiel du coût d’un petit import.
+3. **Le premier lancement est à trois ordres de grandeur du budget.** Le contrat
+   de performance du plan donne « budget initial de 150 ms » à une invocation
+   interactive : `prepare_runner_launch` — `prepare-launch` sous le budget,
+   validation de l’intent, résolution du binaire dans le bundle `.app` et du
+   fichier de jeu dans le dossier accordé — tient en **≈ 0,2 ms**, et ne varie
+   pas avec la taille de la bibliothèque. Ce chiffre exclut délibérément la
+   compilation du composant, qui est payée à l’ouverture de l’écran (tableau
+   ci-dessus) et non à l’appui sur Play ; il exclut aussi `spawn`, qui
+   démarrerait un vrai émulateur.
+4. **Le démarrage ne paie rien pour ce plugin.** « Aucun composant tiers n’est
+   requis avant le premier shell utilisable » reste vrai par construction :
+   `AppState::load` ne touche jamais `PluginRuntime::shared()`, et les deux
+   commandes qui le font sont des `async fn` en `spawn_blocking` déclenchées par
+   l’utilisateur (section 3). Ce que le démarrage paie vraiment après un import,
+   c’est du JSON : **563 µs** pour lire un catalogue de 256 cartes runner, une
+   fiche de profil et son inventaire privé — du même ordre que les 418 µs de la
+   section 2 pour 1000 jeux ordinaires, et la même croissance linéaire.
+
+Aucun budget n’est proposé pour ces lignes : le seul seuil que le plan fixe déjà
+(150 ms interactif) est respecté avec une marge de trois ordres de grandeur, et
+inventer un seuil pour un import dont le coût dominant disparaîtra avec le cache
+de P5 n’apprendrait rien à personne.
+
 ## Budgets proposés
 
 Des propositions, pas des seuils déjà décidés — à valider par l'équipe avant
@@ -340,6 +412,10 @@ cargo test --manifest-path src-tauri/Cargo.toml --release perf_bench -- --ignore
 # L'avant/après du cache de compilation (section 3 bis)
 cargo test --manifest-path src-tauri/Cargo.toml --release \
   perf_bench::bench_plugin_compile_cache -- --ignored --nocapture --test-threads=1
+
+# Le runner Ryujinx en plugin (section 7) — même banc, filtré
+cargo test --manifest-path src-tauri/Cargo.toml --release perf_bench::bench_ryujinx \
+  -- --ignored --nocapture --test-threads=1
 
 # Le coût de compilation à froid d'un seul composant, déjà présent dans le dépôt
 cargo test --manifest-path src-tauri/Cargo.toml --release \

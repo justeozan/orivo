@@ -491,6 +491,152 @@ fn bench_plugin_compile_cache_at_count(count: usize) {
     fs::remove_dir_all(&root).ok();
 }
 
+// P6 — the official Ryujinx runner, installed
+// ---------------------------------------------------------------------------
+//
+// Step 2.4 of `docs/plugin-system-plan.md` asks for startup, navigation, import
+// and first launch measured *with a plugin installed*, and until this lot there
+// was no plugin to install: the benches above multiply the adversarial fixture
+// by a count, which answers "what does discovery cost per component" and nothing
+// about a real library. These four answer the rest of the question with the
+// shipped `plugins/ryujinx` component, a fabricated `.app` bundle and folders of
+// fake ROM files — never a real dump, a real key or a real emulator.
+//
+// Navigation and the rail are deliberately absent here: no plugin runs on those
+// paths at all, which is an architectural fact rather than a measurement, and
+// `docs/performance.md`'s section 1 measures them in the browser where they
+// actually live.
+
+/// Filenames a dumped Switch library really uses, so the import pays for what a
+/// user's folder costs: a name the opaque-id grammar cannot spell, resolved by
+/// the host through the hex reference.
+fn synthetic_switch_library(directory: &Path, count: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(count);
+    for index in 0..count {
+        let name = format!("Bench Game {index} [0100000000{index:06X}][v0].nsp");
+        fs::write(directory.join(&name), b"not a Nintendo Switch dump").unwrap();
+        names.push(name);
+    }
+    names
+}
+
+/// A service over a freshly installed Ryujinx package, with one accepted profile
+/// and one granted folder — the state the "Add an emulator" flow leaves behind.
+fn ryujinx_service(
+    root: &Path,
+    games: &Path,
+    profile_id: &str,
+) -> std::sync::Arc<crate::runner_commands::ThirdPartyRunnerService> {
+    use crate::ryujinx_plugin::{
+        GAMES_SLOT, PLUGIN_ID, fake_application, manifest, package_archive,
+    };
+
+    let plugin_root = root.join("plugins");
+    let installer = crate::plugin_installer::PluginInstallerService::new(
+        plugin_root.clone(),
+        env!("CARGO_PKG_VERSION"),
+    );
+    let files = crate::plugin_installer::read_package(&package_archive()).unwrap();
+    crate::plugin_installer::install_verified(
+        &installer,
+        PLUGIN_ID,
+        manifest().version.as_str(),
+        crate::plugin_update::PackageChannel::Development,
+        &files,
+    )
+    .expect("the shipped package must install");
+
+    let store = crate::runner_host::CatalogStore::new(
+        std::sync::Arc::new(std::sync::RwLock::new(Catalog::default())),
+        root.join("catalog.json"),
+        std::sync::Arc::new(std::sync::Mutex::new(())),
+    );
+    let service = std::sync::Arc::new(crate::runner_commands::ThirdPartyRunnerService::new(
+        store,
+        plugin_root,
+        HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+    ));
+    service
+        .create_profile_with_id(profile_id, PLUGIN_ID, "Ryujinx", &fake_application(root))
+        .unwrap();
+    service
+        .grant_directory(profile_id, Some(GAMES_SLOT), games)
+        .unwrap();
+    service
+}
+
+/// Import a library of `count` fake ROMs, then the first launch it makes
+/// possible, then what those cards cost the next startup.
+///
+/// Three numbers, because they are three different questions. The first import
+/// includes one cold Wasmtime compile of the component and `count` catalog
+/// transactions; a second import over the same folder refreshes instead of
+/// inserting, which is the cost of the "check for new games" a user will press;
+/// and `load_with_migration` afterwards is the only part of any of this that
+/// startup pays for.
+fn bench_ryujinx_import_at_size(count: usize) {
+    let root = scratch_dir(&format!("ryujinx-{count}"));
+    let games = root.join("games");
+    fs::create_dir_all(&games).unwrap();
+    let names = synthetic_switch_library(&games, count);
+    let profile_id = "runner-ryujinx-bench";
+    let service = ryujinx_service(&root, &games, profile_id);
+
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let (first, first_elapsed) =
+        timed(|| service.import_now(profile_id, &cancelled, |_| {}).unwrap());
+    report(
+        "ryujinx.import (first, cold component)",
+        count,
+        vec![first_elapsed],
+    );
+    println!(
+        "PERF {:<40} n={count:<6} imported={} skipped={} pages={}",
+        "ryujinx.import outcome",
+        first.progress.imported,
+        first.progress.skipped,
+        first.progress.pages
+    );
+
+    let mut again = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| service.import_now(profile_id, &cancelled, |_| {}).unwrap());
+        again.push(elapsed);
+    }
+    report("ryujinx.import (again, refreshes)", count, again);
+
+    // The first launch: `prepare-launch` under the interactive budget, the
+    // intent validated, then the host resolving a bundle executable and a game
+    // file. Everything except starting the process, which would start a real
+    // emulator on a real machine.
+    let package = service.package(crate::ryujinx_plugin::PLUGIN_ID).unwrap();
+    let catalog = Catalog::load(&root.join("catalog.json")).unwrap();
+    if let Some(name) = names.first() {
+        let game_ref = crate::ryujinx_plugin::reference(name);
+        let mut launches = Vec::with_capacity(MEASURED_ITERATIONS);
+        for _ in 0..MEASURED_ITERATIONS {
+            let (prepared, elapsed) = timed(|| {
+                crate::runner_host::prepare_runner_launch(
+                    &package, &catalog, profile_id, &game_ref, &cancelled,
+                )
+            });
+            prepared.expect("the first game must be launchable");
+            launches.push(elapsed);
+        }
+        report("ryujinx.prepare_launch", count, launches);
+    }
+
+    let catalog_path = root.join("catalog.json");
+    let mut loads = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| Catalog::load_with_migration(&catalog_path).unwrap());
+        loads.push(elapsed);
+    }
+    report("catalog.load_with_migration (runner cards)", count, loads);
+
+    fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 #[ignore]
 fn bench_plugin_compile_cache_1_installed() {
@@ -507,4 +653,61 @@ fn bench_plugin_compile_cache_8_installed() {
 #[ignore]
 fn bench_plugin_compile_cache_20_installed() {
     bench_plugin_compile_cache_at_count(20);
+}
+
+#[test]
+#[ignore]
+fn bench_ryujinx_import_1_rom() {
+    bench_ryujinx_import_at_size(1);
+}
+
+#[test]
+#[ignore]
+fn bench_ryujinx_import_100_roms() {
+    bench_ryujinx_import_at_size(100);
+}
+
+/// 1000 crosses `MAX_DIRECTORY_ENTRIES` (256 in `plugin_runtime.rs`): a granted
+/// folder is listed no further than that, so this run shows where a large
+/// library stops being visible to *any* plugin rather than pretending 1000 files
+/// import. `docs/performance.md` records what comes back.
+#[test]
+#[ignore]
+fn bench_ryujinx_import_1000_roms() {
+    bench_ryujinx_import_at_size(1_000);
+}
+
+/// Settings → Plugins and the emulator flow, with the real Ryujinx package
+/// installed instead of N copies of the fixture. Same two commands as
+/// `bench_plugin_surfaces_at_count`; what changes is that this is the component
+/// a user will actually have, so the per-component compile cost above can be
+/// checked against a second, independent component rather than assumed.
+#[test]
+#[ignore]
+fn bench_ryujinx_plugin_surfaces() {
+    use crate::ryujinx_plugin::{COMPONENT, MANIFEST_JSON, PLUGIN_ID};
+
+    let runtime = PluginRuntime::shared().expect("engine available on the bench host");
+    let dir = scratch_dir("ryujinx-surfaces");
+    let installed = dir.join(PLUGIN_ID);
+    fs::create_dir_all(&installed).unwrap();
+    fs::write(installed.join("component.wasm"), COMPONENT).unwrap();
+    fs::write(installed.join("manifest.json"), MANIFEST_JSON).unwrap();
+    let registry = PluginRegistry::new(dir.clone(), HostCompatibility::v1("0.3.0"));
+
+    for _ in 0..WARMUP_ITERATIONS {
+        let _ = registry.installed_plugins(&runtime);
+    }
+    let mut installed_samples = Vec::with_capacity(MEASURED_ITERATIONS);
+    let mut runner_samples = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| registry.installed_plugins(&runtime));
+        installed_samples.push(elapsed);
+        let (_, elapsed) = timed(|| registry.runner_plugins(&runtime));
+        runner_samples.push(elapsed);
+    }
+    report("ryujinx.get_plugin_catalog", 1, installed_samples);
+    report("ryujinx.get_runner_plugins", 1, runner_samples);
+
+    fs::remove_dir_all(&dir).ok();
 }
