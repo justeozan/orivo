@@ -4503,8 +4503,11 @@ mod tests {
     fn a_reparse_point_that_is_not_a_redirection_is_read_like_any_file() {
         let library = FixtureLibrary::new("storage-reparse");
         let unusual = library.games.join("delta.rom");
-        // Compressible, in case WOF is what ends up being used.
-        fs::write(&unusual, "Delta Drift\n".repeat(4096).as_bytes()).unwrap();
+        // Short, because the fixture turns a rom's contents into its title and the
+        // host refuses a title longer than it will show. A file big enough to
+        // interest WOF fails that check instead of this test's, which is how the
+        // runner reported it the first time.
+        fs::write(&unusual, b"Delta Drift\n").unwrap();
         let mechanism = plant_storage_reparse_point(&unusual);
         println!("reparse point planted as {mechanism}");
 
