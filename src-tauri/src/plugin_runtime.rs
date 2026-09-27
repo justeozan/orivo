@@ -4780,19 +4780,28 @@ mod tests {
     /// Shared by every helper below that plants one by hand and needs to know
     /// whether the plant actually took.
     ///
-    /// `fs::metadata` follows a reparse point exactly the way an ordinary open
-    /// does, and a filter that actually claims the tag — WOF included — answers
-    /// that call as if the file were ordinary, with the attribute gone. Asking
-    /// this way once concluded a real WOF placeholder was never made, when
-    /// `compact` had in fact just compressed it 32 to 1; `fs::symlink_metadata`
-    /// is the query that stays outside the reparse point, the same way
-    /// `Reparse::AsItself` does.
+    /// Neither `fs::metadata` nor `fs::symlink_metadata` can be trusted for this:
+    /// both once said a real WOF placeholder `compact` had just made — 32 to 1,
+    /// confirmed in its own output — did not exist. `fs::metadata` follows the
+    /// reparse point like an ordinary open; `fs::symlink_metadata` stays outside
+    /// it at the *path* level, through `GetFileAttributesEx`, which the WOF
+    /// filter answers exactly the way it answers a normal open — as if the file
+    /// were ordinary, attribute gone. Only a handle opened with
+    /// `FILE_FLAG_OPEN_REPARSE_POINT`, queried through *that handle*, sees the
+    /// attribute a filter is hiding from every path-based query — the same
+    /// pattern `Reparse::AsItself` and `information` already use in production.
     #[cfg(not(unix))]
     fn is_reparse_point(path: &Path) -> bool {
-        use std::os::windows::fs::MetadataExt;
-        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
 
-        fs::symlink_metadata(path)
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .and_then(|file| file.metadata())
             .map(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
             .unwrap_or(false)
     }
@@ -4981,13 +4990,14 @@ mod tests {
 
     /// Writes a file large and repetitive enough that `compact` bothers, and
     /// compacts it into a real WOF placeholder — asserted, not assumed:
-    /// `is_reparse_point` once said this never happened for a file exactly this
-    /// size, when `compact` had in fact just compressed it 32 to 1 (a metadata
-    /// query that follows the reparse point instead of stopping at it, fixed
-    /// alongside this). The placeholder test's own file stays small for a
-    /// different reason — the fixture turns its contents into a title — and
-    /// takes the by-hand fallback instead; these three tests need the real
-    /// mechanism specifically, so they get a file sized for it.
+    /// `is_reparse_point` said twice, on two different queries, that this never
+    /// happened for a file exactly this size, when `compact`'s own output said
+    /// 32 to 1 both times. Fixed alongside this — see `is_reparse_point`'s own
+    /// comment for which query actually sees a filter-hidden attribute. The
+    /// placeholder test's own file stays small for a different reason — the
+    /// fixture turns its contents into a title — and takes the by-hand fallback
+    /// instead; these three tests need the real mechanism specifically, so they
+    /// get a file sized for it.
     #[cfg(not(unix))]
     fn plant_real_wof_placeholder(path: &Path) -> Vec<u8> {
         let content = vec![b'A'; 128 * 1024];
