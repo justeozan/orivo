@@ -4,6 +4,11 @@ mod game_artwork;
 mod game_detail;
 mod game_media;
 mod launcher;
+// Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
+// numbers docs/performance.md records. It never runs in the default `cargo test`
+// gate, so a busy CI runner can't turn a timing into a false failure.
+#[cfg(test)]
+mod perf_bench;
 mod plugin_installer;
 mod plugin_manifest;
 mod plugin_registry;
