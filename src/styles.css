@@ -1935,6 +1935,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .plugin-row__log ul { margin: 0; padding-left: 18px; }
 .plugin-row__log li + li { margin-top: 4px; }
+.plugin-row__log--error { color: #f0a3a3; }
 .plugin-uninstall-button { height: 30px; padding: 0 11px; font-size: 12px; }
 .plugin-open-button {
   display: grid;

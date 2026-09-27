@@ -1856,7 +1856,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const pluginHealthClient = createDefaultPluginHealthClient();
   let pluginHealthById = new Map<string, PluginHealthView>();
   let pluginHealthIdsKey = "";
-  let pluginJournalById = new Map<string, PluginJournalEntryView[]>();
+  // `null` means the last read failed; absent means never (yet) read this
+  // time it was opened — the panel tells all three states apart.
+  let pluginJournalById = new Map<string, PluginJournalEntryView[] | null>();
   let openPluginLogId: string | null = null;
 
   // "Add an emulator" and the runner profiles inside Plugins & Runners own
@@ -2043,8 +2045,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const panel = document.createElement("div");
     panel.className = "plugin-row__log";
     const entries = pluginJournalById.get(pluginId);
-    if (!entries) {
+    if (entries === undefined) {
       panel.textContent = "Loading…";
+    } else if (entries === null) {
+      // A failed read must never look like a quiet, healthy plugin — the one
+      // case this panel exists to tell apart from the other.
+      panel.classList.add("plugin-row__log--error");
+      panel.textContent = "Orivo could not read this plugin's log. Try again.";
     } else if (entries.length === 0) {
       panel.textContent = "No recent activity.";
     } else {
@@ -2152,13 +2159,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
     openPluginLogId = pluginId;
+    // Always a fresh read: a log cached from an earlier visit could be exactly
+    // the failure this panel must never quietly present as "nothing happened",
+    // and the log can genuinely change between visits regardless.
+    pluginJournalById.delete(pluginId);
     renderDiscoveredPlugins();
-    if (!pluginJournalById.has(pluginId)) {
-      const entries = await pluginHealthClient
-        .getJournal(pluginId, new AbortController().signal)
-        .catch(() => []);
+    const entries = await pluginHealthClient.getJournal(pluginId, new AbortController().signal);
+    if (openPluginLogId === pluginId) {
       pluginJournalById.set(pluginId, entries);
-      if (openPluginLogId === pluginId) renderDiscoveredPlugins();
+      renderDiscoveredPlugins();
     }
   };
 
