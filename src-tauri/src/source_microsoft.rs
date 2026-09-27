@@ -59,6 +59,80 @@ pub fn is_redirect_page(url: &reqwest::Url) -> bool {
         && url.path() == "/oauth20_desktop.srf"
 }
 
+/// Android's WebView answers neither `WebviewWindow::url` nor an eval callback
+/// once the sign-in window has navigated away from its first page, so the
+/// token can only travel back through a navigation, exactly as it does for
+/// Epic (`source_epic::ANDROID_RELAY_SCRIPT`). Unlike Epic's relay, which
+/// trusts any host to reach its fixed path, this one also pins the host: a
+/// bearer token is worth more than a one-time authorization code, so a
+/// same-path lookalike page is not enough to have it relayed.
+const ANDROID_RELAY_HOST: &str = "orivo.invalid";
+const ANDROID_RELAY_PATH: &str = "/microsoft-token";
+
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub const ANDROID_RELAY_SCRIPT: &str = r#"
+(() => {
+  if (window.__orivoMicrosoftRelay) {
+    return;
+  }
+  window.__orivoMicrosoftRelay = true;
+  const relay = () => {
+    if (location.hostname !== 'login.live.com' || location.pathname !== '/oauth20_desktop.srf') {
+      return true;
+    }
+    const hash = location.hash || '';
+    const parameters = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
+    const accessToken = parameters.get('access_token') || '';
+    if (!accessToken) {
+      return false;
+    }
+    const relayUrl = new URL('https://orivo.invalid/microsoft-token');
+    relayUrl.searchParams.set('access_token', accessToken);
+    relayUrl.searchParams.set('refresh_token', parameters.get('refresh_token') || '');
+    relayUrl.searchParams.set('expires_in', parameters.get('expires_in') || '');
+    location.replace(relayUrl.toString());
+    return true;
+  };
+  let attempts = 0;
+  const timer = setInterval(() => {
+    attempts += 1;
+    if (relay() || attempts >= 40) {
+      clearInterval(timer);
+    }
+  }, 250);
+})()
+"#;
+
+/// Read the token back out of the relay navigation. The same validation as
+/// the eval path applies: each field is checked on its own, so a token that
+/// is missing or malformed is rejected without being swapped for the
+/// (absent) refresh token or the raw `expires_in` text.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn token_from_relay_url(url: &reqwest::Url) -> Option<ImplicitToken> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(ANDROID_RELAY_HOST)
+        || url.path() != ANDROID_RELAY_PATH
+    {
+        return None;
+    }
+    let parameters = url
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<String, String>>();
+    let access_token = validate_token(parameters.get("access_token")?)?;
+    Some(ImplicitToken {
+        access_token,
+        refresh_token: parameters
+            .get("refresh_token")
+            .and_then(|value| validate_token(value))
+            .unwrap_or_default(),
+        expires_in: parameters
+            .get("expires_in")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0),
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct ImplicitTokenPayload {
     #[serde(default, rename = "accessToken")]
@@ -548,6 +622,47 @@ mod tests {
             &reqwest::Url::parse("https://login.live.com.evil.example/oauth20_desktop.srf")
                 .unwrap()
         ));
+    }
+
+    #[test]
+    fn a_token_is_read_only_from_the_relay_navigation_orivo_owns() {
+        let relay = reqwest::Url::parse(
+            "https://orivo.invalid/microsoft-token?access_token=EwAoA-token&refresh_token=M.R3_BAY-refresh&expires_in=86400",
+        )
+        .unwrap();
+        let wrong_host = reqwest::Url::parse(
+            "https://evil.example/microsoft-token?access_token=EwAoA-token",
+        )
+        .unwrap();
+        let wrong_path =
+            reqwest::Url::parse("https://orivo.invalid/epic-authorization?access_token=EwAoA-token")
+                .unwrap();
+        let insecure =
+            reqwest::Url::parse("http://orivo.invalid/microsoft-token?access_token=EwAoA-token")
+                .unwrap();
+        let empty_token =
+            reqwest::Url::parse("https://orivo.invalid/microsoft-token?access_token=").unwrap();
+        let bad_token = reqwest::Url::parse(
+            "https://orivo.invalid/microsoft-token?access_token=has%20space",
+        )
+        .unwrap();
+
+        assert!(ANDROID_RELAY_SCRIPT.contains(&format!(
+            "https://{ANDROID_RELAY_HOST}{ANDROID_RELAY_PATH}"
+        )));
+        assert!(ANDROID_RELAY_SCRIPT.contains("login.live.com"));
+        assert!(ANDROID_RELAY_SCRIPT.contains("/oauth20_desktop.srf"));
+
+        let token = token_from_relay_url(&relay).expect("a well-formed relay URL is a token");
+        assert_eq!(token.access_token, "EwAoA-token");
+        assert_eq!(token.refresh_token, "M.R3_BAY-refresh");
+        assert_eq!(token.expires_in, 86_400);
+
+        assert!(token_from_relay_url(&wrong_host).is_none());
+        assert!(token_from_relay_url(&wrong_path).is_none());
+        assert!(token_from_relay_url(&insecure).is_none());
+        assert!(token_from_relay_url(&empty_token).is_none());
+        assert!(token_from_relay_url(&bad_token).is_none());
     }
 
     #[test]

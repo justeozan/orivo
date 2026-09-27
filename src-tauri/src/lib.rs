@@ -4911,6 +4911,24 @@ async fn connect_token_source(
                 );
                 return false;
             }
+            // Same relay, same reason, for the Microsoft implicit flow: the
+            // token is read here and the navigation is denied, so it never
+            // reaches the main WebView.
+            #[cfg(target_os = "android")]
+            if matches!(
+                provider,
+                sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
+            ) && let Some(token) = source_microsoft::token_from_relay_url(url)
+            {
+                eprintln!("[microsoft] relay navigation carried a token");
+                finish_microsoft_login(
+                    &app_for_navigation,
+                    provider,
+                    Arc::clone(&session_for_navigation),
+                    token,
+                );
+                return false;
+            }
             // GOG returns its authorization code in the redirect URL itself, so it
             // is read here — no script ever runs inside the sign-in page.
             if provider == sources::SourceProvider::Gog
@@ -4964,6 +4982,11 @@ async fn connect_token_source(
     #[cfg(target_os = "android")]
     let builder = if provider == sources::SourceProvider::Epic {
         builder.initialization_script(source_epic::ANDROID_RELAY_SCRIPT)
+    } else if matches!(
+        provider,
+        sources::SourceProvider::Xbox | sources::SourceProvider::MicrosoftStore
+    ) {
+        builder.initialization_script(source_microsoft::ANDROID_RELAY_SCRIPT)
     } else {
         builder
     };
@@ -5112,6 +5135,28 @@ fn finish_epic_login(app: &AppHandle, session: Arc<SourceLoginSession>, code: St
             window,
             outcome,
         );
+    });
+}
+
+/// Exchange a Microsoft implicit-flow token for a credential, whichever
+/// channel read it. Mirrors `finish_epic_login`: the relay hands over a value
+/// already validated by `token_from_relay_url`, so this only has to run the
+/// same exchange `extract_microsoft_login` runs for the eval path.
+#[cfg(target_os = "android")]
+fn finish_microsoft_login(
+    app: &AppHandle,
+    provider: sources::SourceProvider,
+    session: Arc<SourceLoginSession>,
+    token: source_microsoft::ImplicitToken,
+) {
+    if session.settled.load(Ordering::Acquire) || !session.begin_exchange() {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = source_microsoft::connect(token).await;
+        let window = app.get_webview_window(&source_window_label(provider));
+        settle_token_login_optional(&app, provider, session, window, outcome);
     });
 }
 
