@@ -446,6 +446,106 @@ pub struct GrantedDirectory {
     path: PathBuf,
     #[cfg(unix)]
     handle: File,
+    trust: FolderTrust,
+}
+
+/// Whether this account is the only one that can put something in the granted
+/// folder. Captured once, from the handle, at the moment the grant is made.
+///
+/// It decides one thing: whether a file in there with a second name could have
+/// been planted by somebody else. Linking a file does not require being able to
+/// read it, so a folder anyone else can write to is a folder where a second name
+/// may be another account's way of having Orivo read something for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FolderTrust {
+    /// `None` when the host could not establish it. Treated as "not private",
+    /// because the alternative is trusting a folder it knows nothing about.
+    private: Option<bool>,
+}
+
+impl FolderTrust {
+    /// Deliberately `false` for the unknown case. A host that cannot tell whether
+    /// another account can write here has not established that one cannot.
+    fn only_this_account_can_write(&self) -> bool {
+        self.private == Some(true)
+    }
+
+    #[cfg(unix)]
+    fn of_handle(handle: &File) -> Self {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+
+        let Ok(metadata) = handle.metadata() else {
+            return Self { private: None };
+        };
+        let group_or_other_writable =
+            metadata.mode() & u32::from(libc::S_IWGRP | libc::S_IWOTH) != 0;
+        Self {
+            private: Some(
+                metadata.uid() == host_account()
+                    && !group_or_other_writable
+                    && !has_extended_acl(handle.as_raw_fd()),
+            ),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of_path(path: &Path) -> Self {
+        // Reading a Windows DACL needs `GetSecurityInfo` from advapi32, which is
+        // not in the feature set this crate enables and cannot be compiled here
+        // at all — `cargo check --target x86_64-pc-windows-msvc` stops in `ring`
+        // for want of a Windows C toolchain. Unknown, therefore not private.
+        //
+        // Note what that does *not* achieve on Windows: `EntryFacts::of` cannot
+        // count links there either, for the same reason, so it reports one and
+        // this rule never fires. The hard-link gap is open on Windows and is
+        // written down as open, in `fixtures/README.md` and in the PR.
+        let _ = path;
+        Self { private: None }
+    }
+}
+
+/// Whether the folder carries an access-control list, which is how macOS shares a
+/// directory without saying so in its mode bits — `~/Public`, `/Users/Shared`, and
+/// anything a user has shared through System Settings.
+///
+/// Any extended ACL counts. Reading its entries to see whether one of them grants
+/// *write* means `acl_get_entry`/`acl_get_permset`/`acl_get_perm_np` and a great
+/// deal more FFI; "the mode bits do not describe who can write here" is the honest
+/// summary and errs towards refusing.
+#[cfg(target_vendor = "apple")]
+fn has_extended_acl(descriptor: std::os::fd::RawFd) -> bool {
+    /// `<sys/acl.h>`. Not in the `libc` crate, and it lives in libSystem, which is
+    /// already linked.
+    const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
+
+    unsafe extern "C" {
+        fn acl_get_fd_np(descriptor: libc::c_int, acl_type: libc::c_int) -> *mut libc::c_void;
+        fn acl_free(object: *mut libc::c_void) -> libc::c_int;
+    }
+
+    // Safety: `descriptor` is an open descriptor borrowed for the call, and the
+    // returned handle is freed here and nowhere else.
+    unsafe {
+        let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED);
+        if acl.is_null() {
+            return false;
+        }
+        acl_free(acl);
+        true
+    }
+}
+
+/// Linux and Android keep a POSIX ACL in an extended attribute, so its presence
+/// is the same question asked of `fgetxattr`.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn has_extended_acl(descriptor: std::os::fd::RawFd) -> bool {
+    const NAME: &[u8] = b"system.posix_acl_access\0";
+    // Safety: a NUL-terminated name, a null buffer and a zero size, which is the
+    // documented way to ask only for the attribute's length.
+    let size =
+        unsafe { libc::fgetxattr(descriptor, NAME.as_ptr().cast(), std::ptr::null_mut(), 0) };
+    size > 0
 }
 
 impl std::fmt::Debug for GrantedDirectory {
@@ -482,9 +582,11 @@ impl GrantedDirectory {
                 .read(true)
                 .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
                 .open(path)?;
+            let trust = FolderTrust::of_handle(&handle);
             Ok(Self {
                 path: path.to_path_buf(),
                 handle,
+                trust,
             })
         }
         #[cfg(not(unix))]
@@ -497,6 +599,7 @@ impl GrantedDirectory {
             }
             Ok(Self {
                 path: path.to_path_buf(),
+                trust: FolderTrust::of_path(path),
             })
         }
     }
@@ -1179,7 +1282,7 @@ impl host_files::Host for HostState {
                 "That file is no longer available.",
             ));
         };
-        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), host_account()) {
+        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), directory.trust) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
                 refusal.message(),
@@ -1341,8 +1444,9 @@ impl EntryFacts {
 enum EntryRefusal {
     NotAFile,
     TooLarge,
-    /// A file with more than one name, owned by another local account.
-    ForeignHardLink,
+    /// A file with more than one name, in a folder this account is not the only
+    /// one able to write to.
+    SharedHardLink,
 }
 
 impl EntryRefusal {
@@ -1351,28 +1455,28 @@ impl EntryRefusal {
             Self::NotAFile | Self::TooLarge => {
                 "That entry is not a readable file of an allowed size."
             }
-            Self::ForeignHardLink => {
-                "That entry is another account's file, under a second name in your folder."
+            Self::SharedHardLink => {
+                "That entry has a second name, in a folder other accounts can add files to."
             }
         }
     }
 }
 
-fn refuse_entry(facts: &EntryFacts, host_owner: u32) -> Option<EntryRefusal> {
+fn refuse_entry(facts: &EntryFacts, folder: FolderTrust) -> Option<EntryRefusal> {
     if !facts.file {
         return Some(EntryRefusal::NotAFile);
     }
     if facts.byte_size > MAX_HOST_FILE_BYTES {
         return Some(EntryRefusal::TooLarge);
     }
-    // One name for another account's file is a folder the user pointed at on
-    // purpose — a shared library, something under `/Applications`. A *second*
-    // name for it is not: linking a file does not require being able to read it,
-    // so this is the shape a plugin is being used to read something on someone
-    // else's behalf. The user's own hard links stay readable, because a
-    // deduplicated library is an ordinary thing to have.
-    if facts.links > 1 && facts.owner != host_owner {
-        return Some(EntryRefusal::ForeignHardLink);
+    // A second name is only suspicious if somebody else could have put it there.
+    // In a folder only this account can write to, every name in it is the user's
+    // own, and a deduplicated ROM library is an ordinary thing to have. In a
+    // folder anyone else can write to, a second name may be their way of having
+    // Orivo read a file they cannot — including one of this user's own private
+    // files, which is why the *file's* owner answers nothing here.
+    if facts.links > 1 && !folder.only_this_account_can_write() {
+        return Some(EntryRefusal::SharedHardLink);
     }
     None
 }
@@ -3414,58 +3518,44 @@ mod tests {
     /// without `fs.protected_hardlinks` — so anyone who can write to the granted
     /// folder can plant one there and let Orivo do the reading.
     ///
-    /// Driven through the rule rather than the filesystem because the case that
-    /// matters needs a second local account, which a test suite cannot create.
-    /// What *is* reproducible is checked below, in
-    /// `the_facts_a_refusal_is_made_from_come_from_the_descriptor`: the link
-    /// count and owner really are read off the open file.
+    /// The first version of this rule asked about the *file's* owner, and missed
+    /// the case that matters: the file another account wants read is usually the
+    /// Orivo user's **own** private file, so its owner is this account and the
+    /// rule said nothing. What decides it is whether anyone else could have put
+    /// the second name there, which is a question about the granted folder.
+    ///
+    /// Driven through `read_file` rather than through the rule, because a rule
+    /// nothing calls is a rule: deleting its call site used to break no test.
+    #[cfg(unix)]
     #[test]
-    fn a_multiply_linked_file_owned_by_another_account_is_refused() {
-        let ours = host_account();
-        let theirs = ours.wrapping_add(1);
-        let entry = |links, owner| EntryFacts {
-            file: true,
-            directory: false,
-            symlink: false,
-            byte_size: 32,
-            links,
-            owner,
-        };
+    fn a_hard_link_is_refused_when_other_accounts_can_write_the_granted_folder() {
+        use std::os::unix::fs::PermissionsExt;
 
-        assert_eq!(refuse_entry(&entry(1, ours), ours), None);
-        // A deduplicated ROM library is an ordinary thing for a user to have,
-        // and every name in it is theirs.
-        assert_eq!(refuse_entry(&entry(9, ours), ours), None);
-        // One name, another owner: a shared or system folder the user pointed at
-        // on purpose. The grant is what authorises this.
-        assert_eq!(refuse_entry(&entry(1, theirs), ours), None);
-        // A second name for someone else's file is the one shape that is not
-        // explained by the user having granted the folder.
-        assert_eq!(
-            refuse_entry(&entry(2, theirs), ours),
-            Some(EntryRefusal::ForeignHardLink)
-        );
+        // The same library, the same link, the same call. Only the folder's
+        // permissions differ.
+        for (mode, expected) in [(0o700, true), (0o770, false), (0o777, false)] {
+            let library = FixtureLibrary::new(&format!("link-{mode:o}"));
+            fs::hard_link(
+                library.games.join("beta.rom"),
+                library.games.join("twin.rom"),
+            )
+            .unwrap();
+            fs::set_permissions(&library.games, fs::Permissions::from_mode(mode)).unwrap();
 
-        assert_eq!(
-            refuse_entry(
-                &EntryFacts {
-                    file: false,
-                    ..entry(1, ours)
-                },
-                ours
-            ),
-            Some(EntryRefusal::NotAFile)
-        );
-        assert_eq!(
-            refuse_entry(
-                &EntryFacts {
-                    byte_size: MAX_HOST_FILE_BYTES + 1,
-                    ..entry(1, ours)
-                },
-                ours
-            ),
-            Some(EntryRefusal::TooLarge)
-        );
+            let harness = Harness::new(PluginLimits::default(), Some(&library));
+            let outcome = harness.prepare("fixture:read-twin");
+            assert_eq!(
+                outcome.is_ok(),
+                expected,
+                "a hard link in a folder with mode {mode:o} was answered {outcome:?}"
+            );
+            // A file with one name is unaffected either way: this refuses a
+            // shared *link*, not a shared folder.
+            assert!(
+                harness.prepare("fixture:read-alpha").is_ok(),
+                "an ordinary file in a folder with mode {mode:o} was refused"
+            );
+        }
     }
 
     /// The rule above is only worth anything if the numbers it judges are the
@@ -3491,8 +3581,72 @@ mod tests {
         assert_eq!(facts.links, 2, "the link count is not the file's own");
         assert_eq!(facts.owner, host_account());
 
+        // The temporary directory this runs in is private, so the same link is
+        // readable — which is the pairing that matters: the rule refuses a link a
+        // *stranger could have made*, not a link.
         let harness = Harness::new(PluginLimits::default(), Some(&library));
         assert!(harness.prepare("fixture:read-twin").is_ok());
+    }
+
+    /// The branch no filesystem here can produce: a folder whose write access the
+    /// host could not establish at all, which is every Windows grant until
+    /// somebody reads a DACL. Unknown has to mean refused, or the rule is only as
+    /// good as the platform it was written on.
+    #[test]
+    fn a_folder_the_host_cannot_vouch_for_is_not_a_private_one() {
+        let private = FolderTrust {
+            private: Some(true),
+        };
+        let shared = FolderTrust {
+            private: Some(false),
+        };
+        let unknown = FolderTrust { private: None };
+        assert!(private.only_this_account_can_write());
+        assert!(!shared.only_this_account_can_write());
+        assert!(!unknown.only_this_account_can_write());
+
+        let entry = |links| EntryFacts {
+            file: true,
+            directory: false,
+            symlink: false,
+            byte_size: 32,
+            links,
+            owner: host_account(),
+        };
+        // A deduplicated library in a folder only this account can write to.
+        assert_eq!(refuse_entry(&entry(9), private), None);
+        // One name is never the shape this rule is about.
+        assert_eq!(refuse_entry(&entry(1), shared), None);
+        assert_eq!(refuse_entry(&entry(1), unknown), None);
+        assert_eq!(
+            refuse_entry(&entry(2), shared),
+            Some(EntryRefusal::SharedHardLink)
+        );
+        assert_eq!(
+            refuse_entry(&entry(2), unknown),
+            Some(EntryRefusal::SharedHardLink)
+        );
+
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    file: false,
+                    ..entry(1)
+                },
+                private
+            ),
+            Some(EntryRefusal::NotAFile)
+        );
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    byte_size: MAX_HOST_FILE_BYTES + 1,
+                    ..entry(1)
+                },
+                private
+            ),
+            Some(EntryRefusal::TooLarge)
+        );
     }
 
     #[test]
