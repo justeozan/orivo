@@ -334,9 +334,14 @@ That check is the user's, and it is four steps:
 - **256 entries per folder.** A granted folder is listed no further; the rest is
   invisible to the plugin. A 1000‑file folder imports the first 256 by name.
   `docs/performance.md` §7 has the measurement.
-- **One folder per profile.** The component asks for one grant slot, `games`,
-  because the v1 manifest has no field where a package could declare more than
-  one. A second folder means a second profile.
+- **One folder per profile.** The component asks for one grant slot, `games` —
+  `runner_commands::DEFAULT_DIRECTORY_SLOT`, which is what makes Settings'
+  "Add a game folder…" work with no per-plugin knowledge — and the v1 manifest has
+  no field where a package could declare a second. So that button is *not*
+  "add another folder" for this plugin: pressed again it re-points the same slot,
+  and once games have been imported under it the host refuses outright ("this
+  folder slot already holds imported games"). A second folder means a second
+  profile until a manifest can declare its slots.
 - **No subfolders**, per the listing rule above.
 - **No file is read**, so no NACP title, no icon, no version, no DLC or update
   awareness, and a file whose name carries no title id has none.
