@@ -194,6 +194,15 @@ composant reste plat de 1 à 20 (1,88 / 1,80 / 1,81 ms) — c'est ce qui valide 
 lecture ci-dessus, puisque N artefacts distincts se rechargent au même prix
 unitaire qu'un seul.
 
+Le chemin de lecture a changé après la contre-revue (ouverture non bloquante,
+refus d'un créneau qui n'est pas un fichier ordinaire), donc le banc a été rejoué
+sur le code livré. La machine partagée était plus chargée à ce moment-là et les
+valeurs absolues le montrent : 41,5 / 297,1 / 809,2 ms sans cache et 2,5 / 15,0 /
+54,6 ms à chaud, pour 1 / 8 / 20 composants. Ce qui survit à la contention est le
+rapport — 16,6× / 19,9× / 14,8× — et c'est la raison pour laquelle le tableau
+ci-dessus garde la mesure du run le plus calme plutôt que de faire passer du bruit
+pour une régression ou pour un gain.
+
 Trois choses que ce tableau ne dit pas, et qu'il faut lire avec lui.
 
 - **Le cache froid est plus lent que l'absence de cache**, de 8 à 117 ms selon N :
