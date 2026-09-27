@@ -53,3 +53,54 @@ The host validates package identity and capabilities in
 `src-tauri/src/plugin_runtime.rs` and queues those invocations in
 `src-tauri/src/plugin_scheduler.rs`; the WIT file must remain aligned with its
 `orivo-plugin@1` SDK identifier.
+
+## Building a runner plugin from zero
+
+`sdk/orivo-plugin-sdk` is the developer kit: a manifest validator and a host
+simulator that call the same code Orivo runs (`plugin_manifest`,
+`plugin_runtime`), so nothing here can silently validate against a second,
+drifted copy of the real rules. Its own README covers each subcommand's
+options; this is the shortest path from an empty directory to a runner that
+answers a simulated call.
+
+1. **Start from the template.** Copy
+   `sdk/orivo-plugin-sdk/templates/runner-plugin-starter` and rename its
+   `PLUGIN_ID`, `PLUGIN_VERSION` and `LIBRARY_GRANT` constants. It implements
+   `runner-plugin` honestly — one directory grant, no misbehaviour — unlike
+   `src-tauri/fixtures/runner-fixture`, which is deliberately adversarial and
+   exists to test the host, not to be copied by an author.
+2. **Build the component.**
+   ```sh
+   rustup target add wasm32-unknown-unknown
+   cargo install wasm-tools --locked --version 1.246.2
+   ./build.sh   # prints component.wasm's sha256 and byte size
+   ```
+3. **Write the manifest.** Copy `manifest.json.example` to `manifest.json` and
+   fill in the `sha256`/`byteSize` `build.sh` printed. `id` must be a
+   lowercase reverse-DNS string with at least three labels; `sdk` must stay
+   `orivo-plugin@1`.
+4. **Validate it.**
+   ```sh
+   cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- validate <your-plugin-dir>
+   ```
+   This runs `PluginManifest::validate` and, once a `signature.ed25519` file
+   exists (any bytes — the SDK only speaks for the development channel),
+   `validate_plugin_package` — the exact checks the installer applies, plus a
+   direct byte comparison against the declared artifact hash.
+5. **Check the contract, then simulate a call.**
+   ```sh
+   cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- check <your-plugin-dir>
+   cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- simulate <your-plugin-dir> \
+     --request discover-page --grant library=./fixtures/games
+   ```
+   `check` reproduces the registry's pre-install gate: the component's own
+   type must ask for no more than the manifest declares, and `get-identity`
+   must agree with it. `simulate` runs one call through the real
+   `PluginRuntime` — the same fuel, epoch deadline and memory ceilings Orivo
+   enforces — and prints the host's journal alongside the answer, so a
+   `permission-denied` shows *why* rather than only that one happened.
+6. **Package it.** `.orivo-plugin` archives, signing and the registry are the
+   installer's territory (`src-tauri/src/plugin_installer.rs`,
+   `src-tauri/src/plugin_registry.rs`), not this SDK's. Until that flow is
+   available to third parties, install a validated directory through Orivo's
+   development channel exactly as the installer's own tests do.

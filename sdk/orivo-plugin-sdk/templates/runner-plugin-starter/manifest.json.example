@@ -1,0 +1,17 @@
+{
+  "id": "com.example.my-runner",
+  "name": "My Runner",
+  "version": "0.1.0",
+  "sdk": "orivo-plugin@1",
+  "minOrivoVersion": "0.3.0",
+  "extensions": ["runner"],
+  "capabilities": ["runner_prepare", "files_read"],
+  "artifacts": [
+    {
+      "path": "component.wasm",
+      "kind": "component",
+      "sha256": "REPLACE-WITH-THE-DIGEST-build.sh-PRINTS",
+      "byteSize": 0
+    }
+  ]
+}
