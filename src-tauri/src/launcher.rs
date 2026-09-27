@@ -37,10 +37,10 @@ pub enum LaunchError {
     ProviderInstallUnsupported {
         label: &'static str,
     },
-    /// Third-party runner execution is intentionally unavailable until the
-    /// plugin host can resolve a validated profile into a typed launch intent.
-    /// The built-in Wine-Staging adapter is resolved earlier by the trusted
-    /// runner host and never reaches this generic fallback.
+    /// No runner host resolved this target. Every runner — the two native
+    /// adapters and any installed plugin — is resolved before the launch service
+    /// is reached, so this is the backstop for a card whose runner is no longer
+    /// installed, or a request that arrived without a configured profile.
     RunnerUnavailable {
         runner_id: String,
     },
@@ -115,10 +115,11 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
             launch_steam(*app_id)
         }
         LaunchTarget::Runner { runner_id, .. } => {
-            // Do not turn runner ids, game references, or profiles into a
-            // process invocation here. The forthcoming plugin host will
-            // validate a typed LaunchIntent against grants and the selected
-            // profile before it asks this service to start anything.
+            // A runner id, a game reference and a profile id never become a
+            // process here. The runner host resolves a validated profile and a
+            // typed launch intent first, and it is the only thing that may hand
+            // this service a program to start — which is why a target that
+            // reaches this arm is refused rather than interpreted.
             Err(LaunchError::RunnerUnavailable {
                 runner_id: runner_id.clone(),
             })
@@ -549,8 +550,11 @@ mod tests {
         assert!(matches!(launch(&game), Err(LaunchError::SteamNotInstalled)));
     }
 
+    /// The backstop, not the third-party runner path. A card whose plugin was
+    /// removed, or a stale request that skipped the host, must be refused with a
+    /// sentence rather than turned into an invocation.
     #[test]
-    fn refuses_runner_targets_until_a_plugin_host_validates_them() {
+    fn refuses_a_runner_target_that_reached_the_launch_service_unresolved() {
         let game = Game {
             id: "runner:com.orivo.ryujinx:abc123".into(),
             title: "Example Switch Game".into(),
