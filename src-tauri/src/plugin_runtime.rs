@@ -384,7 +384,7 @@ impl PluginJournal {
                 return;
             }
             if ring.len() == MAX_JOURNAL_ENTRIES {
-                ring.pop_front();
+                Self::evict_one(&mut ring);
             }
             ring.push_back(entry);
         }
@@ -405,6 +405,33 @@ impl PluginJournal {
     #[allow(dead_code)]
     pub fn traces(&self) -> Vec<JournalEntry> {
         Self::snapshot(&self.traces)
+    }
+
+    /// Makes room, at the expense of whichever plugin is using the most of it.
+    ///
+    /// A single ring shared by every plugin is a ring one busy plugin empties for
+    /// everybody else — and the entries that matter are refusals, which is exactly
+    /// what a misbehaving neighbour would be scrolling away. Dropping the oldest
+    /// entry of the *largest* holder instead of the globally oldest one gives each
+    /// plugin its share without a map of rings to bound and evict in turn.
+    fn evict_one(ring: &mut VecDeque<JournalEntry>) {
+        let mut held: BTreeMap<&str, usize> = BTreeMap::new();
+        for entry in ring.iter() {
+            *held.entry(entry.plugin_id.as_str()).or_default() += 1;
+        }
+        let Some(greediest) = held
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(plugin_id, _)| plugin_id.to_owned())
+        else {
+            ring.pop_front();
+            return;
+        };
+        if let Some(index) = ring.iter().position(|entry| entry.plugin_id == greediest) {
+            ring.remove(index);
+        } else {
+            ring.pop_front();
+        }
     }
 
     fn snapshot(ring: &Mutex<VecDeque<JournalEntry>>) -> Vec<JournalEntry> {
@@ -4170,21 +4197,27 @@ mod tests {
             .expect("the host recorded no trap")
     }
 
-    /// Isolates the tick half. The epoch tick is a whole second, so the wall
-    /// clock cannot have run out in the few milliseconds this takes: only the
-    /// count of observed ticks can end the call.
+    /// Isolates the tick half: three ticks of budget, and thirty seconds of wall
+    /// clock it cannot plausibly reach, so only the count of observed ticks can end
+    /// the call. The epoch tick's *length* does not matter under
+    /// [`EpochMode::Manual`] — nothing is ticking but the test — it only sets how
+    /// many ticks the deadline is worth, which is why a generous wall clock costs
+    /// nothing here. The first version budgeted three seconds and failed on a
+    /// loaded machine, where three hand-driven ticks and a job handover can take
+    /// longer than that and the two halves stop being distinguishable.
     #[test]
     fn the_deadline_runs_out_of_epoch_ticks() {
         let library = FixtureLibrary::new("deadline-ticks");
         let (runtime, prepared, grants) = manual(
             PluginLimits {
                 interactive_fuel: 1 << 42,
-                interactive_deadline: Duration::from_secs(3),
-                epoch_tick: Duration::from_secs(1),
+                interactive_deadline: Duration::from_secs(30),
+                epoch_tick: Duration::from_secs(10),
                 ..PluginLimits::default()
             },
             &library,
         );
+        assert_eq!(runtime.limits().ticks(Duration::from_secs(30)), 3);
         let started = Instant::now();
         let outcome =
             spin_under_manual_epoch(&runtime, &prepared, &grants, 8, Duration::from_millis(1));
@@ -4193,7 +4226,7 @@ mod tests {
             JobError::Runtime(PluginRuntimeError::DeadlineExceeded)
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < Duration::from_secs(30),
             "the wall clock, not the tick count, is what stopped it"
         );
     }
@@ -4623,6 +4656,70 @@ mod tests {
                 .count(),
             1,
             "host-journal was either unmetered or reported its refusal repeatedly"
+        );
+    }
+
+    /// The counter, which the previous version of this test could not exercise:
+    /// `fixture:bury` earns its refusal *once*, so removing `repeats` and letting
+    /// each attempt write its own entry changed nothing it asserted. `fixture:nag`
+    /// asks for the same forbidden folder four hundred times.
+    #[test]
+    fn the_same_refusal_earned_again_is_counted_and_not_repeated() {
+        let library = FixtureLibrary::new("nag");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:nag").is_ok());
+
+        let refusals = harness
+            .runtime
+            .journal()
+            .entries()
+            .into_iter()
+            .filter(|entry| entry.decision == "scope-refused")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refusals.len(),
+            1,
+            "four hundred attempts left {} entries in a ring of {MAX_JOURNAL_ENTRIES}",
+            refusals.len()
+        );
+        assert!(
+            refusals[0].repeats > 1,
+            "the repeats were not counted: {:?}",
+            refusals[0]
+        );
+    }
+
+    /// One ring for every plugin is a ring one busy plugin empties for everybody
+    /// else, and what it empties are refusals — the entries a misbehaving
+    /// neighbour has the most reason to scroll away. Four hundred distinct
+    /// decisions from one plugin must not cost another plugin the one it earned.
+    #[test]
+    fn a_busy_plugin_cannot_evict_another_plugins_refusal() {
+        let journal = PluginJournal::default();
+        journal.record(
+            next_correlation_id(),
+            "com.orivo.quiet-runner",
+            "scope-refused",
+            "a directory grant outside the approved scope was requested",
+        );
+        for index in 0..400 {
+            journal.record(
+                next_correlation_id(),
+                "com.orivo.busy-runner",
+                "scope-refused",
+                // Distinct, so the repeat counter cannot absorb them: this is
+                // about the share of the ring, not about duplicates.
+                format!("attempt {index}"),
+            );
+        }
+
+        let entries = journal.entries();
+        assert_eq!(entries.len(), MAX_JOURNAL_ENTRIES);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.plugin_id == "com.orivo.quiet-runner"),
+            "a busy plugin scrolled away a refusal that was not its own"
         );
     }
 
