@@ -1033,10 +1033,10 @@ impl host_files::Host for HostState {
                 "That file is no longer available.",
             ));
         };
-        if !metadata.is_file() || metadata.len() > MAX_HOST_FILE_BYTES {
+        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), host_account()) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
-                "That entry is not a readable file of an allowed size.",
+                refusal.message(),
             ));
         }
         if self.bytes_read.saturating_add(metadata.len()) > MAX_HOST_READ_BYTES {
@@ -1123,6 +1123,103 @@ fn is_windows_device_name(resolved: &str) -> bool {
     WINDOWS_DEVICE_NAMES
         .iter()
         .any(|device| folded.eq_ignore_ascii_case(device))
+}
+
+/// What the host knows about an entry once it has opened it, as plain values.
+///
+/// Asking the descriptor rather than the name is what makes these trustworthy;
+/// keeping them as data is what makes the rule below a pure function, which is
+/// the only way one of its cases can be tested at all — reproducing that one for
+/// real needs a second local account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EntryFacts {
+    file: bool,
+    byte_size: u64,
+    /// How many names this file answers to. More than one is a hard link.
+    links: u64,
+    owner: u32,
+}
+
+impl EntryFacts {
+    fn of(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                file: metadata.is_file(),
+                byte_size: metadata.len(),
+                links: metadata.nlink(),
+                owner: metadata.uid(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows reports a link count only through a separate query and has
+            // no uid to compare, so the ownership rule below never fires there.
+            // Said out loud rather than silently approximated.
+            Self {
+                file: metadata.is_file(),
+                byte_size: metadata.len(),
+                links: 1,
+                owner: 0,
+            }
+        }
+    }
+}
+
+/// Why the host will not hand an entry's bytes to a plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryRefusal {
+    NotAFile,
+    TooLarge,
+    /// A file with more than one name, owned by another local account.
+    ForeignHardLink,
+}
+
+impl EntryRefusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::NotAFile | Self::TooLarge => {
+                "That entry is not a readable file of an allowed size."
+            }
+            Self::ForeignHardLink => {
+                "That entry is another account's file, under a second name in your folder."
+            }
+        }
+    }
+}
+
+fn refuse_entry(facts: &EntryFacts, host_owner: u32) -> Option<EntryRefusal> {
+    if !facts.file {
+        return Some(EntryRefusal::NotAFile);
+    }
+    if facts.byte_size > MAX_HOST_FILE_BYTES {
+        return Some(EntryRefusal::TooLarge);
+    }
+    // One name for another account's file is a folder the user pointed at on
+    // purpose — a shared library, something under `/Applications`. A *second*
+    // name for it is not: linking a file does not require being able to read it,
+    // so this is the shape a plugin is being used to read something on someone
+    // else's behalf. The user's own hard links stay readable, because a
+    // deduplicated library is an ordinary thing to have.
+    if facts.links > 1 && facts.owner != host_owner {
+        return Some(EntryRefusal::ForeignHardLink);
+    }
+    None
+}
+
+/// The account Orivo is running as. A grant authorises reading the user's own
+/// files; it is not a way to read another account's.
+fn host_account() -> u32 {
+    #[cfg(unix)]
+    {
+        // Safety: `geteuid` reads this process's own identity and cannot fail.
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 /// Exactly one ordinary path component, and nothing that could leave the
@@ -3086,6 +3183,91 @@ mod tests {
         assert_eq!(read_at_most(Cursor::new(vec![7u8; 100]), 99), None);
         assert_eq!(read_at_most(Cursor::new(vec![7u8; 1]), 0), None);
         assert_eq!(read_at_most(Cursor::new(Vec::new()), 0), Some(Vec::new()));
+    }
+
+    /// A second name for a file is how another local account lends a plugin
+    /// something that account cannot read itself. Creating a link does not
+    /// require being able to read its target — not on macOS, and not on Linux
+    /// without `fs.protected_hardlinks` — so anyone who can write to the granted
+    /// folder can plant one there and let Orivo do the reading.
+    ///
+    /// Driven through the rule rather than the filesystem because the case that
+    /// matters needs a second local account, which a test suite cannot create.
+    /// What *is* reproducible is checked below, in
+    /// `the_facts_a_refusal_is_made_from_come_from_the_descriptor`: the link
+    /// count and owner really are read off the open file.
+    #[test]
+    fn a_multiply_linked_file_owned_by_another_account_is_refused() {
+        let ours = host_account();
+        let theirs = ours.wrapping_add(1);
+        let entry = |links, owner| EntryFacts {
+            file: true,
+            byte_size: 32,
+            links,
+            owner,
+        };
+
+        assert_eq!(refuse_entry(&entry(1, ours), ours), None);
+        // A deduplicated ROM library is an ordinary thing for a user to have,
+        // and every name in it is theirs.
+        assert_eq!(refuse_entry(&entry(9, ours), ours), None);
+        // One name, another owner: a shared or system folder the user pointed at
+        // on purpose. The grant is what authorises this.
+        assert_eq!(refuse_entry(&entry(1, theirs), ours), None);
+        // A second name for someone else's file is the one shape that is not
+        // explained by the user having granted the folder.
+        assert_eq!(
+            refuse_entry(&entry(2, theirs), ours),
+            Some(EntryRefusal::ForeignHardLink)
+        );
+
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    file: false,
+                    ..entry(1, ours)
+                },
+                ours
+            ),
+            Some(EntryRefusal::NotAFile)
+        );
+        assert_eq!(
+            refuse_entry(
+                &EntryFacts {
+                    byte_size: MAX_HOST_FILE_BYTES + 1,
+                    ..entry(1, ours)
+                },
+                ours
+            ),
+            Some(EntryRefusal::TooLarge)
+        );
+    }
+
+    /// The rule above is only worth anything if the numbers it judges are the
+    /// file's own. A link the test makes itself has two names and this account's
+    /// owner, and it stays readable — refusing every hard link would break a
+    /// deduplicated library for no security gained.
+    #[cfg(unix)]
+    #[test]
+    fn the_facts_a_refusal_is_made_from_come_from_the_descriptor() {
+        let library = FixtureLibrary::new("hard-link");
+        fs::hard_link(
+            library.games.join("alpha.rom"),
+            library.games.join("twin.rom"),
+        )
+        .unwrap();
+
+        let facts = EntryFacts::of(
+            &fs::File::open(library.games.join("twin.rom"))
+                .unwrap()
+                .metadata()
+                .unwrap(),
+        );
+        assert_eq!(facts.links, 2, "the link count is not the file's own");
+        assert_eq!(facts.owner, host_account());
+
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:read-twin").is_ok());
     }
 
     #[test]
