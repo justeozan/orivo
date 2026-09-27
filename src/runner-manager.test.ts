@@ -380,6 +380,48 @@ describe("createRunnerManagerController", () => {
     expect(failed?.message).toBe("This runner profile is no longer available.");
   });
 
+  it("does not leave a second poll loop running when cancel races an in-flight status read", async () => {
+    vi.useFakeTimers();
+    let statusCalls = 0;
+    let releaseFirstRead: (() => void) | null = null;
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => {
+        statusCalls += 1;
+        // The first tick's read is held open — "in flight" — until the test
+        // releases it, which is what lets a cancel land while it is pending.
+        if (statusCalls === 1) {
+          await new Promise<void>((resolve) => {
+            releaseFirstRead = resolve;
+          });
+        }
+        return job({ jobId, phase: "running" });
+      },
+      cancelImport: async (jobId) => job({ jobId, phase: "running" }),
+    });
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    await controller.startImport("runner-1");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(statusCalls).toBe(1);
+
+    // Cancel while that read has not resolved yet — cancelImport's own
+    // client call and its "still running" follow-up poll both settle
+    // independently of it.
+    await controller.cancelImport("runner-1");
+
+    // Now let the stale, in-flight read finish. A continuation that does not
+    // know it is stale would see "running" and schedule its own follow-up
+    // poll, duplicating the one cancelImport already started.
+    releaseFirstRead!();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Exactly one loop should be alive: one more interval must produce
+    // exactly one more read, not two.
+    await vi.advanceTimersByTimeAsync(500);
+    expect(statusCalls).toBe(2);
+  });
+
   it("stops polling once disposed", async () => {
     vi.useFakeTimers();
     const fake = createFakeRunnerManager();

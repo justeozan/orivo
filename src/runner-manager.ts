@@ -366,6 +366,18 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
   const listeners = new Set<() => void>();
   const jobs = new Map<string, RunnerImportJobView>();
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * `clearTimeout` only stops a poll that has not fired yet. One that has
+   * already fired and is awaiting `getImportStatus` keeps running regardless,
+   * and its continuation — same as `cancelImport`'s own — decides on its own
+   * whether the job is still "running" and, if so, schedules another poll.
+   * Without a token neither side knows about the other's decision, and both
+   * can end up scheduling one: two live loops for one profile, the older one
+   * no longer reachable through `timers` once the newer one overwrites it.
+   * Each `poll()` call captures the generation current when it was scheduled;
+   * a tick only acts if that generation is still current when it fires.
+   */
+  const pollGeneration = new Map<string, number>();
   // Profile mutations and import polling outlive the activation signal `load`
   // is handed, so they run on the controller's own lifetime.
   const lifetime = new AbortController();
@@ -402,22 +414,30 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
     }
   };
 
+  /** Cancels a pending timer and marks any in-flight poll for this profile stale, so neither can act again. */
+  const invalidatePoll = (profileId: string): void => {
+    clearTimer(profileId);
+    pollGeneration.set(profileId, (pollGeneration.get(profileId) ?? 0) + 1);
+  };
+
   const poll = (profileId: string, jobId: string): void => {
     if (disposed) return;
+    const generation = pollGeneration.get(profileId) ?? 0;
+    const isCurrent = (): boolean => (pollGeneration.get(profileId) ?? 0) === generation;
     const timer = setTimeout(() => {
       void (async () => {
-        if (disposed) return;
+        if (disposed || !isCurrent()) return;
         let view: RunnerImportJobView;
         try {
           view = await client.getImportStatus(jobId, lifetime.signal);
         } catch (error) {
-          if (disposed) return;
+          if (disposed || !isCurrent()) return;
           timers.delete(profileId);
           jobs.set(profileId, failedImportJob(profileId, error));
           notify();
           return;
         }
-        if (disposed) return;
+        if (disposed || !isCurrent()) return;
         jobs.set(profileId, view);
         notify();
         if (view.phase === "running") {
@@ -472,7 +492,7 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
     },
 
     async deleteProfile(profileId) {
-      clearTimer(profileId);
+      invalidatePoll(profileId);
       jobs.delete(profileId);
       const removed = await client.deleteProfile(profileId, lifetime.signal);
       if (!disposed) await refresh();
@@ -493,7 +513,7 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
 
     async startImport(profileId) {
       if (disposed) return;
-      clearTimer(profileId);
+      invalidatePoll(profileId);
       let view: RunnerImportJobView;
       try {
         view = await client.startImport(profileId, lifetime.signal);
@@ -514,7 +534,7 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       if (disposed) return;
       const job = jobs.get(profileId);
       if (!job || !job.jobId) return;
-      clearTimer(profileId);
+      invalidatePoll(profileId);
       try {
         const view = await client.cancelImport(job.jobId, lifetime.signal);
         if (disposed) return;
@@ -549,6 +569,7 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       lifetime.abort();
       for (const timer of timers.values()) clearTimeout(timer);
       timers.clear();
+      pollGeneration.clear();
       jobs.clear();
       listeners.clear();
       runners = [];
