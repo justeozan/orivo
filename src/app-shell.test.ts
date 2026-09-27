@@ -1059,6 +1059,7 @@ describe("the Android source confirmations", () => {
         case "connect_winlator_export_folder":
           return {
             connected: true,
+            token: 9,
             folderLabel: "Frontend",
             message: "Connected Frontend.",
             found: [
@@ -1144,7 +1145,7 @@ describe("the Android source confirmations", () => {
     await settle();
 
     expect(root.querySelector(".library-source-review__note")?.textContent).toBe(
-      "RetroArch on this device was installed by com.android.vending.",
+      "RetroArch on this device came from Google Play.",
     );
 
     root.querySelector<HTMLButtonElement>("[data-library-action='console-import']")!.click();
@@ -1166,6 +1167,7 @@ describe("the Android source confirmations", () => {
       if (command === "connect_winlator_export_folder")
         return {
           connected: true,
+          token: 9,
           folderLabel: "Frontend",
           message: "Connected Frontend.",
           found: [

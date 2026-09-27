@@ -36,6 +36,8 @@ export interface WinlatorShortcut {
 /** What `connect_winlator_export_folder` answers. */
 export interface WinlatorExportFolder {
   connected: boolean;
+  /** Which scan this list came from; handed back with the answer. */
+  token: number;
   folderLabel: string | null;
   found: WinlatorShortcut[];
   message: string;
@@ -68,6 +70,13 @@ export function normaliseWinlatorExportFolder(payload: unknown): WinlatorExportF
   if (typeof record.connected !== "boolean" || typeof record.message !== "string") return null;
   return {
     connected: record.connected,
+    // A token that is not a safe integer is read as none: the host refuses that
+    // and asks for the folder again, which beats an answer landing on a list
+    // nobody is looking at.
+    token:
+      typeof record.token === "number" && Number.isSafeInteger(record.token) && record.token > 0
+        ? record.token
+        : 0,
     folderLabel: typeof record.folderLabel === "string" && record.folderLabel.trim() ? record.folderLabel : null,
     found: normaliseWinlatorShortcuts(record.found),
     message: record.message,

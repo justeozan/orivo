@@ -22,6 +22,7 @@ const shortcut = (title: string): WinlatorShortcut => ({
 
 const folder = (found: unknown[]): unknown => ({
   connected: true,
+  token: 5,
   folderLabel: "Frontend",
   found,
   message: "Connected Frontend.",
@@ -70,6 +71,7 @@ describe("normaliseWinlatorExportFolder", () => {
       ),
     ).toEqual({
       connected: true,
+      token: 5,
       folderLabel: "Frontend",
       found: [
         {

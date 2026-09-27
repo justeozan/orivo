@@ -387,7 +387,11 @@ interface State {
   libraryMenuOpen: boolean;
   // What Winlator's export folder holds that the library does not, waiting for
   // the user to say yes: a shortcut is a command, so it is never assumed.
-  winlatorReview: { folderLabel: string | null; shortcuts: WinlatorShortcut[] } | null;
+  winlatorReview: {
+    token: number;
+    folderLabel: string | null;
+    shortcuts: WinlatorShortcut[];
+  } | null;
   // The same question for a console emulator's ROM folder, held separately
   // because it names the emulator that would open them.
   consoleReview: {
@@ -1796,7 +1800,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
       const waiting = winlatorShortcutsToOffer(answer);
       state.winlatorReview = waiting.length
-        ? { folderLabel: answer.folderLabel, shortcuts: waiting }
+        ? { token: answer.token, folderLabel: answer.folderLabel, shortcuts: waiting }
         : null;
       // Nothing was imported: the host found shortcuts and is asking. The menu
       // stays open, now carrying that question, instead of closing on a toast
@@ -1823,6 +1827,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     try {
       const result = normaliseWinlatorImportResult(
         await invoke<unknown>("import_winlator_shortcuts", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
           gameRefs: review.shortcuts.map((shortcut) => shortcut.gameRef),
         }),
       );

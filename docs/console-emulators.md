@@ -162,28 +162,56 @@ one of them — `Download/Roms` — is exactly right.
 ## What the file decides, and what it does not
 
 A fingerprint answers "are these the same bytes?". For RetroArch that is not the
-whole question, because its loader reads two things Orivo never gave it.
+whole question, because the folder a ROM sits in is an input too, and Orivo never
+hashed it.
 
-**A patch beside the ROM.** `runloop_path_fill_names` (`runloop.c`) truncates the
-content path at its last dot and looks for `<that>.ips`, `.bps`, `.ups` and
-`.xdelta`; `task_content.c` applies whichever it finds unless `--no-patch` was
-passed, which an intent cannot pass, and the cartridge cores load into memory so
-the patch takes. A file Orivo never hashed would then decide what runs. So the
-launch lists the ROM's own folder and refuses when one of those four names is
-there — *"A patch file sits next to this game, and the emulator would apply it
-without asking."* — rather than handing over a game it cannot describe. It is
-checked at the launch and not at the import because a patch dropped in afterwards
-is exactly the case this exists for. PPSSPP is handed one document and has read
-access to nothing else, so it has no "beside" to read, and the check does not
-apply to it.
+**A patch beside the ROM — refused.** `runloop_path_fill_names` (`runloop.c`)
+truncates the content path at its last dot and looks for `<that>.ips`, `.bps`,
+`.ups` and `.xdelta`; `patch_content` additionally walks `.ips1`…`.ips9` off the
+same base; `task_content.c` applies whichever it finds unless `--no-patch` was
+passed, which an intent cannot pass, and all five cores Orivo names load into
+memory, so the patch takes. So the launch lists the ROM's own folder and refuses
+when one of those names is there — *"A patch file sits next to this game, and the
+emulator would apply it without asking."*
 
-**A path that names something inside an archive.** `path_get_archive_delim`
-(`libretro-common/file/file_path.c`) reads `…/pack.zip#Game.nes` as the entry
-`Game.nes` inside `pack.zip` — the first `#` that directly follows `.zip`, `.apk`
-or `.7z`, case insensitively. Such a path *ends in* `.nes`, so it passes every
-check Orivo makes about what kind of file it is, while the bytes the host hashed
-are the decoy's. It is refused before any read, in both sources, and again on the
-exact string that crosses.
+The names are compared **case-insensitively over the whole string**, not just its
+ASCII: shared storage on Android 11+ is case-insensitive, so `POKÉMON EMERALD.IPS`
+*is* the file `Pokémon Emerald.ips` to everything that opens it. It is checked at
+the launch rather than at the import, because a patch dropped in afterwards is the
+case this exists for — and it is checked **twice**: once while preparing, and again
+after the content hash, as the last thing before the intent leaves. Preparing a
+launch reads the whole ROM, and a patch that arrived during that read was not
+there when the folder was listed.
+
+**The window does not close, and pretending otherwise would be the lie.** What
+crosses is a *path*; RetroArch opens it, and everything beside it, when it gets
+round to starting — for a cold start, seconds later. Nothing Orivo can do from
+this side covers that. What it can do is not leave a gap it opened itself, and
+say where the remaining one is.
+
+**A path that names something inside an archive — refused.**
+`path_get_archive_delim` (`libretro-common/file/file_path.c`) reads
+`…/pack.zip#Game.nes` as the entry `Game.nes` inside `pack.zip` — the first `#`
+that directly follows `.zip`, `.apk` or `.7z`, case insensitively. Such a path
+*ends in* `.nes`, so it passes every check Orivo makes about what kind of file it
+is, while the bytes the host hashed are the decoy's. Refused before any read, in
+both sources, and again on the exact string that crosses.
+
+**What else those cores read out of a ROM's folder, not exhaustively.** These are
+not refused, and saying "two things" as this page once did was wrong:
+
+| Read by | What | When |
+| --- | --- | --- |
+| snes9x | `<stem>.cht` (`memmap.cpp:1578`) | every load, applied once a RetroArch cheat is active |
+| snes9x | MSU-1 `<stem>.msu`, `<stem>-N.pcm` (`memmap.cpp:2266`) | when the ROM asks for MSU-1 audio |
+| every core | `.srm` saves, and a core's `system` files including BIOS images | only if the user turns on *"save files in content dir"* or *"system files in content dir"*, which are **off by default** |
+
+The first two are content a cheat engine and an audio track, not code paths Orivo
+opens; the third is a setting in the emulator that moves a core's own BIOS and
+save directory into a folder other apps can write to. None of them is Orivo's to
+change, and all of them are reasons the *folder* matters and not only the file.
+`.cue`, `.m3u` and `.chd` are inert for the consoles here — no core Orivo names
+follows a playlist or a track sheet out of the folder.
 
 ## Is this still the file you added?
 
@@ -252,6 +280,31 @@ A title cannot hide behind characters nobody can see, either: a zero-width space
 or a bidi override makes two names *read* identically and *compare* differently,
 which is the whole trick, so those characters are removed from what is shown and
 from what is compared, and the comparison ignores case and spacing on top.
+
+**Exactly what that covers, and what it does not.** Removed: the whole Unicode
+`Cf` category as of 15.1, plus the width-zero code points that are not `Cf` — the
+Hangul and Khmer fillers, the variation selectors, the combining grapheme joiner,
+and braille blank. Not covered, and stated here rather than implied away:
+
+- **Normalisation.** `"Pokémon"` composed (`U+00E9`) and decomposed (`e` +
+  `U+0301`) are two different strings to this check. Folding them needs Unicode
+  decomposition tables, which is a new dependency for a check that *warns* rather
+  than refuses.
+- **Homoglyphs.** A Cyrillic `С` is a different letter from a Latin `C`, and no
+  amount of normalising makes them equal. This is the same attack with none of the
+  machinery, and nothing short of a confusables table touches it.
+
+Both are worth knowing because the duplicate warning is a *hint*, not a gate. What
+does not lie is on every row regardless: the file's own name and the folder holding
+it.
+
+One JNI rule holds all of this up and is worth naming, because breaking it does
+not produce an error: a pending Java exception must be taken before the next JNI
+call on that thread, or ART kills the process. The probe that asks who installed
+an emulator swallows its own failures — a package that vanished between two calls
+is an ordinary answer — and swallowing a failure leaves the throwable armed. So
+the exception is cleared at that seam *and* on the success path of every unit of
+JNI work, and neither depends on the other having remembered.
 
 Two connects can overlap — the second chooser opens while the first is still
 walking a folder. The scan in flight is cancelled when a new one starts, and every
@@ -329,6 +382,9 @@ Game Boy Advance set is roughly 1 500 titles averaging some 12 MB, which is arou
 scan can be abandoned: connecting another folder stops the one in flight. Making
 that visible — progress, and a way to stop it from the menu — is E3's, and
 `scan_roms` already takes the flag and the callback for it.
+
+The confirmation named the store rather than the package that is the store —
+Google Play, F-Droid, or "another source" for one nobody recognises.
 
 Two more things were watched rather than only tested. Replacing an imported ROM
 made Play refuse it — *"This file changed since you added it. Add it again so

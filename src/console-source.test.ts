@@ -163,14 +163,30 @@ describe("what the user is asked", () => {
 });
 
 describe("what the host said about the emulator itself", () => {
-  it("names who installed it, because that is the app the game goes to", () => {
+  it("names the store, not the package that is the store", () => {
     expect(
       consoleEmulatorNote({
         emulatorLabel: "RetroArch",
         emulatorInstalled: true,
         emulatorInstaller: "com.android.vending",
       }),
-    ).toBe("RetroArch on this device was installed by com.android.vending.");
+    ).toBe("RetroArch on this device came from Google Play.");
+    expect(
+      consoleEmulatorNote({
+        emulatorLabel: "RetroArch",
+        emulatorInstalled: true,
+        emulatorInstaller: "org.fdroid.fdroid",
+      }),
+    ).toBe("RetroArch on this device came from F-Droid.");
+    // An installer nobody recognises is described, not printed: a raw package
+    // name is a thing to squint at rather than a fact to act on.
+    expect(
+      consoleEmulatorNote({
+        emulatorLabel: "PPSSPP",
+        emulatorInstalled: true,
+        emulatorInstaller: "com.example.sideloader",
+      }),
+    ).toBe("PPSSPP on this device came from another source.");
     expect(
       consoleEmulatorNote({
         emulatorLabel: "RetroArch",

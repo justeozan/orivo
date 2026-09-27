@@ -12,10 +12,7 @@
 //! security-relevant rule is a second place for it to be wrong.
 
 use serde::Serialize;
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, path::Path};
 
 /// What a granted folder or a file is called when its own name cannot be shown.
 const UNNAMED_FILE: &str = "an unnamed file";
@@ -45,6 +42,16 @@ pub enum SourceTitleCollision {
 /// reads identically has to *compare* identically, and the titles on the other
 /// side of this comparison are the library's, which came from anywhere at all and
 /// never went through [`display_text`].
+///
+/// **What this does not fold, exactly.** Two names that differ only by Unicode
+/// *normalisation* still compare different: `"Pokémon"` composed (`U+00E9`) and
+/// decomposed (`e` + `U+0301`) are two strings here. Folding them would need
+/// decomposition tables — a new dependency for a check that *warns* rather than
+/// refuses — and it would still not catch a homoglyph, which is the same attack
+/// with none of the machinery: a Cyrillic `С` is simply a different letter, and
+/// no amount of normalising makes it equal to `C`. Both are stated in
+/// `docs/console-emulators.md` rather than implied away. The user still sees the
+/// file name and the folder on every row, which is the part that does not lie.
 pub fn folded_title(title: &str) -> String {
     title
         .chars()
@@ -149,28 +156,50 @@ pub fn display_text(value: &str, max_chars: usize) -> Option<String> {
 
 /// Characters that take up no width, so no reader can see them.
 ///
-/// The Unicode `Cf` category plus the two zero-width joiners, written out rather
-/// than looked up: a table lookup would be a new dependency for a list that has
-/// not moved in a decade, and the cost of missing one is only that a duplicate
-/// title is reported where none was meant.
+/// The whole Unicode `Cf` (format) category, plus the handful of code points that
+/// render as nothing without being `Cf`: the width-zero fillers, the variation
+/// selectors, and braille blank. Written out rather than looked up, because a
+/// character-property table would be a new dependency for a list that moves once
+/// a Unicode release and whose worst failure is a duplicate title reported where
+/// none was meant.
+///
+/// The ranges are Unicode 15.1's; a code point assigned to `Cf` after that simply
+/// stays visible to the comparison, which is the safe direction — it can make a
+/// collision go unreported, never invent one.
 fn is_invisible(character: char) -> bool {
     matches!(character,
+        // Cf
         '\u{00AD}'                  // soft hyphen
-        | '\u{034F}'                // combining grapheme joiner
+        | '\u{0600}'..='\u{0605}'   // arabic number signs
         | '\u{061C}'                // arabic letter mark
-        | '\u{115F}'..='\u{1160}'   // hangul fillers
-        | '\u{17B4}'..='\u{17B5}'   // khmer inherent vowels
-        | '\u{180B}'..='\u{180F}'   // mongolian selectors and vowel separator
+        | '\u{06DD}'                // arabic end of ayah
+        | '\u{070F}'                // syriac abbreviation mark
+        | '\u{0890}'..='\u{0891}'   // arabic pound and piastre marks
+        | '\u{08E2}'                // arabic disputed end of ayah
+        | '\u{180E}'                // mongolian vowel separator
         | '\u{200B}'..='\u{200F}'   // zero-width space, joiners, bidi marks
         | '\u{202A}'..='\u{202E}'   // bidi embedding and override
         | '\u{2060}'..='\u{2064}'   // word joiner, invisible operators
         | '\u{2066}'..='\u{206F}'   // bidi isolates, deprecated formatting
+        | '\u{FEFF}'                // zero-width no-break space
+        | '\u{FFF9}'..='\u{FFFB}'   // interlinear annotation
+        | '\u{110BD}'               // kaithi number sign
+        | '\u{110CD}'               // kaithi number sign above
+        | '\u{13430}'..='\u{1343F}' // egyptian hieroglyph format controls
+        | '\u{1BCA0}'..='\u{1BCA3}' // shorthand format controls
+        | '\u{1D173}'..='\u{1D17A}' // musical formatting
+        | '\u{E0001}'               // language tag
+        | '\u{E0020}'..='\u{E007F}' // tags
+        // Not Cf, and still nothing a reader can see.
+        | '\u{034F}'                // combining grapheme joiner
+        | '\u{115F}'..='\u{1160}'   // hangul fillers
+        | '\u{17B4}'..='\u{17B5}'   // khmer inherent vowels
+        | '\u{180B}'..='\u{180D}'   // mongolian free variation selectors
+        | '\u{180F}'                // mongolian free variation selector four
+        | '\u{2800}'                // braille pattern blank
         | '\u{3164}'                // hangul filler
         | '\u{FE00}'..='\u{FE0F}'   // variation selectors
-        | '\u{FEFF}'                // zero-width no-break space
         | '\u{FFA0}'                // halfwidth hangul filler
-        | '\u{1D173}'..='\u{1D17A}' // musical formatting
-        | '\u{E0000}'..='\u{E007F}' // tags
         | '\u{E0100}'..='\u{E01EF}' // variation selectors supplement
     )
 }
@@ -178,9 +207,11 @@ fn is_invisible(character: char) -> bool {
 /// A path the host will hand an emulator, reduced to the one question every
 /// caller has to ask about it.
 ///
-/// Kept here because both runners send a *path* somewhere: Winlator to a Wine
-/// container, RetroArch to a libretro core. Neither may send one that names
-/// something inside an archive.
+/// Used by the console runner, and only by it: RetroArch is the loader that reads
+/// an archive delimiter out of a content path. Winlator hands over a `.desktop`
+/// file that Winlator itself parses, and nothing in that path is interpreted as a
+/// container, so it does not call this. It lives here because it is a rule about
+/// what a shared folder may put in front of a user, not because both flows run it.
 pub fn is_plain_file_path(path: &Path) -> bool {
     path.to_str()
         .is_some_and(|path| !names_archive_member(path))
@@ -212,27 +243,53 @@ fn names_archive_member(path: &str) -> bool {
     false
 }
 
-/// The pathnames a loader would silently read *beside* a file it was given.
+/// The extensions a loader would silently read *beside* a file it was given.
 ///
 /// RetroArch truncates the content path at its last dot and looks for
 /// `<that>.ips`, `.bps`, `.ups` and `.xdelta` — `runloop_path_fill_names` in
 /// `runloop.c` — then applies whichever it finds unless `--no-patch` was passed,
 /// which an intent cannot pass. A patch dropped next to a ROM therefore changes
 /// what runs without changing the file Orivo hashed.
+///
+/// `.ips` additionally covers `ips1`…`ips9`: `patch_content` walks that series
+/// off the same base name, so one `.ips` name is four files' worth of doorway.
 pub const SOFT_PATCH_EXTENSIONS: [&str; 4] = ["ips", "bps", "ups", "xdelta"];
 
-/// The four pathnames a loader would read beside this one.
-pub fn soft_patch_siblings(file: &Path) -> Vec<PathBuf> {
+/// Would a loader read `sibling` as a patch for `file`?
+///
+/// Compared the way the filesystem resolves the names, not the way `==` does.
+/// Shared storage on Android 11+ is case-insensitive, so `POKÉMON EMERALD.IPS`
+/// *is* the file `Pokémon Emerald.ips` to everything that opens it — and an
+/// ASCII-only fold would have let the accented half through. The same fold the
+/// duplicate-title check uses is reused here, so the two cannot disagree about
+/// what "the same name" means; what it does not fold is written down at
+/// [`folded_title`].
+pub fn is_soft_patch_for(file: &Path, sibling: &str) -> bool {
     let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else {
-        return Vec::new();
+        return false;
     };
-    let Some(directory) = file.parent() else {
-        return Vec::new();
+    let folded_stem = folded_title(stem);
+    let sibling = Path::new(sibling);
+    let Some(sibling_stem) = sibling.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
     };
-    SOFT_PATCH_EXTENSIONS
-        .iter()
-        .map(|extension| directory.join(format!("{stem}.{extension}")))
-        .collect()
+    if folded_title(sibling_stem) != folded_stem {
+        return false;
+    }
+    sibling
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            let extension = folded_title(extension);
+            SOFT_PATCH_EXTENSIONS.iter().any(|known| {
+                extension == *known
+                    // `patch_content` reads `.ips1` … `.ips9` off the same base.
+                    || (*known == "ips"
+                        && extension.len() == 4
+                        && extension.starts_with("ips")
+                        && extension.ends_with(|last: char| last.is_ascii_digit()))
+            })
+        })
 }
 
 #[cfg(test)]
@@ -260,6 +317,76 @@ mod tests {
             );
             assert_eq!(folded_title(hidden), folded_title("Celeste"), "{hidden:?}");
         }
+    }
+
+    /// Every `Cf` range plus the width-zero code points that are not `Cf`. The
+    /// list is written out, so this is what holds it to what the doc comment
+    /// claims — and to nothing more.
+    #[test]
+    fn every_width_zero_character_the_fold_claims_is_removed() {
+        for hidden in [
+            '\u{00AD}',
+            '\u{0600}',
+            '\u{0605}',
+            '\u{061C}',
+            '\u{06DD}',
+            '\u{070F}',
+            '\u{0890}',
+            '\u{08E2}',
+            '\u{180E}',
+            '\u{200B}',
+            '\u{200F}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{206F}',
+            '\u{FEFF}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{110BD}',
+            '\u{13430}',
+            '\u{1343F}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{E0001}',
+            '\u{E007F}',
+            '\u{034F}',
+            '\u{115F}',
+            '\u{17B4}',
+            '\u{180B}',
+            '\u{2800}',
+            '\u{3164}',
+            '\u{FE0F}',
+            '\u{FFA0}',
+            '\u{E0100}',
+        ] {
+            let spoofed = format!("Cel{hidden}este");
+            assert_eq!(
+                display_text(&spoofed, MAX).as_deref(),
+                Some("Celeste"),
+                "{:04X} survived display",
+                hidden as u32
+            );
+            assert_eq!(
+                folded_title(&spoofed),
+                folded_title("Celeste"),
+                "{:04X} survived the fold",
+                hidden as u32
+            );
+        }
+    }
+
+    /// What the fold does *not* do, held to as tightly as what it does: two names
+    /// that differ only by Unicode normalisation compare different, and a
+    /// homoglyph is simply another letter. Both are stated in the docs rather
+    /// than implied away; this is what stops the claim from drifting.
+    #[test]
+    fn normalisation_and_homoglyphs_are_out_of_reach() {
+        // "Pokémon" composed, and the same name decomposed.
+        assert_ne!(folded_title("Pokémon"), folded_title("Poke\u{0301}mon"));
+        // A Cyrillic `С` is not a Latin `C`, and no folding makes it one.
+        assert_ne!(folded_title("\u{0421}eleste"), folded_title("Celeste"));
     }
 
     #[test]
@@ -363,17 +490,39 @@ mod tests {
         }
     }
 
+    /// Shared storage on Android 11+ is case-insensitive, so `POKÉMON EMERALD.IPS`
+    /// *is* `Pokémon Emerald.ips` to everything that opens it. The ASCII-only
+    /// comparison this replaced let the accented half of that through.
     #[test]
-    fn names_the_four_files_a_loader_would_read_beside_a_rom() {
-        let siblings = soft_patch_siblings(Path::new("/roms/Alter Ego.nes"));
-        assert_eq!(
-            siblings,
-            [
-                PathBuf::from("/roms/Alter Ego.ips"),
-                PathBuf::from("/roms/Alter Ego.bps"),
-                PathBuf::from("/roms/Alter Ego.ups"),
-                PathBuf::from("/roms/Alter Ego.xdelta"),
-            ]
-        );
+    fn a_patch_is_recognised_however_its_name_is_cased() {
+        let rom = Path::new("/roms/Pokémon Emerald.gba");
+        for sibling in [
+            "Pokémon Emerald.ips",
+            "POKÉMON EMERALD.IPS",
+            "pokémon emerald.Ips",
+            "Pokémon Emerald.bps",
+            "Pokémon Emerald.UPS",
+            "Pokémon Emerald.xdelta",
+            // `patch_content` walks `.ips1` … `.ips9` off the same base name.
+            "Pokémon Emerald.ips1",
+            "Pokémon Emerald.IPS9",
+        ] {
+            assert!(is_soft_patch_for(rom, sibling), "missed {sibling}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_patch_for_this_rom_is_left_alone() {
+        let rom = Path::new("/roms/Pokémon Emerald.gba");
+        for sibling in [
+            "Pokémon Emerald.gba",
+            "Pokémon Ruby.ips",
+            "Pokémon Emerald.ips10",
+            "Pokémon Emerald.ipsx",
+            "Pokémon Emerald.txt",
+            "Pokémon Emerald",
+        ] {
+            assert!(!is_soft_patch_for(rom, sibling), "flagged {sibling}");
+        }
     }
 }

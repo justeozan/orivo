@@ -933,6 +933,35 @@ mod tests {
         assert!(state.catalog.read().unwrap().games.is_empty());
     }
 
+    /// Hashing a folder is bounded but not fast, and a user who has just picked
+    /// another folder is not waiting for the last one. The flag the running scan
+    /// watches is raised by the next connect — so a scan that checks it stops,
+    /// which is what `scan_roms` does between entries and before every read.
+    #[test]
+    fn a_new_connect_cancels_the_scan_still_running() {
+        let home = temporary_directory("console-cancel");
+        let granted = temporary_directory("console-cancel-folder");
+        fs::write(granted.join("Alter Ego.nes"), nes_rom("Alter Ego")).unwrap();
+        let state = state_for(&home);
+
+        // The flag the first scan was handed, kept the way the scan keeps it.
+        let (first, _) = state.console_preview.begin_scan().unwrap();
+        assert!(!first.load(Ordering::Acquire));
+
+        // A second connect: the folder is walked, and the earlier flag is raised
+        // on the way in.
+        preview_console_roms(
+            &state,
+            ConsoleEmulator::RetroArch,
+            Some(&console_folder(&granted)),
+        )
+        .unwrap();
+        assert!(
+            first.load(Ordering::Acquire),
+            "the scan in flight was left running"
+        );
+    }
+
     /// The slug names a menu row, and the host's set of them is closed. Anything
     /// else is refused here rather than reaching a package name.
     #[test]

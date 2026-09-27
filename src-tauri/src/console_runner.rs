@@ -556,19 +556,10 @@ fn refuse_sidecar_patch(
         return Ok(());
     }
     let beside = source.sibling_names(rom)?;
-    let patches = crate::source_review::soft_patch_siblings(rom);
-    let named = patches
+    if beside
         .iter()
-        .filter_map(|patch| patch.file_name().and_then(|name| name.to_str()))
-        .collect::<Vec<_>>();
-    // The comparison is case-insensitive because the loader lowercases nothing
-    // and the filesystem under shared storage does not either: `.IPS` is the
-    // same file to a user and a different string to a `==`.
-    if beside.iter().any(|existing| {
-        named
-            .iter()
-            .any(|patch| existing.eq_ignore_ascii_case(patch))
-    }) {
+        .any(|existing| crate::source_review::is_soft_patch_for(rom, existing))
+    {
         return Err(ConsoleRunnerError::RomHasSidecarPatch);
     }
     Ok(())
@@ -1040,7 +1031,7 @@ fn scan_directory(
         if *scanned_files > limits.max_files {
             return Err(ConsoleRunnerError::TooManyFiles);
         }
-        if *scanned_files % 32 == 0 {
+        if scanned_files.is_multiple_of(32) {
             progress(*scanned_files);
         }
         match entry.kind {
@@ -1442,6 +1433,18 @@ impl PreparedConsoleLaunch {
         if fingerprint_rom(source, &self.rom_path, &AtomicBool::new(false))? != self.fingerprint {
             return Err(ConsoleRunnerError::RomNotLaunchable);
         }
+        // And the folder again, *after* the hash and as the last thing before the
+        // intent leaves: preparing a launch reads the whole ROM, and a patch
+        // dropped in during that read would otherwise have been checked for
+        // before it existed.
+        //
+        // The window does not close. What is handed over is a *path*, and the
+        // emulator opens it — and everything beside it — when it gets round to
+        // starting, which for a cold RetroArch is seconds later. Nothing Orivo
+        // can do from this side covers that; what it can do is not leave a gap it
+        // opened itself. `docs/console-emulators.md` says so, and says what else
+        // those cores read out of a ROM's own folder.
+        refuse_sidecar_patch(&launch_surface(self.emulator), source, &self.rom_path)?;
         self.send()
     }
 
@@ -1464,7 +1467,7 @@ impl PreparedConsoleLaunch {
 mod android {
     use super::{ConsoleEmulator, ConsoleIntent, ConsoleRunnerError, InstalledPackage};
     use crate::winlator_runner::AndroidIntentExtra;
-    use crate::winlator_saf::android::{java_string, with_env};
+    use crate::winlator_saf::android::{clear_pending_exception, java_string, with_env};
     use jni::{JNIEnv, objects::JObject};
     use std::{path::PathBuf, sync::mpsc, time::Duration};
 
@@ -1519,7 +1522,24 @@ mod android {
     /// `getInstallerPackageName` exists, and a sideload answers `null` on both.
     /// None of the three outcomes is an error: the user is being *shown* this,
     /// not gated on it.
+    ///
+    /// Which is exactly why the exception is taken here. Every `?` inside turns a
+    /// JNI failure into `None` and returns *success* to the caller — the package
+    /// disappearing between the two calls is enough — and a throwable left pending
+    /// on the thread kills the app at the next JNI call on it. `with_env` clears on
+    /// its success path too; this clears at the seam, so neither depends on the
+    /// other having remembered.
     fn installer_of(env: &mut JNIEnv<'_>, manager: &JObject<'_>, package: &str) -> Option<String> {
+        let installer = installer_name(env, manager, package);
+        clear_pending_exception(env);
+        installer
+    }
+
+    fn installer_name(
+        env: &mut JNIEnv<'_>,
+        manager: &JObject<'_>,
+        package: &str,
+    ) -> Option<String> {
         let sdk = env
             .get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
             .and_then(|version| version.i())
@@ -1793,7 +1813,7 @@ fn valid_opaque_id(value: &str) -> bool {
 fn rom_title_from_filename(path: &Path) -> String {
     path.file_stem()
         .and_then(|name| name.to_str())
-        .and_then(|name| display_text(name))
+        .and_then(display_text)
         .unwrap_or_else(|| "Console game".into())
 }
 
@@ -2289,6 +2309,37 @@ mod tests {
             );
             fs::remove_file(&path).unwrap();
         }
+    }
+
+    /// Preparing a launch reads the whole ROM. A patch dropped into the folder
+    /// during that read was not there when the folder was listed, so the check
+    /// has to run again — after the hash, as the last thing before the intent
+    /// leaves. The window does not close, because what crosses is a path the
+    /// emulator opens later; it just stops being one Orivo opened itself.
+    #[test]
+    fn refuses_to_send_an_intent_for_a_rom_a_patch_appeared_beside() {
+        let granted = temporary_directory("sidecar-mid-launch");
+        write_rom(&granted, "Alter Ego.nes", NES_HEADER);
+        let profile = nes_profile(&granted);
+        let candidate = scan(&profile, &filesystem(&profile))[0].clone();
+        let entry = inventory(&profile, &candidate);
+        let intent =
+            ConsoleLaunchIntent::new(RETROARCH_RUNNER_ID, &profile.id, &candidate.game_ref)
+                .unwrap();
+        let prepared = prepare_console_launch(
+            &profile,
+            &filesystem(&profile),
+            &entry,
+            &intent,
+            &NoInstalledPackages,
+        )
+        .unwrap();
+
+        fs::write(granted.join("Alter Ego.ips"), b"PATCH").unwrap();
+        assert_eq!(
+            prepared.launch(&filesystem(&profile)),
+            Err(ConsoleRunnerError::RomHasSidecarPatch)
+        );
     }
 
     /// PPSSPP is handed one document and has read access to nothing else, so

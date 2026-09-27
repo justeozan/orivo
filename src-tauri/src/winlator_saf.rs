@@ -498,8 +498,28 @@ pub(crate) mod android {
             .map_err(|_| WinlatorRunnerError::ExportFolderAccessLost)?;
         let activity = context.activity.as_obj();
         match work(&mut guard, activity) {
-            Ok(value) => Ok(value),
+            // A unit of work that *succeeded* can still leave an exception armed:
+            // anything inside it that swallowed a JNI error — a probe that treats
+            // "not installed" as an ordinary answer, say — kept the pending
+            // throwable. It stays pending until the thread detaches, and the next
+            // JNI call on it dies under CheckJNI. Taking it here is the one place
+            // that covers every such unit without each of them remembering to.
+            Ok(value) => {
+                clear_pending_exception(&mut guard);
+                Ok(value)
+            }
             Err(_) => Err(classify_pending_exception(&mut guard)),
+        }
+    }
+
+    /// Take any pending Java exception, reporting it to logcat and nowhere else.
+    pub(crate) fn clear_pending_exception(env: &mut JNIEnv<'_>) {
+        if env.exception_check().unwrap_or(false) {
+            // Logcat is the only place a device-side failure can be read
+            // afterwards, and a swallowed one is exactly what nobody will look
+            // for unless it is written down.
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
         }
     }
 

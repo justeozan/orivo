@@ -293,6 +293,9 @@ struct AppState {
     /// It holds host-private paths and fingerprints; the WebView sees only the
     /// opaque references and titles projected out of it.
     winlator_preview: Mutex<Option<WinlatorImportPreview>>,
+    /// The token the next Winlator scan gets. Monotonic, so a reused one is a
+    /// list that has been replaced.
+    winlator_preview_token: AtomicU64,
     /// A console ROM scan the user has not acted on yet. Same rule as the
     /// Winlator one — the WebView sees opaque references and the import
     /// re-derives everything from the folder — plus a token, because two connects
@@ -630,6 +633,9 @@ struct WinlatorShortcutsWaitingEvent {
 #[serde(rename_all = "camelCase")]
 struct WinlatorExportFolderView {
     connected: bool,
+    /// Which scan this list came from. The WebView hands it back with the
+    /// references it chose, so an answer can never land on another snapshot.
+    token: u64,
     folder_label: Option<String>,
     found: Vec<WinlatorShortcutView>,
     message: String,
@@ -706,6 +712,7 @@ impl AppState {
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
             wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
+            winlator_preview_token: AtomicU64::new(0),
             console_preview: console_commands::ConsoleImportState::default(),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
@@ -3096,6 +3103,11 @@ struct WinlatorShortcutReport {
 /// re-derives them from the folder rather than from anything it was sent.
 #[derive(Debug)]
 struct WinlatorImportPreview {
+    /// Which scan this is. Two reviews can overlap — the second one starts while
+    /// the first is still hashing a folder — and the answer the user gives
+    /// belongs to the list they were shown. Without it, the newer snapshot's
+    /// contents, and so its `Name=`, would be imported against the older list.
+    token: u64,
     profile_id: String,
     shortcuts: Vec<winlator_runner::ScannedWinlatorShortcut>,
 }
@@ -3371,11 +3383,13 @@ fn preview_winlator_shortcuts(
         .and_then(|name| name.to_str())
         .map(str::to_string);
 
+    let token = state.winlator_preview_token.fetch_add(1, Ordering::Relaxed) + 1;
     *state
         .winlator_preview
         .lock()
         .map_err(|_| "Winlator import is temporarily unavailable.".to_string())? =
         Some(WinlatorImportPreview {
+            token,
             profile_id: profile.id.clone(),
             shortcuts: scan.shortcuts,
         });
@@ -3384,6 +3398,7 @@ fn preview_winlator_shortcuts(
     let folder_name = label.clone().unwrap_or_else(|| "that folder".into());
     Ok(WinlatorExportFolderView {
         connected: true,
+        token,
         folder_label: label,
         message: match (found.len(), waiting) {
             (0, _) => format!(
@@ -3413,6 +3428,7 @@ fn preview_winlator_shortcuts(
 /// invented resolves to nothing.
 fn import_winlator_shortcuts_now(
     state: &AppState,
+    token: u64,
     game_refs: &[String],
 ) -> Result<WinlatorImportResponse, String> {
     if game_refs.is_empty() || game_refs.len() > MAX_WINE_IMPORT_SELECTION {
@@ -3424,9 +3440,16 @@ fn import_winlator_shortcuts_now(
             .winlator_preview
             .lock()
             .map_err(|_| "Winlator import is temporarily unavailable.".to_string())?;
-        let preview = preview.as_ref().ok_or_else(|| {
-            "This Winlator list is no longer available. Connect the folder again.".to_string()
-        })?;
+        let preview = preview
+            .as_ref()
+            // The answer belongs to the list it was given for. A second review
+            // replaces the snapshot, and an answer to the first one would import
+            // the newer folder's contents — its `Name=` included — under the names
+            // the user actually read.
+            .filter(|preview| preview.token == token)
+            .ok_or_else(|| {
+                "This Winlator list is no longer available. Connect the folder again.".to_string()
+            })?;
         (
             preview.profile_id.clone(),
             preview
@@ -3676,6 +3699,7 @@ async fn connect_winlator_export_folder(
     let Some(tree_uri) = picked else {
         return Ok(WinlatorExportFolderView {
             connected: false,
+            token: 0,
             folder_label: None,
             found: Vec::new(),
             message: "No folder was connected.".into(),
@@ -3704,11 +3728,12 @@ async fn connect_winlator_export_folder(
 #[tauri::command]
 async fn import_winlator_shortcuts(
     app: AppHandle,
+    token: u64,
     game_refs: Vec<String>,
 ) -> Result<WinlatorImportResponse, String> {
     require_winlator_runner_platform()?;
     winlator_blocking(&app, move |state| {
-        import_winlator_shortcuts_now(state, &game_refs)
+        import_winlator_shortcuts_now(state, token, &game_refs)
     })
     .await
 }
@@ -10205,6 +10230,7 @@ pub(crate) mod tests {
             winlator_adoption: Arc::new(WinlatorAdoption::default()),
             wine_auto_apply: Arc::new(WineAutoApply::default()),
             winlator_preview: Mutex::new(None),
+            winlator_preview_token: AtomicU64::new(0),
             console_preview: console_commands::ConsoleImportState::default(),
             wine_scan_jobs: Mutex::new(BTreeMap::new()),
             wine_operation_sequence: AtomicU64::new(0),
@@ -10234,7 +10260,7 @@ pub(crate) mod tests {
         assert!(state.catalog.read().unwrap().games.is_empty());
 
         let chosen = vec![view.found[0].game_ref.clone()];
-        let imported = import_winlator_shortcuts_now(&state, &chosen).unwrap();
+        let imported = import_winlator_shortcuts_now(&state, view.token, &chosen).unwrap();
         assert_eq!(imported.imported_ids.len(), 1);
         assert!(imported.skipped_refs.is_empty());
 
@@ -10325,6 +10351,36 @@ pub(crate) mod tests {
         );
     }
 
+    /// Two reviews can overlap — the second starts while the first is still
+    /// hashing a folder — and the answer belongs to the list the user read.
+    /// Without a token the newer snapshot's contents, and so the `Name=` the
+    /// confirmation was checked against, would be imported against the older list.
+    #[test]
+    fn an_answer_to_a_winlator_list_that_was_replaced_imports_nothing() {
+        let home = temporary_directory("winlator-token");
+        let first = temporary_directory("winlator-token-first");
+        fs::write(
+            first.join("Celeste.desktop"),
+            exported_winlator_shortcut("Celeste", 2),
+        )
+        .unwrap();
+        let second = temporary_directory("winlator-token-second");
+        fs::write(
+            second.join("Braid.desktop"),
+            exported_winlator_shortcut("Braid", 3),
+        )
+        .unwrap();
+
+        let state = state_for(&home);
+        let stale = preview_winlator_shortcuts(&state, Some(&readable(&first))).unwrap();
+        let fresh = preview_winlator_shortcuts(&state, Some(&readable(&second))).unwrap();
+        assert_ne!(stale.token, fresh.token);
+
+        let answer = vec![stale.found[0].game_ref.clone()];
+        assert!(import_winlator_shortcuts_now(&state, stale.token, &answer).is_err());
+        assert!(state.catalog.read().unwrap().games.is_empty());
+    }
+
     /// Any app can drop a file into a shared folder, so the window between "Add
     /// “Celeste”?" and the tap on it is one somebody else can write in. What the
     /// user vouched for is a file's contents, and the import says no when the
@@ -10343,7 +10399,7 @@ pub(crate) mod tests {
 
         fs::write(&shortcut, exported_winlator_shortcut("Not Celeste", 9)).unwrap();
         let chosen = vec![view.found[0].game_ref.clone()];
-        let imported = import_winlator_shortcuts_now(&state, &chosen).unwrap();
+        let imported = import_winlator_shortcuts_now(&state, view.token, &chosen).unwrap();
 
         assert!(imported.imported_ids.is_empty());
         assert_eq!(imported.skipped_refs, chosen);
@@ -10363,10 +10419,11 @@ pub(crate) mod tests {
         )
         .unwrap();
         let state = state_for(&home);
-        preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
+        let view = preview_winlator_shortcuts(&state, Some(&readable(&granted))).unwrap();
 
         let imported =
-            import_winlator_shortcuts_now(&state, &["shortcut:deadbeef".to_string()]).unwrap();
+            import_winlator_shortcuts_now(&state, view.token, &["shortcut:deadbeef".to_string()])
+                .unwrap();
         assert!(imported.imported_ids.is_empty());
         assert_eq!(imported.skipped_refs, ["shortcut:deadbeef"]);
         assert!(state.catalog.read().unwrap().games.is_empty());

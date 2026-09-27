@@ -200,6 +200,26 @@ export function consoleEmulatorNote(folder: {
 }): string | null {
   if (!folder.emulatorInstalled) return null;
   return folder.emulatorInstaller
-    ? `${folder.emulatorLabel} on this device was installed by ${folder.emulatorInstaller}.`
+    ? `${folder.emulatorLabel} on this device came from ${installerName(folder.emulatorInstaller)}.`
     : `${folder.emulatorLabel} on this device was installed by hand, not from a store.`;
+}
+
+/**
+ * The store a package name stands for.
+ *
+ * The host reports what the platform said, which is a package name — and
+ * "installed by com.android.vending" is a sentence nobody outside this repository
+ * can read. The stores anyone actually installs an emulator from are named; any
+ * other is described rather than printed, because an unrecognised installer is
+ * exactly the case where the raw name would be a thing to squint at instead of a
+ * fact to act on.
+ */
+function installerName(installer: string): string {
+  if (installer === "com.android.vending") return "Google Play";
+  if (installer === "org.fdroid.fdroid" || installer === "org.fdroid.basic") return "F-Droid";
+  if (installer === "com.amazon.venezia") return "the Amazon Appstore";
+  if (installer === "com.samsung.android.app.galaxystore") return "the Galaxy Store";
+  if (installer === "com.google.android.packageinstaller" || installer === "com.android.packageinstaller")
+    return "a file you opened";
+  return "another source";
 }
