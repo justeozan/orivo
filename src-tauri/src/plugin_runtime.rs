@@ -250,19 +250,33 @@ pub struct JournalEntry {
     pub plugin_id: String,
     pub decision: &'static str,
     pub detail: String,
+    /// How many times this exact decision was reached under this correlation.
+    /// A component that asks for the same forbidden folder in a loop earns one
+    /// entry and a count, not one entry per attempt — otherwise the answer to a
+    /// refusal becomes a way of clearing the ring that recorded it.
+    pub repeats: u32,
 }
 
-/// Two bounded rings, and the split matters: a plugin can call `host-journal`
-/// as often as it likes, and sharing one ring would let it evict the host's
-/// record of the refusals it just earned. Decisions are the host's; messages are
-/// the plugin's, and only the plugin's own ring can be flooded.
+/// Three bounded rings, and what separates them is who decides how often they
+/// are written to.
 ///
-/// Both are deliberately in memory and capped: the journal exists to explain the
-/// last failure to a user and to let a test assert that a refusal was recorded,
+/// `decisions` is the host's record of what it refused and why. Nothing a plugin
+/// can do in a loop writes to it: per-call bookkeeping goes to `traces` instead,
+/// and a decision reached twice under one correlation is counted rather than
+/// repeated. That is what makes a refusal still there when someone looks.
+///
+/// `traces` is the per-call detail — how long a call took, how many entries a
+/// listing held — which is written on every host call and is therefore expected
+/// to scroll. `messages` is the plugin's own text, which it may produce as freely
+/// as its budget allows.
+///
+/// All three are deliberately in memory and capped: the journal exists to explain
+/// the last failure to a user and to let a test assert a refusal was recorded,
 /// not to become a log file a plugin can grow.
 #[derive(Debug, Default)]
 pub struct PluginJournal {
     decisions: Mutex<VecDeque<JournalEntry>>,
+    traces: Mutex<VecDeque<JournalEntry>>,
     messages: Mutex<VecDeque<JournalEntry>>,
 }
 
@@ -275,6 +289,18 @@ impl PluginJournal {
         detail: impl Into<String>,
     ) {
         self.push(&self.decisions, correlation_id, plugin_id, decision, detail);
+    }
+
+    /// Per-call bookkeeping. Written on every host call, which is exactly why it
+    /// is not written where the decisions are.
+    fn trace(
+        &self,
+        correlation_id: CorrelationId,
+        plugin_id: &str,
+        decision: &'static str,
+        detail: impl Into<String>,
+    ) {
+        self.push(&self.traces, correlation_id, plugin_id, decision, detail);
     }
 
     /// Text a plugin chose. Kept apart from the host's decisions so a chatty
@@ -307,6 +333,7 @@ impl PluginJournal {
             plugin_id: plugin_id.to_owned(),
             decision,
             detail: detail.into(),
+            repeats: 1,
         };
         // `eprintln!` panics when stderr is gone, and this is called from inside
         // the scheduler. A journal line is not worth poisoning a lock over.
@@ -319,6 +346,17 @@ impl PluginJournal {
             entry.detail
         );
         if let Ok(mut ring) = ring.lock() {
+            // Counted rather than repeated. Scanning the ring is bounded by the
+            // ring, and the alternative is a plugin that empties it by earning
+            // the same refusal two hundred and fifty-six times.
+            if let Some(seen) = ring.iter_mut().find(|seen| {
+                seen.correlation_id == entry.correlation_id
+                    && seen.decision == entry.decision
+                    && seen.detail == entry.detail
+            }) {
+                seen.repeats = seen.repeats.saturating_add(1);
+                return;
+            }
             if ring.len() == MAX_JOURNAL_ENTRIES {
                 ring.pop_front();
             }
@@ -334,6 +372,13 @@ impl PluginJournal {
     #[allow(dead_code)]
     pub fn plugin_messages(&self) -> Vec<JournalEntry> {
         Self::snapshot(&self.messages)
+    }
+
+    /// Per-call bookkeeping, which scrolls. Separated from [`Self::entries`] so
+    /// a caller reading the host's decisions is not reading traffic.
+    #[allow(dead_code)]
+    pub fn traces(&self) -> Vec<JournalEntry> {
+        Self::snapshot(&self.traces)
     }
 
     fn snapshot(ring: &Mutex<VecDeque<JournalEntry>>) -> Vec<JournalEntry> {
@@ -990,8 +1035,23 @@ impl host_files::Host for HostState {
             });
         }
         listing.sort_by(|left, right| left.name.cmp(&right.name));
+        if listing.len() > MAX_DIRECTORY_ENTRIES {
+            // The contract gives the host no way to tell a plugin its listing was
+            // cut, so it tells the journal instead: a plugin paging a folder
+            // larger than this bound otherwise sees a short library and no reason
+            // for it.
+            self.journal.record(
+                self.correlation_id,
+                &self.plugin_id,
+                "files-truncated",
+                format!(
+                    "a granted folder of {} readable entries was cut to {MAX_DIRECTORY_ENTRIES}",
+                    listing.len()
+                ),
+            );
+        }
         listing.truncate(MAX_DIRECTORY_ENTRIES);
-        self.journal.record(
+        self.journal.trace(
             self.correlation_id,
             &self.plugin_id,
             "files-list",
@@ -2033,7 +2093,7 @@ impl PluginRuntime {
 
         match outcome {
             Ok(response) => {
-                self.inner.journal.record(
+                self.inner.journal.trace(
                     correlation_id,
                     plugin_id,
                     request.decision(),
@@ -3918,6 +3978,34 @@ mod tests {
                 .count(),
             1,
             "host-journal was either unmetered or reported its refusal repeatedly"
+        );
+    }
+
+    /// Separate rings were only half of it. The host's own ring is bounded too,
+    /// and it was written to on *every* host call — a listing wrote a line, a
+    /// refusal wrote a line — so a plugin that earned a refusal and then made
+    /// two hundred and fifty ordinary calls scrolled it away itself. The whole
+    /// point of journalling a refusal is that it is still there afterwards.
+    #[test]
+    fn a_refusal_survives_the_traffic_that_earned_it() {
+        let library = FixtureLibrary::new("bury");
+        let harness = Harness::new(PluginLimits::default(), Some(&library));
+        assert!(harness.prepare("fixture:bury").is_ok());
+
+        let decisions = harness.runtime.journal().entries();
+        assert!(
+            decisions
+                .iter()
+                .any(|entry| entry.decision == "scope-refused"),
+            "the plugin buried its own refusal under {} ordinary calls",
+            decisions.len()
+        );
+        // And it is one entry with a count, not one per attempt: a component that
+        // asks for the same forbidden folder in a loop must not be able to fill
+        // the ring with the answer either.
+        assert!(
+            decisions.len() < MAX_JOURNAL_ENTRIES,
+            "the decision ring is full after a single invocation"
         );
     }
 
