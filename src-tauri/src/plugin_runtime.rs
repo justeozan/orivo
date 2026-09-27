@@ -471,10 +471,204 @@ pub struct PluginGrants {
 /// it. A swap afterwards changes nothing.
 pub struct GrantedDirectory {
     path: PathBuf,
-    #[cfg(unix)]
+    /// Held on every platform now. On Windows it is what
+    /// [`windows_relative`] opens entries relative to, which is the difference
+    /// between a grant that names a folder and a grant that names a spelling.
     handle: File,
     trust: FolderTrust,
     identity: Option<DirectoryIdentity>,
+}
+
+/// Handle-relative file access on Windows.
+///
+/// `openat` has an exact equivalent here, and the pattern in this module is the
+/// one `std` uses for its own (still unstable) `fs::Dir`
+/// (`std/src/sys/fs/windows/dir.rs`): `NtCreateFile` takes an `OBJECT_ATTRIBUTES`
+/// whose `RootDirectory` is a directory handle and whose `ObjectName` is a single
+/// relative component. Without it a granted folder is a path, and a path is
+/// re-resolved on every use — a **junction** dropped in place of a parent
+/// redirects every later read, and `mklink /J` needs nothing but write access to
+/// that parent, unlike a directory symbolic link.
+///
+/// Three structures are declared here rather than taken from `windows-sys`,
+/// because `OBJECT_ATTRIBUTES` lives behind two `Wdk_*` features and drags
+/// `Win32_Security` in with it for two fields this code only ever sets to null.
+/// They are frozen ABI, they are six fields between them, and each is written out
+/// below against its documented layout. Everything with a non-trivial shape —
+/// `BY_HANDLE_FILE_INFORMATION` and its ten fields — comes from `windows-sys`.
+#[cfg(not(unix))]
+mod windows_relative {
+    use std::ffi::{OsStr, c_void};
+    use std::fs::File;
+    use std::io;
+    use std::mem::{MaybeUninit, size_of};
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::path::Path;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, SYNCHRONIZE,
+    };
+
+    /// `winternl.h`. `Length` and `MaximumLength` are byte counts, not character
+    /// counts, and the buffer is not NUL-terminated.
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+
+    /// `winternl.h`. The last two fields are pointers this code always leaves
+    /// null, so they are typed as opaque rather than as the security structures
+    /// they could be.
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *const UnicodeString,
+        attributes: u32,
+        security_descriptor: *const c_void,
+        security_quality_of_service: *const c_void,
+    }
+
+    /// `winternl.h`. A union of `NTSTATUS` and a pointer, then a `ULONG_PTR`; both
+    /// are pointer-sized and this code never reads either, so the whole thing is
+    /// an out-parameter of the right size and alignment and nothing more.
+    #[repr(C)]
+    struct IoStatusBlock {
+        _status_or_pointer: *mut c_void,
+        _information: usize,
+    }
+
+    const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
+    const FILE_OPEN: u32 = 1;
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    unsafe extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut HANDLE,
+            desired_access: u32,
+            object_attributes: *const ObjectAttributes,
+            io_status_block: *mut IoStatusBlock,
+            allocation_size: *const i64,
+            file_attributes: u32,
+            share_access: u32,
+            create_disposition: u32,
+            create_options: u32,
+            ea_buffer: *const c_void,
+            ea_length: u32,
+        ) -> i32;
+        fn RtlNtStatusToDosError(status: i32) -> u32;
+    }
+
+    /// Opens the granted folder itself.
+    ///
+    /// Reparse points are *followed* here, deliberately, and only here: this is
+    /// the moment the user pointed at a folder, and a picker may well hand back a
+    /// path that goes through one — exactly as the Unix side follows a link on the
+    /// way to the grant and never after it.
+    /// `FILE_FLAG_BACKUP_SEMANTICS` is what permits opening a directory at all.
+    pub(super) fn open_directory(path: &Path) -> io::Result<File> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+    }
+
+    /// One entry of `directory`, opened relative to its handle and never through a
+    /// path.
+    ///
+    /// `FILE_OPEN_REPARSE_POINT` opens a junction or a symbolic link *as itself*,
+    /// so the caller's kind check refuses it rather than following it out of the
+    /// grant. `FILE_SYNCHRONOUS_IO_NONALERT` is required for the handle to be
+    /// usable with ordinary reads afterwards.
+    fn open_relative(directory: &File, name: &str, access: u32) -> io::Result<File> {
+        let mut wide = OsStr::new(name).encode_wide().collect::<Vec<u16>>();
+        if wide.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
+        }
+        let bytes = u16::try_from(wide.len() * size_of::<u16>())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        let object_name = UnicodeString {
+            length: bytes,
+            maximum_length: bytes,
+            buffer: wide.as_mut_ptr(),
+        };
+        let attributes = ObjectAttributes {
+            length: size_of::<ObjectAttributes>() as u32,
+            root_directory: directory.as_raw_handle() as HANDLE,
+            object_name: &object_name,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: ptr::null(),
+            security_quality_of_service: ptr::null(),
+        };
+        let mut handle: HANDLE = ptr::null_mut();
+        let mut status_block = MaybeUninit::<IoStatusBlock>::zeroed();
+        // Safety: `attributes` borrows `object_name`, which borrows `wide`, and all
+        // three outlive the call; `directory` is an open directory handle; the two
+        // out-parameters are correctly sized and are not read unless the call
+        // reports success.
+        let status = unsafe {
+            NtCreateFile(
+                &mut handle,
+                access | SYNCHRONIZE,
+                &attributes,
+                status_block.as_mut_ptr(),
+                ptr::null(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                ptr::null(),
+                0,
+            )
+        };
+        if status < 0 {
+            // Safety: an integer translation with no pointers involved.
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        // Safety: the call reported success, so `handle` is a fresh owned handle
+        // that nothing else refers to.
+        Ok(unsafe { File::from_raw_handle(handle as _) })
+    }
+
+    pub(super) fn open_entry_for_reading(directory: &File, name: &str) -> io::Result<File> {
+        open_relative(directory, name, FILE_GENERIC_READ)
+    }
+
+    /// Opens for attributes only, which is not "opening" in any of the senses a
+    /// listing has to avoid: it moves no data, it does not hydrate a cloud-backed
+    /// file, and Windows never refuses it over another opener's share mode — so an
+    /// entry some program holds exclusively is still describable, exactly as a
+    /// mode-000 file is on Unix.
+    pub(super) fn open_entry_for_facts(directory: &File, name: &str) -> io::Result<File> {
+        open_relative(directory, name, FILE_READ_ATTRIBUTES)
+    }
+
+    /// Everything the host asks of a handle on Windows: kind, size, how many names
+    /// the file answers to, and which file on which volume it is.
+    pub(super) fn information(handle: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+        let mut information = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+        // Safety: an open handle, and an out-parameter the call fills before it
+        // reports success.
+        let answered = unsafe {
+            GetFileInformationByHandle(handle.as_raw_handle() as HANDLE, information.as_mut_ptr())
+        };
+        if answered == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: the call reported success, so the structure is initialised.
+        Ok(unsafe { information.assume_init() })
+    }
 }
 
 /// Which folder a grant names, as the filesystem identifies it rather than as a
@@ -511,15 +705,15 @@ impl DirectoryIdentity {
         self.file_id
     }
 
-    /// `None` where the host cannot ask. On Windows that needs
-    /// `GetFileInformationByHandle`, which cannot be type-checked on this machine
-    /// at all — see the note on [`FolderTrust::of_path`] — so a stored identity
-    /// there is refused rather than waved through.
-    fn of_directory(handle_or_path: &GrantedDirectoryHandle<'_>) -> Option<Self> {
+    /// Asked of the handle, on both platforms: a device and an inode on Unix, a
+    /// volume serial number and a file index on Windows. `None` only when the
+    /// query itself failed, which is a folder that has stopped answering rather
+    /// than a platform that cannot be asked.
+    fn of_directory(handle: &File) -> Option<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let metadata = handle_or_path.0.metadata().ok()?;
+            let metadata = handle.metadata().ok()?;
             Some(Self {
                 volume: metadata.dev(),
                 file_id: metadata.ino(),
@@ -527,8 +721,12 @@ impl DirectoryIdentity {
         }
         #[cfg(not(unix))]
         {
-            let _ = handle_or_path;
-            None
+            let information = windows_relative::information(handle).ok()?;
+            Some(Self {
+                volume: u64::from(information.dwVolumeSerialNumber),
+                file_id: (u64::from(information.nFileIndexHigh) << 32)
+                    | u64::from(information.nFileIndexLow),
+            })
         }
     }
 }
@@ -543,13 +741,6 @@ pub struct PinnedDirectory {
     /// caller reads afterwards to store.
     pub identity: Option<DirectoryIdentity>,
 }
-
-/// The thing an identity is asked of, so the unix and non-unix bodies above read
-/// the same. A handle where there is one, and nothing where there is not.
-#[cfg(unix)]
-struct GrantedDirectoryHandle<'directory>(&'directory File);
-#[cfg(not(unix))]
-struct GrantedDirectoryHandle<'directory>(&'directory Path);
 
 /// Whether this account is the only one that can put something in the granted
 /// folder. Captured once, from the handle, at the moment the grant is made.
@@ -591,18 +782,20 @@ impl FolderTrust {
         }
     }
 
+    /// Windows: not established, and therefore not private.
+    ///
+    /// Telling a private folder from a shared one here means reading the DACL —
+    /// `GetSecurityInfo`, then walking the ACEs, then deciding which well-known
+    /// SIDs count as "somebody else" — and that last part is security *policy*,
+    /// invented by code that cannot be run on the platform it governs. So the
+    /// answer is the conservative one, and the consequence is stated rather than
+    /// hidden: now that the link count is available from the handle, the rule
+    /// fires on **every** multiply-linked file in a granted folder on Windows,
+    /// including the user's own. Stricter than Unix, refusing something harmless,
+    /// and the direction to be wrong in.
     #[cfg(not(unix))]
-    fn of_path(path: &Path) -> Self {
-        // Reading a Windows DACL needs `GetSecurityInfo` from advapi32, which is
-        // not in the feature set this crate enables and cannot be compiled here
-        // at all — `cargo check --target x86_64-pc-windows-msvc` stops in `ring`
-        // for want of a Windows C toolchain. Unknown, therefore not private.
-        //
-        // Note what that does *not* achieve on Windows: `EntryFacts::of` cannot
-        // count links there either, for the same reason, so it reports one and
-        // this rule never fires. The hard-link gap is open on Windows and is
-        // written down as open, in `fixtures/README.md` and in the PR.
-        let _ = path;
+    fn of_handle(handle: &File) -> Self {
+        let _ = handle;
         Self { private: None }
     }
 }
@@ -688,7 +881,7 @@ impl GrantedDirectory {
             // Asked of the descriptor, after the open: a path could have been
             // answered by something else in between, and this is the answer that
             // was actually given.
-            let identity = DirectoryIdentity::of_directory(&GrantedDirectoryHandle(&handle));
+            let identity = DirectoryIdentity::of_directory(&handle);
             Ok(Self {
                 path: path.to_path_buf(),
                 handle,
@@ -698,16 +891,17 @@ impl GrantedDirectory {
         }
         #[cfg(not(unix))]
         {
-            // Windows has no `openat`, so the grant is still a path here and the
-            // swap above is still reachable. `FILE_FLAG_OPEN_REPARSE_POINT` keeps
-            // the *entry* honest, which is the half that can be kept.
             if !path.is_dir() {
                 return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
             }
+            let handle = windows_relative::open_directory(path)?;
+            let trust = FolderTrust::of_handle(&handle);
+            let identity = DirectoryIdentity::of_directory(&handle);
             Ok(Self {
                 path: path.to_path_buf(),
-                trust: FolderTrust::of_path(path),
-                identity: DirectoryIdentity::of_directory(&GrantedDirectoryHandle(path)),
+                handle,
+                trust,
+                identity,
             })
         }
     }
@@ -748,12 +942,11 @@ impl GrantedDirectory {
         }
         #[cfg(not(unix))]
         {
-            // No handle to be relative to here — see the note on `open`. The link
-            // count this cannot reach is not used by a listing.
-            self.path
-                .join(name)
-                .symlink_metadata()
-                .map(|metadata| EntryFacts::of(&metadata))
+            // Relative to the handle, and for attributes only: not "opening" in
+            // any of the senses a listing has to avoid, and never refused over
+            // another opener's share mode.
+            let entry = windows_relative::open_entry_for_facts(&self.handle, name)?;
+            EntryFacts::of_handle(&entry)
         }
     }
 
@@ -790,19 +983,7 @@ impl GrantedDirectory {
         }
         #[cfg(not(unix))]
         {
-            use std::os::windows::fs::OpenOptionsExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            };
-            // `FILE_FLAG_BACKUP_SEMANTICS` is what lets a *directory* be opened at
-            // all (`std/src/sys/fs/windows/dir.rs`). Without it, asking for one
-            // fails at the open and the caller cannot tell "that is a folder"
-            // from "that is gone" — so the refusal below is the kind check on the
-            // handle, as it is on Unix, rather than an accident of the flags.
-            fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-                .open(self.path.join(name))
+            windows_relative::open_entry_for_reading(&self.handle, name)
         }
     }
 }
@@ -1432,19 +1613,19 @@ impl host_files::Host for HostState {
                 "That file is no longer available.",
             ));
         };
-        let Ok(metadata) = file.metadata() else {
+        let Ok(facts) = EntryFacts::of_handle(&file) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That file is no longer available.",
             ));
         };
-        if let Some(refusal) = refuse_entry(&EntryFacts::of(&metadata), directory.trust) {
+        if let Some(refusal) = refuse_entry(&facts, directory.trust) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::PermissionDenied,
                 refusal.message(),
             ));
         }
-        if self.bytes_read.saturating_add(metadata.len()) > MAX_HOST_READ_BYTES {
+        if self.bytes_read.saturating_add(facts.byte_size) > MAX_HOST_READ_BYTES {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::RateLimited,
                 "This plugin read too much in one call.",
@@ -1548,35 +1729,47 @@ struct EntryFacts {
 }
 
 impl EntryFacts {
-    /// From metadata the host already holds — a descriptor it opened, or, on
-    /// Windows, a path it asked about without following a link.
-    fn of(metadata: &fs::Metadata) -> Self {
+    /// From a handle the host holds. Every fact a refusal is made from comes
+    /// through here, which is what keeps a path out of the decision.
+    fn of_handle(handle: &File) -> std::io::Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            Self {
+            let metadata = handle.metadata()?;
+            Ok(Self {
                 file: metadata.is_file(),
                 directory: metadata.is_dir(),
                 symlink: metadata.file_type().is_symlink(),
                 byte_size: metadata.len(),
                 links: metadata.nlink(),
                 owner: metadata.uid(),
-            }
+            })
         }
         #[cfg(not(unix))]
         {
-            // Windows has no uid, and the link count is only reachable through a
-            // handle query, which a listing deliberately does not do. Said out
-            // loud rather than silently approximated: `read_file` fills both in
-            // from the handle it opens.
-            Self {
-                file: metadata.is_file(),
-                directory: metadata.is_dir(),
-                symlink: metadata.file_type().is_symlink(),
-                byte_size: metadata.len(),
-                links: 1,
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+            };
+
+            let information = windows_relative::information(handle)?;
+            let directory = information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            let symlink = information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            Ok(Self {
+                // A junction and a symbolic link are both reparse points, and
+                // neither is a file the host will read: the grant covers what is
+                // inside the folder, not wherever a reparse point leads.
+                file: !directory && !symlink,
+                directory,
+                symlink,
+                byte_size: (u64::from(information.nFileSizeHigh) << 32)
+                    | u64::from(information.nFileSizeLow),
+                // The count Windows only reports through a handle. Without it the
+                // hard-link rule had nothing to fire on here.
+                links: u64::from(information.nNumberOfLinks),
+                // No uid on Windows. `FolderTrust` is what carries ownership, and
+                // the rule below does not consult this field.
                 owner: 0,
-            }
+            })
         }
     }
 
@@ -2978,17 +3171,36 @@ mod tests {
         std::os::unix::fs::symlink(target, link).unwrap();
         #[cfg(windows)]
         {
-            let status = std::process::Command::new("cmd")
-                .arg("/C")
-                .arg(format!(
-                    "mklink /J \"{}\" \"{}\"",
+            use std::os::windows::process::CommandExt;
+
+            // `raw_arg`, because `cmd /C` applies its own quote-stripping to the
+            // string it is handed and Rust's ordinary argument escaping produces a
+            // form it mangles. This is the documented working shape:
+            // `/C mklink /J "link" "target"`, verbatim.
+            let output = std::process::Command::new("cmd")
+                .raw_arg(format!(
+                    "/C mklink /J \"{}\" \"{}\"",
                     link.display(),
                     target.display()
                 ))
-                .status()
-                .expect("mklink is on PATH");
-            assert!(status.success(), "mklink /J did not create the junction");
+                .output()
+                .expect("cmd is on PATH");
+            assert!(
+                output.status.success(),
+                "mklink /J did not create the junction: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
+    }
+
+    /// Removes a directory redirection without touching what it pointed at. A
+    /// junction is removed with `RemoveDirectory`, a symbolic link with `unlink`.
+    fn remove_directory_redirect(link: &Path) {
+        #[cfg(unix)]
+        fs::remove_file(link).unwrap();
+        #[cfg(not(unix))]
+        fs::remove_dir(link).unwrap();
     }
 
     /// Plants a file the host cannot open for reading, and hands back whatever has
@@ -3633,35 +3845,44 @@ mod tests {
         );
     }
 
-    /// `O_NOFOLLOW` judges the last component of a path and nothing above it, so
-    /// a grant is only as trustworthy as every directory on the way to it. This
-    /// plants the swap the flag cannot see: the granted folder's *parent* is
-    /// replaced by a symbolic link to a folder the user never approved, which
-    /// needs write access to that parent rather than to the grant.
+    /// A grant is only as trustworthy as every directory on the way to it, and
+    /// `O_NOFOLLOW` judges the last component of a path and nothing above it.
+    ///
+    /// This is the swap neither flag can see: the folder the user's path goes
+    /// *through* is re-pointed at a folder they never approved. It needs write
+    /// access to that parent and nothing else — a symbolic link on Unix, a
+    /// junction on Windows, which `mklink /J` makes without any privilege at all.
     ///
     /// Before the handle, `read_file` joined the grant's path and followed the
-    /// link, so `fixture:read-secret` did not fail — it succeeded, reading a file
-    /// from the attacker's folder.
+    /// redirection, so `fixture:read-secret` did not fail — it succeeded, reading a
+    /// file from the attacker's folder. On Windows it still did until
+    /// `windows_relative` landed, and the runner said so.
     #[test]
     fn a_swapped_parent_cannot_redirect_a_granted_folder() {
         let root = temporary_root("swapped-parent");
-        let library = root.join("library");
+        let approved = root.join("approved");
         let decoy = root.join("decoy");
-        fs::create_dir_all(library.join("games")).unwrap();
+        // The directory the user's path goes through, which is the one that gets
+        // re-pointed. Redirecting *this* rather than renaming the approved folder
+        // is both the realistic attack and the one shape that behaves identically
+        // on each platform.
+        let through = root.join("through");
+        fs::create_dir_all(approved.join("games")).unwrap();
         fs::create_dir_all(decoy.join("games")).unwrap();
-        fs::write(library.join("games/alpha.rom"), b"Alpha Quest\n").unwrap();
+        fs::write(approved.join("games/alpha.rom"), b"Alpha Quest\n").unwrap();
         fs::write(decoy.join("games/secret.rom"), b"a keychain token").unwrap();
+        redirect_directory(&through, &approved);
 
         let harness = Harness::with_directories(
             PluginLimits::default(),
             &[GAMES_GRANT],
-            &BTreeMap::from([(GAMES_GRANT.to_string(), library.join("games"))]),
+            &BTreeMap::from([(GAMES_GRANT.to_string(), through.join("games"))]),
         );
 
         // The swap happens after the user granted the folder, which is the whole
         // point: the handle names the directory they approved, not the path.
-        fs::rename(&library, root.join("library-real")).unwrap();
-        redirect_directory(&library, &decoy);
+        remove_directory_redirect(&through);
+        redirect_directory(&through, &decoy);
 
         let error = harness.prepare("fixture:read-secret").unwrap_err();
         assert!(
@@ -3791,12 +4012,12 @@ mod tests {
         }
     }
 
-    /// The rule above is only worth anything if the numbers it judges are the
-    /// file's own. A link the test makes itself has two names and this account's
-    /// owner, and it stays readable — refusing every hard link would break a
-    /// deduplicated library for no security gained.
+    /// The rule is only worth anything if the numbers it judges are the file's
+    /// own, and the link count is the one Windows reports through a handle and
+    /// nowhere else — before this it always read one, so the rule had nothing to
+    /// fire on there at all.
     #[test]
-    fn the_facts_a_refusal_is_made_from_come_from_the_descriptor() {
+    fn the_facts_a_refusal_is_made_from_come_from_the_handle() {
         let library = FixtureLibrary::new("hard-link");
         fs::hard_link(
             library.games.join("alpha.rom"),
@@ -3804,21 +4025,34 @@ mod tests {
         )
         .unwrap();
 
-        let facts = EntryFacts::of(
-            &fs::File::open(library.games.join("twin.rom"))
-                .unwrap()
-                .metadata()
-                .unwrap(),
-        );
+        let facts = EntryFacts::of_handle(&fs::File::open(library.games.join("twin.rom")).unwrap())
+            .unwrap();
         assert_eq!(facts.links, 2, "the link count is not the file's own");
+        assert!(facts.file && !facts.directory && !facts.symlink);
+        assert_eq!(facts.byte_size, 12);
         #[cfg(unix)]
         assert_eq!(facts.owner, host_account());
 
-        // The temporary directory this runs in is private, so the same link is
-        // readable — which is the pairing that matters: the rule refuses a link a
-        // *stranger could have made*, not a link.
         let harness = Harness::new(PluginLimits::default(), Some(&library));
-        assert!(harness.prepare("fixture:read-twin").is_ok());
+        let outcome = harness.prepare("fixture:read-twin");
+        // Unix can tell that this temporary folder is private, so the user's own
+        // link stays readable. Windows cannot tell yet, and a folder whose write
+        // access is unknown is not a private one — so the same link is refused
+        // there. That asymmetry is the point of `FolderTrust`, and it is asserted
+        // rather than described.
+        #[cfg(unix)]
+        assert!(outcome.is_ok(), "a link in a private folder was refused");
+        #[cfg(not(unix))]
+        assert!(
+            matches!(
+                outcome,
+                Err(PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::PermissionDenied,
+                    ..
+                })
+            ),
+            "a link in a folder Windows cannot vouch for was read: {outcome:?}"
+        );
     }
 
     /// The branch no filesystem here can produce: a folder whose write access the
@@ -3900,18 +4134,28 @@ mod tests {
         ));
     }
 
-    /// Unix only, and deliberately: creating the link is half of what this
-    /// exercises, and a `cfg`-ed-out body would have reported a pass on Windows
-    /// without testing anything at all.
-    #[cfg(unix)]
+    /// A redirection *inside* the granted folder is skipped rather than followed,
+    /// on both platforms: a symbolic link on Unix, a junction on Windows. The
+    /// listing reports what an entry is, and a reparse point is not a file the
+    /// grant covers.
     #[test]
-    fn a_symlink_inside_a_granted_directory_is_not_listed() {
+    fn a_redirect_inside_a_granted_directory_is_not_listed() {
         let library = FixtureLibrary::new("symlink");
+        #[cfg(unix)]
         std::os::unix::fs::symlink(
             library.root.join("secret.txt"),
             library.games.join("zeta.rom"),
         )
         .unwrap();
+        #[cfg(not(unix))]
+        {
+            // A junction needs a directory to point at, and the name still has to
+            // end in `.rom` for the fixture to consider it a game at all.
+            let outside = library.root.join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("secret.txt"), b"a keychain token").unwrap();
+            redirect_directory(&library.games.join("zeta.rom"), &outside);
+        }
         let harness = Harness::new(PluginLimits::default(), Some(&library));
         let PluginResponse::DiscoveryPage(page) = harness
             .call(PluginRequest::DiscoverPage {
@@ -3925,7 +4169,7 @@ mod tests {
         };
         assert!(
             page.games.iter().all(|game| game.external_id != "zeta"),
-            "a symlink out of the grant was listed"
+            "a redirection out of the grant was listed"
         );
     }
 
