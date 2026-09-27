@@ -40,6 +40,12 @@ tauri-plugin-opener = "2"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.15"
 
+[dependencies.tauri-plugin-orivo-saf]
+# Local, and Android-only in effect: it exists to carry the Kotlin that receives
+# the folder chooser's result into the generated Android project. Off Android its
+# one call refuses. See `tauri-plugin-orivo-saf/README.md`.
+path = "../tauri-plugin-orivo-saf"
+
 [target.'cfg(target_os = "android")'.dependencies]
 android-native-keyring-store = "1.0"
 jni = "0.21"
