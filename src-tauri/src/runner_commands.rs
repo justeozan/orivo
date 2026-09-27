@@ -15,14 +15,13 @@ use crate::catalog::{
     Catalog, CatalogError, RunnerGrantedDirectory, RunnerProfile, RunnerProfileSettings,
     RunnerProfileStatus,
 };
-use crate::plugin_manifest::{HostCompatibility, valid_opaque_id};
+use crate::plugin_manifest::{HostCompatibility, PluginCapability, valid_opaque_id};
 use crate::plugin_registry::{PluginRegistry, PluginState};
 use crate::plugin_runtime::PluginRuntime;
 use crate::runner_host::{
     CatalogStore, RunnerHostError, RunnerImportLimits, RunnerImportProgress, RunnerPackage,
-    apply_profile_validation, directory_grant_is_active, directory_grant_records,
-    import_runner_games, prepare_runner_launch, resolve_application, unix_millis,
-    validate_profile_with_plugin,
+    apply_profile_validation, directory_grant_is_active, directory_identity, import_runner_games,
+    prepare_runner_launch, resolve_application, unix_millis, validate_profile_with_plugin,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -46,7 +45,9 @@ use tauri::State;
 /// can still be made to agree, and the reference fixture's own slot is passed in
 /// explicitly by the tests that use it.
 pub const DEFAULT_DIRECTORY_SLOT: &str = "games";
-const MAX_DIRECTORY_SLOT_LENGTH: usize = 256;
+/// Short enough that `<profile id>:<slot>` still fits the grant-scope grammar,
+/// and longer than any name a component would hard-code.
+const MAX_DIRECTORY_SLOT_LENGTH: usize = 96;
 const MAX_PROFILE_NAME_LENGTH: usize = 120;
 /// Enough concurrent imports for a user working through several runners, and
 /// few enough that the map is not a way to make Orivo hold memory.
@@ -282,13 +283,28 @@ impl ThirdPartyRunnerService {
             import_cursor: None,
             import_complete: false,
             last_imported_at: None,
+            package_fingerprint: None,
         };
         // The application has to be startable before the plugin is asked about
         // anything: a profile pointing at a folder or a text file is the host's
         // to refuse, and refusing it here keeps a bad pick from becoming a
         // stored profile the plugin blessed.
         resolve_application(&profile)?;
-        self.commit_profile(profile)?;
+        let identity = package.identity().clone();
+        let granted_at = unix_millis();
+        self.store.commit(|catalog| {
+            catalog.upsert_runner_profile(profile)?;
+            // Creating a profile is the consent for this plugin to prepare
+            // *this* profile's launches, and for nothing else: the value is the
+            // profile id, so another profile's permission is a separate answer.
+            catalog.allow_plugin_scope_value(
+                plugin_id,
+                PluginCapability::RunnerPrepare,
+                profile_id,
+                &identity,
+                granted_at,
+            )
+        })?;
         self.revalidate_profile(&package, profile_id)
     }
 
@@ -350,7 +366,10 @@ impl ThirdPartyRunnerService {
         directory: &Path,
     ) -> Result<RunnerProfileView, RunnerHostError> {
         let slot = slot.unwrap_or(DEFAULT_DIRECTORY_SLOT).to_owned();
-        if !valid_opaque_id(&slot, MAX_DIRECTORY_SLOT_LENGTH) {
+        // `:` is what joins a profile id to a slot in the ledger, so a slot
+        // carrying one could spell another profile's key. The opaque grammar
+        // allows it; a slot does not.
+        if !valid_opaque_id(&slot, MAX_DIRECTORY_SLOT_LENGTH) || slot.contains(':') {
             return Err(RunnerHostError::GrantRefused);
         }
         let directory =
@@ -358,6 +377,18 @@ impl ThirdPartyRunnerService {
         if !directory.is_dir() {
             return Err(RunnerHostError::GameOutsideScope);
         }
+        let plugin_id = {
+            let catalog = self.store.snapshot()?;
+            catalog
+                .runner_profile(profile_id)
+                .map(|profile| profile.plugin_id.clone())
+                .ok_or(RunnerHostError::UnknownProfile)?
+        };
+        // The permission is recorded against the package that is installed now,
+        // so a different one arriving under this id later does not inherit it.
+        let identity = self.package(&plugin_id)?.identity().clone();
+        // Taken here, while the folder is the one the picker returned.
+        let (device, inode) = directory_identity(&directory);
         let granted_at = unix_millis();
         self.store.commit(|catalog| {
             let profile = catalog
@@ -388,15 +419,23 @@ impl ThirdPartyRunnerService {
             directories.push(RunnerGrantedDirectory {
                 id: slot.clone(),
                 path: directory.clone(),
+                device,
+                inode,
             });
             catalog.upsert_runner_profile(RunnerProfile {
                 game_directories: directories,
                 ..profile.clone()
             })?;
-            for record in directory_grant_records(catalog, &profile.plugin_id, granted_at) {
-                catalog.grant_plugin_capability(record)?;
-            }
-            Ok(())
+            // One folder, one value, keyed to this profile. Restating a whole
+            // scope here is what used to put a revoked folder back the next
+            // time the user allowed a different one.
+            catalog.allow_plugin_scope_value(
+                &profile.plugin_id,
+                PluginCapability::FilesRead,
+                &crate::catalog::directory_grant_key(profile_id, &slot),
+                &identity,
+                granted_at,
+            )
         })?;
         self.profile_view(profile_id)
     }
@@ -431,19 +470,55 @@ impl ThirdPartyRunnerService {
         let validation = validate_profile_with_plugin(package, &catalog, &profile, &cancelled)?;
         let mut validated = profile;
         apply_profile_validation(&mut validated, &validation);
+        // The verdict belongs to the component that gave it, so the two are
+        // written together and read together.
+        validated.package_fingerprint = Some(package.identity().fingerprint.clone());
         self.commit_profile(validated)?;
         self.profile_view(profile_id)
     }
 
-    /// Persist a profile and restate the plugin's grants from what the catalog
-    /// then holds, so the ledger can never describe a profile that is gone.
+    /// Persist a profile, and touch no permission doing it.
+    ///
+    /// Renaming, enabling and revalidating say nothing about folders. Restating
+    /// a scope from whatever the catalog happens to hold is how a folder the
+    /// user revoked came back the next time they edited anything, so a profile
+    /// write is only ever a profile write.
     fn commit_profile(&self, profile: RunnerProfile) -> Result<(), RunnerHostError> {
-        let granted_at = unix_millis();
-        let plugin_id = profile.plugin_id.clone();
-        self.store.commit(|catalog| {
-            catalog.upsert_runner_profile(profile)?;
-            for record in directory_grant_records(catalog, &plugin_id, granted_at) {
-                catalog.grant_plugin_capability(record)?;
+        self.store
+            .commit(|catalog| catalog.upsert_runner_profile(profile).map(|_| ()))
+    }
+
+    /// Everything a plugin's removal costs it.
+    ///
+    /// Every permission it held is taken back, and every profile it owns goes
+    /// back to waiting for a verdict — a package that arrives under this id
+    /// later has not been asked about any of them. What stays is what belongs
+    /// to the user: the profiles they built, the folders they picked and every
+    /// game already imported, which is the plan's promise 6 for a plugin that
+    /// is disabled or deleted.
+    ///
+    /// `plugin_installer` owns the uninstall command and is another lot's file,
+    /// so it has to call this — the `#[allow(dead_code)]` is that one missing
+    /// line and nothing else. Until it lands, the package identity recorded on
+    /// each grant is what stops a replacement from inheriting them.
+    #[allow(dead_code)]
+    pub fn forget_plugin(&self, plugin_id: &str) -> Result<(), RunnerHostError> {
+        let revoked_at = unix_millis();
+        let plugin_id = plugin_id.to_owned();
+        self.store.commit(move |catalog| {
+            catalog.revoke_plugin_grants(&plugin_id, revoked_at)?;
+            for profile in catalog
+                .runner_profiles_for_plugin(&plugin_id)
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                catalog.upsert_runner_profile(RunnerProfile {
+                    status: RunnerProfileStatus::Unvalidated,
+                    status_message: None,
+                    package_fingerprint: None,
+                    ..profile
+                })?;
             }
             Ok(())
         })
@@ -706,7 +781,12 @@ fn profile_view(catalog: &Catalog, profile: &RunnerProfile) -> RunnerProfileView
             .game_directories
             .iter()
             .map(|directory| RunnerDirectoryView {
-                granted: directory_grant_is_active(catalog, &profile.plugin_id, &directory.id),
+                granted: directory_grant_is_active(
+                    catalog,
+                    &profile.plugin_id,
+                    &profile.id,
+                    &directory.id,
+                ),
                 label: safe_label(&directory.path, "Folder"),
                 id: directory.id.clone(),
             })
@@ -960,6 +1040,7 @@ mod tests {
     /// hard-coded in the component because the v1 manifest has nowhere to
     /// declare it.
     const FIXTURE_SLOT: &str = "fixture-games";
+    const SECOND_PROFILE_ID: &str = "fixture-profile-2";
 
     struct Harness {
         root: PathBuf,
@@ -1069,6 +1150,43 @@ mod tests {
         fn catalog(&self) -> Catalog {
             Catalog::load(&self.catalog_path).unwrap()
         }
+
+        /// A second profile of the same plugin, with its own folder under the
+        /// same slot. That is not a contrived shape: the component hard-codes
+        /// the slot it asks for, so every profile it owns uses the same one.
+        fn second_profile(&self, tag: &str, roms: &[(&str, &str)]) -> PathBuf {
+            let folder = self.root.join(tag);
+            fs::create_dir_all(&folder).unwrap();
+            for (name, title) in roms {
+                fs::write(folder.join(name), title.as_bytes()).unwrap();
+            }
+            self.service
+                .create_profile_with_id(
+                    SECOND_PROFILE_ID,
+                    FIXTURE_PLUGIN_ID,
+                    "Second Fixture",
+                    &self.emulator,
+                )
+                .unwrap();
+            self.service
+                .grant_directory(SECOND_PROFILE_ID, Some(FIXTURE_SLOT), &folder)
+                .unwrap();
+            let cancelled = AtomicBool::new(false);
+            self.service
+                .import_now(SECOND_PROFILE_ID, &cancelled, |_| {})
+                .unwrap();
+            folder
+        }
+
+        /// The marker the installer writes beside a package it accepted with a
+        /// release signature. Removing it is what a hand-loaded package taking
+        /// over an installed id looks like from here.
+        fn trust_marker(&self) -> PathBuf {
+            self.plugin_root
+                .join(".staging")
+                .join("trusted")
+                .join(FIXTURE_PLUGIN_ID)
+        }
     }
 
     fn write_fixture_plugin(plugin_root: &Path) {
@@ -1098,6 +1216,11 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        // Installed from the signed registry channel, which is the state whose
+        // grants must not carry over to a package that arrives another way.
+        let trusted = plugin_root.join(".staging").join("trusted");
+        fs::create_dir_all(&trusted).unwrap();
+        fs::write(trusted.join(FIXTURE_PLUGIN_ID), b"1").unwrap();
     }
 
     /// A fake emulation application: this test binary, copied.
@@ -1119,8 +1242,16 @@ mod tests {
     }
 
     fn launch_error(service: &ThirdPartyRunnerService, game_ref: &str) -> RunnerHostError {
+        profile_launch_error(service, ACCEPTED_PROFILE_ID, game_ref)
+    }
+
+    fn profile_launch_error(
+        service: &ThirdPartyRunnerService,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> RunnerHostError {
         service
-            .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, game_ref)
+            .launch(FIXTURE_PLUGIN_ID, profile_id, game_ref)
             .expect_err("the launch should have been refused")
     }
 
@@ -1146,6 +1277,37 @@ mod tests {
             external_id: game_ref.into(),
             game_path,
             directory_grant_id,
+            platform: None,
+            imported_at: Some(1),
+        };
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let game = crate::runner_host::runner_catalog_game(
+                    FIXTURE_PLUGIN_ID,
+                    ACCEPTED_PROFILE_ID,
+                    &entry,
+                );
+                catalog.upsert_runner_inventory(entry.clone())?;
+                catalog.upsert_runner(game)?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// Plant an entry in a named folder without going through discovery. The
+    /// fixture only ever pages the one slot it hard-codes, so a second folder
+    /// needs its inventory written the way an import would have written it.
+    fn plant_entry_in(harness: &Harness, game_ref: &str, file: &str, slot: &str, folder: &Path) {
+        let entry = crate::catalog::RunnerGameInventoryEntry {
+            profile_id: ACCEPTED_PROFILE_ID.into(),
+            game_ref: game_ref.into(),
+            title: "Planted Game".into(),
+            provider_id: FIXTURE_PLUGIN_ID.into(),
+            external_id: game_ref.into(),
+            game_path: fs::canonicalize(folder.join(file)).unwrap(),
+            directory_grant_id: slot.into(),
             platform: None,
             imported_at: Some(1),
         };
@@ -1667,5 +1829,433 @@ mod tests {
         assert!(!json.contains('/'), "{json}");
         assert!(json.contains("Fixture Emulator"));
         assert!(json.contains(ACCEPTED_PROFILE_ID));
+    }
+    // -----------------------------------------------------------------------
+    // Revocation has to be per profile, and it has to stick
+    // -----------------------------------------------------------------------
+
+    /// A component hard-codes the slot it asks `host-files` for, so every
+    /// profile of one plugin names its folder under the same id. A permission
+    /// keyed by the slot alone therefore has another profile standing in for
+    /// the one the user just revoked, and revoking does nothing at all.
+    #[test]
+    fn revoking_one_profiles_folder_leaves_the_other_profile_untouched() {
+        let harness = Harness::new("shared-slot", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+        harness.second_profile("other-games", &[("delta.rom", "Delta Drift")]);
+
+        harness
+            .service
+            .revoke_directory(ACCEPTED_PROFILE_ID, FIXTURE_SLOT)
+            .unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantMissing
+        );
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, SECOND_PROFILE_ID, "delta")
+                .is_ok(),
+            "the other profile's folder was never revoked"
+        );
+    }
+
+    /// A permission taken away stays away until the user gives it again.
+    /// Renaming a profile, enabling it, or revalidating it says nothing about
+    /// folders, so none of them may put one back.
+    #[test]
+    fn a_revoked_folder_is_not_restored_by_editing_the_profile() {
+        let harness = Harness::new("revoke-rename", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+        harness
+            .service
+            .revoke_directory(ACCEPTED_PROFILE_ID, FIXTURE_SLOT)
+            .unwrap();
+
+        harness
+            .service
+            .rename_profile(ACCEPTED_PROFILE_ID, "Renamed")
+            .unwrap();
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantMissing,
+            "a rename re-granted the folder"
+        );
+
+        harness
+            .service
+            .set_profile_enabled(ACCEPTED_PROFILE_ID, false)
+            .unwrap();
+        harness
+            .service
+            .set_profile_enabled(ACCEPTED_PROFILE_ID, true)
+            .unwrap();
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantMissing,
+            "a disable/enable round trip re-granted the folder"
+        );
+    }
+
+    /// Allowing a second folder is consent about that folder and nothing else.
+    #[test]
+    fn a_revoked_folder_is_not_restored_by_allowing_a_different_one() {
+        let harness = Harness::new("revoke-second", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+        harness
+            .service
+            .revoke_directory(ACCEPTED_PROFILE_ID, FIXTURE_SLOT)
+            .unwrap();
+
+        let elsewhere = harness.root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some("extra"), &elsewhere)
+            .unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantMissing,
+            "allowing another folder re-granted the revoked one"
+        );
+    }
+
+    /// Creating a second profile restates nothing about the first.
+    #[test]
+    fn a_revoked_folder_is_not_restored_by_adding_a_profile() {
+        let harness = Harness::new("revoke-newprofile", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+        harness
+            .service
+            .revoke_directory(ACCEPTED_PROFILE_ID, FIXTURE_SLOT)
+            .unwrap();
+        harness.second_profile("other-games", &[("delta.rom", "Delta Drift")]);
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantMissing,
+            "adding a profile re-granted a revoked folder"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Grants belong to the package that was consented to
+    // -----------------------------------------------------------------------
+
+    /// The package the user allowed was release-signed. A package that takes
+    /// its id afterwards without that signature is a different thing, and the
+    /// permissions do not come with the name.
+    #[test]
+    fn grants_do_not_survive_a_signed_package_being_replaced_by_an_unsigned_one() {
+        let harness = Harness::new("resign", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_ok()
+        );
+
+        fs::remove_file(harness.trust_marker()).unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GrantStale
+        );
+        // And nothing was destroyed by noticing: the profile and its games are
+        // where the user left them.
+        assert_eq!(harness.catalog().runner_inventory.len(), 3);
+        assert!(
+            harness
+                .catalog()
+                .runner_profile(ACCEPTED_PROFILE_ID)
+                .is_some()
+        );
+    }
+
+    /// A component that is not the one the profile was validated against has
+    /// not been judged by anything. The verdict goes back to unvalidated rather
+    /// than carrying over to code the plugin never showed the host.
+    #[test]
+    fn a_profile_validated_against_another_build_is_not_launchable() {
+        let harness = Harness::new("rebuild", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+
+        // What an in-place replacement looks like from the catalog's side: the
+        // profile remembers a component that is no longer installed.
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let profile = catalog
+                    .runner_profile(ACCEPTED_PROFILE_ID)
+                    .cloned()
+                    .unwrap();
+                catalog.upsert_runner_profile(crate::catalog::RunnerProfile {
+                    package_fingerprint: Some("0".repeat(64)),
+                    ..profile
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::ProfileNeedsRevalidation
+        );
+        assert_eq!(harness.catalog().runner_inventory.len(), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // The folder that was allowed, and no other
+    // -----------------------------------------------------------------------
+
+    /// Re-resolving the folder from its path every launch means a link planted
+    /// over one of its parents moves the whole grant, and the emulator is handed
+    /// the decoy's file under the real game's name.
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_parent_with_a_link_does_not_move_the_granted_folder() {
+        let harness = Harness::new("parent-link", THREE_ROMS);
+        let live = harness.root.join("live");
+        fs::create_dir_all(live.join("roms")).unwrap();
+        fs::write(live.join("roms/alpha.rom"), b"Alpha Quest").unwrap();
+        harness
+            .service
+            .create_profile_with_id(
+                ACCEPTED_PROFILE_ID,
+                FIXTURE_PLUGIN_ID,
+                "Fixture Runner",
+                &harness.emulator,
+            )
+            .unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some(FIXTURE_SLOT), &live.join("roms"))
+            .unwrap();
+        harness.import();
+        assert_eq!(harness.catalog().runner_inventory.len(), 1);
+
+        // The parent is swapped for a link to somewhere else entirely, which is
+        // a rename and a symlink — neither of which needs to touch the folder
+        // the user actually allowed.
+        let decoy = harness.root.join("decoy");
+        fs::create_dir_all(decoy.join("roms")).unwrap();
+        fs::write(decoy.join("roms/alpha.rom"), b"Not your game").unwrap();
+        fs::rename(&live, harness.root.join("live-real")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &live).unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GameOutsideScope
+        );
+    }
+
+    /// The same question without a link in it: the folder was renamed away and
+    /// an ordinary directory took its name. The path still canonicalises to
+    /// itself, so only the folder's own identity can tell them apart.
+    #[cfg(unix)]
+    #[test]
+    fn a_granted_folder_replaced_by_another_real_folder_is_refused() {
+        let harness = Harness::new("folder-swap", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+
+        fs::rename(&harness.games, harness.root.join("games-real")).unwrap();
+        fs::create_dir_all(&harness.games).unwrap();
+        fs::write(harness.games.join("alpha.rom"), b"Not your game").unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::GameOutsideScope
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A folder that is simply not there
+    // -----------------------------------------------------------------------
+
+    /// An external drive that is unplugged is not a permissions problem, and it
+    /// is not every game's problem either. Only the games on it stop, and the
+    /// message says which kind of failure it is.
+    #[test]
+    fn a_folder_that_is_not_there_blocks_only_the_games_inside_it() {
+        let harness = Harness::new("offline", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+
+        let removable = harness.root.join("removable");
+        fs::create_dir_all(&removable).unwrap();
+        fs::write(removable.join("zeta.rom"), b"Zeta Zone").unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some("removable"), &removable)
+            .unwrap();
+        plant_entry_in(&harness, "zeta", "zeta.rom", "removable", &removable);
+
+        fs::remove_dir_all(&removable).unwrap();
+
+        assert_eq!(
+            launch_error(&harness.service, "zeta"),
+            RunnerHostError::DirectoryUnavailable
+        );
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_ok(),
+            "one missing folder blocked a game in a folder that is still here"
+        );
+    }
+
+    /// The uninstall hook `plugin_installer` has to call. What goes is the
+    /// permissions and the verdicts; what stays is everything the user made.
+    #[test]
+    fn forgetting_a_plugin_takes_its_permissions_and_leaves_its_games() {
+        let harness = Harness::new("forget", THREE_ROMS);
+        harness.configured_profile();
+        harness.import();
+
+        harness.service.forget_plugin(FIXTURE_PLUGIN_ID).unwrap();
+
+        let catalog = harness.catalog();
+        assert!(catalog.plugin_grants.iter().all(|grant| !grant.is_active()));
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
+        assert_eq!(profile.status, RunnerProfileStatus::Unvalidated);
+        assert!(profile.package_fingerprint.is_none());
+        assert_eq!(profile.game_directories.len(), 1);
+        assert_eq!(catalog.runner_inventory.len(), 3);
+        assert_eq!(
+            catalog
+                .games
+                .iter()
+                .filter(|game| matches!(&game.launch_target,
+                    crate::catalog::LaunchTarget::Runner { runner_id, .. }
+                        if runner_id == FIXTURE_PLUGIN_ID))
+                .count(),
+            3
+        );
+        assert_eq!(
+            launch_error(&harness.service, "alpha"),
+            RunnerHostError::ProfileNeedsRevalidation
+        );
+    }
+
+    /// The write half of an import must not do filesystem work: a plugin that
+    /// answers with a page of ids naming nothing would otherwise hold the
+    /// catalog's write lease for a directory scan per candidate. Committing a
+    /// page whose folder has since been deleted is how that is proven — the
+    /// commit still succeeds, because it never looks.
+    #[test]
+    fn committing_a_page_touches_no_filesystem() {
+        let harness = Harness::new("no-io-commit", THREE_ROMS);
+        harness.configured_profile();
+        let catalog = harness.catalog();
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap().clone();
+        let page = crate::plugin_runtime::PluginDiscoveryPage {
+            games: Vec::new(),
+            next_cursor: Some("alpha.rom".into()),
+            complete: false,
+        };
+        let entry = crate::catalog::RunnerGameInventoryEntry {
+            profile_id: ACCEPTED_PROFILE_ID.into(),
+            game_ref: "alpha".into(),
+            title: "Alpha Quest".into(),
+            provider_id: FIXTURE_PLUGIN_ID.into(),
+            external_id: "alpha".into(),
+            game_path: fs::canonicalize(harness.games.join("alpha.rom")).unwrap(),
+            directory_grant_id: FIXTURE_SLOT.into(),
+            platform: None,
+            imported_at: Some(1),
+        };
+
+        fs::remove_dir_all(&harness.games).unwrap();
+
+        let committed = crate::runner_host::commit_resolved_page(
+            harness.service.store_for_tests(),
+            FIXTURE_PLUGIN_ID,
+            ACCEPTED_PROFILE_ID,
+            &profile.game_directories,
+            vec![entry],
+            &page,
+            1,
+            0,
+        )
+        .unwrap();
+        assert_eq!(committed.imported, 1);
+        assert_eq!(
+            harness
+                .catalog()
+                .runner_profile(ACCEPTED_PROFILE_ID)
+                .unwrap()
+                .import_cursor
+                .as_deref(),
+            Some("alpha.rom")
+        );
+    }
+
+    /// A page resolved against folders that changed underneath it is not
+    /// something to write down: those paths were checked against a grant that
+    /// no longer describes the profile.
+    #[test]
+    fn a_page_resolved_against_other_folders_is_refused() {
+        let harness = Harness::new("stale-page", THREE_ROMS);
+        harness.configured_profile();
+        let stale = vec![crate::catalog::RunnerGrantedDirectory {
+            id: FIXTURE_SLOT.into(),
+            path: harness.root.join("somewhere-else"),
+            device: None,
+            inode: None,
+        }];
+        let page = crate::plugin_runtime::PluginDiscoveryPage {
+            games: Vec::new(),
+            next_cursor: None,
+            complete: true,
+        };
+
+        assert!(
+            crate::runner_host::commit_resolved_page(
+                harness.service.store_for_tests(),
+                FIXTURE_PLUGIN_ID,
+                ACCEPTED_PROFILE_ID,
+                &stale,
+                Vec::new(),
+                &page,
+                1,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    /// A slot is joined to a profile id to key the ledger, so one carrying the
+    /// separator could spell a different profile's permission.
+    #[test]
+    fn a_folder_slot_cannot_spell_another_profiles_key() {
+        let harness = Harness::new("slot-grammar", THREE_ROMS);
+        harness.configured_profile();
+        let elsewhere = harness.root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+
+        assert_eq!(
+            harness
+                .service
+                .grant_directory(
+                    ACCEPTED_PROFILE_ID,
+                    Some("fixture-profile-2:fixture-games"),
+                    &elsewhere,
+                )
+                .unwrap_err(),
+            RunnerHostError::GrantRefused
+        );
     }
 }

@@ -714,6 +714,30 @@ pub struct WinlatorShortcutInventoryEntry {
 pub struct RunnerGrantedDirectory {
     pub id: String,
     pub path: PathBuf,
+    /// The folder's own identity when it was granted, so a launch can tell the
+    /// folder the user pointed at from another one that has since taken its
+    /// name. A canonical path answers "is this still the same place?" only
+    /// while nobody renames a directory and builds a new one where it was.
+    ///
+    /// `None` on a platform that does not publish one; the canonical path is
+    /// then the whole of the check, and it still catches a parent replaced by
+    /// a link.
+    #[serde(default)]
+    pub device: Option<u64>,
+    #[serde(default)]
+    pub inode: Option<u64>,
+}
+
+/// Which package a permission was given to.
+///
+/// A grant belongs to code, not to an identifier. The two halves are used
+/// differently on purpose: a release-signed package can be updated and the
+/// signature is what carries the consent forward, while a package that arrived
+/// unsigned has no such chain, so its own bytes are the only identity it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginPackageIdentity {
+    pub fingerprint: String,
+    pub trusted: bool,
 }
 
 /// Whether the plugin that owns a profile has accepted it.
@@ -802,6 +826,11 @@ pub struct RunnerProfile {
     /// Unix milliseconds of the last completed import page, if one has landed.
     #[serde(default)]
     pub last_imported_at: Option<u64>,
+    /// The component this profile's verdict was earned against. A package that
+    /// changed under the same identifier has not been asked about this profile,
+    /// so the status is not about it.
+    #[serde(default)]
+    pub package_fingerprint: Option<String>,
 }
 
 /// The private inventory behind a third-party runner game. `game_ref` is the
@@ -848,11 +877,43 @@ pub struct PluginGrantRecord {
     pub granted_at: u64,
     #[serde(default)]
     pub revoked_at: Option<u64>,
+    /// The component this permission was given to, and whether that package
+    /// arrived release-signed. A row that carries neither is a permission over
+    /// nothing identifiable, so resolution refuses it rather than guessing.
+    #[serde(default)]
+    pub package_fingerprint: Option<String>,
+    #[serde(default)]
+    pub package_trusted: Option<bool>,
 }
 
 impl PluginGrantRecord {
     pub fn is_active(&self) -> bool {
         self.revoked_at.is_none()
+    }
+
+    /// Whether this row still speaks for the package installed now.
+    ///
+    /// A release-signed package may be updated under the same signature and
+    /// keep what it was allowed; that is what the channel is for. A package
+    /// that arrived unsigned has no signer to vouch for a new build, so only
+    /// the exact component it was allowed to counts — which is what stops an
+    /// uninstall and a hand-loaded replacement from inheriting the folders the
+    /// user allowed something else.
+    pub fn applies_to(&self, package: &PluginPackageIdentity) -> bool {
+        match (self.package_trusted, self.package_fingerprint.as_deref()) {
+            (Some(true), Some(_)) => package.trusted,
+            (Some(false), Some(fingerprint)) => {
+                !package.trusted && fingerprint == package.fingerprint
+            }
+            _ => false,
+        }
+    }
+
+    fn identity(&self) -> Option<PluginPackageIdentity> {
+        Some(PluginPackageIdentity {
+            fingerprint: self.package_fingerprint.clone()?,
+            trusted: self.package_trusted?,
+        })
     }
 
     /// The manifest-checkable form of this row. `validate_grant` is what
@@ -1646,10 +1707,23 @@ impl Catalog {
                 } if runner_id == &profile.plugin_id && target_profile_id == profile_id
             )
         });
-        // Whatever this profile was the last to authorise stops being
-        // reachable with it, so the ledger records that rather than keeping an
-        // active row over a scope nothing resolves any more.
-        candidate.narrow_grants_to_existing(&profile.plugin_id, revoked_at)?;
+        // What this profile authorised goes with it, and nothing else does:
+        // every value here is keyed to this profile, so another profile of the
+        // same plugin keeps exactly what it was allowed.
+        for directory in &profile.game_directories {
+            candidate.revoke_plugin_scope_value(
+                &profile.plugin_id,
+                PluginCapability::FilesRead,
+                &directory_grant_key(profile_id, &directory.id),
+                revoked_at,
+            )?;
+        }
+        candidate.revoke_plugin_scope_value(
+            &profile.plugin_id,
+            PluginCapability::RunnerPrepare,
+            profile_id,
+            revoked_at,
+        )?;
         candidate.validate()?;
         *self = candidate;
         Ok(true)
@@ -1715,80 +1789,87 @@ impl Catalog {
         Ok(true)
     }
 
-    /// Narrow one plugin's grants to what the catalog still holds.
+    /// Add one value to what a capability allows, and record which package it
+    /// was allowed to.
     ///
-    /// This can only ever take away. Each row in force is intersected with the
-    /// profiles and folders that still exist, so a grant cannot silently widen
-    /// to something the user never allowed, and a row left with nothing to point
-    /// at is revoked instead of kept as an empty permission.
-    fn narrow_grants_to_existing(
-        &mut self,
-        plugin_id: &str,
-        revoked_at: u64,
-    ) -> Result<(), CatalogError> {
-        let profiles = self.runner_profiles_for_plugin(plugin_id);
-        let directories = profiles
-            .iter()
-            .flat_map(|profile| profile.game_directories.iter())
-            .map(|directory| directory.id.clone())
-            .collect::<BTreeSet<_>>();
-        let profile_ids = profiles
-            .iter()
-            .map(|profile| profile.id.clone())
-            .collect::<BTreeSet<_>>();
-        self.narrow_grant(
-            plugin_id,
-            PluginCapability::FilesRead,
-            &directories,
-            revoked_at,
-        )?;
-        self.narrow_grant(
-            plugin_id,
-            PluginCapability::RunnerPrepare,
-            &profile_ids,
-            revoked_at,
-        )
-    }
-
-    fn narrow_grant(
+    /// Granting is additive and explicit: only the folder or profile the user
+    /// just consented to moves. Nothing restates a scope from what the catalog
+    /// happens to hold, because a restatement is how a permission the user took
+    /// away comes back the next time they rename something. A value allowed to
+    /// a package this is no longer starts the scope over rather than joining it.
+    pub fn allow_plugin_scope_value(
         &mut self,
         plugin_id: &str,
         capability: PluginCapability,
-        remaining: &BTreeSet<String>,
-        revoked_at: u64,
+        value: &str,
+        package: &PluginPackageIdentity,
+        granted_at: u64,
     ) -> Result<(), CatalogError> {
-        let Some(active) = self.active_plugin_grant(plugin_id, capability) else {
-            return Ok(());
-        };
-        let (ids, granted_at) = match &active.scope {
-            CapabilityScope::DirectoryGrants(ids) | CapabilityScope::RunnerProfiles(ids) => {
-                (ids.clone(), active.granted_at)
+        let active = self.active_plugin_grant(plugin_id, capability);
+        let carried = active
+            .filter(|grant| grant.applies_to(package))
+            .map(|grant| (grant.scope.clone(), grant.granted_at));
+        let mut values = match carried.as_ref().map(|(scope, _)| scope) {
+            Some(CapabilityScope::DirectoryGrants(ids) | CapabilityScope::RunnerProfiles(ids)) => {
+                ids.clone()
             }
-            _ => return Ok(()),
+            _ => BTreeSet::new(),
         };
-        let narrowed = ids
-            .intersection(remaining)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if narrowed.len() == ids.len() {
-            return Ok(());
-        }
-        if narrowed.is_empty() {
-            self.revoke_plugin_capability(plugin_id, capability, revoked_at)?;
-            return Ok(());
-        }
-        let scope = match capability {
-            PluginCapability::FilesRead => CapabilityScope::DirectoryGrants(narrowed),
-            PluginCapability::RunnerPrepare => CapabilityScope::RunnerProfiles(narrowed),
-            _ => return Ok(()),
-        };
+        values.insert(value.to_owned());
+        let scope = scope_for(capability, values)?;
         self.grant_plugin_capability(PluginGrantRecord {
             plugin_id: plugin_id.to_owned(),
             capability,
             scope,
-            granted_at: revoked_at.max(granted_at),
+            granted_at: carried.map_or(granted_at, |(_, at)| granted_at.max(at)),
             revoked_at: None,
+            package_fingerprint: Some(package.fingerprint.clone()),
+            package_trusted: Some(package.trusted),
         })
+    }
+
+    /// Take one value out of what a capability allows. The row that was in
+    /// force is retired and a narrower one takes its place, so the ledger reads
+    /// as the history it is; a scope emptied this way is revoked outright.
+    pub fn revoke_plugin_scope_value(
+        &mut self,
+        plugin_id: &str,
+        capability: PluginCapability,
+        value: &str,
+        revoked_at: u64,
+    ) -> Result<bool, CatalogError> {
+        let Some(active) = self.active_plugin_grant(plugin_id, capability) else {
+            return Ok(false);
+        };
+        let (mut values, identity) = match (&active.scope, active.identity()) {
+            (
+                CapabilityScope::DirectoryGrants(ids) | CapabilityScope::RunnerProfiles(ids),
+                identity,
+            ) => (ids.clone(), identity),
+            _ => return Ok(false),
+        };
+        if !values.remove(value) {
+            return Ok(false);
+        }
+        if values.is_empty() {
+            return self.revoke_plugin_capability(plugin_id, capability, revoked_at);
+        }
+        let Some(identity) = identity else {
+            // A row with no package behind it resolves to nothing anyway, so
+            // there is no narrower version of it worth writing.
+            return self.revoke_plugin_capability(plugin_id, capability, revoked_at);
+        };
+        let scope = scope_for(capability, values)?;
+        self.grant_plugin_capability(PluginGrantRecord {
+            plugin_id: plugin_id.to_owned(),
+            capability,
+            scope,
+            granted_at: revoked_at,
+            revoked_at: None,
+            package_fingerprint: Some(identity.fingerprint),
+            package_trusted: Some(identity.trusted),
+        })?;
+        Ok(true)
     }
 
     /// Withdraw one granted folder without touching anything it produced. The
@@ -1806,37 +1887,34 @@ impl Catalog {
         if profile.granted_directory(directory_id).is_none() {
             return Ok(false);
         }
-        // A folder another profile of the same plugin also grants stays
-        // reachable: this revokes one profile's permission, not a slot.
-        let remaining = self
-            .runner_profiles_for_plugin(&profile.plugin_id)
-            .into_iter()
-            .flat_map(|candidate| candidate.game_directories.iter())
-            .map(|directory| directory.id.clone())
-            .filter(|id| {
-                id != directory_id
-                    || self
-                        .runner_profiles_for_plugin(&profile.plugin_id)
-                        .iter()
-                        .any(|candidate| {
-                            candidate.id != profile_id
-                                && candidate.granted_directory(directory_id).is_some()
-                        })
-            })
-            .collect::<BTreeSet<_>>();
-        let mut candidate = self.clone();
-        candidate.narrow_grant(
+        self.revoke_plugin_scope_value(
             &profile.plugin_id,
             PluginCapability::FilesRead,
-            &remaining,
+            &directory_grant_key(profile_id, directory_id),
             revoked_at,
-        )?;
-        if candidate == *self {
-            return Ok(false);
+        )
+    }
+
+    /// Everything one plugin was allowed, taken back at once. Used when a
+    /// package leaves: its profiles and the games they imported stay, and only
+    /// the permissions go.
+    #[allow(dead_code)]
+    pub fn revoke_plugin_grants(
+        &mut self,
+        plugin_id: &str,
+        revoked_at: u64,
+    ) -> Result<bool, CatalogError> {
+        let capabilities = self
+            .plugin_grants
+            .iter()
+            .filter(|grant| grant.plugin_id == plugin_id && grant.is_active())
+            .map(|grant| grant.capability)
+            .collect::<BTreeSet<_>>();
+        let mut revoked = false;
+        for capability in capabilities {
+            revoked |= self.revoke_plugin_capability(plugin_id, capability, revoked_at)?;
         }
-        candidate.validate()?;
-        *self = candidate;
-        Ok(true)
+        Ok(revoked)
     }
 
     /// Associate a pre-existing local Direct Windows executable with a Wine
@@ -2461,6 +2539,14 @@ impl RunnerProfile {
         if let Some(cursor) = self.import_cursor.as_deref() {
             validate_opaque_runner_token("import cursor", cursor, MAX_RUNNER_CURSOR_LENGTH)?;
         }
+        if let Some(fingerprint) = self.package_fingerprint.as_deref()
+            && (fingerprint.len() != 64
+                || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(CatalogError::Invalid(
+                "runner profile package fingerprint must be a SHA-256 digest".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -2516,6 +2602,27 @@ impl PluginGrantRecord {
                 "a plugin grant cannot be revoked before it was granted".into(),
             ));
         }
+        // A retired row is history and may predate this rule; a row still in
+        // force has to say which package it belongs to, or it is a permission
+        // that would follow an identifier rather than the code behind it.
+        if self.is_active() {
+            let fingerprint = self.package_fingerprint.as_deref().ok_or_else(|| {
+                CatalogError::Invalid(
+                    "a plugin grant in force must record the package it was given to".into(),
+                )
+            })?;
+            if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CatalogError::Invalid(
+                    "a plugin grant's package fingerprint must be a SHA-256 digest".into(),
+                ));
+            }
+            if self.package_trusted.is_none() {
+                return Err(CatalogError::Invalid(
+                    "a plugin grant in force must record how its package arrived".into(),
+                ));
+            }
+        }
         // The pairing is checked again against the manifest before any
         // invocation. It is checked here too so a hand-edited catalog cannot
         // persist a shape the resolver has never been asked to reason about.
@@ -2538,6 +2645,35 @@ impl PluginGrantRecord {
             ));
         }
         Ok(())
+    }
+}
+
+/// The value a directory grant carries in its scope: `<profile id>:<slot>`.
+///
+/// Not the slot alone, because the slot is the component's and not the user's.
+/// A plugin hard-codes the id it asks `host-files` for, so every profile it owns
+/// names its folder the same way; keyed by the slot, one profile's permission
+/// answers for another's and revoking a folder on one leaves it reachable
+/// through the other. Both halves are opaque tokens, so the pair is one too.
+pub fn directory_grant_key(profile_id: &str, slot: &str) -> String {
+    format!("{profile_id}:{slot}")
+}
+
+/// The slot half of a key, if it belongs to this profile.
+pub fn directory_grant_slot<'key>(key: &'key str, profile_id: &str) -> Option<&'key str> {
+    key.strip_prefix(profile_id)?.strip_prefix(':')
+}
+
+fn scope_for(
+    capability: PluginCapability,
+    values: BTreeSet<String>,
+) -> Result<CapabilityScope, CatalogError> {
+    match capability {
+        PluginCapability::FilesRead => Ok(CapabilityScope::DirectoryGrants(values)),
+        PluginCapability::RunnerPrepare => Ok(CapabilityScope::RunnerProfiles(values)),
+        _ => Err(CatalogError::Invalid(
+            "that capability is not scoped by value".into(),
+        )),
     }
 }
 
@@ -3124,7 +3260,11 @@ pub(crate) fn resolve_executable(path: &Path) -> Result<PathBuf, CatalogError> {
             .and_then(|value| value.into_dictionary())
             .and_then(|dictionary| dictionary.get("CFBundleExecutable").cloned())
             .and_then(|value| value.into_string());
-        if let Some(executable_name) = executable_name {
+        // `CFBundleExecutable` is a string in a file the host does not own, and
+        // joining it is how `../../../bin/sh` — or an absolute path, which
+        // `join` substitutes outright — becomes the program Orivo starts. A
+        // bundle names one ordinary entry of its own `MacOS` folder or nothing.
+        if let Some(executable_name) = executable_name.filter(|name| is_single_component(name)) {
             let executable = path.join("Contents/MacOS").join(executable_name);
             if executable.is_file() {
                 return Ok(executable);
@@ -3136,6 +3276,15 @@ pub(crate) fn resolve_executable(path: &Path) -> Result<PathBuf, CatalogError> {
         "could not resolve an executable from {}",
         path.display()
     )))
+}
+
+/// One ordinary path component: no separator, no root, no `.` or `..`, and
+/// nothing a platform reads as a drive or a stream.
+fn is_single_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+        && !value.contains(['/', '\\', ':'])
 }
 
 fn bundle_display_name(path: &Path) -> Option<String> {
@@ -4904,6 +5053,8 @@ mod tests {
             game_directories: vec![RunnerGrantedDirectory {
                 id: "fixture-games".into(),
                 path: PathBuf::from("/Games/Roms"),
+                device: None,
+                inode: None,
             }],
             settings: RunnerProfileSettings::default(),
             status: RunnerProfileStatus::Valid,
@@ -4912,6 +5063,7 @@ mod tests {
             import_cursor: None,
             import_complete: false,
             last_imported_at: None,
+            package_fingerprint: None,
         }
     }
 
@@ -4961,7 +5113,17 @@ mod tests {
         }
     }
 
+    /// A release-signed package, which is the ordinary case and the one whose
+    /// grants survive an update.
+    fn package_identity() -> PluginPackageIdentity {
+        PluginPackageIdentity {
+            fingerprint: "a".repeat(64),
+            trusted: true,
+        }
+    }
+
     fn files_grant(ids: &[&str], granted_at: u64) -> PluginGrantRecord {
+        let identity = package_identity();
         PluginGrantRecord {
             plugin_id: FIXTURE_PLUGIN.into(),
             capability: PluginCapability::FilesRead,
@@ -4970,6 +5132,8 @@ mod tests {
             ),
             granted_at,
             revoked_at: None,
+            package_fingerprint: Some(identity.fingerprint),
+            package_trusted: Some(identity.trusted),
         }
     }
 
@@ -5377,7 +5541,13 @@ mod tests {
     fn revoking_one_folder_leaves_the_profile_and_its_games_intact() {
         let mut catalog = catalog_with_runner_game();
         catalog
-            .grant_plugin_capability(files_grant(&["fixture-games"], 10))
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                &directory_grant_key("fixture-profile-1", "fixture-games"),
+                &package_identity(),
+                10,
+            )
             .unwrap();
 
         assert!(
@@ -5402,23 +5572,256 @@ mod tests {
         assert_eq!(catalog.games.len(), 1);
     }
 
-    /// Narrowing can only ever take away. A folder another profile of the same
-    /// plugin still grants stays reachable when this one's profile is deleted.
+    /// The slot is the component's, so both profiles name their folder the
+    /// same way. Keyed by profile *and* slot, revoking one says nothing about
+    /// the other — which is the whole point of the composite key.
     #[test]
-    fn deleting_a_profile_narrows_the_ledger_to_what_is_left() {
+    fn revoking_one_profiles_folder_does_not_touch_another_profiles() {
         let mut catalog = catalog_with_runner_game();
         let second = RunnerProfile {
             id: "fixture-profile-2".into(),
             game_directories: vec![RunnerGrantedDirectory {
-                id: "other-games".into(),
+                id: "fixture-games".into(),
                 path: PathBuf::from("/Games/MoreRoms"),
+                device: None,
+                inode: None,
             }],
             ..runner_profile()
         };
         catalog.upsert_runner_profile(second).unwrap();
+        for profile in ["fixture-profile-1", "fixture-profile-2"] {
+            catalog
+                .allow_plugin_scope_value(
+                    FIXTURE_PLUGIN,
+                    PluginCapability::FilesRead,
+                    &directory_grant_key(profile, "fixture-games"),
+                    &package_identity(),
+                    10,
+                )
+                .unwrap();
+        }
+
+        assert!(
+            catalog
+                .revoke_runner_directory("fixture-profile-1", "fixture-games", 40)
+                .unwrap()
+        );
+        match &catalog
+            .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+            .expect("the other profile keeps what it was allowed")
+            .scope
+        {
+            CapabilityScope::DirectoryGrants(keys) => assert_eq!(
+                keys.iter().cloned().collect::<Vec<_>>(),
+                vec![directory_grant_key("fixture-profile-2", "fixture-games")]
+            ),
+            scope => panic!("unexpected scope {scope:?}"),
+        }
+    }
+
+    /// Allowing something is about that one thing. Nothing here restates a
+    /// scope from what the catalog holds, so a folder taken away stays away.
+    #[test]
+    fn allowing_one_value_does_not_bring_back_another() {
+        let mut catalog = catalog_with_runner_game();
+        let identity = package_identity();
+        let first = directory_grant_key("fixture-profile-1", "fixture-games");
+        let second = directory_grant_key("fixture-profile-1", "extra");
         catalog
-            .grant_plugin_capability(files_grant(&["fixture-games", "other-games"], 10))
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                &first,
+                &identity,
+                10,
+            )
             .unwrap();
+        catalog
+            .revoke_plugin_scope_value(FIXTURE_PLUGIN, PluginCapability::FilesRead, &first, 20)
+            .unwrap();
+        catalog
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                &second,
+                &identity,
+                30,
+            )
+            .unwrap();
+
+        match &catalog
+            .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+            .unwrap()
+            .scope
+        {
+            CapabilityScope::DirectoryGrants(keys) => {
+                assert_eq!(keys.iter().cloned().collect::<Vec<_>>(), vec![second]);
+            }
+            scope => panic!("unexpected scope {scope:?}"),
+        }
+    }
+
+    /// A permission given to one package does not join one given to another.
+    /// The scope starts over rather than accumulating across an identity it
+    /// never belonged to.
+    #[test]
+    fn a_value_allowed_to_another_package_does_not_join_this_ones_scope() {
+        let mut catalog = Catalog::default();
+        let signed = package_identity();
+        let hand_loaded = PluginPackageIdentity {
+            fingerprint: "b".repeat(64),
+            trusted: false,
+        };
+        catalog
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                "one",
+                &signed,
+                10,
+            )
+            .unwrap();
+        catalog
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                "two",
+                &hand_loaded,
+                20,
+            )
+            .unwrap();
+
+        let active = catalog
+            .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::FilesRead)
+            .unwrap();
+        assert!(!active.applies_to(&signed));
+        assert!(active.applies_to(&hand_loaded));
+        match &active.scope {
+            CapabilityScope::DirectoryGrants(keys) => {
+                assert_eq!(keys.iter().cloned().collect::<Vec<_>>(), vec!["two"]);
+            }
+            scope => panic!("unexpected scope {scope:?}"),
+        }
+    }
+
+    /// A signed package may be updated under its signature and keep what it
+    /// was allowed. One that arrived unsigned has no signer to vouch for a new
+    /// build, so only the bytes it was allowed to count.
+    #[test]
+    fn a_grant_follows_the_signature_it_was_given_under() {
+        let signed = package_identity();
+        let updated = PluginPackageIdentity {
+            fingerprint: "c".repeat(64),
+            trusted: true,
+        };
+        let hand_loaded = PluginPackageIdentity {
+            fingerprint: "b".repeat(64),
+            trusted: false,
+        };
+        let grant = files_grant(&["one"], 10);
+        assert!(grant.applies_to(&signed));
+        assert!(grant.applies_to(&updated));
+        assert!(!grant.applies_to(&hand_loaded));
+
+        let unsigned_grant = PluginGrantRecord {
+            package_fingerprint: Some(hand_loaded.fingerprint.clone()),
+            package_trusted: Some(false),
+            ..files_grant(&["one"], 10)
+        };
+        assert!(unsigned_grant.applies_to(&hand_loaded));
+        assert!(!unsigned_grant.applies_to(&signed));
+        assert!(!unsigned_grant.applies_to(&PluginPackageIdentity {
+            fingerprint: "d".repeat(64),
+            trusted: false,
+        }));
+    }
+
+    #[test]
+    fn a_grant_in_force_must_say_which_package_it_belongs_to() {
+        let mut catalog = Catalog::default();
+        let anonymous = PluginGrantRecord {
+            package_fingerprint: None,
+            package_trusted: None,
+            ..files_grant(&["one"], 10)
+        };
+
+        assert!(
+            catalog
+                .grant_plugin_capability(anonymous)
+                .unwrap_err()
+                .to_string()
+                .contains("record the package it was given to")
+        );
+    }
+
+    /// Every permission goes; every profile and every game stays. That is the
+    /// plan's promise 6 for a plugin that is removed.
+    #[test]
+    fn revoking_a_plugins_grants_leaves_its_profiles_and_games() {
+        let mut catalog = catalog_with_runner_game();
+        catalog
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::FilesRead,
+                &directory_grant_key("fixture-profile-1", "fixture-games"),
+                &package_identity(),
+                10,
+            )
+            .unwrap();
+        catalog
+            .allow_plugin_scope_value(
+                FIXTURE_PLUGIN,
+                PluginCapability::RunnerPrepare,
+                "fixture-profile-1",
+                &package_identity(),
+                10,
+            )
+            .unwrap();
+
+        assert!(catalog.revoke_plugin_grants(FIXTURE_PLUGIN, 50).unwrap());
+        assert!(catalog.plugin_grants.iter().all(|grant| !grant.is_active()));
+        assert_eq!(catalog.runner_profiles.len(), 1);
+        assert_eq!(catalog.runner_inventory.len(), 1);
+        assert_eq!(catalog.games.len(), 1);
+    }
+
+    /// Deleting a profile takes back what that profile authorised, and only
+    /// that: another profile of the same plugin keeps its own folder even
+    /// though both named it under the same slot.
+    #[test]
+    fn deleting_a_profile_takes_back_only_what_it_authorised() {
+        let mut catalog = catalog_with_runner_game();
+        let second = RunnerProfile {
+            id: "fixture-profile-2".into(),
+            game_directories: vec![RunnerGrantedDirectory {
+                id: "fixture-games".into(),
+                path: PathBuf::from("/Games/MoreRoms"),
+                device: None,
+                inode: None,
+            }],
+            ..runner_profile()
+        };
+        catalog.upsert_runner_profile(second).unwrap();
+        for profile in ["fixture-profile-1", "fixture-profile-2"] {
+            catalog
+                .allow_plugin_scope_value(
+                    FIXTURE_PLUGIN,
+                    PluginCapability::FilesRead,
+                    &directory_grant_key(profile, "fixture-games"),
+                    &package_identity(),
+                    10,
+                )
+                .unwrap();
+            catalog
+                .allow_plugin_scope_value(
+                    FIXTURE_PLUGIN,
+                    PluginCapability::RunnerPrepare,
+                    profile,
+                    &package_identity(),
+                    10,
+                )
+                .unwrap();
+        }
 
         assert!(
             catalog
@@ -5433,8 +5836,22 @@ mod tests {
             .expect("the other profile's folder is still allowed")
             .scope
         {
-            CapabilityScope::DirectoryGrants(ids) => {
-                assert_eq!(ids.iter().cloned().collect::<Vec<_>>(), vec!["other-games"]);
+            CapabilityScope::DirectoryGrants(keys) => assert_eq!(
+                keys.iter().cloned().collect::<Vec<_>>(),
+                vec![directory_grant_key("fixture-profile-2", "fixture-games")]
+            ),
+            scope => panic!("unexpected scope {scope:?}"),
+        }
+        match &catalog
+            .active_plugin_grant(FIXTURE_PLUGIN, PluginCapability::RunnerPrepare)
+            .expect("the other profile may still be prepared")
+            .scope
+        {
+            CapabilityScope::RunnerProfiles(ids) => {
+                assert_eq!(
+                    ids.iter().cloned().collect::<Vec<_>>(),
+                    vec!["fixture-profile-2"]
+                );
             }
             scope => panic!("unexpected scope {scope:?}"),
         }
@@ -5452,5 +5869,43 @@ mod tests {
                 .to_string()
                 .contains("granted twice at once")
         );
+    }
+    /// `CFBundleExecutable` is a string inside a file the host does not own. A
+    /// bundle that names its executable with a path walks straight out of
+    /// itself, and the only thing that stops it is refusing anything but a
+    /// single ordinary component.
+    #[test]
+    fn a_bundle_naming_its_executable_outside_itself_is_refused() {
+        let root = temporary_migration_directory("bundle-escape");
+        let bundle = root.join("Escape.app");
+        fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        fs::write(bundle.join("Contents/MacOS/Escape"), b"").unwrap();
+        for name in ["../../../bin/sh", "/bin/sh", "..", "sub/dir", ""] {
+            fs::write(
+                bundle.join("Contents/Info.plist"),
+                format!(
+                    "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+                     <key>CFBundleExecutable</key><string>{name}</string></dict></plist>"
+                ),
+            )
+            .unwrap();
+            assert!(
+                resolve_executable(&bundle).is_err(),
+                "{name} should not resolve out of the bundle"
+            );
+        }
+
+        // The ordinary case still works.
+        fs::write(
+            bundle.join("Contents/Info.plist"),
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>Escape</string></dict></plist>",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_executable(&bundle).unwrap(),
+            bundle.join("Contents/MacOS/Escape")
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 }

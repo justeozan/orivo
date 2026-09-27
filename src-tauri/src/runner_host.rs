@@ -28,8 +28,9 @@
 //! uses their public doors.
 
 use crate::catalog::{
-    Catalog, CatalogError, Game, GameSource, LaunchTarget, PluginGrantRecord,
-    RunnerGameInventoryEntry, RunnerProfile, RunnerProfileStatus,
+    Catalog, CatalogError, Game, GameSource, LaunchTarget, PluginPackageIdentity,
+    RunnerGameInventoryEntry, RunnerProfile, RunnerProfileStatus, directory_grant_key,
+    directory_grant_slot,
 };
 use crate::plugin_manifest::{
     CapabilityGrant, CapabilityScope, CompatibleVersionInfo, HostCompatibility,
@@ -106,6 +107,16 @@ pub enum RunnerHostError {
     /// the plugin stopped declaring the capability, or its scope grammar
     /// changed under an update.
     GrantRefused,
+    /// The grant was given to a package this is no longer. Permissions belong
+    /// to the code the user allowed, not to the identifier it installed under.
+    GrantStale,
+    /// The profile was accepted by a build of the plugin that is not the one
+    /// installed now, so its verdict says nothing about this one.
+    ProfileNeedsRevalidation,
+    /// The folder this game lives in cannot be opened right now — an external
+    /// drive, most likely. Nothing is wrong with the permission and nothing
+    /// else in the library is affected.
+    DirectoryUnavailable,
     /// The emulation application the profile names is gone, is not a file, or
     /// is not executable.
     ApplicationUnavailable,
@@ -173,6 +184,18 @@ impl std::fmt::Display for RunnerHostError {
                 formatter,
                 "This plugin's permissions no longer match what its package declares. Set it up again."
             ),
+            Self::GrantStale => write!(
+                formatter,
+                "This plugin is not the package you allowed. Allow its folders again to keep using it."
+            ),
+            Self::ProfileNeedsRevalidation => write!(
+                formatter,
+                "This plugin changed since the profile was set up. Open its settings so Orivo can check the profile again."
+            ),
+            Self::DirectoryUnavailable => write!(
+                formatter,
+                "The folder this game lives in is not available right now. Reconnect it and try again; your other games are unaffected."
+            ),
             Self::ApplicationUnavailable => write!(
                 formatter,
                 "The emulator this profile points at is missing or cannot be started. Choose it again."
@@ -235,6 +258,7 @@ pub struct RunnerPackage {
     runtime: PluginRuntime,
     manifest: ValidatedPluginManifest,
     prepared: PreparedComponent,
+    identity: PluginPackageIdentity,
 }
 
 impl std::fmt::Debug for RunnerPackage {
@@ -320,6 +344,10 @@ impl RunnerPackage {
             return Err(RunnerHostError::NotReady(health.message));
         }
         Ok(Self {
+            identity: PluginPackageIdentity {
+                fingerprint: sha256,
+                trusted: package_is_trusted(plugin_root, plugin_id),
+            },
             runtime: runtime.clone(),
             manifest,
             prepared,
@@ -328,6 +356,13 @@ impl RunnerPackage {
 
     pub fn plugin_id(&self) -> &str {
         self.manifest.id()
+    }
+
+    /// Which code this is, and whether it arrived release-signed. Every
+    /// permission the user gives is recorded against this, so a package that
+    /// takes an installed identifier later does not inherit it.
+    pub fn identity(&self) -> &PluginPackageIdentity {
+        &self.identity
     }
 
     pub fn manifest(&self) -> &ValidatedPluginManifest {
@@ -413,44 +448,75 @@ fn map_runtime_error(error: PluginRuntimeError) -> RunnerHostError {
 // Grants
 // ---------------------------------------------------------------------------
 
-/// The grants in force for one plugin *on one profile*.
+/// What a plugin may reach on one profile, right now.
 ///
-/// Resolving per profile is what makes the ledger usable at all: two profiles of
-/// the same plugin name their folders under the same slot — the v1 `runner`
-/// world gives a component no way to declare which slots it will ask for, so it
-/// hard-codes them — and a grant row that listed both would resolve to whichever
-/// folder came first. Narrowing the persisted scope to the profile being invoked
-/// keeps the answer unambiguous, and it means an invocation for one profile can
-/// never reach another profile's folder.
+/// Resolving per profile is what makes the ledger usable at all: two profiles
+/// of the same plugin name their folders under the same slot — the v1 `runner`
+/// world gives a component no way to declare the slots it will ask for, so it
+/// hard-codes them — which is why the ledger keys a folder by profile *and*
+/// slot and this translates back before the plugin sees anything.
+#[derive(Debug)]
+pub struct ResolvedProfileGrants {
+    pub grants: PluginGrants,
+    /// Slots this profile grants and the plugin may currently read.
+    pub granted: BTreeSet<String>,
+    /// Slots the host could not open. An unplugged drive is not a permissions
+    /// problem and must not read like one, so it is reported apart from every
+    /// other reason a folder might be out of reach.
+    pub unavailable: BTreeSet<String>,
+    /// Whether a permission was skipped because it belongs to a package this
+    /// is no longer. It changes what the user is told, not what is allowed.
+    pub stale: bool,
+}
+
 pub fn resolve_profile_grants(
     catalog: &Catalog,
-    manifest: &ValidatedPluginManifest,
+    package: &RunnerPackage,
     profile: &RunnerProfile,
-) -> Result<PluginGrants, RunnerHostError> {
-    let directories = profile
-        .game_directories
-        .iter()
-        .map(|directory| (directory.id.clone(), directory.path.clone()))
-        .collect::<BTreeMap<_, _>>();
+) -> Result<ResolvedProfileGrants, RunnerHostError> {
+    let mut directories = BTreeMap::new();
+    let mut unavailable = BTreeSet::new();
+    for directory in &profile.game_directories {
+        match verify_granted_directory(directory) {
+            Ok(path) => {
+                directories.insert(directory.id.clone(), path);
+            }
+            // Both reasons keep the folder out of the plugin's reach. They are
+            // told apart at the point of use, where the difference between "not
+            // plugged in" and "not the folder you allowed" is the whole message.
+            Err(_) => {
+                unavailable.insert(directory.id.clone());
+            }
+        }
+    }
+
+    let mut stale = false;
     let mut grants = Vec::new();
+    let mut granted = BTreeSet::new();
     for record in catalog
         .plugin_grants
         .iter()
         .filter(|record| record.plugin_id == profile.plugin_id && record.is_active())
     {
+        if !record.applies_to(package.identity()) {
+            stale = true;
+            continue;
+        }
         let grant = record.to_capability_grant();
         match (&grant.capability, &grant.scope) {
-            (PluginCapability::FilesRead, CapabilityScope::DirectoryGrants(ids)) => {
-                let narrowed = ids
+            (PluginCapability::FilesRead, CapabilityScope::DirectoryGrants(keys)) => {
+                let slots = keys
                     .iter()
-                    .filter(|id| directories.contains_key(*id))
-                    .cloned()
+                    .filter_map(|key| directory_grant_slot(key, &profile.id))
+                    .filter(|slot| directories.contains_key(*slot))
+                    .map(str::to_owned)
                     .collect::<BTreeSet<_>>();
-                if narrowed.is_empty() {
+                if slots.is_empty() {
                     continue;
                 }
+                granted = slots.clone();
                 grants.push(CapabilityGrant {
-                    scope: CapabilityScope::DirectoryGrants(narrowed),
+                    scope: CapabilityScope::DirectoryGrants(slots),
                     ..grant
                 });
             }
@@ -466,61 +532,61 @@ pub fn resolve_profile_grants(
             _ => grants.push(grant),
         }
     }
-    PluginGrants::resolve(manifest, &grants, &directories)
-        .map_err(|_| RunnerHostError::GrantRefused)
+    let grants = PluginGrants::resolve(package.manifest(), &grants, &directories)
+        .map_err(|_| RunnerHostError::GrantRefused)?;
+    Ok(ResolvedProfileGrants {
+        grants,
+        granted,
+        unavailable,
+        stale,
+    })
 }
 
-/// Whether one granted folder is currently readable by its plugin. A launch
-/// asks this before it resolves a file: the folders stay on the profile when a
-/// grant is withdrawn — the games inside them are still the user's — so the
-/// ledger, not the profile, is what says whether Orivo may still reach in.
-pub fn directory_grant_is_active(catalog: &Catalog, plugin_id: &str, directory_id: &str) -> bool {
+impl ResolvedProfileGrants {
+    /// The refusal that fits: a permission that belongs to another package
+    /// reads differently from one the user simply has not given.
+    fn missing(&self) -> RunnerHostError {
+        if self.stale {
+            RunnerHostError::GrantStale
+        } else {
+            RunnerHostError::GrantMissing
+        }
+    }
+}
+
+/// Whether one granted folder is currently readable by its plugin, as the
+/// ledger sees it. The Plugins panel asks this to draw a folder as allowed or
+/// not; the launch path asks the resolved grants instead, because by then the
+/// folder has to have been opened as well as allowed.
+pub fn directory_grant_is_active(
+    catalog: &Catalog,
+    plugin_id: &str,
+    profile_id: &str,
+    slot: &str,
+) -> bool {
+    let key = directory_grant_key(profile_id, slot);
     catalog
         .active_plugin_grant(plugin_id, PluginCapability::FilesRead)
         .is_some_and(|grant| match &grant.scope {
-            CapabilityScope::DirectoryGrants(ids) => ids.contains(directory_id),
+            CapabilityScope::DirectoryGrants(keys) => keys.contains(&key),
             _ => false,
         })
 }
 
-/// The grant rows that a newly granted folder implies, as one statement of what
-/// the plugin may now reach. Granting is always complete rather than additive,
-/// so a row can never drift out of step with the profiles it scopes.
-pub fn directory_grant_records(
-    catalog: &Catalog,
-    plugin_id: &str,
-    granted_at: u64,
-) -> Vec<PluginGrantRecord> {
-    let profiles = catalog.runner_profiles_for_plugin(plugin_id);
-    let directories = profiles
-        .iter()
-        .flat_map(|profile| profile.game_directories.iter())
-        .map(|directory| directory.id.clone())
-        .collect::<BTreeSet<_>>();
-    let profile_ids = profiles
-        .iter()
-        .map(|profile| profile.id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut records = Vec::new();
-    if !directories.is_empty() {
-        records.push(PluginGrantRecord {
-            plugin_id: plugin_id.to_owned(),
-            capability: PluginCapability::FilesRead,
-            scope: CapabilityScope::DirectoryGrants(directories),
-            granted_at,
-            revoked_at: None,
-        });
-    }
-    if !profile_ids.is_empty() {
-        records.push(PluginGrantRecord {
-            plugin_id: plugin_id.to_owned(),
-            capability: PluginCapability::RunnerPrepare,
-            scope: CapabilityScope::RunnerProfiles(profile_ids),
-            granted_at,
-            revoked_at: None,
-        });
-    }
-    records
+/// The marker the installer writes beside a package it accepted with the
+/// release key.
+///
+/// Reading it here duplicates a path `plugin_installer` owns, which is a seam
+/// that should be an accessor on its service rather than a shared constant.
+/// The layout is host-owned state about *how* a package arrived and lives
+/// outside the plugin's own directory, so a package cannot declare itself
+/// trusted by writing one.
+fn package_is_trusted(plugin_root: &Path, plugin_id: &str) -> bool {
+    plugin_root
+        .join(".staging")
+        .join("trusted")
+        .join(plugin_id)
+        .is_file()
 }
 
 // ---------------------------------------------------------------------------
@@ -540,9 +606,9 @@ pub fn validate_profile_with_plugin(
     profile: &RunnerProfile,
     cancelled: &AtomicBool,
 ) -> Result<PluginProfileValidation, RunnerHostError> {
-    let grants = resolve_profile_grants(catalog, package.manifest(), profile)?;
+    let resolved = resolve_profile_grants(catalog, package, profile)?;
     let response = package.call(
-        &grants,
+        &resolved.grants,
         PluginRequest::ValidateProfile {
             profile_id: profile.id.clone(),
             display_name: profile.display_name.clone(),
@@ -573,13 +639,20 @@ pub fn apply_profile_validation(profile: &mut RunnerProfile, validation: &Plugin
 
 fn usable_profile<'catalog>(
     catalog: &'catalog Catalog,
-    plugin_id: &str,
+    package: &RunnerPackage,
     profile_id: &str,
 ) -> Result<&'catalog RunnerProfile, RunnerHostError> {
     let profile = catalog
         .runner_profile(profile_id)
-        .filter(|profile| profile.plugin_id == plugin_id)
+        .filter(|profile| profile.plugin_id == package.plugin_id())
         .ok_or(RunnerHostError::UnknownProfile)?;
+    // A verdict is about the component that gave it. A package that changed
+    // under the same identifier has never been asked about this profile, so
+    // its `Valid` says nothing and the profile waits for a fresh answer rather
+    // than launching on an old one.
+    if profile.package_fingerprint.as_deref() != Some(package.identity().fingerprint.as_str()) {
+        return Err(RunnerHostError::ProfileNeedsRevalidation);
+    }
     match profile.status {
         RunnerProfileStatus::Valid => {}
         // The plugin's own words are the actionable half of this refusal, so
@@ -660,18 +733,92 @@ pub fn resolve_game_file(
 /// weeks old, the file may have become a symbolic link out of the folder, and
 /// the grant may have been withdrawn since. All three are asked again here.
 pub fn reverify_game_file(
-    catalog: &Catalog,
+    resolved: &ResolvedProfileGrants,
     profile: &RunnerProfile,
     entry: &RunnerGameInventoryEntry,
 ) -> Result<PathBuf, RunnerHostError> {
-    if !directory_grant_is_active(catalog, &profile.plugin_id, &entry.directory_grant_id) {
-        return Err(RunnerHostError::GrantMissing);
-    }
     let directory = profile
         .granted_directory(&entry.directory_grant_id)
         .ok_or(RunnerHostError::GrantMissing)?;
-    let root = fs::canonicalize(&directory.path).map_err(|_| RunnerHostError::GameOutsideScope)?;
+    // The order is the message. A folder that is simply not plugged in is not
+    // a permissions problem, and telling a user to allow a folder again when
+    // the drive is in a drawer sends them looking in the wrong place.
+    let root = verify_granted_directory(directory)?;
+    if !resolved.granted.contains(&entry.directory_grant_id) {
+        return Err(resolved.missing());
+    }
     canonical_file_inside(&entry.game_path, &root)
+}
+
+/// The folder the user allowed, or nothing.
+///
+/// Two questions, because one answer is not enough. Re-canonicalising catches a
+/// parent swapped for a link, which would otherwise move the whole grant
+/// somewhere else while every later check kept agreeing with itself. The
+/// folder's own identity catches the case with no link in it at all: the
+/// directory renamed away and an ordinary one built where it stood, which
+/// canonicalises to exactly the same path.
+fn verify_granted_directory(
+    directory: &crate::catalog::RunnerGrantedDirectory,
+) -> Result<PathBuf, RunnerHostError> {
+    let canonical =
+        fs::canonicalize(&directory.path).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+    if canonical != directory.path {
+        return Err(RunnerHostError::GameOutsideScope);
+    }
+    let metadata = fs::metadata(&canonical).map_err(|_| RunnerHostError::DirectoryUnavailable)?;
+    if !metadata.is_dir() {
+        return Err(RunnerHostError::GameOutsideScope);
+    }
+    if !directory_identity_matches(directory, &metadata) {
+        return Err(RunnerHostError::GameOutsideScope);
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn directory_identity_matches(
+    directory: &crate::catalog::RunnerGrantedDirectory,
+    metadata: &fs::Metadata,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    // A grant written before the identity was recorded has only its canonical
+    // path to stand on. That is the weaker half of the check, not none of it.
+    directory
+        .device
+        .is_none_or(|device| device == metadata.dev())
+        && directory.inode.is_none_or(|inode| inode == metadata.ino())
+}
+
+/// Windows publishes a volume serial and a file index, but only through a
+/// handle and an unstable API. Until that is worth the unsafe block, the
+/// canonical-path half of the check stands alone there.
+#[cfg(not(unix))]
+fn directory_identity_matches(
+    _directory: &crate::catalog::RunnerGrantedDirectory,
+    _metadata: &fs::Metadata,
+) -> bool {
+    true
+}
+
+/// The identity to record when a folder is granted, so a later launch has
+/// something to compare against.
+pub fn directory_identity(path: &Path) -> (Option<u64>, Option<u64>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        match fs::metadata(path) {
+            Ok(metadata) => (Some(metadata.dev()), Some(metadata.ino())),
+            Err(_) => (None, None),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        (None, None)
+    }
 }
 
 /// A regular file, not a link, strictly inside `root` after canonicalisation.
@@ -780,22 +927,25 @@ pub fn prepare_runner_launch(
     game_ref: &str,
     cancelled: &AtomicBool,
 ) -> Result<PreparedRunnerLaunch, RunnerHostError> {
-    let profile = usable_profile(catalog, package.plugin_id(), profile_id)?;
+    let profile = usable_profile(catalog, package, profile_id)?;
     let entry = catalog
         .runner_inventory_entry(profile_id, game_ref)
         .ok_or(RunnerHostError::InventoryMissing)?;
-    let grants = resolve_profile_grants(catalog, package.manifest(), profile)?;
+    let resolved = resolve_profile_grants(catalog, package, profile)?;
+    // The file first, because "that drive is not plugged in" and "you took this
+    // folder away" are different things to be told, and only one of them is
+    // about permissions.
+    let game_file = reverify_game_file(&resolved, profile, entry)?;
     // `runner.prepare` is what the user agreed to when they created the profile.
     // Without it the plugin is installed and identified and nothing more, so the
     // host does not ask it to prepare anything.
-    if !grants.holds(PluginCapability::RunnerPrepare) {
-        return Err(RunnerHostError::GrantMissing);
+    if !resolved.grants.holds(PluginCapability::RunnerPrepare) {
+        return Err(resolved.missing());
     }
-    let game_file = reverify_game_file(catalog, profile, entry)?;
     let application = resolve_application(profile)?;
 
     let response = package.call(
-        &grants,
+        &resolved.grants,
         PluginRequest::PrepareLaunch {
             profile_id: profile_id.to_owned(),
             game_reference: game_ref.to_owned(),
@@ -954,13 +1104,19 @@ pub fn import_runner_games(
     mut on_progress: impl FnMut(RunnerImportProgress),
 ) -> Result<RunnerImportOutcome, RunnerHostError> {
     let catalog = store.snapshot()?;
-    let profile = usable_profile(&catalog, package.plugin_id(), profile_id)?.clone();
-    let grants = resolve_profile_grants(&catalog, package.manifest(), &profile)?;
+    let profile = usable_profile(&catalog, package, profile_id)?.clone();
+    let resolved = resolve_profile_grants(&catalog, package, &profile)?;
     // Discovery reads the granted folder through `host-files`, so without the
-    // permission in force there is nothing for the plugin to page through.
-    if !grants.holds(PluginCapability::FilesRead) {
-        return Err(RunnerHostError::GrantMissing);
+    // permission in force there is nothing for the plugin to page through. A
+    // profile whose only folder is unplugged says so rather than reporting a
+    // permission it still has.
+    if !resolved.grants.holds(PluginCapability::FilesRead) {
+        if resolved.granted.is_empty() && !resolved.unavailable.is_empty() && !resolved.stale {
+            return Err(RunnerHostError::DirectoryUnavailable);
+        }
+        return Err(resolved.missing());
     }
+    let grants = &resolved.grants;
 
     // A finished import starts again from the beginning: its cursor is spent,
     // and re-walking is how a library that gained files is noticed at all.
@@ -980,7 +1136,7 @@ pub fn import_runner_games(
         }
         let page = discover_page(
             package,
-            &grants,
+            grants,
             profile_id,
             cursor.clone(),
             limits.page_size,
@@ -993,7 +1149,21 @@ pub fn import_runner_games(
             return Err(RunnerHostError::ImportStalled);
         }
 
-        let committed = commit_page(store, package.plugin_id(), profile_id, &page)?;
+        let imported_at = unix_millis();
+        // Resolved before the lease is taken, and the profile's folders travel
+        // with the result so the commit can refuse a page resolved against a
+        // grant that has since changed.
+        let (entries, skipped) = resolve_page_candidates(&profile, profile_id, &page, imported_at);
+        let committed = commit_resolved_page(
+            store,
+            package.plugin_id(),
+            profile_id,
+            &profile.game_directories,
+            entries,
+            &page,
+            imported_at,
+            skipped,
+        )?;
         progress.pages += 1;
         progress.imported += committed.imported;
         progress.refreshed += committed.refreshed;
@@ -1045,22 +1215,68 @@ fn discover_page(
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct CommittedPage {
-    imported: usize,
-    refreshed: usize,
-    skipped: usize,
+pub struct CommittedPage {
+    pub imported: usize,
+    pub refreshed: usize,
+    pub skipped: usize,
 }
 
 /// One page, one transaction. The cursor moves with the candidates it describes,
 /// so a crash between two pages can only ever lose the page that was in flight.
-fn commit_page(
+/// Turn a page of candidates into the entries the catalog would hold.
+///
+/// This walks granted folders, which is why it is deliberately not part of the
+/// commit: a plugin that answers with fifty ids naming nothing would otherwise
+/// hold the catalog's write lease for fifty directory scans, and every other
+/// write in the app behind it.
+fn resolve_page_candidates(
+    profile: &RunnerProfile,
+    profile_id: &str,
+    page: &PluginDiscoveryPage,
+    imported_at: u64,
+) -> (Vec<RunnerGameInventoryEntry>, usize) {
+    let mut entries = Vec::with_capacity(page.games.len());
+    let mut skipped = 0;
+    for candidate in &page.games {
+        let Ok((directory_grant_id, game_path)) =
+            resolve_game_file(profile, &candidate.external_id)
+        else {
+            skipped += 1;
+            continue;
+        };
+        entries.push(RunnerGameInventoryEntry {
+            profile_id: profile_id.to_owned(),
+            game_ref: candidate.external_id.clone(),
+            title: candidate.title.clone(),
+            provider_id: candidate.provider_id.clone(),
+            external_id: candidate.external_id.clone(),
+            game_path,
+            directory_grant_id,
+            platform: candidate.platform.clone(),
+            imported_at: Some(imported_at),
+        });
+    }
+    (entries, skipped)
+}
+
+/// One page, one transaction, and no filesystem inside it.
+///
+/// The cursor moves with the candidates it describes, so a crash between two
+/// pages can only ever lose the page that was in flight. The profile is read
+/// again under the lease and its folders compared against the ones the page was
+/// resolved against: a grant that changed while the page was being resolved
+/// makes those paths stale, and a stale path is not something to write down.
+pub fn commit_resolved_page(
     store: &CatalogStore,
     plugin_id: &str,
     profile_id: &str,
+    resolved_against: &[crate::catalog::RunnerGrantedDirectory],
+    entries: Vec<RunnerGameInventoryEntry>,
     page: &PluginDiscoveryPage,
+    imported_at: u64,
+    skipped: usize,
 ) -> Result<CommittedPage, RunnerHostError> {
-    let imported_at = unix_millis();
-    store.commit(|catalog| {
+    store.commit(move |catalog| {
         let profile = catalog
             .runner_profile(profile_id)
             .filter(|profile| profile.plugin_id == plugin_id)
@@ -1068,39 +1284,41 @@ fn commit_page(
             .ok_or_else(|| {
                 CatalogError::Invalid("the runner profile changed during the import".into())
             })?;
-        let mut committed = CommittedPage::default();
-        for candidate in &page.games {
-            let Ok((directory_grant_id, game_path)) =
-                resolve_game_file(&profile, &candidate.external_id)
-            else {
-                committed.skipped += 1;
-                continue;
-            };
-            let entry = RunnerGameInventoryEntry {
-                profile_id: profile_id.to_owned(),
-                game_ref: candidate.external_id.clone(),
-                title: candidate.title.clone(),
-                provider_id: candidate.provider_id.clone(),
-                external_id: candidate.external_id.clone(),
-                game_path,
-                directory_grant_id,
-                platform: candidate.platform.clone(),
-                imported_at: Some(imported_at),
-            };
-            let game = runner_catalog_game(plugin_id, profile_id, &entry);
+        if profile.game_directories != resolved_against {
+            return Err(CatalogError::Invalid(
+                "the runner profile's folders changed during the import".into(),
+            ));
+        }
+        let mut committed = CommittedPage {
+            skipped,
+            ..CommittedPage::default()
+        };
+        for entry in entries {
             // A candidate the catalog refuses is dropped from this page, not
             // allowed to take the page with it: one unusable ROM must not stop a
-            // library from importing.
-            let mut trial = catalog.clone();
-            let Ok(inserted) = trial.upsert_runner_inventory(entry) else {
+            // library from importing. The undo is exact rather than a clone of
+            // the whole catalog, which a page of fifty would pay for fifty
+            // times while holding the write lease.
+            let game = runner_catalog_game(plugin_id, profile_id, &entry);
+            let previous = catalog
+                .runner_inventory_entry(profile_id, &entry.game_ref)
+                .cloned();
+            let Ok(inserted) = catalog.upsert_runner_inventory(entry.clone()) else {
                 committed.skipped += 1;
                 continue;
             };
-            if trial.upsert_runner(game).is_err() || trial.validate().is_err() {
+            if catalog.upsert_runner(game).is_err() {
+                match previous {
+                    Some(previous) => {
+                        let _ = catalog.upsert_runner_inventory(previous);
+                    }
+                    None => catalog.runner_inventory.retain(|held| {
+                        held.profile_id != entry.profile_id || held.game_ref != entry.game_ref
+                    }),
+                }
                 committed.skipped += 1;
                 continue;
             }
-            *catalog = trial;
             if inserted {
                 committed.imported += 1;
             } else {
@@ -1230,6 +1448,8 @@ mod tests {
             game_directories: vec![RunnerGrantedDirectory {
                 id: "fixture-games".into(),
                 path: root.join("games"),
+                device: None,
+                inode: None,
             }],
             settings: RunnerProfileSettings::default(),
             status: RunnerProfileStatus::Valid,
@@ -1238,6 +1458,7 @@ mod tests {
             import_cursor: None,
             import_complete: false,
             last_imported_at: None,
+            package_fingerprint: None,
         }
     }
 
@@ -1311,31 +1532,47 @@ mod tests {
             Err(RunnerHostError::GameUnresolvable)
         );
         // And the launch half, where the entry already exists and the file was
-        // swapped underneath it.
-        let entry = RunnerGameInventoryEntry {
-            profile_id: profile.id.clone(),
-            game_ref: "escape".into(),
-            title: "Escape".into(),
-            provider_id: profile.plugin_id.clone(),
-            external_id: "escape".into(),
-            game_path: root.join("games/escape.rom"),
-            directory_grant_id: "fixture-games".into(),
-            platform: None,
-            imported_at: None,
-        };
-        let mut catalog = Catalog::default();
-        catalog
-            .grant_plugin_capability(PluginGrantRecord {
-                plugin_id: profile.plugin_id.clone(),
-                capability: PluginCapability::FilesRead,
-                scope: CapabilityScope::DirectoryGrants(BTreeSet::from(["fixture-games".into()])),
-                granted_at: 1,
-                revoked_at: None,
-            })
-            .unwrap();
+        // swapped underneath it. The end-to-end version of this — through a
+        // real profile, its grants and a real launch — lives in
+        // `runner_commands`; what is being pinned here is the check itself.
         assert_eq!(
-            reverify_game_file(&catalog, &profile, &entry),
+            canonical_file_inside(&root.join("games/escape.rom"), &root.join("games")),
             Err(RunnerHostError::GameOutsideScope)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The folder the user pointed at, and not one that took its name. Both
+    /// halves of the check earn their place: the canonical path catches a
+    /// parent swapped for a link, the identity catches a rename with no link
+    /// in it at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_granted_folder_is_recognised_by_its_own_identity() {
+        let root = temporary_root("folder-identity");
+        let games = root.join("games");
+        fs::create_dir_all(&games).unwrap();
+        let (device, inode) = directory_identity(&games);
+        assert!(device.is_some() && inode.is_some());
+        let granted = crate::catalog::RunnerGrantedDirectory {
+            id: "fixture-games".into(),
+            path: fs::canonicalize(&games).unwrap(),
+            device,
+            inode,
+        };
+        assert_eq!(verify_granted_directory(&granted).unwrap(), granted.path);
+
+        fs::rename(&games, root.join("games-real")).unwrap();
+        fs::create_dir_all(&games).unwrap();
+        assert_eq!(
+            verify_granted_directory(&granted),
+            Err(RunnerHostError::GameOutsideScope)
+        );
+
+        fs::remove_dir_all(&games).unwrap();
+        assert_eq!(
+            verify_granted_directory(&granted),
+            Err(RunnerHostError::DirectoryUnavailable)
         );
         fs::remove_dir_all(root).unwrap();
     }
