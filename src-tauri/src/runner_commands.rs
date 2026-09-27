@@ -1238,6 +1238,7 @@ mod tests {
                 "1.0.0",
                 channel,
                 &files,
+                false,
             )
             .map(|_| ())
         }

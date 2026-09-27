@@ -110,6 +110,12 @@ pub struct InstalledPluginView {
     /// only thing "Go back to the previous version" can mean, so it is a fact
     /// about disk rather than a button that might do nothing.
     pub rollback_to: Option<String>,
+    /// Whether that version is signed by Orivo's release key — `None` when
+    /// there is no rollback target at all. A rollback is allowed to put a
+    /// development build back in place of a signed one (`plugin_update.rs`'s
+    /// `grant_verdict`: it is a version the user had), so Settings needs this
+    /// to warn before it does rather than after.
+    pub rollback_trusted: Option<bool>,
     /// A newer release in the registry, from the cached index only. Resolving
     /// it never touches the network.
     pub update_to: Option<String>,
@@ -222,23 +228,28 @@ impl PluginInstallerService {
         self.registry()
             .installed_plugins(&runtime)
             .into_iter()
-            .map(|record| InstalledPluginView {
-                trusted: self.store.is_trusted(&record.id),
-                rollback_to: self
-                    .store
-                    .rollback_target(&record.id)
-                    .map(|target| target.version),
-                update_to: available
-                    .iter()
-                    .find(|entry| entry.id == record.id)
-                    .filter(|entry| is_upgrade(&entry.version, &record.version))
-                    .map(|entry| entry.version.clone()),
-                id: record.id,
-                name: record.name,
-                version: record.version,
-                extensions: record.extension_names,
-                state: record.state,
-                message: record.message,
+            .map(|record| {
+                let rollback_target = self.store.rollback_target(&record.id);
+                InstalledPluginView {
+                    trusted: self.store.is_trusted(&record.id),
+                    rollback_to: rollback_target
+                        .as_ref()
+                        .map(|target| target.version.clone()),
+                    rollback_trusted: rollback_target
+                        .as_ref()
+                        .map(|target| target.channel.is_official()),
+                    update_to: available
+                        .iter()
+                        .find(|entry| entry.id == record.id)
+                        .filter(|entry| is_upgrade(&entry.version, &record.version))
+                        .map(|entry| entry.version.clone()),
+                    id: record.id,
+                    name: record.name,
+                    version: record.version,
+                    extensions: record.extension_names,
+                    state: record.state,
+                    message: record.message,
+                }
             })
             .collect()
     }
@@ -736,8 +747,19 @@ fn install_package(
         },
         _ => PackageChannel::Development,
     };
-    install_verified(service, &plugin_id, &version, channel, &files)
-        .map(|outcome| outcome.plugin_id)
+    // `expected` is only ever `Some` through the registry doors
+    // (`install_plugin_from_registry`, `update_plugin`, automatic maintenance):
+    // that is exactly the channel with a downgrade rule to re-check under the
+    // gate. A sideloaded package (`expected: None`) has no such rule.
+    install_verified(
+        service,
+        &plugin_id,
+        &version,
+        channel,
+        &files,
+        expected.is_some(),
+    )
+    .map(|outcome| outcome.plugin_id)
 }
 
 /// The transaction, with the host's verdict wired into both of its checkpoints.
@@ -754,28 +776,30 @@ pub(crate) fn install_verified(
     version: &str,
     channel: PackageChannel,
     files: &PackageFiles,
+    guard_against_downgrade: bool,
 ) -> Result<crate::plugin_update::InstallOutcome, String> {
     let runtime =
         PluginRuntime::shared().map_err(|_| "The plugin runtime is unavailable.".to_string())?;
     let registry = service.registry();
-    service.store.install(
-        plugin_id,
-        version,
-        channel,
-        files,
-        &|directory, checkpoint| {
-            // Staging cannot ask the component who it is: the directory is not
-            // named after the plugin, and that name is half the question.
-            // Everything else is cheaper to refuse there.
-            let depth = match checkpoint {
-                Checkpoint::Staged => VerifyDepth::Contract,
-                Checkpoint::Live => VerifyDepth::Smoke,
-            };
-            verify_until_conclusive(|| {
-                registry.verify_package(&runtime, directory, plugin_id, depth)
-            })
-        },
-    )
+    let verify = |directory: &Path, checkpoint: Checkpoint| {
+        // Staging cannot ask the component who it is: the directory is not
+        // named after the plugin, and that name is half the question.
+        // Everything else is cheaper to refuse there.
+        let depth = match checkpoint {
+            Checkpoint::Staged => VerifyDepth::Contract,
+            Checkpoint::Live => VerifyDepth::Smoke,
+        };
+        verify_until_conclusive(|| registry.verify_package(&runtime, directory, plugin_id, depth))
+    };
+    if guard_against_downgrade {
+        service
+            .store
+            .install_refusing_downgrade(plugin_id, version, channel, files, &verify)
+    } else {
+        service
+            .store
+            .install(plugin_id, version, channel, files, &verify)
+    }
 }
 
 /// Ask the host for a verdict, and keep asking while it says it has none.
@@ -1556,6 +1580,7 @@ mod tests {
         let installed = service.installed();
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].rollback_to, None);
+        assert_eq!(installed[0].rollback_trusted, None);
 
         // The same identity at a later version: an ordinary update.
         let catalog = br#"{"version":1,"titles":[]}"#.to_vec();
@@ -1572,6 +1597,10 @@ mod tests {
         let installed = service.installed();
         assert_eq!(installed[0].version, "0.2.0");
         assert_eq!(installed[0].rollback_to.as_deref(), Some("0.1.0"));
+        // Both versions arrived through the unsigned door in this test, so the
+        // version to go back to is unsigned too — Settings must not offer it
+        // as if it were as safe as an official one.
+        assert_eq!(installed[0].rollback_trusted, Some(false));
 
         assert_eq!(
             service.store.rollback(&installed[0].id).unwrap().version,
@@ -1580,6 +1609,56 @@ mod tests {
         let installed = service.installed();
         assert_eq!(installed[0].version, "0.1.0");
         assert_eq!(installed[0].rollback_to, None);
+        assert_eq!(installed[0].rollback_trusted, None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The counterpart of the test above: when both the live version and the
+    /// one it can go back to arrived through the registry, Settings has to be
+    /// able to say the rollback target is signed rather than defaulting to the
+    /// unsigned warning the sideload path exercises.
+    #[test]
+    fn a_rollback_target_installed_through_the_registry_is_reported_trusted() {
+        let root = temporary_root("rollback-trust");
+        let service = service(&root);
+        let official = || crate::plugin_update::PackageChannel::Official {
+            signer: "test-release-key".into(),
+        };
+
+        let first = read_package(&valid_package("com.orivo.quiky")).unwrap();
+        install_verified(
+            &service,
+            "com.orivo.quiky",
+            "0.1.0",
+            official(),
+            &first,
+            false,
+        )
+        .unwrap();
+
+        let catalog = br#"{"version":1,"titles":[]}"#.to_vec();
+        let manifest = String::from_utf8(manifest_json("com.orivo.quiky", &catalog))
+            .unwrap()
+            .replace(r#""version": "0.1.0""#, r#""version": "0.2.0""#);
+        let newer_bytes = package(&[
+            ("manifest.json", manifest.into_bytes()),
+            ("component.wasm", EMPTY_COMPONENT.to_vec()),
+            ("assets/catalog.json", catalog),
+        ]);
+        let newer = read_package(&newer_bytes).unwrap();
+        install_verified(
+            &service,
+            "com.orivo.quiky",
+            "0.2.0",
+            official(),
+            &newer,
+            true,
+        )
+        .unwrap();
+
+        let installed = service.installed();
+        assert_eq!(installed[0].rollback_to.as_deref(), Some("0.1.0"));
+        assert_eq!(installed[0].rollback_trusted, Some(true));
         fs::remove_dir_all(&root).ok();
     }
 

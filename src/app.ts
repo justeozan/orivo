@@ -131,6 +131,16 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
+import {
+  createDefaultPluginHealthClient,
+  phraseJournalEntry,
+  pluginHealthErrorMessage,
+  pluginHealthSummary,
+  type PluginHealthView,
+  type PluginJournalEntryView,
+} from "./plugin-health";
+import { createDefaultRunnerManagerClient, createRunnerManagerController } from "./runner-manager";
+import { mountRunnerPanel } from "./runner-view";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
@@ -240,7 +250,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher";
+type PluginId = "wine" | "wallpaper-searcher" | "runners";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
@@ -568,10 +578,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
+    runnersPanel: get<HTMLElement>("#runners-panel"),
+    runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
+    pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
@@ -1836,6 +1849,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const pluginManager = createPluginManagerController(createDefaultPluginManagerClient());
   pluginManager.onChange(() => renderPluginList());
 
+  // Health and the journal are a second, smaller surface (`plugin_health.rs`):
+  // whether a plugin is degraded, and the sentences behind why. Kept apart
+  // from the catalogue above so a registry with no health commands — an older
+  // host binary — still renders the rest of the panel exactly as before.
+  const pluginHealthClient = createDefaultPluginHealthClient();
+  let pluginHealthById = new Map<string, PluginHealthView>();
+  let pluginHealthIdsKey = "";
+  // `null` means the last read failed; absent means never (yet) read this
+  // time it was opened — the panel tells all three states apart.
+  let pluginJournalById = new Map<string, PluginJournalEntryView[] | null>();
+  let openPluginLogId: string | null = null;
+
+  // "Add an emulator" and the runner profiles inside Plugins & Runners own
+  // their whole subtree (`runner-view.ts`): this call is the only thing this
+  // file does with them beyond toggling the panel's `hidden` attribute.
+  const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
+  mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
+
   const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
     row.className = "settings-row plugin-catalog-row";
@@ -1916,6 +1947,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         .join(" · ") || "Plugin tiers";
     copy.append(name, details);
 
+    const health = pluginHealthById.get(plugin.id) ?? null;
+    const healthSummary = pluginHealthSummary(health);
+    if (healthSummary) {
+      const healthLine = document.createElement("small");
+      healthLine.className = "plugin-row__health";
+      if (health?.degraded) healthLine.classList.add("plugin-row__health--degraded");
+      healthLine.textContent = healthSummary;
+      copy.append(healthLine);
+    }
+
     const state = document.createElement("span");
     state.className = "plugin-row__state";
     // A plugin the host refused to load must not read in the same green as one
@@ -1924,15 +1965,210 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (plugin.state === "invalid") state.classList.add("plugin-row__state--error");
     state.textContent = formatPluginStatus(plugin);
 
+    const actions = document.createElement("div");
+    actions.className = "plugin-row__actions";
+
+    if (health?.degraded) {
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "settings-button settings-button--quiet";
+      resume.dataset.pluginResume = plugin.id;
+      resume.textContent = "Resume";
+      actions.append(resume);
+    }
+    const updateProgress = pluginManager.progressFor(plugin.id);
+    const updateBusy = isPluginInstallBusy(updateProgress);
+    if (plugin.updateTo || updateBusy) {
+      const update = document.createElement("button");
+      update.type = "button";
+      update.className = "settings-button settings-button--quiet";
+      update.dataset.pluginUpdate = plugin.id;
+      // A second click while one is already running must not restart it — the
+      // controller itself ignores it too, but the button should already look
+      // like there is nothing left to click.
+      update.disabled = updateBusy;
+      update.textContent = updateBusy
+        ? updateProgress?.phase === "downloading"
+          ? `Downloading ${pluginPercent(updateProgress)}%`
+          : updateProgress?.phase === "verifying"
+            ? "Verifying…"
+            : "Installing…"
+        : `Update to v${plugin.updateTo}`;
+      actions.append(update);
+      if (updateProgress?.phase === "failed") {
+        const failed = document.createElement("small");
+        failed.className = "plugin-row__update-error";
+        failed.textContent = updateProgress.message || "This update did not finish.";
+        copy.append(failed);
+      }
+    }
+    if (plugin.rollbackTo) {
+      const rollback = document.createElement("button");
+      rollback.type = "button";
+      rollback.className = "settings-button settings-button--quiet";
+      rollback.dataset.pluginRollback = plugin.id;
+      // Said in the button itself, before the click that would act on it: a
+      // rollback is allowed to put a development build back in place of a
+      // signed one, and that is not the same kind of "previous version".
+      rollback.textContent =
+        plugin.rollbackTrusted === false
+          ? `Go back to v${plugin.rollbackTo} (unsigned)`
+          : `Go back to v${plugin.rollbackTo}`;
+      actions.append(rollback);
+    }
+
+    const log = document.createElement("button");
+    log.type = "button";
+    log.className = "settings-button settings-button--quiet";
+    log.dataset.pluginLog = plugin.id;
+    log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
+    log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
+    actions.append(log);
+
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "settings-button settings-button--quiet plugin-uninstall-button";
     remove.dataset.pluginUninstall = plugin.id;
     remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
     remove.textContent = "Uninstall";
+    actions.append(remove);
 
-    row.append(mark, copy, state, remove);
+    row.append(mark, copy, state, actions);
+
+    if (openPluginLogId === plugin.id) {
+      row.append(renderPluginLogPanel(plugin.id));
+    }
     return row;
+  };
+
+  const renderPluginLogPanel = (pluginId: string): HTMLElement => {
+    const panel = document.createElement("div");
+    panel.className = "plugin-row__log";
+    const entries = pluginJournalById.get(pluginId);
+    if (entries === undefined) {
+      panel.textContent = "Loading…";
+    } else if (entries === null) {
+      // A failed read must never look like a quiet, healthy plugin — the one
+      // case this panel exists to tell apart from the other.
+      panel.classList.add("plugin-row__log--error");
+      panel.textContent = "Orivo could not read this plugin's log. Try again.";
+    } else if (entries.length === 0) {
+      panel.textContent = "No recent activity.";
+    } else {
+      const list = document.createElement("ul");
+      for (const line of entries) {
+        const item = document.createElement("li");
+        item.textContent = phraseJournalEntry(line);
+        list.append(item);
+      }
+      panel.append(list);
+    }
+    return panel;
+  };
+
+  /**
+   * Health is a second command from a second module, so a freshly rendered
+   * registry list re-fetches it only when the id set actually changed — a
+   * caller that wants a forced re-check (after `resume`, after an import
+   * settles, or on opening the Plugins section) calls this directly instead
+   * of going through that guard.
+   */
+  const refreshPluginHealth = async (pluginIds: string[]): Promise<void> => {
+    if (pluginIds.length === 0) {
+      pluginHealthIdsKey = "";
+      pluginHealthById = new Map();
+      return;
+    }
+    const rows = await pluginHealthClient.getHealthReport(
+      pluginIds,
+      new AbortController().signal,
+    );
+    if (rows.length === 0) {
+      // The default client collapses every failure — no Tauri, an older host
+      // binary, a dropped IPC call — to an empty list, the same as a host
+      // with no health commands at all. A real report always answers one row
+      // per id it was given, so an empty one back for a non-empty request
+      // means the read failed, not that every plugin is healthy. The id key
+      // is left unset so the next render retries instead of caching this as
+      // "nothing to report".
+      return;
+    }
+    pluginHealthIdsKey = pluginIds.join(",");
+    pluginHealthById = new Map(rows.map((row) => [row.pluginId, row]));
+    renderDiscoveredPlugins();
+  };
+
+  // A runner import can push the plugin that ran it towards `degraded`
+  // (repeated `discover-page` failures), so health is worth a fresh read as
+  // soon as one settles — not continuously while it runs, only at the
+  // transition away from "running", which is what this tracks per profile.
+  const runnerImportPhaseByProfile = new Map<string, string>();
+  runnerManager.onChange(() => {
+    let settled = false;
+    for (const runner of runnerManager.runners()) {
+      for (const profile of runner.profiles) {
+        const phase = runnerManager.importFor(profile.id)?.phase ?? null;
+        const previous = runnerImportPhaseByProfile.get(profile.id) ?? null;
+        if (previous === "running" && phase !== null && phase !== "running") settled = true;
+        if (phase !== null) runnerImportPhaseByProfile.set(profile.id, phase);
+      }
+    }
+    if (settled) {
+      void refreshPluginHealth(pluginManager.catalog().installed.map((entry) => entry.id));
+    }
+  });
+
+  const resumeInstalledPlugin = async (pluginId: string): Promise<void> => {
+    try {
+      await pluginHealthClient.resume(pluginId, new AbortController().signal);
+    } catch (error) {
+      showToast(pluginHealthErrorMessage(error));
+    }
+    await refreshPluginHealth(pluginManager.catalog().installed.map((plugin) => plugin.id));
+  };
+
+  // The row itself shows progress and any failure (renderInstalledPluginRow
+  // reads pluginManager.progressFor), the same way a registry install already
+  // does — so this has nothing left to guess about the outcome, and nothing
+  // to toast on success either. The controller rejects on failure so this does
+  // not also print a lying "updated" toast; it is caught and dropped here.
+  const updateInstalledPlugin = (pluginId: string): void => {
+    void pluginManager.update(pluginId).catch(() => {});
+  };
+
+  const rollbackInstalledPlugin = async (pluginId: string): Promise<void> => {
+    const name = pluginName(pluginId);
+    const target = pluginManager.catalog().installed.find((entry) => entry.id === pluginId);
+    const unsigned = target?.rollbackTrusted === false;
+    try {
+      await pluginManager.rollback(pluginId);
+      showToast(
+        unsigned
+          ? `${name} went back to an unsigned build.`
+          : `${name} went back to a previous version.`,
+      );
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
+  };
+
+  const togglePluginLog = async (pluginId: string): Promise<void> => {
+    if (openPluginLogId === pluginId) {
+      openPluginLogId = null;
+      renderDiscoveredPlugins();
+      return;
+    }
+    openPluginLogId = pluginId;
+    // Always a fresh read: a log cached from an earlier visit could be exactly
+    // the failure this panel must never quietly present as "nothing happened",
+    // and the log can genuinely change between visits regardless.
+    pluginJournalById.delete(pluginId);
+    renderDiscoveredPlugins();
+    const entries = await pluginHealthClient.getJournal(pluginId, new AbortController().signal);
+    if (openPluginLogId === pluginId) {
+      pluginJournalById.set(pluginId, entries);
+      renderDiscoveredPlugins();
+    }
   };
 
   // Quiky is the Store's installer, not a plugin the user manages: it has no
@@ -1961,6 +2197,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const installed = pluginManager.catalog().installed;
     const rows = installed.map(renderInstalledPluginRow);
     refs.pluginsInstalledList.append(...rows);
+
+    const ids = installed.map((plugin) => plugin.id);
+    if (ids.join(",") !== pluginHealthIdsKey) {
+      void refreshPluginHealth(ids);
+    }
   };
 
   /**
@@ -2005,8 +2246,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    refs.runnersPanel.hidden = state.pluginView !== "runners";
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
+    refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
     const matches = available.filter(
@@ -2065,6 +2308,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
+    // Cheap and always fresh: a background import or a plugin update can
+    // change a profile's status between visits, so every open re-reads it.
+    if (id === "runners") void runnerManager.load(new AbortController().signal);
   };
 
   const renderWineSettingsPanel = (): void => {
@@ -5597,7 +5843,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (route.section === "plugins") void refreshWineRunnerSettings();
       // The catalogue is re-read on every visit: a plugin installed from the
       // file picker in a previous session has to show up without a restart.
-      if (route.section === "plugins") void pluginManager.load(activation.signal);
+      if (route.section === "plugins") {
+        // A plugin can turn `degraded` while Settings is closed — during a
+        // background import, say — so its health is worth a fresh read on
+        // every visit too, not only when the installed id set has changed.
+        pluginHealthIdsKey = "";
+        void pluginManager.load(activation.signal);
+      }
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
@@ -5736,7 +5988,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "runners") {
       openPluginDetail(pluginId);
       return;
     }
@@ -5762,6 +6014,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     if (target?.closest("[data-plugin-install-file]")) {
       void installPluginFromFile();
+      return;
+    }
+    if (target?.closest("[data-plugin-refresh-registry]")) {
+      void pluginManager.refreshCatalog();
+      return;
+    }
+    const resumeId = target?.closest<HTMLButtonElement>("[data-plugin-resume]")?.dataset.pluginResume;
+    if (resumeId) {
+      void resumeInstalledPlugin(resumeId);
+      return;
+    }
+    const updateId = target?.closest<HTMLButtonElement>("[data-plugin-update]")?.dataset.pluginUpdate;
+    if (updateId) {
+      updateInstalledPlugin(updateId);
+      return;
+    }
+    const rollbackId = target?.closest<HTMLButtonElement>("[data-plugin-rollback]")?.dataset
+      .pluginRollback;
+    if (rollbackId) {
+      void rollbackInstalledPlugin(rollbackId);
+      return;
+    }
+    const logId = target?.closest<HTMLButtonElement>("[data-plugin-log]")?.dataset.pluginLog;
+    if (logId) {
+      void togglePluginLog(logId);
       return;
     }
 
@@ -5809,6 +6086,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       target.checked
     ) {
       void savePreferences({ motion: target.value as MotionPreference });
+    }
+    if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
+      // The controller repaints the checkbox back to the host's own value
+      // either way; this only needs to say why it did not stick.
+      void pluginManager.setAutomaticUpdates(target.checked).catch((error) => {
+        showToast(pluginErrorMessage(error));
+      });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -7200,13 +7484,29 @@ function shell(): string {
                       <span class="plugin-row__state">Installed</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
+                    <div class="settings-row plugin-row">
+                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("gamepad")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Third-party runners</strong>
+                        <small>Emulator plugins, and the profiles you build for them</small>
+                      </div>
+                      <span class="plugin-row__state">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="runners" aria-label="Open third-party runner settings">${icon("chevron-right")}</button>
+                    </div>
                   </div>
                 </div>
 
                 <div class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <p class="plugins-group__label">Available</p>
-                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    <div class="plugins-group__header-actions">
+                      <label class="plugins-automatic-updates">
+                        <input id="plugins-automatic-updates" type="checkbox" />
+                        <span>Automatic updates</span>
+                      </label>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>Check for updates</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    </div>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
@@ -7281,6 +7581,18 @@ function shell(): string {
                     <small>Saved keys are picked up immediately — no restart needed.</small>
                   </div>
                 </div>
+              </section>
+
+              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" hidden>
+                <header class="settings-card__header">
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
+                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="runners-panel-title">Third-party runners</strong>
+                    <small>Add an emulator: pick its application, the folders it should read, and import your games</small>
+                  </div>
+                </header>
+                <div id="runners-panel-body"></div>
               </section>
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>
