@@ -740,19 +740,27 @@ mod windows_relative {
     /// outright: this host does not know what serves the bytes behind it, and the
     /// one bit already checked never promised that it was safe.
     pub(super) fn open_entry_for_reading(directory: &File, name: &str) -> io::Result<File> {
-        open_entry_for_reading_seamed(directory, name, || {})
+        open_entry_for_reading_seamed(directory, name, super::reparse_tag_is_followed, || {})
     }
 
-    /// The same, with a seam fired between the two opens this function makes.
+    /// The same, with the whitelist and the seam between the two opens taken as
+    /// parameters.
     ///
-    /// A real attacker only sometimes lands inside the window between them, which
-    /// is not something a test can assert on; [`open_entry_for_reading_racing`]
-    /// hands a test this exact seam so the swap is certain rather than probable.
-    /// `open_entry_for_reading` is what production calls, with nothing to run
-    /// there.
+    /// The whitelist is a parameter for the same reason [`super::PluginLimits`]
+    /// is: production has exactly one answer, [`super::reparse_tag_is_followed`],
+    /// and [`open_entry_for_reading_racing`] is the only other caller, staging a
+    /// race against a tag this host can actually plant on any volume rather than
+    /// one only a real WOF/dedup/cloud filter can produce.
+    ///
+    /// The seam between the two opens exists because a real attacker only
+    /// sometimes lands inside that window, which is not something a test can
+    /// assert on; firing it deterministically is what lets a test force the swap
+    /// instead. `open_entry_for_reading` is what production calls, with nothing
+    /// to run there and the real whitelist in force.
     fn open_entry_for_reading_seamed(
         directory: &File,
         name: &str,
+        is_followed: impl Fn(u32) -> bool,
         between_opens: impl FnOnce(),
     ) -> io::Result<File> {
         let entry = open_relative(directory, name, FILE_GENERIC_READ, Reparse::AsItself)?;
@@ -763,7 +771,7 @@ mod windows_relative {
             // A link, for the caller's kind check to refuse.
             return Ok(entry);
         }
-        if !super::reparse_tag_is_followed(tag) {
+        if !is_followed(tag) {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("reparse tag {tag:#010x} is not one this host follows"),
@@ -795,16 +803,17 @@ mod windows_relative {
         Ok(followed)
     }
 
-    /// [`open_entry_for_reading`], with the seam a test needs to swap the entry
-    /// deterministically between its two opens rather than racing a thread
-    /// against it.
+    /// [`open_entry_for_reading`], with the whitelist and the between-opens seam
+    /// exposed so a test can stage a race deterministically, against a tag it can
+    /// actually plant on any volume.
     #[cfg(test)]
     pub(super) fn open_entry_for_reading_racing(
         directory: &File,
         name: &str,
+        is_followed: impl Fn(u32) -> bool,
         between_opens: impl FnOnce(),
     ) -> io::Result<File> {
-        open_entry_for_reading_seamed(directory, name, between_opens)
+        open_entry_for_reading_seamed(directory, name, is_followed, between_opens)
     }
 
     /// Opens for attributes only, which is not "opening" in any of the senses a
@@ -4901,41 +4910,40 @@ mod tests {
     /// fires exactly between the two opens, so the swap is certain rather than
     /// probable.
     ///
-    /// The entry needs a tag `reparse_tag_is_followed` trusts, or the race never
-    /// starts — the whitelist refuses it before the second open is attempted at
-    /// all. `FSCTL_SET_REPARSE_POINT` cannot hand-plant one:
-    /// `plant_storage_reparse_point`'s doc comment is where that was proved.
-    /// `compact /c /exe:LZX` is the one real mechanism available, and it needs a
-    /// file worth compressing — large and repetitive — where the placeholder test
-    /// needed one small enough for a title. If the volume declines it here too,
-    /// the race has nothing to stand on and the test says so and returns, the
-    /// same way the placeholder test's first version did.
+    /// The entry needs a tag *something* trusts, or the race never starts — the
+    /// whitelist refuses it before the second open is attempted at all. The
+    /// production whitelist only trusts a real WOF/dedup/cloud tag, and
+    /// `plant_storage_reparse_point`'s doc comment is where it was proved that
+    /// none of those three can be hand-planted (`FSCTL_SET_REPARSE_POINT` refuses
+    /// a Microsoft-owned tag outright, and this runner's volume refuses `compact`
+    /// even a 128 KiB file worth compressing). So this test does not use the
+    /// production whitelist: `open_entry_for_reading_racing` takes it as a
+    /// parameter, and this test trusts exactly the one tag it plants with
+    /// `plant_unrecognised_reparse_point` — a mechanism this file already knows
+    /// works on every Windows volume, because refusing *that* tag is what the
+    /// next test over asserts. What is under test here is the identity check
+    /// after a trusted tag's second open, not which tags are trusted; the
+    /// whitelist itself is `the_host_follows_only_the_reparse_tags_it_recognises`'s
+    /// job.
     #[cfg(not(unix))]
     #[test]
     fn a_reparse_point_swapped_for_a_symlink_between_the_two_opens_is_refused() {
         let library = FixtureLibrary::new("reparse-race");
         let entry = library.games.join("swap.rom");
-        fs::write(&entry, vec![b'A'; 128 * 1024]).unwrap();
-        let compacted = std::process::Command::new("compact")
-            .args(["/c", "/exe:LZX"])
-            .arg(&entry)
-            .output()
-            .expect("compact is on PATH");
-        if !is_reparse_point(&entry) {
-            println!(
-                "compact produced no reparse point here, so this race cannot be staged: {}",
-                String::from_utf8_lossy(&compacted.stdout).trim()
-            );
-            return;
-        }
+        fs::write(&entry, b"Swap Quest\n").unwrap();
+        let tag = plant_unrecognised_reparse_point(&entry);
 
         let secret = library.root.join("secret.txt");
         let directory = windows_relative::open_directory(&library.games).unwrap();
-        let result =
-            windows_relative::open_entry_for_reading_racing(&directory, "swap.rom", || {
+        let result = windows_relative::open_entry_for_reading_racing(
+            &directory,
+            "swap.rom",
+            |candidate| candidate == tag,
+            || {
                 fs::remove_file(&entry).unwrap();
                 redirect_file(&entry, &secret);
-            });
+            },
+        );
 
         assert!(
             matches!(&result, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied),
