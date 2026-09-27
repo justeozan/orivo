@@ -359,7 +359,117 @@ impl PluginJournal {
 pub struct PluginGrants {
     declared: BTreeSet<PluginCapability>,
     granted: BTreeSet<PluginCapability>,
-    directories: BTreeMap<String, PathBuf>,
+    directories: BTreeMap<String, Arc<GrantedDirectory>>,
+}
+
+/// One approved folder, held open for as long as the grant lives.
+///
+/// The descriptor is the grant. `O_NOFOLLOW` judges the last component of a path
+/// and nothing above it, so a *parent* of the granted folder replaced by a
+/// symbolic link — which needs write access to that parent, not to the folder
+/// itself — silently redirects every later read. A path is re-resolved on every
+/// use and can therefore be answered differently each time; a descriptor names
+/// the directory the user actually approved, once, and `openat` reads relative to
+/// it. A swap afterwards changes nothing.
+pub struct GrantedDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    handle: File,
+}
+
+impl std::fmt::Debug for GrantedDirectory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GrantedDirectory")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Two grants name the same folder when they resolved to the same path. The
+/// descriptor is an implementation detail of reaching it, not part of its
+/// identity, and comparing raw file descriptors would make equality depend on
+/// the order in which grants happened to be opened.
+impl PartialEq for GrantedDirectory {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for GrantedDirectory {}
+
+impl GrantedDirectory {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Links *on the way to* the grant are followed here, deliberately:
+            // this is the moment the user pointed at a folder, and on macOS the
+            // ordinary temporary and home directories live behind one. What must
+            // not be re-resolved is everything after it.
+            let handle = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+                .open(path)?;
+            Ok(Self {
+                path: path.to_path_buf(),
+                handle,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows has no `openat`, so the grant is still a path here and the
+            // swap above is still reachable. `FILE_FLAG_OPEN_REPARSE_POINT` keeps
+            // the *entry* honest, which is the half that can be kept.
+            if !path.is_dir() {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory));
+            }
+            Ok(Self {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    /// Opens one entry of this directory, relative to the handle.
+    ///
+    /// `O_NOFOLLOW` refuses a symbolic link instead of resolving it, and
+    /// `O_NONBLOCK` means a FIFO does not park this worker where neither the
+    /// epoch nor a cancellation can reach it. The caller still has to ask the
+    /// descriptor what it opened: a directory and a character device both open
+    /// happily here.
+    fn open_entry(&self, name: &str) -> std::io::Result<File> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+
+            let name = CString::new(name)
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+            // Safety: `handle` is an open directory descriptor borrowed for the
+            // length of the call, and `name` is NUL-terminated.
+            let descriptor = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if descriptor < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Safety: `openat` just returned this descriptor and nothing else
+            // owns it.
+            Ok(unsafe { File::from_raw_fd(descriptor) })
+        }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(self.path.join(name))
+        }
+    }
 }
 
 impl PluginGrants {
@@ -400,7 +510,12 @@ impl PluginGrants {
                     let path = directories
                         .get(id)
                         .ok_or(GrantValidationError::InvalidScope(grant.capability))?;
-                    resolved.directories.insert(id.clone(), path.clone());
+                    // Opened here rather than at the call, because this is the
+                    // moment the grant is made. A folder the host cannot open as
+                    // a directory now is not a scope it can honour later.
+                    let directory = GrantedDirectory::open(path)
+                        .map_err(|_| GrantValidationError::InvalidScope(grant.capability))?;
+                    resolved.directories.insert(id.clone(), Arc::new(directory));
                 }
             }
         }
@@ -415,8 +530,8 @@ impl PluginGrants {
         self.granted.contains(&capability)
     }
 
-    fn directory(&self, id: &str) -> Option<&Path> {
-        self.directories.get(id).map(PathBuf::as_path)
+    fn directory(&self, id: &str) -> Option<&Arc<GrantedDirectory>> {
+        self.directories.get(id)
     }
 }
 
@@ -745,7 +860,10 @@ impl HostState {
     /// Resolving a grant is the only place a plugin's opaque id becomes a path,
     /// and it fails closed twice: once if the capability was never granted, and
     /// once if this particular id is outside the granted scope.
-    fn granted_directory(&self, grant: &str) -> Result<PathBuf, wit_types::PluginError> {
+    fn granted_directory(
+        &self,
+        grant: &str,
+    ) -> Result<Arc<GrantedDirectory>, wit_types::PluginError> {
         if !self.grants.holds(PluginCapability::FilesRead) {
             self.journal.record(
                 self.correlation_id,
@@ -759,7 +877,7 @@ impl HostState {
             ));
         }
         match self.grants.directory(grant) {
-            Some(path) => Ok(path.to_path_buf()),
+            Some(directory) => Ok(Arc::clone(directory)),
             None => {
                 self.journal.record(
                     self.correlation_id,
@@ -831,8 +949,8 @@ impl host_files::Host for HostState {
         grant: String,
     ) -> Result<Vec<host_files::DirectoryEntry>, wit_types::PluginError> {
         self.spend_host_call()?;
-        let root = self.granted_directory(&grant)?;
-        let Ok(entries) = fs::read_dir(&root) else {
+        let directory = self.granted_directory(&grant)?;
+        let Ok(entries) = fs::read_dir(&directory.path) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That folder is no longer readable.",
@@ -844,22 +962,23 @@ impl host_files::Host for HostState {
         // allowed to hear about. Sorting before the second one is what makes the
         // answer the same on every run — `read_dir` order is not.
         for entry in entries.filter_map(Result::ok).take(MAX_DIRECTORY_SCAN) {
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            // `metadata` follows links; `symlink_metadata` is what says whether
-            // this entry *is* one. A link is skipped rather than resolved so a
-            // granted folder cannot be used as a door to an ungranted one.
-            let Ok(raw) = entry.path().symlink_metadata() else {
-                continue;
-            };
-            if raw.file_type().is_symlink() {
-                continue;
-            }
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.len() > MAX_ENTRY_NAME_BYTES || !valid_entry_name(&name) {
                 continue;
             }
+            // `read_dir` walks a path, and a path is what a swapped parent
+            // redirects. The name is therefore only a suggestion: every fact
+            // reported below is asked of a descriptor opened relative to the
+            // granted directory's own handle, so an entry the approved folder
+            // does not have cannot be listed at all, and a symbolic link is
+            // refused by the open rather than described. The worst a swap can
+            // still do is *hide* entries, which is not a way out of the grant.
+            let Ok(opened) = directory.open_entry(&name) else {
+                continue;
+            };
+            let Ok(metadata) = opened.metadata() else {
+                continue;
+            };
             listing.push(host_files::DirectoryEntry {
                 name,
                 byte_size: if metadata.is_file() {
@@ -887,31 +1006,22 @@ impl host_files::Host for HostState {
         name: String,
     ) -> Result<Vec<u8>, wit_types::PluginError> {
         self.spend_host_call()?;
-        let root = self.granted_directory(&grant)?;
+        let directory = self.granted_directory(&grant)?;
         if name.len() > MAX_ENTRY_NAME_BYTES || !valid_entry_name(&name) {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::InvalidInput,
                 "That is not a name inside the allowed folder.",
             ));
         }
-        // Open once, then judge the handle. Checking the path and reading it
-        // again are two different objects if anything can write to the granted
-        // folder in between: a symbolic link reads outside the grant, a FIFO
-        // blocks this worker forever — neither the epoch nor a cancellation can
-        // reach a thread parked in `read` — and a character device has no size to
-        // bound. `O_NOFOLLOW` and `O_NONBLOCK` refuse the first two at `open`,
-        // and the size and kind below are asked of the descriptor, not the name.
-        //
-        // A hard link inside the folder stays readable, and that is a real gap
-        // rather than a justified one: creating a link does not require being able
-        // to read its target on macOS, nor on Linux without
-        // `fs.protected_hardlinks`, so another local account that can write to the
-        // granted folder can put a file there that it cannot read itself. Refusing
-        // a multiply-linked file owned by someone else would close it; that needs
-        // a test which can only be written with a second account, so it is
-        // recorded as a follow-up rather than guessed at here.
-        let path = root.join(&name);
-        let Ok(file) = open_without_following(&path) else {
+        // Open through the grant's own handle, then judge the descriptor.
+        // Checking a path and reading it again are two different objects if
+        // anything can write to the granted folder in between: a symbolic link
+        // reads outside the grant, a FIFO blocks this worker forever — neither
+        // the epoch nor a cancellation can reach a thread parked in `read` — and
+        // a character device has no size to bound. The open refuses the first
+        // two, and the kind, size and ownership below are asked of the
+        // descriptor rather than of the name.
+        let Ok(file) = directory.open_entry(&name) else {
             return Err(plugin_error(
                 wit_types::PluginErrorCode::Unavailable,
                 "That file is no longer available.",
@@ -1013,30 +1123,6 @@ fn is_windows_device_name(resolved: &str) -> bool {
     WINDOWS_DEVICE_NAMES
         .iter()
         .any(|device| folded.eq_ignore_ascii_case(device))
-}
-
-/// Opens a file in the granted directory without following a link into one that
-/// is not, and without blocking on something that is not a file at all.
-///
-/// The flags are the whole point of the function. On Unix `O_NOFOLLOW` fails on a
-/// symbolic link instead of resolving it, and `O_NONBLOCK` means a FIFO does not
-/// park this worker where neither the epoch nor a cancellation can reach it. On
-/// Windows `FILE_FLAG_OPEN_REPARSE_POINT` opens the link itself, so the caller's
-/// `is_file` check on the handle refuses it.
-fn open_without_following(path: &Path) -> std::io::Result<File> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    options.open(path)
 }
 
 /// Exactly one ordinary path component, and nothing that could leave the
@@ -2376,20 +2462,42 @@ mod tests {
 
     impl Harness {
         fn new(limits: PluginLimits, library: Option<&FixtureLibrary>) -> Self {
+            match library {
+                Some(library) => {
+                    Self::with_directories(limits, &[GAMES_GRANT], &library.directories())
+                }
+                None => {
+                    let runtime = PluginRuntime::with_limits(limits, EpochMode::Threaded).unwrap();
+                    let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
+                    Self {
+                        runtime,
+                        prepared,
+                        grants: PluginGrants::none(),
+                    }
+                }
+            }
+        }
+
+        /// The grants a test wants, rather than the fixture library's own. The
+        /// ids and the map are separate arguments on purpose: a grant naming
+        /// folders the map does not have is exactly the narrowed scope several
+        /// tests below need.
+        fn with_directories(
+            limits: PluginLimits,
+            ids: &[&str],
+            directories: &BTreeMap<String, PathBuf>,
+        ) -> Self {
             let runtime = PluginRuntime::with_limits(limits, EpochMode::Threaded).unwrap();
             let prepared = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
-            let grants = match library {
-                Some(library) => PluginGrants::resolve(
-                    &fixture_manifest(vec![
-                        PluginCapability::RunnerPrepare,
-                        PluginCapability::FilesRead,
-                    ]),
-                    &[files_grant(&[GAMES_GRANT])],
-                    &library.directories(),
-                )
-                .unwrap(),
-                None => PluginGrants::none(),
-            };
+            let grants = PluginGrants::resolve(
+                &fixture_manifest(vec![
+                    PluginCapability::RunnerPrepare,
+                    PluginCapability::FilesRead,
+                ]),
+                &[files_grant(ids)],
+                directories,
+            )
+            .unwrap();
             Self {
                 runtime,
                 prepared,
@@ -2865,6 +2973,55 @@ mod tests {
             ),
             "reading a symlink out of the grant returned {error:?}"
         );
+    }
+
+    /// `O_NOFOLLOW` judges the last component of a path and nothing above it, so
+    /// a grant is only as trustworthy as every directory on the way to it. This
+    /// plants the swap the flag cannot see: the granted folder's *parent* is
+    /// replaced by a symbolic link to a folder the user never approved, which
+    /// needs write access to that parent rather than to the grant.
+    ///
+    /// Before the handle, `read_file` joined the grant's path and followed the
+    /// link, so `fixture:read-secret` did not fail — it succeeded, reading a file
+    /// from the attacker's folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_swapped_parent_cannot_redirect_a_granted_folder() {
+        let root = temporary_root("swapped-parent");
+        let library = root.join("library");
+        let decoy = root.join("decoy");
+        fs::create_dir_all(library.join("games")).unwrap();
+        fs::create_dir_all(decoy.join("games")).unwrap();
+        fs::write(library.join("games/alpha.rom"), b"Alpha Quest\n").unwrap();
+        fs::write(decoy.join("games/secret.rom"), b"a keychain token").unwrap();
+
+        let harness = Harness::with_directories(
+            PluginLimits::default(),
+            &[GAMES_GRANT],
+            &BTreeMap::from([(GAMES_GRANT.to_string(), library.join("games"))]),
+        );
+
+        // The swap happens after the user granted the folder, which is the whole
+        // point: the handle names the directory they approved, not the path.
+        fs::rename(&library, root.join("library-real")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &library).unwrap();
+
+        let error = harness.prepare("fixture:read-secret").unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PluginRuntimeError::Plugin {
+                    code: PluginErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "a swapped parent redirected the grant: {error:?}"
+        );
+        // And the folder the user really granted is still readable, so this is a
+        // handle rather than a refusal of everything.
+        assert!(harness.prepare("fixture:read-alpha").is_ok());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A FIFO is the one substitution that does not merely read the wrong file:
