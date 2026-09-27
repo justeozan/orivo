@@ -34,6 +34,7 @@
 //! host is the point: a limit or a refusal that arrives after the code it is
 //! meant to gate is one that never gated anything.
 
+use crate::plugin_compile_cache::ComponentCache;
 use crate::plugin_manifest::{
     CapabilityGrant, CapabilityScope, GrantValidationError, PluginCapability, PluginExtension,
     ValidatedPluginManifest, valid_opaque_id,
@@ -1368,6 +1369,12 @@ impl Drop for TickerLease<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// See [`PluginRuntime::compiles_on_this_thread`].
+    static COMPILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Who advances the epoch. `Manual` exists so a test can decide exactly when a
 /// deadline expires instead of racing a sleeping thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2264,6 +2271,18 @@ struct RuntimeInner {
     /// Created on first use, in whichever worker asks for it. A session that
     /// never opens a plugin surface never pays for the worker threads.
     scheduler: OnceLock<Arc<PluginScheduler>>,
+    /// Resolved on the first compilation rather than at construction. The cache
+    /// is authenticated by a key in the system keychain, and macOS prompts when
+    /// an application whose code signature it does not recognise reads one — so
+    /// opening it has to happen where a component is actually being compiled,
+    /// never on a path the user did not ask for.
+    ///
+    /// A *success* is remembered and a refusal is not, which is the whole reason
+    /// this is not `OnceLock<Option<_>>`. This runtime is process-wide, and the
+    /// cache refuses to open until a user-initiated surface permits it: caching
+    /// the first refusal would mean that a background update installing before
+    /// the user touches anything leaves the session without a cache for good.
+    compile_cache: OnceLock<ComponentCache>,
 }
 
 impl Drop for RuntimeInner {
@@ -2343,6 +2362,7 @@ impl PluginRuntime {
                 ticker,
                 epoch_mode,
                 scheduler: OnceLock::new(),
+                compile_cache: OnceLock::new(),
             }),
         })
     }
@@ -2384,6 +2404,50 @@ impl PluginRuntime {
                 Arc::clone(&self.inner.journal),
             ))
         })
+    }
+
+    /// The compile cache, or `None` when this process has none yet — no
+    /// directory configured, nothing permitted, or no install key. `None` is the
+    /// whole feature switched off: every caller then behaves exactly as it did
+    /// before the cache existed, and asks again next time.
+    fn compile_cache(&self) -> Option<&ComponentCache> {
+        if let Some(cache) = self.inner.compile_cache.get() {
+            return Some(cache);
+        }
+        // Two callers can lose this race and both build one; that costs a hash of
+        // the engine configuration, and the install key behind it is memoised
+        // process-wide, so the keychain is still read at most once.
+        let _ = self
+            .inner
+            .compile_cache
+            .set(crate::plugin_compile_cache::shared(&self.inner.engine)?);
+        self.inner.compile_cache.get()
+    }
+
+    /// The engine every component is compiled by. Only the compile cache needs
+    /// it: an artifact is loadable by an engine whose configuration produced it
+    /// and by no other, so the cache is built from this one or not at all.
+    #[cfg(test)]
+    pub(crate) fn engine(&self) -> &Engine {
+        &self.inner.engine
+    }
+
+    /// Attaches a cache explicitly instead of the process-wide one `lib.rs`
+    /// configures, so a test can own its directory and its key.
+    #[cfg(test)]
+    pub(crate) fn use_compile_cache(&self, cache: ComponentCache) {
+        assert!(
+            self.inner.compile_cache.set(cache).is_ok(),
+            "the compile cache was already resolved for this runtime"
+        );
+    }
+
+    /// What the attached cache answered. The only way to tell a reused artifact
+    /// from a recompilation from outside this module, since both produce the same
+    /// component.
+    #[cfg(test)]
+    pub(crate) fn compile_cache_counts(&self) -> Option<crate::plugin_compile_cache::CacheCounts> {
+        self.compile_cache().map(ComponentCache::counts)
     }
 
     /// Queues one invocation. This is the door every caller outside this module
@@ -2531,7 +2595,19 @@ impl PluginRuntime {
         bytes: &[u8],
         sha256: &str,
     ) -> Result<PreparedComponent, PluginRuntimeError> {
-        self.compile(bytes).map(|component| PreparedComponent {
+        // A cached artifact is machine code, so the cache answers only with one
+        // it can prove this installation wrote; anything it cannot prove is a
+        // compile, which is what this call did before the cache existed. See
+        // `plugin_compile_cache.rs` for why that proof is the whole module.
+        //
+        // `preflight_component` stays a plain compile on purpose: it is the
+        // installer asking whether *these bytes* validate, and answering that
+        // from an artifact would answer a different question.
+        let component = match self.compile_cache() {
+            Some(cache) => cache.component(bytes, || self.compile(bytes))?,
+            None => self.compile(bytes)?,
+        };
+        Ok(PreparedComponent {
             component,
             sha256: sha256.to_owned(),
         })
@@ -2549,10 +2625,24 @@ impl PluginRuntime {
     /// that closes Orivo is an outage. Nothing is installed into the engine until
     /// compilation returns, so there is no half-registered module to inherit.
     fn compile(&self, bytes: &[u8]) -> Result<Component, PluginRuntimeError> {
+        #[cfg(test)]
+        COMPILES.with(|count| count.set(count.get() + 1));
         without_unwinding(|| {
             Component::new(&self.inner.engine, bytes)
                 .map_err(|_| PluginRuntimeError::InvalidComponent)
         })
+    }
+
+    /// How many components this thread has compiled.
+    ///
+    /// Per *thread*, not per process, and that is what makes it usable: the two
+    /// paths a test needs to hold to zero — the startup update check, the cache's
+    /// warm read — run synchronously on the caller's thread, while `cargo test`
+    /// runs every other test in parallel on its own. A process-wide counter would
+    /// be a race; this one is a fact about the work the test itself caused.
+    #[cfg(test)]
+    pub(crate) fn compiles_on_this_thread() -> u64 {
+        COMPILES.with(std::cell::Cell::get)
     }
 
     /// One call into a component, under grants and limits, from start to

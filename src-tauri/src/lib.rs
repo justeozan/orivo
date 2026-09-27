@@ -9,6 +9,7 @@ mod launcher;
 // gate, so a busy CI runner can't turn a timing into a false failure.
 #[cfg(test)]
 mod perf_bench;
+mod plugin_compile_cache;
 mod plugin_health;
 mod plugin_index;
 mod plugin_installer;
@@ -890,6 +891,16 @@ pub fn run() {
             // keychain item and macOS would ask for the keychain password once
             // per store, every time.
             sources::set_connections_path(app_data.join(sources::CONNECTIONS_FILE));
+            // Compiled plugin components are regenerable, so they live in the
+            // cache directory rather than beside the packages they came from.
+            // Naming it is all that happens here: the cache is opened by the
+            // first component compilation, which no startup path performs.
+            plugin_compile_cache::configure(
+                app.path()
+                    .app_cache_dir()
+                    .unwrap_or_else(|_| app_data.clone())
+                    .join(plugin_compile_cache::CACHE_DIRECTORY),
+            );
             // Android is the only platform whose URL hand-off runs through a
             // Tauri plugin, so it needs the handle the `UrlOpener` seam omits.
             #[cfg(target_os = "android")]
@@ -1023,6 +1034,7 @@ pub fn run() {
             sync_source_library,
             disconnect_source_account,
             get_runner_plugins,
+            purge_plugin_compile_cache,
             get_wine_runner_status,
             begin_wine_profile_setup,
             get_wine_profile_setup,
@@ -1406,6 +1418,9 @@ async fn get_runner_plugins(state: State<'_, AppState>) -> Result<Vec<RunnerPlug
     let root = state.plugin_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = PluginDiscoveryLease(lease_flag);
+        // The "Add an emulator" flow is user-initiated, so the compile cache may
+        // open from here on — see `plugin_compile_cache::permit`.
+        plugin_compile_cache::permit();
         let runtime = PluginRuntime::shared().map_err(|error| error.to_string())?;
         Ok::<_, String>(
             PluginRegistry::new(root, HostCompatibility::v1(env!("CARGO_PKG_VERSION")))
@@ -1414,6 +1429,20 @@ async fn get_runner_plugins(state: State<'_, AppState>) -> Result<Vec<RunnerPlug
     })
     .await
     .map_err(|error| format!("Plugin discovery did not finish: {error}"))?
+}
+
+/// Throw away every compiled component, and report how many were removed.
+///
+/// The sixth promise of the plugin plan: removing or disabling a plugin keeps
+/// the games, the preferences and the sessions, and only a plugin's regenerable
+/// caches may be deleted. This is the door for Settings › Plugins, and it is
+/// always safe to open — a component whose artifact is gone is compiled again on
+/// the next open.
+#[tauri::command]
+async fn purge_plugin_compile_cache() -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(plugin_compile_cache::purge)
+        .await
+        .map_err(|error| format!("The plugin cache could not be purged: {error}"))?
 }
 
 fn wine_runner_status_view() -> WineRunnerStatusView {

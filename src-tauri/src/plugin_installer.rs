@@ -255,6 +255,9 @@ impl PluginInstallerService {
     }
 
     fn catalog(&self) -> PluginCatalogView {
+        // Settings › Plugins is a user-initiated surface, so the compile cache may
+        // be opened from here on. Nothing before this point in a session does.
+        crate::plugin_compile_cache::permit();
         let installed = self.installed();
         let available = self
             .available_entries()
@@ -524,7 +527,16 @@ pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstaller
         {
             return;
         }
-        for entry in pending_automatic_updates(&service) {
+        // Reading every installed manifest is disk work, and the command executor
+        // is not where disk work goes: `spawn_blocking`, like the recovery step
+        // above it.
+        let listing = Arc::clone(&service);
+        let Ok(pending) =
+            tauri::async_runtime::spawn_blocking(move || pending_automatic_updates(&listing)).await
+        else {
+            return;
+        };
+        for entry in pending {
             if service.cancelled.load(Ordering::Acquire) {
                 return;
             }
@@ -541,15 +553,22 @@ pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstaller
 /// impersonation the two channels exist to prevent.
 fn pending_automatic_updates(service: &PluginInstallerService) -> Vec<IndexEntry> {
     let available = service.available_entries();
+    // The manifest listing, not `installed()`: this runs at launch, and the three
+    // fields it reads — id, version, whether the package arrived signed — are the
+    // manifest's and the trust marker's. `installed()` would preflight every
+    // installed component to answer them, which is a Cranelift pass per plugin on
+    // the startup path and, with a compile cache behind it, the install key read
+    // at launch. See `plugin_compile_cache::permit`.
     service
-        .installed()
+        .registry()
+        .installed_manifests()
         .into_iter()
-        .filter(|plugin| plugin.trusted)
-        .filter_map(|plugin| {
+        .filter(|record| service.store.is_trusted(&record.id))
+        .filter_map(|record| {
             available
                 .iter()
-                .find(|entry| entry.id == plugin.id)
-                .filter(|entry| is_upgrade(&entry.version, &plugin.version))
+                .find(|entry| entry.id == record.id)
+                .filter(|entry| is_upgrade(&entry.version, &record.version))
                 .cloned()
         })
         .collect()
@@ -1782,6 +1801,51 @@ mod tests {
         // package, and this install is a development build all the same.
         assert!(!service.store.is_trusted("com.orivo.quiky"));
         assert_eq!(pending_automatic_updates(&service), Vec::new());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// What the startup update check reads, and all it reads.
+    ///
+    /// `pending_automatic_updates` runs at launch for a user who consented to
+    /// updates, and it used to get there through `installed()` — which preflights
+    /// every installed component, so launching Orivo compiled every plugin, on the
+    /// command executor, and (once a compile cache existed behind
+    /// `prepare_component`) read that cache's install key at the same time. The
+    /// three fields it actually wants are the manifest's and the trust marker's.
+    ///
+    /// `valid_package` ships `EMPTY_COMPONENT`, which is a core module and not a
+    /// component: Wasmtime refuses it. That it is listed here with its id and
+    /// version anyway is the property — no component was consulted to produce
+    /// this answer.
+    #[test]
+    fn the_update_check_reads_manifests_and_not_components() {
+        let root = temporary_root("update-listing");
+        let service = service(&root);
+        install_package(
+            &service,
+            &valid_package("com.orivo.quiky"),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .unwrap();
+
+        let listed = service.registry().installed_manifests();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "com.orivo.quiky");
+        assert!(!listed[0].version.is_empty());
+
+        // And the whole call, at the call site, compiling nothing. Counted per
+        // thread, so the parallel suite cannot move it: putting `installed()`
+        // back here fails this line and nothing else would.
+        let before = PluginRuntime::compiles_on_this_thread();
+        // The consent rule still holds on top of it: a sideloaded package has no
+        // trust marker, so nothing is pending.
+        assert_eq!(pending_automatic_updates(&service), Vec::new());
+        assert_eq!(
+            PluginRuntime::compiles_on_this_thread(),
+            before,
+            "the startup update check compiled a component"
+        );
         fs::remove_dir_all(&root).ok();
     }
 

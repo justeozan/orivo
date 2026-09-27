@@ -38,6 +38,7 @@
 //!    plugin count instead of re-measuring it.
 
 use crate::catalog::{CURRENT_SCHEMA_VERSION, Catalog};
+use crate::plugin_compile_cache::{CacheLimits, ComponentCache};
 use crate::plugin_manifest::{
     ArtifactDescriptor, ArtifactKind, HostCompatibility, PLUGIN_SDK_V1, PluginCapability,
     PluginExtension, PluginManifest,
@@ -248,6 +249,40 @@ fn bench_wine_auto_apply_10000_games() {
     bench_wine_auto_apply_at_size(10_000);
 }
 
+/// Whether the installed copies share one component or carry different bytes.
+///
+/// `Identical` is what the numbers in `docs/performance.md` section 3 were taken
+/// with, and it is kept so those stay comparable. It is the wrong shape for a
+/// compile cache: N copies of one component are N packages sharing *one*
+/// artifact, which flatters a cache that is meant to hold one per component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Components {
+    Identical,
+    Distinct,
+}
+
+/// The fixture with a WebAssembly custom section appended, so every copy is a
+/// different component with a different digest.
+///
+/// A custom section is ignored by the component model and by Cranelift, which is
+/// what makes this a fair stand-in for N unrelated third-party runners: each one
+/// compiles to the same amount of code and lands in its own cache slot, so the
+/// cached measurement is N loads of N artifacts rather than N loads of one.
+fn fixture_variant(index: usize) -> Vec<u8> {
+    const SECTION_NAME: &[u8] = b"orivo-bench";
+    let mut payload = Vec::with_capacity(1 + SECTION_NAME.len() + 8);
+    payload.push(SECTION_NAME.len() as u8);
+    payload.extend_from_slice(SECTION_NAME);
+    payload.extend_from_slice(&(index as u64).to_le_bytes());
+
+    let mut bytes = Vec::with_capacity(RUNNER_COMPONENT.len() + payload.len() + 2);
+    bytes.extend_from_slice(RUNNER_COMPONENT);
+    bytes.push(0x00);
+    bytes.push(payload.len() as u8);
+    bytes.extend_from_slice(&payload);
+    bytes
+}
+
 /// Installs `count` copies of the real runner fixture, each under its own
 /// directory.
 ///
@@ -265,7 +300,12 @@ fn bench_wine_auto_apply_10000_games() {
 /// same for every copy, so `get-identity` disagrees with the manifest from
 /// the second copy on — full compile and instantiate cost, `Invalid` result
 /// — which is a fair stand-in for N distinct, unrelated third-party runners.
-fn install_fixture_copies(root: &Path, count: usize, extensions: Vec<PluginExtension>) {
+fn install_fixture_copies(
+    root: &Path,
+    count: usize,
+    extensions: Vec<PluginExtension>,
+    components: Components,
+) {
     for index in 0..count {
         let id = if index == 0 {
             RUNNER_ID.to_string()
@@ -274,7 +314,11 @@ fn install_fixture_copies(root: &Path, count: usize, extensions: Vec<PluginExten
         };
         let directory = root.join(&id);
         fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("component.wasm"), RUNNER_COMPONENT).unwrap();
+        let component = match components {
+            Components::Identical => RUNNER_COMPONENT.to_vec(),
+            Components::Distinct => fixture_variant(index),
+        };
+        fs::write(directory.join("component.wasm"), &component).unwrap();
         let manifest = PluginManifest {
             id,
             name: "Fixture Runner".into(),
@@ -287,8 +331,8 @@ fn install_fixture_copies(root: &Path, count: usize, extensions: Vec<PluginExten
             artifacts: vec![ArtifactDescriptor {
                 path: "component.wasm".into(),
                 kind: ArtifactKind::Component,
-                sha256: sha256_hex(RUNNER_COMPONENT),
-                byte_size: RUNNER_COMPONENT.len() as u64,
+                sha256: sha256_hex(&component),
+                byte_size: component.len() as u64,
             }],
         };
         fs::write(
@@ -309,7 +353,12 @@ fn bench_plugin_surfaces_at_count(count: usize) {
     let compat = HostCompatibility::v1("0.3.0");
 
     let installer_dir = scratch_dir(&format!("installed-{count}"));
-    install_fixture_copies(&installer_dir, count, vec![PluginExtension::Runner]);
+    install_fixture_copies(
+        &installer_dir,
+        count,
+        vec![PluginExtension::Runner],
+        Components::Identical,
+    );
     let installer_registry = PluginRegistry::new(installer_dir.clone(), compat.clone());
     for _ in 0..WARMUP_ITERATIONS {
         let _ = installer_registry.installed_plugins(&runtime);
@@ -327,7 +376,12 @@ fn bench_plugin_surfaces_at_count(count: usize) {
     fs::remove_dir_all(&installer_dir).ok();
 
     let runner_dir = scratch_dir(&format!("runner-{count}"));
-    install_fixture_copies(&runner_dir, count, vec![PluginExtension::Runner]);
+    install_fixture_copies(
+        &runner_dir,
+        count,
+        vec![PluginExtension::Runner],
+        Components::Identical,
+    );
     let runner_registry = PluginRegistry::new(runner_dir.clone(), compat);
     for _ in 0..WARMUP_ITERATIONS {
         let _ = runner_registry.runner_plugins(&runtime);
@@ -366,4 +420,91 @@ fn bench_plugin_surfaces_8_installed() {
 #[ignore]
 fn bench_plugin_surfaces_20_installed() {
     bench_plugin_surfaces_at_count(20);
+}
+
+// ---------------------------------------------------------------------------
+// P5 — what the compile cache removes from the two discovery commands
+// ---------------------------------------------------------------------------
+
+/// A fixed key, because the bench must not touch the keychain: a `cargo test`
+/// binary asking macOS for a keychain item is a password prompt on a machine
+/// nobody is watching. What is measured here is the disk and the engine, and
+/// neither depends on where the key came from.
+const CACHE_BENCH_KEY: [u8; 32] = [0x5a; 32];
+
+/// Three numbers for the same work: no cache at all (the state before this lot),
+/// a cache seeing each component for the first time, and a cache that already
+/// holds them.
+///
+/// The uncached line is measured here rather than quoted from section 3 of
+/// `docs/performance.md` so that the comparison survives a different machine, a
+/// different day and — because these copies carry distinct component bytes,
+/// unlike the ones those numbers were taken with — a different fixture shape.
+fn bench_plugin_compile_cache_at_count(count: usize) {
+    let root = scratch_dir(&format!("cache-plugins-{count}"));
+    install_fixture_copies(
+        &root,
+        count,
+        vec![PluginExtension::Runner],
+        Components::Distinct,
+    );
+    let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+
+    let uncached = PluginRuntime::new().expect("an engine is available on the bench host");
+    for _ in 0..WARMUP_ITERATIONS {
+        let _ = registry.installed_plugins(&uncached);
+    }
+    let mut samples = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| registry.installed_plugins(&uncached));
+        samples.push(elapsed);
+    }
+    report("plugin discovery, no cache", count, samples);
+
+    let artifacts = scratch_dir(&format!("cache-artifacts-{count}"));
+    let cached = PluginRuntime::new().expect("an engine is available on the bench host");
+    cached.use_compile_cache(ComponentCache::open(
+        cached.engine().clone(),
+        artifacts.clone(),
+        CACHE_BENCH_KEY,
+        CacheLimits::default(),
+    ));
+
+    // The first pass compiles *and* writes, so it is strictly slower than the
+    // uncached one. That cost is paid once per component, ever, and saying so is
+    // the point of measuring it separately rather than folding it into a median.
+    let (_, cold) = timed(|| registry.installed_plugins(&cached));
+    report("plugin discovery, cold cache", count, vec![cold]);
+
+    let mut warm = Vec::with_capacity(MEASURED_ITERATIONS);
+    for _ in 0..MEASURED_ITERATIONS {
+        let (_, elapsed) = timed(|| registry.installed_plugins(&cached));
+        warm.push(elapsed);
+    }
+    report("plugin discovery, warm cache", count, warm);
+    println!(
+        "PERF cache counts                        n={count:<6} {:?}",
+        cached.compile_cache_counts()
+    );
+
+    fs::remove_dir_all(&artifacts).ok();
+    fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+#[ignore]
+fn bench_plugin_compile_cache_1_installed() {
+    bench_plugin_compile_cache_at_count(1);
+}
+
+#[test]
+#[ignore]
+fn bench_plugin_compile_cache_8_installed() {
+    bench_plugin_compile_cache_at_count(8);
+}
+
+#[test]
+#[ignore]
+fn bench_plugin_compile_cache_20_installed() {
+    bench_plugin_compile_cache_at_count(20);
 }
