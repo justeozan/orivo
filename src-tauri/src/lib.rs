@@ -27,6 +27,12 @@ mod preferences;
 mod quiky_installer;
 mod runner_commands;
 mod runner_host;
+// Tests only: the official Ryujinx runner is a WebAssembly component in
+// `plugins/ryujinx/`, not Rust in this binary. What lives here is the proof that
+// the shipped component goes through the host's real path — install, profile,
+// grant, import, process — and nothing a release build executes.
+#[cfg(test)]
+mod ryujinx_plugin;
 mod source_epic;
 mod source_gog;
 mod source_instant_gaming;

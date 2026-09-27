@@ -1,0 +1,32 @@
+# Its own workspace, same reasoning as `src-tauri/fixtures/runner-fixture`:
+# this crate targets wasm32-unknown-unknown and is built by `build.sh` when the
+# component changes, never by `cargo build`/`cargo test` at the repository root.
+# Keeping it out of Orivo's workspace is what stops those commands from needing
+# a wasm target, a component tool or a network fetch on a fresh clone — the
+# committed `package/component.wasm` is all the Rust suite reads.
+[workspace]
+
+[package]
+name = "orivo-ryujinx-runner"
+# Must equal `package/manifest.json`'s `version`: the registry refuses a
+# component whose `get-identity` disagrees with the package it arrived in.
+version = "1.0.0"
+edition = "2024"
+publish = false
+license-file = "../../LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The only dependency, and the same release the fixture, the starter template
+# and the host's wasmtime agree on — see `src-tauri/fixtures/README.md` for why
+# the version has to match the component encoder.
+wit-bindgen = { version = "0.62.0", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

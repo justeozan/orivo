@@ -273,6 +273,49 @@ fausses : la tâche de maintenance du lancement atteignait `prepare_component`, 
 au lancement pour qui a la Boutique en page de départ — permettait le cache.
 Afficher une page n'est pas un geste à propos d'un plugin.
 
+L’étape 2.1 est faite, et c’est la première fois que le système de plugins sert
+à quelque chose : **Ryujinx** (Switch, macOS) est un plugin runner officiel
+publié dans le dépôt sous forme de **composant WebAssembly**, dans
+`plugins/ryujinx/`, construit par son propre script avec son SHA-256 committé
+et chargé par le host exactement comme le paquet d’un tiers. Wine et Winlator
+restent des adapters Rust ; celui-ci est du code invité sous le bac à sable. Il
+ne fait qu’une chose : lister le seul dossier accordé et dire lesquels de ces
+*noms* sont des jeux Switch. Il n’appelle **jamais** `read-file`, donc les
+`prod.keys`, le firmware et les sauvegardes qui vivent dans ce même dossier sont
+hors d’atteinte par construction — et c’est le compteur `bytes_read` du host qui
+le prouve, pas une promesse. Orivo n’embarque ni Ryujinx, ni clé, ni firmware,
+ni jeu : l’utilisateur installe l’émulateur lui-même et le choisit au sélecteur.
+
+Une chose a dû bouger côté host pour que ce palier veuille dire quelque chose.
+La référence externe qu’un plugin rend doit passer la grammaire d’id opaque
+(`[A-Za-z0-9._\-:]`), et un dump Switch s’appelle par convention
+`Titre [0100…][v0].nsp` — espaces et crochets. Aucune référence n’existait donc
+pour ces fichiers, et une bibliothèque nommée normalement importait zéro jeu.
+Le résolveur accepte désormais, à côté du nom en clair, **`x:` suivi du nom
+d’entrée en hexadécimal minuscule**, sans rien changer à la frontière — l’id
+reste opaque, le fichier sort toujours du listing du host dans un dossier
+accordé, et rien de ce que le plugin dit n’est joint à un chemin. Ce qui
+s’élargit, c’est seulement *quels noms un plugin peut prononcer*. Les trois
+détails de cette forme sont là parce qu’une référence est la clé d’une carte de
+bibliothèque (`runner_game_id`) : `x:` est un espace de noms qu’aucun nom de
+fichier ne peut atteindre (le host ne liste jamais un nom contenant `:`), donc
+les deux formes ne peuvent pas décrire un même fichier et il n’y a aucune
+priorité à arbitrer ; la casse minuscule est la seule orthographe, sinon un
+fichier aurait eu 2^k références et donc 2^k cartes ; et plus d’une
+correspondance est refusée au lieu d’être classée. Une référence ne peut nommer
+que ce que le host aurait pu montrer : ni nom caché — le sidecar AppleDouble
+`._<nom>` qu’écrit macOS sur une clé exFAT porte le même suffixe que le dump
+qu’il double — ni nom que `valid_entry_name` refuserait. Une page ne lit
+désormais ses dossiers accordés qu’une fois, au lieu d’une fois par candidat. Élargir `runner-profile` ou
+ajouter un mode de lancement reste une décision ouverte, hors de ce palier :
+`docs/ryujinx-runner.md` dit ce que Ryujinx accepte, ce que le contrat v1 ne
+peut pas exprimer (plein écran, dossier de données) et ce que publier ce plugin
+sur le canal officiel demanderait — une clé de release et un index signé, qui
+ne sont pas dans ce dépôt. L’étape 2.4 est mesurée avec ce plugin installé :
+démarrage, ouverture de Réglages → Plugins, import de 1 / 100 / 1000 fausses
+ROMs et préparation du premier lancement sont dans
+[`docs/performance.md`](performance.md), § 7.
+
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
 bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune
 dépendance SQLite et son catalogue est un JSON versionné (`catalog.rs`, schéma

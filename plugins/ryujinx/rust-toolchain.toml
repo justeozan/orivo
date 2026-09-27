@@ -1,0 +1,13 @@
+# The committed `package/component.wasm` carries a SHA-256 the test suite
+# checks, so "reproducible" has to mean something more than "it built here".
+# `stable` floats: the compiler that produced the artefact would be a different
+# one six weeks later, and the digest would change with no source change to
+# explain it.
+#
+# This pin is scoped to this crate — it is its own workspace and `build.sh` runs
+# cargo from this directory — so nothing else in Orivo is held to it. Rebuilding
+# needs this exact compiler; `build.sh` says so rather than letting a different
+# one produce a digest that silently disagrees with the manifest.
+[toolchain]
+channel = "1.98.1"
+targets = ["wasm32-unknown-unknown"]

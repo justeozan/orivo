@@ -1872,7 +1872,10 @@ fn host_account() -> u32 {
 /// gone — and `C:x` resolves against that drive's current directory. Rejecting
 /// `:` outright is what makes this checkable on a Unix CI, where `:` is an
 /// ordinary character and `components()` would happily call it `Normal`.
-fn valid_entry_name(name: &str) -> bool {
+/// `pub(crate)` for `runner_host`: the host resolves a candidate's file from its
+/// own listing, and "a name this plugin could have been shown" has to be the same
+/// question in both places or the resolver becomes the weaker side of it.
+pub(crate) fn valid_entry_name(name: &str) -> bool {
     if name.is_empty()
         || name.len() > MAX_ENTRY_NAME_BYTES
         || name.contains('/')
