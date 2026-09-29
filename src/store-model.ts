@@ -500,18 +500,17 @@ export function formatPrice(offer: StoreOffer | null): string {
 // the card layout owns, from its own facts.
 // ---------------------------------------------------------------------------
 
-const FALLBACK_STATS = ["Réflexion", "Immersion", "Exploration"];
-
-function stableHash(value: string): number {
-  let hash = 0;
-  for (const character of value) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
-  return hash;
-}
-
+/**
+ * The five-dot scores, and only where they are real.
+ *
+ * They used to be invented for a game with no editorial entry — three of its
+ * tags, scored `3 + hash(id) % 3` and announced to a screen reader as "4 sur
+ * 5". Nothing showed it while every game on the shelf was written by hand, but
+ * the moment a game arrives from a shop's own catalogue the shelf starts rating
+ * games at random. A card with nothing to say here says nothing.
+ */
 export function fitStats(game: GameSummary): StoreFitStat[] {
-  if (game.curation?.stats.length) return game.curation.stats.slice(0, 3);
-  const labels = (game.tags.length ? game.tags : FALLBACK_STATS).slice(0, 3);
-  return labels.map((label) => ({ label, value: 3 + (stableHash(`${game.id}:${label}`) % 3) }));
+  return game.curation?.stats.slice(0, 3) ?? [];
 }
 
 export function sessionLabel(game: GameSummary): string {

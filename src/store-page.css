@@ -752,6 +752,9 @@
   white-space: nowrap;
 }
 
+/* A game with no scores of its own leaves no gap where they would have been. */
+.store-card__stats:empty { display: none; }
+
 .store-card__stats {
   display: flex;
   margin-top: clamp(4px, 0.615svh, 6.3px);

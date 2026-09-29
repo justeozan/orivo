@@ -8,6 +8,7 @@ import {
   reduceStorePageState,
   selectBestOffer,
   selectStoreGames,
+  fitStats,
   storeCategoryLabel,
   STORE_CATEGORIES,
   type StoreBrowsePage,
@@ -463,6 +464,42 @@ describe("selectStoreGames", () => {
 
   it("returns an empty list rather than inventing results", () => {
     expect(selectStoreGames(stateWith({ home, platforms: ["switch"] }))).toEqual([]);
+  });
+});
+
+describe("fitStats", () => {
+  it("prints the scores a game was actually given", () => {
+    const stats = fitStats(
+      game({
+        curation: {
+          genres: [],
+          duration: "",
+          mode: "",
+          stats: [
+            { label: "Réflexion", value: 5 },
+            { label: "Créativité", value: 4 },
+            { label: "Relaxation", value: 4 },
+            { label: "Une quatrième", value: 2 },
+          ],
+          tagline: "",
+          heroTitle: "",
+          heroLead: "",
+          highlights: [],
+          categories: [],
+          platforms: [],
+        },
+      }),
+    );
+    expect(stats.map((stat) => stat.label)).toEqual(["Réflexion", "Créativité", "Relaxation"]);
+  });
+
+  it("invents none for a game nobody wrote about", () => {
+    // The card used to fill this row from the game's own tags, scored
+    // `3 + hash(id) % 3` and read out as "4 sur 5". A shop's catalogue is full
+    // of games with tags and no editorial entry, and none of them may be
+    // rated by a number the shelf made up.
+    expect(fitStats(game({ tags: ["Open World", "Survival", "Crafting"] }))).toEqual([]);
+    expect(fitStats(game({ tags: [] }))).toEqual([]);
   });
 });
 
