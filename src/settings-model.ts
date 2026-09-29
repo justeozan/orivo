@@ -5,6 +5,7 @@ import type {
   StoreProvider,
   WallpaperCredentials,
 } from "./contracts";
+import type { IconName } from "./icons";
 
 export const START_PAGES = ["library", "store"] as const;
 export const STORE_REGIONS = ["automatic", "us", "ca", "gb", "fr", "de", "jp", "au"] as const;
@@ -24,6 +25,13 @@ export interface Preferences {
   debugSampleSocial: boolean;
   /** Surfaces that are not finished yet. Off by default; the Me page is one. */
   betaFeatures: boolean;
+  /**
+   * Debug-only: keep the games Orivo wrote by hand on the Store's shelf once a
+   * storefront's own new releases are there to fill it. Off by default — they
+   * stood in for a catalogue that did not exist yet, and they crowd out what
+   * has actually just come out.
+   */
+  showEditorialGames: boolean;
 }
 
 export interface PreferencesUpdate {
@@ -33,6 +41,7 @@ export interface PreferencesUpdate {
   showShowcaseGames?: boolean;
   debugSampleSocial?: boolean;
   betaFeatures?: boolean;
+  showEditorialGames?: boolean;
   reset?: boolean;
 }
 
@@ -49,19 +58,36 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   showShowcaseGames: false,
   debugSampleSocial: false,
   betaFeatures: false,
+  showEditorialGames: false,
 });
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
+  /** The page title: the full name of the section. */
   label: string;
+  /** The sidebar tab: one word, next to the section's glyph. */
+  tab: string;
+  icon: IconName;
   description: string;
 }> = [
-  { id: "general", label: "General", description: "Startup and store defaults" },
-  { id: "libraries", label: "Libraries & Sources", description: "Accounts, imports, and providers" },
-  { id: "plugins", label: "Plugins & Runners", description: "Wine profiles and plugin health" },
-  { id: "appearance", label: "Appearance", description: "Motion preferences" },
-  { id: "data", label: "Data", description: "Derived cache usage" },
-  { id: "about", label: "About", description: "Versions and attributions" },
+  { id: "general", label: "General", tab: "General", icon: "cog", description: "Startup and store defaults" },
+  {
+    id: "libraries",
+    label: "Libraries & Sources",
+    tab: "Libraries",
+    icon: "folder",
+    description: "Accounts, imports, and providers",
+  },
+  {
+    id: "plugins",
+    label: "Plugins & Runners",
+    tab: "Plugins",
+    icon: "puzzle",
+    description: "Wine profiles and plugin health",
+  },
+  { id: "appearance", label: "Appearance", tab: "Appearance", icon: "palette", description: "Motion preferences" },
+  { id: "data", label: "Data", tab: "Data", icon: "database", description: "Derived cache usage" },
+  { id: "about", label: "About", tab: "About", icon: "info", description: "Versions and attributions" },
 ] as const;
 
 const providerLabels: Record<StoreProvider, string> = {
@@ -102,6 +128,8 @@ export function normalisePreferences(value: unknown): Preferences {
     showShowcaseGames: record.showShowcaseGames === true || record.show_showcase_games === true,
     debugSampleSocial: record.debugSampleSocial === true || record.debug_sample_social === true,
     betaFeatures: record.betaFeatures === true || record.beta_features === true,
+    showEditorialGames:
+      record.showEditorialGames === true || record.show_editorial_games === true,
   };
 }
 
@@ -219,6 +247,28 @@ export function defaultProviderStatuses(): ProviderStatus[] {
           : "An authorised provider feed is not configured.",
     refreshedAt: null,
   }));
+}
+
+/**
+ * What a store's price feed is called on screen.
+ *
+ * `unavailable` and `not-configured` are the same sentence to the person
+ * reading the page — Orivo cannot show this store's prices yet — and differ
+ * only in why: one has no authorised feed configured, the other has no public
+ * feed to configure. Neither is a fault, and neither is anything the reader can
+ * do something about, so a red "Unavailable" down half the list read as a row
+ * of errors. Both say what is actually true instead: not yet. The feed's own
+ * sentence is still one pointer away on the row.
+ */
+export function providerHealthLabel(health: ProviderHealth): string {
+  switch (health) {
+    case "available":
+      return "Available";
+    case "degraded":
+      return "Degraded";
+    default:
+      return "Soon";
+  }
 }
 
 export function formatDataSize(bytes: number): string {

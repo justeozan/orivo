@@ -78,6 +78,12 @@ const STEAM_REFRESH_GIVE_UP_AFTER: usize = 5;
 /// on any given week is mostly asset flips.
 const STEAM_NEW_RELEASES_LIMIT: usize = 24;
 
+/// How old a release may be before the shelf stops calling it new. The listing
+/// is Steam's own and is ordered by release date, so this changes nothing on a
+/// normal week — it is the guarantee that an old game cannot reach the shelf
+/// through this door whatever the storefront decides to rank.
+const STEAM_NEW_RELEASE_MAX_AGE_DAYS: i64 = 90;
+
 /// Steam labels a listing with the descriptors its publisher declared. 1 and 3
 /// are "some nudity or sexual content" and "adult only sexual content"; a shelf
 /// that opens on a recommendation does not surface those unasked.
@@ -1840,6 +1846,39 @@ fn steam_library_hero_url(app_id: &str) -> String {
     format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/library_hero.jpg")
 }
 
+/// Steam answers in the language it was asked in, so a date comes back as
+/// "29 sept. 2026". Only that form is read, and a date in any other — a year on
+/// its own, a quarter, a season — is no answer rather than a wrong one: the
+/// listing's own ordering then speaks for the game instead of a parse failing
+/// it. Returns days since the epoch, which is what the rest of this file counts
+/// in.
+fn steam_release_days(date: &str) -> Option<i64> {
+    let mut parts = date.split_whitespace();
+    let day: u32 = parts.next()?.trim_end_matches('.').parse().ok()?;
+    let month = match parts
+        .next()?
+        .trim_end_matches('.')
+        .to_lowercase()
+        .as_str()
+    {
+        "janv" => 1,
+        "févr" | "fevr" => 2,
+        "mars" => 3,
+        "avr" => 4,
+        "mai" => 5,
+        "juin" => 6,
+        "juil" => 7,
+        "août" | "aout" => 8,
+        "sept" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "déc" | "dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    Some(days_from_civil(year, month, day))
+}
+
 /// One released game read out of a storefront listing, with the offer that
 /// prices it. `None` for anything that is not a released game Orivo will show.
 fn steam_new_release_from_payload(
@@ -1864,6 +1903,18 @@ fn steam_new_release_from_payload(
         .unwrap_or(false)
     {
         return None;
+    }
+    // Out, and out recently. The listing is ranked by release date, so this only
+    // ever catches something the storefront itself has mis-sorted.
+    if let Some(days) = data
+        .get("release_date")
+        .and_then(|date| date.get("date"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(steam_release_days)
+    {
+        if (now_ms / 86_400_000) as i64 - days > STEAM_NEW_RELEASE_MAX_AGE_DAYS {
+            return None;
+        }
     }
     if let Some(ids) = data
         .get("content_descriptors")
@@ -2382,7 +2433,7 @@ fn store_home(
     } else {
         document.games
     };
-    let games = without_owned(games, library);
+    let games = without_editorial(without_owned(games, library), app_data_dir);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -2429,7 +2480,7 @@ fn browse(
     } else {
         document.games
     };
-    let games = without_owned(games, library);
+    let games = without_editorial(without_owned(games, library), app_data_dir);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -2467,6 +2518,38 @@ pub fn open_store_offer(app: AppHandle, offer_id: String) -> Result<(), String> 
 
 /// Read the stored region tolerantly. An explicit host override wins; a
 /// missing or automatic preference falls back to the default region.
+/// Whether the shelf still carries the games Orivo wrote by hand.
+///
+/// They are held back once a storefront's own releases are there to take their
+/// place: forty-seven curated entries at the front of every shelf is what kept
+/// what actually came out this week off the screen. With nothing live to show —
+/// a refresh that has not run, or one that never reached Steam — they are the
+/// shelf again, because an empty Store is worse than a dated one.
+fn editorial_games_shown(app_data_dir: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct StoredPreferences {
+        #[serde(default, rename = "showEditorialGames")]
+        show_editorial_games: bool,
+    }
+    fs::read_to_string(app_data_dir.join(PREFERENCES_FILE))
+        .ok()
+        .and_then(|encoded| serde_json::from_str::<StoredPreferences>(&encoded).ok())
+        .map(|preferences| preferences.show_editorial_games)
+        .unwrap_or(false)
+}
+
+fn without_editorial(games: Vec<CachedGame>, app_data_dir: &Path) -> Vec<CachedGame> {
+    if editorial_games_shown(app_data_dir) {
+        return games;
+    }
+    let live: Vec<CachedGame> = games
+        .iter()
+        .filter(|game| game.curation.is_none())
+        .cloned()
+        .collect();
+    if live.is_empty() { games } else { live }
+}
+
 fn resolve_region(app_data_dir: &Path) -> String {
     if let Ok(region) = std::env::var(STORE_REGION_ENV)
         && is_region_code(&region)
@@ -4545,6 +4628,57 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The hand-written shelf, and when it steps aside.
+    // -----------------------------------------------------------------------
+
+    fn live_game(id: &str) -> CachedGame {
+        let payload = steam_release(id, serde_json::json!({}));
+        steam_new_release_from_payload(id, &payload, "FR", NOW_MS)
+            .expect("a game")
+            .0
+    }
+
+    #[test]
+    fn the_curated_shelf_steps_aside_for_what_just_came_out() {
+        let directory = TestDirectory::new("editorial-hidden");
+        let mut document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        document.games.push(live_game("2900640"));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), 1, "the curated games were still on the shelf");
+        assert_eq!(home.games[0].id, "steam:2900640");
+    }
+
+    #[test]
+    fn an_empty_shelf_is_worse_than_a_dated_one() {
+        // Nothing live: a refresh that never ran, or never reached Steam. The
+        // games Orivo wrote are then the shelf rather than a blank page.
+        let directory = TestDirectory::new("editorial-fallback");
+        let document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE);
+    }
+
+    #[test]
+    fn the_debug_switch_puts_the_curated_shelf_back() {
+        let directory = TestDirectory::new("editorial-shown");
+        fs::write(
+            directory.root.join(PREFERENCES_FILE),
+            br#"{"showEditorialGames":true}"#,
+        )
+        .unwrap();
+        let mut document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        document.games.push(live_game("2900640"));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE + 1);
+    }
+
+    // -----------------------------------------------------------------------
     // What Steam has just released.
     // -----------------------------------------------------------------------
 
@@ -4636,6 +4770,38 @@ mod tests {
         assert_eq!(offer.provider, StoreProviderId::Steam);
         assert_eq!(offer.id, "offer_steam_steam2900640");
         assert_eq!(offer.verified_at_epoch_ms, Some(NOW_MS));
+    }
+
+    #[test]
+    fn a_game_that_came_out_years_ago_is_not_a_new_release() {
+        // The fixture clock, written back out the way Steam writes a date, so
+        // the test says what it means whatever NOW_MS is set to.
+        const MONTHS: [&str; 12] = [
+            "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
+            "nov.", "déc.",
+        ];
+        let (year, month, day) = civil_from_days((NOW_MS / 86_400_000) as i64);
+        let today = format!("{day} {} {year}", MONTHS[month as usize - 1]);
+
+        let fresh = steam_release(
+            "1",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": today } }),
+        );
+        assert!(steam_new_release_from_payload("1", &fresh, "FR", NOW_MS).is_some());
+
+        let old = steam_release(
+            "2",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": "3 juin 2015" } }),
+        );
+        assert!(steam_new_release_from_payload("2", &old, "FR", NOW_MS).is_none());
+
+        // A date Orivo cannot read is no answer rather than a wrong one: the
+        // listing said this game just came out, and that stands.
+        let vague = steam_release(
+            "3",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": "T4 2026" } }),
+        );
+        assert!(steam_new_release_from_payload("3", &vague, "FR", NOW_MS).is_some());
     }
 
     #[test]

@@ -73,7 +73,6 @@ import {
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
-  sourceStatusLine,
   sourceSyncSummary,
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
@@ -96,6 +95,7 @@ import {
   normalisePreferences,
   normaliseProviderStatuses,
   normaliseWallpaperCredentials,
+  providerHealthLabel,
 } from "./settings-model";
 import {
   INITIAL_UPDATE_STATE,
@@ -122,7 +122,13 @@ import {
   type InstalledPluginView,
 } from "./plugin-manager";
 import { createDefaultQuikyClient } from "./quiky-install";
-import { composedTarget, createSpatialNav, isTypingEvent } from "./spatial-nav";
+import {
+  NAV_STEP_EVENT,
+  composedTarget,
+  createSpatialNav,
+  isTypingEvent,
+  type NavStepDetail,
+} from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
 import { attachFeedbackTo, initErrorReporting } from "./sentry";
 import "./library-onboarding.css";
@@ -136,8 +142,6 @@ type BackendRecord = Record<string, unknown>;
 type UpdaterModule = typeof import("@tauri-apps/plugin-updater");
 type UpdateHandle = NonNullable<Awaited<ReturnType<UpdaterModule["check"]>>>;
 
-type SteamPreviewStatus = "available" | "unavailable" | "error";
-type SteamPanelPhase = "idle" | "scanning" | SteamPreviewStatus | "importing";
 type SteamNoticeTone = "success" | "error" | "info";
 type SteamAccountPhase =
   | "idle"
@@ -150,40 +154,12 @@ type SteamAccountPhase =
   | "syncing"
   | "error";
 
-interface SteamPreviewGame {
-  appId: string;
-  title: string;
-  locationLabel: string;
-  lastUpdated: string;
-  selected: boolean;
-  alreadyImported: boolean;
-  coverUrl: string;
-  heroUrl: string;
-}
-
-interface SteamPreview {
-  status: SteamPreviewStatus;
-  libraries: number;
-  games: SteamPreviewGame[];
-  message: string;
-}
-
-interface SteamImportResult {
-  importedIds: string[];
-  updatedIds: string[];
-  skippedAppIds: string[];
-}
-
-interface SteamPreviewMedia {
-  appId: string;
-  coverUrl: string;
-  heroUrl: string;
-}
-
 interface SteamAccountStatus {
   connected: boolean;
   steamId: string;
   method: "web" | "api_key" | "";
+  /** The profile's display name; empty when Steam showed none, so the id stands in. */
+  personaName: string;
 }
 
 interface SteamAccountSyncResult {
@@ -267,16 +243,6 @@ interface NormalisedLibraryGame {
   mediaTokens: LibraryMediaTokens;
 }
 
-interface SteamPanelState {
-  open: boolean;
-  phase: SteamPanelPhase;
-  preview: SteamPreview | null;
-  selectedAppIds: Set<string>;
-  query: string;
-  notice: string;
-  noticeTone: SteamNoticeTone;
-}
-
 interface SteamAccountState {
   open: boolean;
   phase: SteamAccountPhase;
@@ -353,7 +319,6 @@ interface State {
   onboarding: OnboardingState;
   notifications: NotificationsState;
   libraryMenuOpen: boolean;
-  steam: SteamPanelState;
   steamAccount: SteamAccountState;
   sourceAccounts: SourceAccountsState;
   wineSettings: WineSettingsState;
@@ -376,11 +341,13 @@ export interface MountAppOptions {
 }
 
 const lastUsedFallback = fallbackLibrary[0];
-const MAX_RENDERED_STEAM_GAMES = 120;
-const MAX_STEAM_PREVIEW_MEDIA = 16;
-const MAX_STEAM_IMPORT_SELECTION = 2_000;
-const MAX_AUTOMATIC_STEAM_SELECTION = 50;
 const MAX_RENDERED_LIBRARY_CARDS = 48;
+/**
+ * How close to the rendered window's edge the selection may come before the
+ * window moves. Twelve cards is more than a screenful at every size, so the
+ * cards being swapped in and out are always off screen.
+ */
+const RAIL_WINDOW_MARGIN = 12;
 // Hydration covers everything the library actually renders. Capping it below
 // the rendered window left later cards showing a placeholder indefinitely,
 // because nothing re-runs hydration for a card that is already on screen.
@@ -426,6 +393,21 @@ const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
+/**
+ * The stores whose logo ships as its own file, under their own brand, for the
+ * rows that have no account to show: buying games and reading store data are
+ * different businesses, but a logo is a logo either way, and every row in this
+ * list presents it in the same place.
+ */
+const STORE_LOGO_FILES: Readonly<Record<string, string>> = {
+  humble: "humble.svg",
+  fanatical: "fanatical.png",
+  "green-man-gaming": "green-man-gaming.svg",
+  playstation: "playstation.svg",
+  nintendo: "nintendo.svg",
+  apple: "apple.svg",
+  "google-play": "google-play.svg",
+};
 
 export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
   const notificationStorage = defaultNotificationStorage();
@@ -454,15 +436,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       highlighted: [],
     },
     libraryMenuOpen: false,
-    steam: {
-      open: false,
-      phase: "idle",
-      preview: null,
-      selectedAppIds: new Set(),
-      query: "",
-      notice: "",
-      noticeTone: "info",
-    },
     steamAccount: {
       open: false,
       phase: "idle",
@@ -536,14 +509,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
-    librarySourceList: get<HTMLElement>("#library-source-list"),
     toast: get<HTMLElement>("#toast"),
-    steamPanel: get<HTMLElement>("#steam-import-panel"),
-    steamBody: get<HTMLElement>("#steam-import-body"),
-    steamFooter: get<HTMLElement>("#steam-import-footer"),
-    steamSelectionSummary: get<HTMLElement>("#steam-selection-summary"),
-    steamImportButton: get<HTMLButtonElement>("#steam-import-selected"),
-    steamRefresh: get<HTMLButtonElement>("#steam-refresh"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
     steamSourceRow: get<HTMLElement>("#steam-source-row"),
@@ -585,6 +551,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     notFoundDetail: get<HTMLElement>("#not-found-detail"),
     settingsTitle: get<HTMLElement>("#settings-page-title"),
     settingsDescription: get<HTMLElement>("#settings-page-description"),
+    settingsLayout: get<HTMLElement>(".settings-layout"),
+    settingsSidebar: get<HTMLElement>(".settings-sidebar"),
     settingsPanels: Array.from(root.querySelectorAll<HTMLElement>("[data-settings-panel]")),
     settingsSectionButtons: Array.from(
       root.querySelectorAll<HTMLButtonElement>("[data-settings-section]"),
@@ -594,19 +562,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   let activeHero = 0;
   let heroRequest = 0;
+  /** When the settings entrance cascade has finished and may be disarmed. */
+  let settingsEntranceTimer = 0;
+  /** The sidebar's own cascade: it belongs to the page, not to the section. */
+  let settingsSidebarEntranceTimer = 0;
+  /** Whether Settings is the page on screen — set by its activate/deactivate. */
+  let settingsPageActive = false;
   // One decoded wordmark is remembered per URL, so walking back along the rail
   // costs a set lookup rather than another load.
   let heroLogoSource = "";
   const heroLogosReady = new Set<string>();
   const heroLogoWaiters = new Map<string, Array<() => void>>();
   let toastTimer: number | undefined;
-  let steamRequest = 0;
   let libraryRequest = 0;
   /** Ticks the library while an Epic download runs; null when nothing is. */
   let installWatchTimer: number | null = null;
   const pendingLibraryMediaIds = new Map<string, number>();
-  const pendingSteamPreviewMediaIds = new Map<string, number>();
-  let steamPreviewMediaRefreshQueued = false;
   let settingsRequest = 0;
   /**
    * A plugin detail asked for by a deep link from outside Settings. The route
@@ -666,17 +637,41 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     return browseGames(searched, state.browse.mode, currentSegmentId());
   };
 
+  /**
+   * Which slice of a long library the rail actually renders.
+   *
+   * The window used to be centred on the selection, so every single step moved
+   * it by one and handed all 48 cards the next game along. The selection then
+   * sat at the same card, at the same place, on a rail that never scrolled,
+   * while the artwork under it changed: walking a big library looked like being
+   * stuck against an edge with the shelf churning past.
+   *
+   * It holds still instead, and only moves when the selection comes within
+   * `RAIL_WINDOW_MARGIN` of an edge — further than a screenful at every size,
+   * so the games on screen are never the ones being swapped. `renderCards`
+   * then keeps the shelf visually still across the move.
+   */
+  /** Where the rendered window starts in the visible library. */
+  let railWindowStart = 0;
+
   const railGames = (games: LibraryGame[]): LibraryGame[] => {
     if (games.length <= MAX_RENDERED_LIBRARY_CARDS) {
+      railWindowStart = 0;
       return games;
     }
 
     const selectedIndex = Math.max(0, games.findIndex((game) => game.id === state.selectedId));
-    const start = Math.min(
-      Math.max(0, selectedIndex - Math.floor(MAX_RENDERED_LIBRARY_CARDS / 2)),
-      games.length - MAX_RENDERED_LIBRARY_CARDS,
-    );
-    return games.slice(start, start + MAX_RENDERED_LIBRARY_CARDS);
+    const lastStart = games.length - MAX_RENDERED_LIBRARY_CARDS;
+    let start = Math.min(Math.max(0, railWindowStart), lastStart);
+    if (
+      selectedIndex < start + RAIL_WINDOW_MARGIN ||
+      selectedIndex >= start + MAX_RENDERED_LIBRARY_CARDS - RAIL_WINDOW_MARGIN
+    ) {
+      start = selectedIndex - Math.floor(MAX_RENDERED_LIBRARY_CARDS / 2);
+    }
+
+    railWindowStart = Math.min(Math.max(0, start), lastStart);
+    return games.slice(railWindowStart, railWindowStart + MAX_RENDERED_LIBRARY_CARDS);
   };
 
   const selectedGame = (): LibraryGame => {
@@ -1061,8 +1056,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
+  /**
+   * The leftmost card the rail is showing, and where it sits in the rail's own
+   * coordinates. Rendering a different window shifts every card by the width of
+   * what was added or dropped in front of it; putting this card back where it
+   * was puts the whole shelf back, because the games between them keep their
+   * order and their widths.
+   */
+  const railAnchor = (): { id: string; offset: number } | null => {
+    const edge = refs.cards.scrollLeft;
+    for (const card of refs.cards.querySelectorAll<HTMLButtonElement>(".game-card")) {
+      const id = card.dataset.gameId;
+      if (id && card.offsetLeft + card.offsetWidth > edge) return { id, offset: card.offsetLeft };
+    }
+    return null;
+  };
+
   const renderCards = (): void => {
+    const windowBefore = railWindowStart;
     const games = railGames(visibleGames());
+    // Only a window that moved can shift the shelf under the eye, and reading
+    // an offset forces a layout, so nothing is measured on an ordinary repaint.
+    const anchor = windowBefore === railWindowStart ? null : railAnchor();
 
     if (games.length === 0) {
       if (!refs.cards.querySelector(".rail-empty")) {
@@ -1108,6 +1123,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       }
       syncGameCard(card, game, index, game.id === state.selectedId);
     }
+
+    if (!anchor) return;
+    const moved = Array.from(refs.cards.querySelectorAll<HTMLButtonElement>(".game-card")).find(
+      (card) => card.dataset.gameId === anchor.id,
+    );
+    // A wrap from one end of the library to the other shares no card with the
+    // window it left, and that one is meant to jump.
+    if (moved) refs.cards.scrollLeft += moved.offsetLeft - anchor.offset;
   };
 
   /**
@@ -1138,6 +1161,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const card = document.createElement("button");
     card.type = "button";
     card.className = "game-card";
+    // An entry of the page's rail: left and right step between these.
+    card.dataset.navItem = "";
     let pressedWhileDeployed = false;
 
     const media = document.createElement("span");
@@ -1201,6 +1226,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     card.dataset.navOpen = game.id;
     card.dataset.navLaunch = game.id;
     card.classList.toggle("is-selected", selected);
+    card.toggleAttribute("data-nav-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
     card.setAttribute("aria-label", `Open details for ${game.title}`);
 
@@ -1340,13 +1366,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // and goes quiet.
     const blocked = blockedOnThisMachine(game);
     // A download already running is not a second install to start, so the
-    // button reports it rather than offering to queue another.
-    refs.playButton.disabled =
+    // button reports it rather than offering to queue another. It says so with
+    // `aria-disabled` rather than with the property: a greyed Play still takes
+    // focus, which is how the arrow keys reach it from the rail below and read
+    // the reason out of its label, while a press on it stays as quiet as the
+    // `disabled` attribute used to make it.
+    const quiet =
       blocked ||
       (!game.launchable &&
         !isSteamInstallable &&
         !isEpicInstallable &&
         !isEpicInstalling);
+    if (quiet) refs.playButton.setAttribute("aria-disabled", "true");
+    else refs.playButton.removeAttribute("aria-disabled");
     // The button doubles as the progress bar, so it keeps its size and place
     // rather than being swapped for a separate control mid-download.
     const fill = refs.playButton.querySelector<HTMLElement>(".play-button__fill");
@@ -1411,13 +1443,29 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
     if (scroll) {
       requestAnimationFrame(() => {
-        Array.from(refs.cards.querySelectorAll<HTMLElement>(".game-card"))
-          .find((card) => card.dataset.gameId === id)
-          ?.scrollIntoView({
+        const card = Array.from(refs.cards.querySelectorAll<HTMLElement>(".game-card")).find(
+          (candidate) => candidate.dataset.gameId === id,
+        );
+        if (!card) return;
+        const reveal = (): void =>
+          card.scrollIntoView({
             behavior: prefersReducedMotion() ? "auto" : "smooth",
             block: "nearest",
             inline: "nearest",
           });
+        reveal();
+        // The card is still growing into its selected width and the one it took
+        // over from still shrinking, so the scroll above measured a layout the
+        // rail is about to leave: stepping fast, it stopped short and left the
+        // next game half hidden. Once the growth settles, measure again.
+        const settle = (event: TransitionEvent): void => {
+          if (event.propertyName !== "flex-basis") return;
+          card.removeEventListener("transitionend", settle);
+          card.removeEventListener("transitioncancel", settle);
+          if (event.type === "transitionend" && state.selectedId === id) reveal();
+        };
+        card.addEventListener("transitionend", settle);
+        card.addEventListener("transitioncancel", settle);
       });
     }
   };
@@ -1454,40 +1502,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     state.steamAccount.status?.connected === true ||
     state.games.some((game) => game.source === "steam");
 
-  // Same rule for every other store: a synced game is proof the account was
-  // connected, even before Settings has loaded its status list.
-  const renderLibrarySources = (): void => {
-    const list = refs.librarySourceList;
-    list.replaceChildren();
-
-    if (steamSourceConnected()) {
-      const steam = document.createElement("button");
-      steam.type = "button";
-      steam.className = "library-source-action";
-      steam.setAttribute("role", "menuitem");
-      steam.dataset.libraryAction = "source-steam";
-      steam.innerHTML =
-        `<span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>` +
-        `<span class="library-source-action__copy"><strong>Steam</strong><small>Connected · import installed games</small></span>` +
-        icon("chevron-right", "library-source-action__chevron");
-      list.append(steam);
-    }
-
-    // Connected stores are deliberately not listed here. They live in
-    // Settings › Libraries & Sources, which is where they can actually be
-    // managed; repeating them in this menu made it long without adding an
-    // action beyond "sync now".
-
-  };
-
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
     state.libraryMenuOpen = open;
     refs.libraryMenu.hidden = !open;
     refs.libraryMenuButton.setAttribute("aria-expanded", String(open));
     refs.topbar.classList.toggle("is-library-menu-open", open);
-    if (open) {
-      renderLibrarySources();
-    }
 
     if (open && focus) {
       requestAnimationFrame(() => focusLibraryMenuItem(focus));
@@ -1764,10 +1783,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const row = document.createElement("div");
     row.className = "settings-row plugin-row";
     row.dataset.pluginManaged = plugin.id;
-    const mark = document.createElement("span");
-    mark.className = "settings-card__mark plugin-row__mark";
-    mark.setAttribute("aria-hidden", "true");
-    mark.innerHTML = icon("puzzle");
 
     const copy = document.createElement("div");
     copy.className = "settings-row__copy";
@@ -1799,7 +1814,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
     remove.textContent = "Uninstall";
 
-    row.append(mark, copy, state, remove);
+    row.append(copy, state, remove);
     return row;
   };
 
@@ -1836,11 +1851,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * changelog. These are not installable and say so: a row marked "Soon" is an
    * honest roadmap entry, an install button that fails is not.
    */
-  const COMING_SOON_PLUGINS: ReadonlyArray<{ icon: IconName; name: string; summary: string }> = [
-    { icon: "sparkle", name: "Spotify", summary: "What you are listening to, beside what you are playing." },
-    { icon: "monitor", name: "Moonlight / Sunshine", summary: "Stream a game from another machine on your network." },
-    { icon: "collections", name: "Playnite", summary: "Import a Playnite library, its metadata and its categories." },
-    { icon: "cloud", name: "Ludusavi", summary: "Back up and restore your save games." },
+  const COMING_SOON_PLUGINS: ReadonlyArray<{ name: string; summary: string }> = [
+    { name: "Spotify", summary: "What you are listening to, beside what you are playing." },
+    { name: "Moonlight / Sunshine", summary: "Stream a game from another machine on your network." },
+    { name: "Playnite", summary: "Import a Playnite library, its metadata and its categories." },
+    { name: "Ludusavi", summary: "Back up and restore your save games." },
   ];
 
   const renderComingSoonPlugins = (term: string): HTMLElement[] =>
@@ -1849,10 +1864,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ).map((entry) => {
       const row = document.createElement("div");
       row.className = "settings-row plugin-row plugin-row--soon";
-      const mark = document.createElement("span");
-      mark.className = "settings-card__mark plugin-row__mark";
-      mark.setAttribute("aria-hidden", "true");
-      mark.innerHTML = icon(entry.icon);
       const copy = document.createElement("div");
       copy.className = "settings-row__copy";
       const name = document.createElement("strong");
@@ -1863,7 +1874,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const state = document.createElement("span");
       state.className = "plugin-row__state plugin-row__state--soon";
       state.textContent = "Soon";
-      row.append(mark, copy, state);
+      row.append(copy, state);
       return row;
     });
 
@@ -2175,292 +2186,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderWineSettingsPanel();
   };
 
-  const visibleSteamGames = (): SteamPreviewGame[] => {
-    const preview = state.steam.preview;
-    if (!preview || preview.status !== "available") {
-      return [];
-    }
-
-    const term = state.steam.query.trim().toLocaleLowerCase();
-    if (!term) {
-      return preview.games;
-    }
-
-    return preview.games.filter((game) =>
-      [game.title, game.appId].join(" ").toLocaleLowerCase().includes(term),
-    );
-  };
-
-  const focusSteamPanel = (): void => {
-    requestAnimationFrame(() => {
-      refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search")?.focus();
-    });
-  };
-
-  const renderSteamPanel = (): void => {
-    const steam = state.steam;
-    // Collapsed by default: the scan is reached from the Steam row's "Installed
-    // games" button, so an idle pitch for it no longer needs to hold a card.
-    refs.steamPanel.hidden = !steam.open;
-    refs.steamPanel.setAttribute("aria-busy", String(steam.phase === "scanning" || steam.phase === "importing"));
-    const hasAvailablePreview = steam.preview?.status === "available";
-    refs.steamRefresh.hidden = !hasAvailablePreview || !steam.open;
-    refs.steamRefresh.disabled =
-      !hasAvailablePreview || steam.phase === "scanning" || steam.phase === "importing";
-
-    if (!steam.open) {
-      refs.steamBody.replaceChildren();
-      refs.steamFooter.hidden = true;
-      return;
-    }
-
-    const detail = refs.steamPanel.querySelector<HTMLElement>("#steam-import-detail");
-    if (detail) {
-      if (steam.preview?.status === "available") {
-        const libraryCount = steam.preview.libraries === 1 ? "1 library" : steam.preview.libraries + " libraries";
-        const gameCount = steam.preview.games.length === 1 ? "1 installed game" : steam.preview.games.length + " installed games";
-        detail.textContent = "Steam · " + libraryCount + " · " + gameCount;
-      } else {
-        detail.textContent = "A local Steam source";
-      }
-    }
-
-    refs.steamBody.replaceChildren();
-    refs.steamFooter.hidden = true;
-    refs.steamImportButton.disabled = true;
-    refs.steamImportButton.textContent = "Import selected";
-    refs.steamSelectionSummary.textContent = "";
-
-    if (steam.phase === "idle" || steam.phase === "scanning") {
-      const loading = document.createElement("section");
-      loading.className = "steam-state steam-state--loading";
-      loading.setAttribute("aria-live", "polite");
-
-      const spinner = document.createElement("span");
-      spinner.className = "steam-spinner";
-      spinner.setAttribute("aria-hidden", "true");
-
-      const heading = document.createElement("h2");
-      heading.textContent = "Looking for your Steam library";
-      const message = document.createElement("p");
-      message.textContent = "Orivo is reading installed games locally. You can keep browsing while this finishes.";
-      loading.append(spinner, heading, message);
-      refs.steamBody.append(loading);
-      return;
-    }
-
-    const preview = steam.preview;
-    if (!preview || preview.status === "unavailable" || preview.status === "error") {
-      const unavailable = document.createElement("section");
-      unavailable.className = "steam-state steam-state--unavailable";
-      unavailable.setAttribute("aria-live", "polite");
-
-      const badge = document.createElement("span");
-      badge.className = "steam-state__icon";
-      badge.innerHTML = icon(preview?.status === "error" ? "alert" : "folder");
-      badge.setAttribute("aria-hidden", "true");
-
-      const heading = document.createElement("h2");
-      heading.textContent = preview?.status === "error" ? "Steam could not be scanned" : "Steam was not found";
-      const message = document.createElement("p");
-      message.textContent =
-        preview?.message ||
-        (preview?.status === "error"
-          ? "Try again in a moment. Your existing Orivo library is unaffected."
-          : "Install Steam or open it once, then try scanning again.");
-
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.className = "steam-secondary-button";
-      retry.dataset.steamAction = "retry";
-      retry.innerHTML = icon("refresh") + "<span>Scan again</span>";
-      unavailable.append(badge, heading, message, retry);
-      refs.steamBody.append(unavailable);
-      return;
-    }
-
-    if (steam.notice) {
-      const notice = document.createElement("p");
-      notice.className = "steam-notice steam-notice--" + steam.noticeTone;
-      notice.setAttribute("role", steam.noticeTone === "error" ? "alert" : "status");
-      notice.textContent = steam.notice;
-      refs.steamBody.append(notice);
-    }
-
-    if (steam.phase === "importing") {
-      const progress = document.createElement("p");
-      progress.className = "steam-notice steam-notice--info";
-      progress.setAttribute("role", "status");
-      const count = steam.selectedAppIds.size;
-      progress.textContent =
-        "Adding " + count.toLocaleString() + (count === 1 ? " game" : " games") + ". You can keep browsing.";
-      refs.steamBody.append(progress);
-    }
-
-    const matchingGames = visibleSteamGames();
-    const games = matchingGames.slice(0, MAX_RENDERED_STEAM_GAMES);
-    const selectedMatchingCount = matchingGames.filter((game) => steam.selectedAppIds.has(game.appId)).length;
-    const controls = document.createElement("div");
-    controls.className = "steam-list-controls";
-
-    const search = document.createElement("label");
-    search.className = "steam-search-control";
-    search.innerHTML = icon("search");
-    const searchInput = document.createElement("input");
-    searchInput.id = "steam-game-search";
-    searchInput.type = "search";
-    searchInput.autocomplete = "off";
-    searchInput.spellcheck = false;
-    searchInput.placeholder = "Filter installed games";
-    searchInput.value = steam.query;
-    searchInput.setAttribute("aria-label", "Filter installed Steam games");
-    search.append(searchInput);
-
-    const selectAll = document.createElement("label");
-    selectAll.className = "steam-select-all";
-    const selectAllInput = document.createElement("input");
-    selectAllInput.id = "steam-select-all";
-    selectAllInput.type = "checkbox";
-    selectAllInput.checked = matchingGames.length > 0 && selectedMatchingCount === matchingGames.length;
-    selectAllInput.indeterminate = selectedMatchingCount > 0 && selectedMatchingCount < matchingGames.length;
-    selectAllInput.disabled = matchingGames.length === 0 || steam.phase === "importing";
-    const selectAllText = document.createElement("span");
-    selectAllText.textContent = "Select matching";
-    selectAll.append(selectAllInput, selectAllText);
-    controls.append(search, selectAll);
-    refs.steamBody.append(controls);
-
-    const results = document.createElement("p");
-    results.className = "steam-results-count";
-    const matchingLabel =
-      matchingGames.length === preview.games.length
-        ? matchingGames.length + " games found"
-        : matchingGames.length + " of " + preview.games.length + " games";
-    results.textContent =
-      games.length < matchingGames.length
-        ? matchingLabel + " · Showing the first " + MAX_RENDERED_STEAM_GAMES + "; refine your filter to see the rest."
-        : matchingLabel;
-    results.setAttribute("aria-live", "polite");
-    refs.steamBody.append(results);
-
-    if (matchingGames.length === 0) {
-      const empty = document.createElement("section");
-      empty.className = "steam-list-empty";
-      const heading = document.createElement("h2");
-      heading.textContent = preview.games.length === 0 ? "No installed Steam games yet" : "No games match that filter";
-      const message = document.createElement("p");
-      message.textContent =
-        preview.games.length === 0
-          ? "When Steam has installed games locally, they will appear here."
-          : "Try a game title or clear the filter.";
-      empty.append(heading, message);
-      refs.steamBody.append(empty);
-    } else {
-      const list = document.createElement("div");
-      list.id = "steam-games";
-      list.className = "steam-game-list";
-      list.setAttribute("role", "list");
-
-      for (const game of games) {
-        const row = document.createElement("label");
-        row.className = "steam-game-row";
-        row.classList.toggle("is-selected", steam.selectedAppIds.has(game.appId));
-        row.classList.toggle("is-imported", game.alreadyImported);
-        row.setAttribute("role", "listitem");
-
-        const toggle = document.createElement("input");
-        toggle.type = "checkbox";
-        toggle.checked = steam.selectedAppIds.has(game.appId);
-        toggle.disabled = steam.phase === "importing";
-        toggle.dataset.steamAppId = game.appId;
-        toggle.setAttribute("aria-label", "Select " + game.title);
-
-        const artwork = document.createElement("span");
-        artwork.className = "steam-game-artwork";
-        if (game.coverUrl || game.heroUrl) {
-          const image = document.createElement("img");
-          image.src = game.coverUrl || game.heroUrl;
-          image.alt = "";
-          image.loading = "lazy";
-          image.decoding = "async";
-          image.addEventListener("error", () => {
-            image.remove();
-            artwork.classList.add("steam-game-artwork--fallback");
-          });
-          artwork.append(image);
-        } else {
-          artwork.classList.add("steam-game-artwork--fallback");
-        }
-
-        const copy = document.createElement("span");
-        copy.className = "steam-game-copy";
-        const title = document.createElement("strong");
-        title.textContent = game.title;
-        const metadata = document.createElement("span");
-        metadata.className = "steam-game-metadata";
-        const metadataParts = ["Steam app " + game.appId];
-        if (game.locationLabel) {
-          metadataParts.push(game.locationLabel);
-        }
-        if (game.lastUpdated) {
-          metadataParts.push("Updated " + game.lastUpdated);
-        }
-        metadata.textContent = metadataParts.join(" · ");
-        copy.append(title, metadata);
-
-        const status = document.createElement("span");
-        status.className = "steam-game-status";
-        if (game.alreadyImported) {
-          status.textContent = "In library";
-        } else {
-          status.textContent = "Ready";
-        }
-
-        row.append(toggle, artwork, copy, status);
-        list.append(row);
-      }
-
-      refs.steamBody.append(list);
-    }
-
-    refs.steamFooter.hidden = false;
-    const selectedCount = preview.games.filter((game) => steam.selectedAppIds.has(game.appId)).length;
-    refs.steamSelectionSummary.textContent =
-      selectedCount === 0 ? "Choose games to import" : selectedCount === 1 ? "1 game selected" : selectedCount + " games selected";
-    refs.steamImportButton.disabled = selectedCount === 0 || steam.phase === "importing";
-    refs.steamImportButton.textContent =
-      steam.phase === "importing"
-        ? "Importing…"
-        : selectedCount === 0
-          ? "Import selected"
-        : selectedCount === 1
-          ? "Import 1 game"
-          : "Import " + selectedCount + " games";
-  };
-
-  // The Steam import list lives inside Settings › Libraries. "Open" only means
-  // the scanned list is expanded in that card — there is no modal to dismiss.
-  const setSteamPanelOpen = (open: boolean): void => {
-    if (open && state.steam.open) {
-      focusSteamPanel();
-      return;
-    }
-    state.steam.open = open;
-
-    if (!open) {
-      renderSteamPanel();
-      return;
-    }
-
-    closeLibraryMenu();
-    if (state.steam.phase !== "scanning" && state.steam.phase !== "importing") {
-      void scanSteamLibrary();
-    } else {
-      renderSteamPanel();
-      focusSteamPanel();
-    }
-  };
-
   const focusSteamAccountPanel = (): void => {
     requestAnimationFrame(() => {
       if (!state.steamAccount.open) {
@@ -2702,7 +2427,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // overwrite the fresher one (a slow "disconnected" beating a "connected").
     const request = settingsRequest;
     if (!isTauriRuntime()) {
-      state.steamAccount.status = { connected: false, steamId: "", method: "" };
+      state.steamAccount.status = { connected: false, steamId: "", method: "", personaName: "" };
       state.steamAccount.phase = "disconnected";
       state.steamAccount.notice = "Steam account connection is available in the Orivo desktop app.";
       state.steamAccount.noticeTone = "info";
@@ -2731,6 +2456,129 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   };
 
   /**
+   * One line of the sources list.
+   *
+   * Every store is built this way: its own logo with the presence dot on the
+   * corner, its name, the sync glyph, and the decision right-aligned at the
+   * end. A store that only sells data has no account to show, so its
+   * right-hand slot carries its status instead — the logo, the name and the
+   * spacing stay exactly the same.
+   */
+  const sourceRowElement = (
+    provider: string,
+    label: string,
+    markHtml: string,
+    connected: boolean,
+  ): {
+    row: HTMLDivElement;
+    mark: HTMLSpanElement;
+    name: HTMLSpanElement;
+    actions: HTMLDivElement;
+  } => {
+    const row = document.createElement("div");
+    row.className = "settings-row source-account-row";
+    row.classList.toggle("is-connected", connected);
+    row.dataset.sourceRow = provider;
+
+    const mark = document.createElement("span");
+    mark.className = "source-account-row__mark";
+    // The logo is already named by the text beside it, but the presence dot
+    // hanging off its corner is a sentence of its own and has to be reachable.
+    mark.innerHTML = markHtml;
+
+    const name = document.createElement("span");
+    name.className = "source-account-row__name";
+    name.textContent = label;
+
+    const actions = document.createElement("div");
+    actions.className = "source-account-row__actions";
+
+    row.append(mark, name, actions);
+    return { row, mark, name, actions };
+  };
+
+  /**
+   * The pin in the logo's corner: that you are signed in to this store, and —
+   * when it has one — the health of its price feed. It used to be a second
+   * line under the name, and a dot carries the same sentence without costing a
+   * line. A store you have not signed in to has no presence to report.
+   */
+  const sourcePresenceElement = (
+    connected: boolean,
+    health: ProviderStatus | undefined,
+  ): HTMLSpanElement | null => {
+    if (!connected) {
+      return null;
+    }
+    const dot = document.createElement("span");
+    dot.setAttribute("role", "img");
+    if (health) {
+      dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
+      dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
+      dot.setAttribute("aria-label", `Store data: ${health.health.replace("-", " ")}`);
+      return dot;
+    }
+    dot.className = "source-account-row__dot source-account-row__dot--connected";
+    dot.setAttribute("aria-label", "Connected");
+    return dot;
+  };
+
+  /**
+   * The sync glyph beside a connected row. It is the one button in the list
+   * that a picture says more than a word does: re-reading the store is the
+   * same gesture on every one of them.
+   */
+  const sourceSyncButton = (provider: string | null, label: string): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-account-row__sync";
+    button.innerHTML = icon("sync");
+    button.setAttribute("aria-label", `Sync ${label}`);
+    if (provider) {
+      button.dataset.sourceAction = "sync";
+      button.dataset.sourceProvider = provider;
+    } else {
+      button.dataset.steamRowAction = "sync";
+    }
+    return button;
+  };
+
+  /**
+   * The right-hand slot of a row that has an account: who you are signed in
+   * as. Under the pointer it becomes "Disconnect", so at rest the row states
+   * an identity and on approach it offers the one thing that identity is for.
+   */
+  const sourceAccountButton = (options: {
+    action: string;
+    provider: string | null;
+    idle: string;
+    hover?: string;
+  }): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-account-row__account";
+    button.setAttribute("aria-label", options.hover ? `${options.idle} — ${options.hover}` : options.idle);
+    if (options.provider) {
+      button.dataset.sourceAction = options.action;
+      button.dataset.sourceProvider = options.provider;
+    } else {
+      button.dataset.steamRowAction = options.action;
+    }
+    const name = document.createElement("span");
+    name.className = "source-account-row__account-name";
+    name.textContent = options.idle;
+    button.append(name);
+    if (options.hover) {
+      const hover = document.createElement("span");
+      hover.className = "source-account-row__account-hover";
+      hover.setAttribute("aria-hidden", "true");
+      hover.textContent = options.hover;
+      button.append(hover);
+    }
+    return button;
+  };
+
+  /**
    * Steam's row in the stores list.
    *
    * Steam is not a `ConnectedSource` — it has its own backend, its own sign-in
@@ -2742,57 +2590,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const account = state.steamAccount;
     const connected = account.status?.connected === true;
     const busy = account.phase === "connecting" || account.phase === "syncing";
-    const row = document.createElement("div");
-    row.className = "settings-row source-account-row";
-    row.classList.toggle("is-connected", connected);
-    row.dataset.sourceRow = "steam";
-
-    const mark = document.createElement("span");
-    mark.className = "source-account-row__mark";
-    mark.setAttribute("aria-hidden", "true");
-    mark.innerHTML = brandIcon("steam");
-
-    const copy = document.createElement("div");
-    copy.className = "settings-row__copy source-account-row__copy";
-    const name = document.createElement("strong");
-    name.textContent = "Steam";
-    const detail = document.createElement("small");
-    // The Steam ID is the account's own identifier, so it goes in as text.
-    detail.textContent = connected
-      ? account.status?.steamId
-        ? `Connected as ${account.status.steamId}`
-        : "Connected"
-      : `See the games you own, and import the ones installed on ${hostDeviceLabel()}.`;
-    copy.append(name, detail);
-
     // Steam's price-data health rides on its row, the same way every other
     // store's does, instead of being repeated under "Store data only".
     const health = state.providerStatuses.find((provider) => provider.provider === "steam");
-    if (health) {
-      const dot = document.createElement("span");
-      dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
-      dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
-      dot.setAttribute("role", "img");
-      dot.setAttribute("aria-label", `Store data: ${health.health.replace("-", " ")}`);
-      name.append(dot);
+    const { row, mark, actions } = sourceRowElement("steam", "Steam", brandIcon("steam"), connected);
+    const presence = sourcePresenceElement(connected, health);
+    if (presence) {
+      mark.append(presence);
     }
 
-    const actions = document.createElement("div");
-    actions.className = "source-account-row__actions";
-    const button = (
-      action: string,
-      label: string,
-      className: string,
-      iconName: IconName,
-    ): HTMLButtonElement => {
-      const element = document.createElement("button");
-      element.type = "button";
-      element.className = className;
-      element.dataset.steamRowAction = action;
-      element.innerHTML = icon(iconName);
-      element.append(document.createTextNode(label));
-      return element;
-    };
+    if (connected && !busy) {
+      // The glyph belongs to the left group — logo, name, sync — so the
+      // right-hand slot stays the account alone.
+      row.insertBefore(sourceSyncButton(null, "Steam"), actions);
+    }
 
     if (busy) {
       const spinner = document.createElement("span");
@@ -2805,18 +2616,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       actions.append(spinner, waiting);
     } else if (connected) {
       actions.append(
-        button("sync", "Sync", "steam-import-button", "refresh"),
-        button("import", "Installed games", "steam-secondary-button", "download"),
-        button("manage", "Manage", "steam-secondary-button", "settings"),
+        sourceAccountButton({
+          action: "disconnect",
+          provider: null,
+          // The persona name is the account's own name; the id stands in
+          // whenever Steam showed no profile to take one from.
+          idle: account.status?.personaName || account.status?.steamId || "Connected",
+          hover: "Disconnect",
+        }),
       );
     } else {
-      actions.append(
-        button("connect", "Connect", "steam-import-button", "steam"),
-        button("import", "Installed games", "steam-secondary-button", "download"),
-      );
+      actions.append(sourceAccountButton({ action: "connect", provider: null, idle: "Connect" }));
     }
 
-    row.append(mark, copy, actions);
     refs.steamSourceRow.replaceChildren(row);
   };
 
@@ -2920,7 +2732,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     try {
       await invoke("disconnect_steam_account");
-      state.steamAccount.status = { connected: false, steamId: "", method: "" };
+      state.steamAccount.status = { connected: false, steamId: "", method: "", personaName: "" };
       state.steamAccount.phase = "disconnected";
       state.steamAccount.lastSync = null;
       state.steamAccount.apiKeySteamId = "";
@@ -3013,60 +2825,34 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     for (const descriptor of CONNECTED_SOURCES) {
       const status = sourceStatus(descriptor.provider);
       const busy = state.sourceAccounts.busy.has(descriptor.provider);
-      const row = document.createElement("div");
-      row.className = "settings-row source-account-row";
-      row.classList.toggle("is-connected", status.connected);
-      row.dataset.sourceRow = descriptor.provider;
-
-      const mark = document.createElement("span");
-      mark.className = "source-account-row__mark";
-      mark.setAttribute("aria-hidden", "true");
-      // Settings presents each store as itself, in its own colours and at a
-      // size where the logo is the logo. The library, the hero badge and the
-      // detail page keep the white marks.
-      mark.innerHTML = brandIcon(descriptor.icon);
-
-      const copy = document.createElement("div");
-      copy.className = "settings-row__copy source-account-row__copy";
-      const name = document.createElement("strong");
-      name.textContent = status.label;
-      const detail = document.createElement("small");
-      // A disconnected store needs to say what connecting it gives you. Once
-      // it is connected that pitch is spent, and the account is what matters —
-      // repeating both made every connected row three lines tall.
-      detail.textContent = status.connected
-        ? sourceStatusLine(status)
-        : status.description || sourceStatusLine(status);
-      copy.append(name, detail);
-      const sync = state.sourceAccounts.lastSync.get(descriptor.provider);
-      if (sync) {
-        const summary = document.createElement("small");
-        summary.className = "source-account-row__summary";
-        summary.textContent = sourceSyncSummary(sync);
-        copy.append(summary);
-      }
-
-      // This store's price-data health, on the same row as its connection, as
-      // a small dot beside the name. It used to be a red "Unavailable" pill on
-      // every row, which read as an error about the store itself rather than a
-      // note about its price feed.
+      const pending = state.sourceAccounts.pendingDisconnect === descriptor.provider;
+      // This store's price-data health rides on the same row as its
+      // connection, as a dot on the corner of its logo. It used to be a red
+      // "Unavailable" pill on every row, which read as an error about the
+      // store itself rather than a note about its price feed.
       const health = state.providerStatuses.find(
         (provider) => providerStatusForSource(provider.provider) === descriptor.provider,
       );
-      if (health) {
-        const dot = document.createElement("span");
-        dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
-        dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
-        dot.setAttribute("role", "img");
-        dot.setAttribute(
-          "aria-label",
-          `Store data: ${health.health.replace("-", " ")}`,
-        );
-        name.append(dot);
+      const { row, mark, actions } = sourceRowElement(
+        descriptor.provider,
+        status.label,
+        // Settings presents each store as itself, in its own colours and at a
+        // size where the logo is the logo. The library, the hero badge and the
+        // detail page keep the white marks.
+        brandIcon(descriptor.icon),
+        status.connected,
+      );
+      const presence = sourcePresenceElement(status.connected, health);
+      if (presence) {
+        mark.append(presence);
       }
 
-      const actions = document.createElement("div");
-      actions.className = "source-account-row__actions";
+      if (status.connected && !busy && !pending) {
+        // Same place as Steam's: the left group, right after the name, so the
+        // right-hand slot stays the account alone.
+        row.insertBefore(sourceSyncButton(descriptor.provider, status.label), actions);
+      }
+
       if (busy) {
         const spinner = document.createElement("span");
         spinner.className = "steam-spinner";
@@ -3089,13 +2875,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
             "close",
           ),
         );
-      } else if (state.sourceAccounts.pendingDisconnect === descriptor.provider) {
+      } else if (pending) {
         // Disconnecting is two decisions, not one: sign out, and optionally
         // forget what was already imported. Never guess the second.
-        const confirm = document.createElement("p");
+        const confirm = document.createElement("span");
         confirm.className = "source-account-row__confirm";
         confirm.textContent = "Keep the games already imported?";
-        copy.append(confirm);
+        actions.append(confirm);
         actions.append(
           sourceActionButton(
             descriptor.provider,
@@ -3121,34 +2907,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         );
       } else if (status.connected) {
         actions.append(
-          sourceActionButton(
-            descriptor.provider,
-            "sync",
-            "Sync",
-            "steam-import-button",
-            "refresh",
-          ),
-          sourceActionButton(
-            descriptor.provider,
-            "disconnect",
-            "Disconnect",
-            "steam-secondary-button",
-            "close",
-          ),
+          sourceAccountButton({
+            action: "disconnect",
+            provider: descriptor.provider,
+            // Who you are signed in as: the account, not a verdict about it.
+            idle: status.accountLabel || "Connected",
+            hover: "Disconnect",
+          }),
         );
       } else {
-        // The brand logo already sits at the head of the row, so repeating it
-        // inside the button only added noise.
-        const connect = document.createElement("button");
-        connect.type = "button";
-        connect.className = "steam-import-button source-account-row__connect";
-        connect.dataset.sourceAction = "connect";
-        connect.dataset.sourceProvider = descriptor.provider;
-        connect.textContent = "Connect";
-        actions.append(connect);
+        actions.append(
+          sourceAccountButton({ action: "connect", provider: descriptor.provider, idle: "Connect" }),
+        );
       }
 
-      row.append(mark, copy, actions);
       if (
         state.sourceAccounts.notice &&
         state.sourceAccounts.noticeProvider === descriptor.provider
@@ -3799,11 +3571,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         onboardingButton("connect", `Connect ${descriptor.label}`, provider, true),
       );
     }
-    if (provider === "steam") {
-      actions.append(
-        onboardingButton("steam-import", "Import installed games instead", provider),
-      );
-    }
     view.append(actions);
     if (!isTauriRuntime()) view.append(onboardingDesktopOnlyNote());
     return view;
@@ -3982,241 +3749,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
-  const hydrateSteamPreviewMedia = async (
-    preview: SteamPreview,
-    request: number,
-    candidates: SteamPreviewGame[] = preview.games,
-  ): Promise<void> => {
-    if (!isTauriRuntime() || preview.status !== "available") {
-      return;
-    }
-    if ([...pendingSteamPreviewMediaIds.values()].some((pendingRequest) => pendingRequest === request)) {
-      steamPreviewMediaRefreshQueued = true;
-      return;
-    }
-
-    const appIds: string[] = [];
-    for (const game of candidates) {
-      if (
-        appIds.length >= MAX_STEAM_PREVIEW_MEDIA ||
-        (game.coverUrl || game.heroUrl) ||
-        pendingSteamPreviewMediaIds.has(game.appId)
-      ) {
-        continue;
-      }
-      pendingSteamPreviewMediaIds.set(game.appId, request);
-      appIds.push(game.appId);
-    }
-    if (appIds.length === 0) {
-      return;
-    }
-
-    try {
-      const media = await normaliseSteamPreviewMedia(
-        await invoke<unknown>("get_steam_preview_media", { appIds }),
-      );
-      const currentPreview = state.steam.preview;
-      if (request !== steamRequest || media.size === 0 || currentPreview?.status !== "available") {
-        return;
-      }
-
-      state.steam.preview = {
-        ...currentPreview,
-        games: currentPreview.games.map((game) => {
-          const cached = media.get(game.appId);
-          return cached
-            ? {
-                ...game,
-                coverUrl: game.coverUrl || cached.coverUrl,
-                heroUrl: game.heroUrl || cached.heroUrl,
-              }
-            : game;
-        }),
-      };
-      const activeSearch = refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search");
-      const searchWasFocused = document.activeElement === activeSearch;
-      const selectionStart = activeSearch?.selectionStart ?? null;
-      const selectionEnd = activeSearch?.selectionEnd ?? null;
-      renderSteamPanel();
-      if (searchWasFocused) {
-        requestAnimationFrame(() => {
-          const nextSearch = refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search");
-          nextSearch?.focus();
-          if (nextSearch && selectionStart !== null && selectionEnd !== null) {
-            nextSearch.setSelectionRange(selectionStart, selectionEnd);
-          }
-        });
-      }
-    } catch {
-      // Preview artwork is optional. The list remains immediately usable if a
-      // cache copy races Steam or cannot be read on this machine.
-    } finally {
-      for (const appId of appIds) {
-        if (pendingSteamPreviewMediaIds.get(appId) === request) {
-          pendingSteamPreviewMediaIds.delete(appId);
-        }
-      }
-      if (
-        request === steamRequest &&
-        steamPreviewMediaRefreshQueued &&
-        state.steam.preview?.status === "available"
-      ) {
-        steamPreviewMediaRefreshQueued = false;
-        void hydrateSteamPreviewMedia(state.steam.preview, request, visibleSteamGames());
-      }
-    }
-  };
-
-  const scanSteamLibrary = async (): Promise<void> => {
-    const request = ++steamRequest;
-    pendingSteamPreviewMediaIds.clear();
-    steamPreviewMediaRefreshQueued = false;
-    state.steam.phase = "scanning";
-    state.steam.notice = "";
-    state.steam.query = "";
-    renderSteamPanel();
-
-    if (!isTauriRuntime()) {
-      if (request !== steamRequest) {
-        return;
-      }
-      state.steam.preview = {
-        status: "unavailable",
-        libraries: 0,
-        games: [],
-        message: "Steam scanning is available in the Orivo desktop app.",
-      };
-      state.steam.phase = "unavailable";
-      renderSteamPanel();
-      return;
-    }
-
-    try {
-      const result = await invoke<unknown>("get_steam_import_preview");
-      const preview = await normaliseSteamPreview(result);
-      if (!preview) {
-        throw new Error("Steam returned an invalid import preview.");
-      }
-      if (request !== steamRequest) {
-        return;
-      }
-
-      state.steam.preview = preview;
-      state.steam.phase = preview.status;
-      const initiallySelected = preview.games.filter((game) => game.selected && !game.alreadyImported);
-      state.steam.selectedAppIds = new Set(
-        initiallySelected.length <= MAX_AUTOMATIC_STEAM_SELECTION
-          ? initiallySelected.map((game) => game.appId)
-          : [],
-      );
-      if (initiallySelected.length > MAX_AUTOMATIC_STEAM_SELECTION) {
-        state.steam.notice =
-          initiallySelected.length.toLocaleString() +
-          " installed games found. Filter and choose the games you want to add (up to " +
-          MAX_STEAM_IMPORT_SELECTION.toLocaleString() +
-          ").";
-        state.steam.noticeTone = "info";
-      }
-
-      if (!state.steam.open && preview.status === "available") {
-        const count = preview.games.length;
-        showToast(count === 0 ? "Steam is ready to import when you install a game." : "Steam found " + count + " installed games.");
-      }
-    } catch (error) {
-      if (request !== steamRequest) {
-        return;
-      }
-      state.steam.preview = {
-        status: "error",
-        libraries: 0,
-        games: [],
-        message: messageFromError(error, "Steam could not be scanned."),
-      };
-      state.steam.phase = "error";
-      state.steam.selectedAppIds.clear();
-    }
-
-    renderSteamPanel();
-    if (state.steam.open) {
-      focusSteamPanel();
-    }
-    if (state.steam.preview?.status === "available") {
-      void hydrateSteamPreviewMedia(state.steam.preview, request);
-    }
-  };
-
-  const setSteamSelectionForVisibleGames = (selected: boolean): void => {
-    let selectionWasCapped = false;
-    for (const game of visibleSteamGames()) {
-      if (selected) {
-        if (!state.steam.selectedAppIds.has(game.appId) && state.steam.selectedAppIds.size >= MAX_STEAM_IMPORT_SELECTION) {
-          selectionWasCapped = true;
-          break;
-        }
-        state.steam.selectedAppIds.add(game.appId);
-      } else {
-        state.steam.selectedAppIds.delete(game.appId);
-      }
-    }
-    if (selectionWasCapped) {
-      state.steam.notice = "Choose up to " + MAX_STEAM_IMPORT_SELECTION.toLocaleString() + " games per import.";
-      state.steam.noticeTone = "info";
-    }
-    renderSteamPanel();
-  };
-
-  const importSteamGames = async (): Promise<void> => {
-    const preview = state.steam.preview;
-    if (!preview || preview.status !== "available" || state.steam.phase === "importing") {
-      return;
-    }
-
-    const appIds = preview.games
-      .filter((game) => state.steam.selectedAppIds.has(game.appId))
-      .map((game) => game.appId);
-    if (appIds.length === 0) {
-      return;
-    }
-    if (!isTauriRuntime()) {
-      state.steam.notice = "Steam importing is available in the Orivo desktop app.";
-      state.steam.noticeTone = "error";
-      renderSteamPanel();
-      return;
-    }
-
-    state.steam.phase = "importing";
-    state.steam.notice = "";
-    renderSteamPanel();
-
-    try {
-      const result = normaliseSteamImportResult(
-        await invoke<unknown>("import_steam_games", { appIds }),
-      );
-      const changed = new Set([...result.importedIds, ...result.updatedIds]);
-      state.steam.preview = {
-        ...preview,
-        games: preview.games.map((game) =>
-          changed.has(game.appId) ? { ...game, alreadyImported: true, selected: false } : game,
-        ),
-      };
-      for (const appId of [...result.importedIds, ...result.updatedIds, ...result.skippedAppIds]) {
-        state.steam.selectedAppIds.delete(appId);
-      }
-      state.steam.phase = "available";
-      state.steam.notice = steamImportSummary(result);
-      state.steam.noticeTone = result.importedIds.length + result.updatedIds.length > 0 ? "success" : "info";
-
-      await refreshLibrary();
-      showToast(state.steam.notice);
-    } catch (error) {
-      state.steam.phase = "available";
-      state.steam.notice = messageFromError(error, "Could not import the selected Steam games.");
-      state.steam.noticeTone = "error";
-    }
-
-    renderSteamPanel();
-  };
-
   const installDxvkMacosForProfile = async (profileId: string): Promise<void> => {
     const settings = state.wineSettings;
     if (!profileId || !isTauriRuntime() || settings.loading) {
@@ -4375,6 +3907,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
     const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
     if (sampleSocial) sampleSocial.checked = state.preferences.debugSampleSocial;
+    const editorialGames = root.querySelector<HTMLInputElement>("#preference-editorial-games");
+    if (editorialGames) editorialGames.checked = state.preferences.showEditorialGames;
     const beta = root.querySelector<HTMLInputElement>("#preference-beta");
     if (beta) beta.checked = state.preferences.betaFeatures;
     applyBetaFeatures();
@@ -4406,22 +3940,45 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       const row = document.createElement("article");
       row.className = "provider-status-row";
       row.dataset.settingsSearchable = "";
-      const copy = document.createElement("div");
+      const mark = document.createElement("span");
+      mark.className = "source-account-row__mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.innerHTML = providerLogoMarkup(provider.provider);
       const title = document.createElement("strong");
       title.textContent = provider.label;
-      const message = document.createElement("p");
-      message.textContent = provider.message || "No status details available.";
-      copy.append(title, message);
       const status = document.createElement("span");
       status.className = `provider-health provider-health--${provider.health}`;
-      status.textContent = provider.health.replace("-", " ");
-      row.append(copy, status);
+      status.textContent = providerHealthLabel(provider.health);
+      // The feed's own words are still one pointer away; they simply no longer
+      // earn a second line on every row.
+      status.title = provider.message || status.textContent;
+      row.append(mark, title, status);
       fragment.append(row);
     }
     list.replaceChildren(fragment);
     // The connectable rows carry the rest of the health chips, so they have to
     // repaint whenever provider status lands.
     renderSourceAccountsPanel();
+  };
+
+  /**
+   * The logo of a store that has no account row of its own, in the same slot
+   * every other store's logo occupies. These sell data only, so there is no
+   * sign-in to show on the right — everything else about the line is the same.
+   */
+  const providerLogoMarkup = (provider: StoreProvider): string => {
+    const file = STORE_LOGO_FILES[provider];
+    if (file) {
+      return `<img class="source-account-row__logo" src="/media/logos/${file}" alt="" />`;
+    }
+    const source = providerStatusForSource(provider);
+    if (source) {
+      return brandIcon(connectedSourceDescriptor(source).icon);
+    }
+    if (provider === "steam") {
+      return brandIcon("steam");
+    }
+    return icon("store");
   };
 
   /**
@@ -4514,7 +4071,63 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderPluginList();
   };
 
-  const renderSettingsRoute = (route: Extract<AppRoute, { page: "settings" }>): void => {
+  /**
+   * Settings arrives as one soft cascade: the title and the lines of whichever
+   * section is on screen rise together, and the tabs beside them move only when
+   * the page itself is opened. A section switch repaints the content, never the
+   * column beside it, so clicking a tab does not make the whole sidebar jump.
+   * The delays are written here rather than in CSS so the order follows what
+   * the page is actually showing, and the whole thing is skipped under reduced
+   * motion — the animation is the only reason the classes exist.
+   */
+  const playSettingsEntrance = (enteringPage: boolean): void => {
+    const layout = refs.settingsLayout;
+    const sidebar = refs.settingsSidebar;
+    if (!layout || prefersReducedMotion()) {
+      return;
+    }
+    const setDelay = (element: HTMLElement, delayMs: number): void => {
+      element.style.setProperty("--enter-delay", `${delayMs}ms`);
+    };
+    const restart = (element: HTMLElement, timer: number): number => {
+      window.clearTimeout(timer);
+      element.classList.remove("is-entering");
+      void element.offsetWidth; // one reflow, so a second visit starts it again
+      element.classList.add("is-entering");
+      // Taking the class back once the cascade is over is what keeps the rest
+      // of the page honest: a row repainted by a landing sync is a repaint,
+      // not a second entrance.
+      return window.setTimeout(() => element.classList.remove("is-entering"), 1400);
+    };
+    if (enteringPage && sidebar) {
+      refs.settingsSectionButtons.forEach((button, index) => setDelay(button, index * 22));
+      settingsSidebarEntranceTimer = restart(sidebar, settingsSidebarEntranceTimer);
+    }
+    setDelay(refs.settingsTitle, enteringPage ? 50 : 0);
+    setDelay(refs.settingsDescription, enteringPage ? 90 : 30);
+    const panel = refs.settingsPanels.find((candidate) => !candidate.hidden);
+    if (panel) {
+      const lines = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          // Every kind of block the panel renders: rows and statuses, the
+          // labels above them, and the controls that are not rows — the
+          // choices, the plugin search, the forms — so a card never half-
+          // arrives with its controls already sitting on screen. The
+          // stylesheet animates the same list; blocks that land after this
+          // runs still take the path because its selectors are classes too.
+          ".settings-row, .provider-status-row, .settings-group__label, .settings-hint, .settings-card__header, .settings-choices, .plugins-group__label, .plugins-group__action, .plugins-search, .credentials-form, .settings-attributions",
+        ),
+      );
+      const first = enteringPage ? 120 : 80;
+      lines.forEach((line, index) => setDelay(line, first + index * 14));
+    }
+    settingsEntranceTimer = restart(layout, settingsEntranceTimer);
+  };
+
+  const renderSettingsRoute = (
+    route: Extract<AppRoute, { page: "settings" }>,
+    enteringPage: boolean,
+  ): void => {
     const definition = SETTINGS_SECTIONS.find((section) => section.id === route.section)!;
     refs.settingsTitle.textContent = definition.label;
     refs.settingsDescription.textContent = definition.description;
@@ -4534,6 +4147,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderDataUsage();
     renderUpdatePanel();
     renderSettingsSearch();
+    playSettingsEntrance(enteringPage);
   };
 
   const loadPreferences = async (request = settingsRequest): Promise<void> => {
@@ -4815,7 +4429,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   root.querySelector<HTMLButtonElement>("#previous-game")?.addEventListener("click", () => moveSelection(-1));
   root.querySelector<HTMLButtonElement>("#next-game")?.addEventListener("click", () => moveSelection(1));
-  root.querySelector<HTMLButtonElement>("#play-button")?.addEventListener("click", () => void launchGame());
+  // The keys step the rail through the library's own list: the rail renders a
+  // window of it, so the card after the last one on screen is ours to name.
+  refs.cards.addEventListener(NAV_STEP_EVENT, (event) => {
+    event.preventDefault();
+    moveSelection((event as CustomEvent<NavStepDetail>).detail.delta);
+  });
+  refs.playButton.addEventListener("click", () => {
+    // `aria-disabled` leaves the button focusable so the arrow keys can reach
+    // it from the rail below; pressing it stays as quiet as the `disabled`
+    // attribute used to make it.
+    if (refs.playButton.getAttribute("aria-disabled") === "true") return;
+    void launchGame();
+  });
   refs.launchFeedback.addEventListener("click", (event) => {
     const retry = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-launch-action='retry']");
     const gameId = retry?.dataset.gameId;
@@ -4849,13 +4475,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
-    if (action === "source-steam") {
-      // The connected Steam source goes straight to the existing installed-games
-      // import that lives in Settings › Libraries & Sources.
-      closeLibraryMenu();
-      navigate({ page: "settings", section: "libraries", attachGameId: null });
-      setSteamPanelOpen(true);
-    } else if (action === "add-source") {
+    if (action === "add-source") {
       // "Add a new source" opens the existing library connection flow: the
       // Settings › Libraries page auto-expands the Steam account connect card.
       closeLibraryMenu();
@@ -4945,102 +4565,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
-  refs.steamPanel.addEventListener("click", (event) => {
-    const target = event.target as Element | null;
-    const action = target?.closest<HTMLButtonElement>("[data-steam-action]")?.dataset.steamAction;
-
-    if (action === "scan") {
-      setSteamPanelOpen(true);
-    } else if (action === "retry" || action === "refresh") {
-      void scanSteamLibrary();
-    } else if (action === "import") {
-      void importSteamGames();
-    }
-  });
-
-  refs.steamPanel.addEventListener("input", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement) || target.id !== "steam-game-search") {
-      return;
-    }
-
-    const cursor = target.selectionStart;
-    state.steam.query = target.value;
-    renderSteamPanel();
-    if (state.steam.preview?.status === "available") {
-      void hydrateSteamPreviewMedia(state.steam.preview, steamRequest, visibleSteamGames());
-    }
-    requestAnimationFrame(() => {
-      const next = refs.steamPanel.querySelector<HTMLInputElement>("#steam-game-search");
-      if (next) {
-        next.focus();
-        if (cursor !== null) {
-          next.setSelectionRange(cursor, cursor);
-        }
-      }
-    });
-  });
-
-  refs.steamPanel.addEventListener("change", (event) => {
-    const target = event.target;
-    if (!(target instanceof HTMLInputElement)) {
-      return;
-    }
-
-    if (target.id === "steam-select-all") {
-      setSteamSelectionForVisibleGames(target.checked);
-      return;
-    }
-
-    const appId = target.dataset.steamAppId;
-    if (!appId) {
-      return;
-    }
-
-    if (target.checked) {
-      if (
-        !state.steam.selectedAppIds.has(appId) &&
-        state.steam.selectedAppIds.size >= MAX_STEAM_IMPORT_SELECTION
-      ) {
-        state.steam.notice = "Choose up to " + MAX_STEAM_IMPORT_SELECTION.toLocaleString() + " games per import.";
-        state.steam.noticeTone = "info";
-      } else {
-        state.steam.selectedAppIds.add(appId);
-      }
-    } else {
-      state.steam.selectedAppIds.delete(appId);
-    }
-    renderSteamPanel();
-  });
-
-  refs.steamPanel.addEventListener("keydown", (event) => {
-    const target = event.target;
-    if (
-      (event.key !== "ArrowDown" && event.key !== "ArrowUp") ||
-      !(target instanceof HTMLInputElement) ||
-      !target.dataset.steamAppId
-    ) {
-      return;
-    }
-
-    const toggles = Array.from(
-      refs.steamPanel.querySelectorAll<HTMLInputElement>("input[data-steam-app-id]:not(:disabled)"),
-    );
-    const index = toggles.indexOf(target);
-    if (index < 0) {
-      return;
-    }
-
-    event.preventDefault();
-    const nextIndex =
-      event.key === "ArrowDown"
-        ? Math.min(toggles.length - 1, index + 1)
-        : Math.max(0, index - 1);
-    toggles[nextIndex]?.focus();
-  });
-
-  // Steam's row and the two panels it expands share one card, so the listener
-  // sits on the card rather than on each panel.
+  // Steam's row and the panel it expands share one card, so the listener
+  // sits on the card rather than on the panel.
   refs.sourceAccountsPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
     const action = target?.closest<HTMLButtonElement>("[data-steam-row-action]")?.dataset.steamRowAction;
@@ -5050,10 +4576,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       setSteamAccountPanelOpen(!(state.steamAccount.open && action === "manage"));
     } else if (action === "sync") {
       void syncSteamAccountLibrary();
-    } else if (action === "import") {
-      setSteamPanelOpen(!state.steam.open);
-    } else if (action === "close-import") {
-      setSteamPanelOpen(false);
+    } else if (action === "disconnect") {
+      void disconnectSteamAccount();
     }
   });
 
@@ -5154,14 +4678,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     void listen<SteamAccountConnectedEvent>(STEAM_ACCOUNT_CONNECTED_EVENT, (event) => {
       const steamId = typeof event.payload?.steamId === "string" ? event.payload.steamId : "";
       state.steamAccount.open = true;
-      state.steamAccount.status = { connected: true, steamId, method: "web" };
+      state.steamAccount.status = { connected: true, steamId, method: "web", personaName: "" };
       // Let `syncSteamAccountLibrary` own the in-flight state. Setting this to
       // `syncing` here would make its guard treat the fresh login as an
       // existing sync and leave the panel waiting forever.
       state.steamAccount.phase = "connected";
       state.steamAccount.notice = "";
       renderSteamAccountPanel();
-      void syncSteamAccountLibrary();
+      // The status report carries the persona name the row wants; read it once
+      // the sync has released the panel, or a slow status would clear the
+      // "Syncing…" state underneath it.
+      void syncSteamAccountLibrary().finally(() => void refreshSteamAccountStatus());
     });
     void listen(STEAM_ACCOUNT_LOGIN_CANCELLED_EVENT, () => {
       if (state.steamAccount.phase !== "connecting") {
@@ -5345,6 +4872,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // the navigation there earns its contrast from a text shadow rather than
     // from a band of darkness across the top of the artwork.
     refs.topbar.classList.toggle("topbar--over-art", route.page === "library");
+    // Settings paints its own wash edge to edge, up under the bar: a near-black
+    // scrim there would draw a line the wash does not have, so that page drops
+    // the veil and keeps only the blur.
+    refs.topbar.classList.toggle("topbar--over-wash", route.page === "settings");
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
       link.classList.toggle("is-active", active);
@@ -5408,6 +4939,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     activate(activation) {
       const route = activation.route;
       if (route.page !== "settings") return;
+      // The sidebar belongs to the page, not to the section: it animates once,
+      // on the way in, and stays still while the sections change beneath it.
+      const enteringPage = !settingsPageActive;
+      settingsPageActive = true;
       const request = ++settingsRequest;
       // A deep link that names a game (for example the game detail page's
       // "Configure Wine" action) opens the Wine runner detail directly, and a
@@ -5422,10 +4957,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       // Consumed whatever the section was: a request that missed its page is
       // stale, not pending.
       pendingPluginView = null;
-      renderSettingsRoute(route);
+      renderSettingsRoute(route, enteringPage);
       renderPluginList();
       renderWineSettingsPanel();
-      renderSteamPanel();
       void loadPreferences(request);
 
       if (route.section === "libraries") {
@@ -5456,14 +4990,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (activation.restoreState) refs.settingsPage.scrollTop = activation.restoreState.scrollTop;
     },
     deactivate(): PageRestoreState | null {
+      settingsPageActive = false;
       settingsRequest += 1;
       const scrollTop = refs.settingsPage.scrollTop;
       state.pluginView = "list";
       state.wineSettings.pendingDeleteProfileId = "";
-      state.steam.open = false;
       renderPluginList();
       renderWineSettingsPanel();
-      renderSteamPanel();
       // Closing through the setter is what cancels an in-flight Steam web
       // login; assigning `open` directly orphans the `steam-auth` window.
       setSteamAccountPanelOpen(false);
@@ -5672,6 +5205,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       // Purely a detail-page overlay: no library reload needed.
       void savePreferences({ debugSampleSocial: target.checked });
     }
+    if (target instanceof HTMLInputElement && target.id === "preference-editorial-games") {
+      // The shelf is assembled host-side and rebuilt on every activation, so
+      // opening the Store again is what picks this up.
+      void savePreferences({ showEditorialGames: target.checked });
+    }
     if (target instanceof HTMLInputElement && target.id === "preference-beta") {
       void savePreferences({ betaFeatures: target.checked });
     }
@@ -5684,6 +5222,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  /**
+   * The section follows focus in the column, whoever moved it: the tablist's
+   * own keys below, or a controller walking the column through spatial
+   * navigation, which never sends a key. A click opens its section through the
+   * click handler, so focus that came with the pointer is left alone.
+   */
+  const showSettingsSection = (section: string | undefined): void => {
+    if (!section) return;
+    const shown = router.current;
+    if (shown.page === "settings" && shown.section === section) return;
+    navigate({ page: "settings", section: section as SettingsSection, attachGameId: null });
+  };
+  for (const button of refs.settingsSectionButtons) {
+    button.addEventListener("focus", () => {
+      if (document.body.dataset.inputMode === "pointer") return;
+      showSettingsSection(button.dataset.settingsSection);
+    });
+  }
+
   refs.settingsPage.addEventListener("keydown", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLButtonElement) || !target.dataset.settingsSection) return;
@@ -5691,11 +5248,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const index = buttons.indexOf(target);
     if (index < 0) return;
 
+    // Stacked, the column is walked with up and down; on its side on a phone,
+    // with left and right. Past either end the key is spatial navigation's:
+    // up from the first section climbs to the topbar, and the other axis
+    // leaves the column for the section's own controls.
+    const [first, second] = buttons.map((button) => button.getBoundingClientRect());
+    const stacked =
+      !first || !second || Math.abs(second.top - first.top) > Math.abs(second.left - first.left);
+    const previousKey = stacked ? "ArrowUp" : "ArrowLeft";
+    const nextKey = stacked ? "ArrowDown" : "ArrowRight";
+
     let nextIndex: number | null = null;
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") {
-      nextIndex = (index + 1) % buttons.length;
-    } else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
-      nextIndex = (index - 1 + buttons.length) % buttons.length;
+    if (event.key === nextKey && index < buttons.length - 1) {
+      nextIndex = index + 1;
+    } else if (event.key === previousKey && index > 0) {
+      nextIndex = index - 1;
     } else if (event.key === "Home") {
       nextIndex = 0;
     } else if (event.key === "End") {
@@ -5706,10 +5273,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     event.preventDefault();
     const next = buttons[nextIndex];
     next.focus();
-    const section = next.dataset.settingsSection;
-    if (section) {
-      navigate({ page: "settings", section: section as SettingsSection, attachGameId: null });
-    }
+    showSettingsSection(next.dataset.settingsSection);
   });
 
   let storeSearchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -5811,12 +5375,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         break;
       case "cancel":
         if (provider) void cancelFromOnboarding(provider);
-        break;
-      case "steam-import":
-        // The installed-games scan is a different job from signing in, and it
-        // already has a home: the Steam row in Settings expands into it.
-        navigate({ page: "settings", section: "libraries", attachGameId: null });
-        setSteamPanelOpen(true);
         break;
       case "settings":
         navigate({ page: "settings", section: "libraries", attachGameId: null });
@@ -5931,25 +5489,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       return;
     }
 
-    // With nothing focused there is no geometry to navigate from, so the rail
-    // keeps its own 1-D shortcuts. Once a card holds focus, spatial navigation
-    // takes over and can also walk off the rail to the rest of the page.
+    // The arrow keys are spatial navigation's, focused or not: with nothing
+    // focused it starts from the selected card, so left and right still change
+    // the game and up climbs to Play. Enter and A keep their shortcuts for the
+    // selected game while nothing holds focus.
     const onRail = target?.classList.contains("game-card") === true;
     const adrift = target === null || target === document.body;
 
     switch (event.key) {
-      case "ArrowLeft":
-      case "ArrowUp":
-        if (!adrift) break;
-        event.preventDefault();
-        moveSelection(-1);
-        break;
-      case "ArrowRight":
-      case "ArrowDown":
-        if (!adrift) break;
-        event.preventDefault();
-        moveSelection(1);
-        break;
       case "Enter":
         // Enter launches the selected game outright; A opens its page first.
         if (!adrift && !onRail) break;
@@ -6014,7 +5561,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     onActivity: () => spatialNav.setInputMode("gamepad"),
   });
 
-  renderSteamPanel();
   renderWineSettingsPanel();
   renderPreferenceControls();
   renderNotifications();
@@ -6421,106 +5967,19 @@ function normaliseWineRunnerSettings(value: unknown): { runner: WineRunnerStatus
   };
 }
 
-async function normaliseSteamPreview(result: unknown): Promise<SteamPreview | null> {
-  if (!isRecord(result)) {
-    return null;
-  }
-
-  const rawStatus = readString(result, "status");
-  if (rawStatus !== "available" && rawStatus !== "unavailable" && rawStatus !== "error") {
-    return null;
-  }
-
-  const rawGames = Array.isArray(result.games) ? result.games.filter(isRecord) : [];
-  const seenAppIds = new Set<string>();
-  const games: SteamPreviewGame[] = [];
-  for (const record of rawGames) {
-    const appId = readSteamAppId(record);
-    const title = readString(record, "title");
-    if (!appId || !title || seenAppIds.has(appId)) {
-      continue;
-    }
-    seenAppIds.add(appId);
-
-    const alreadyImported = readBoolean(record, "alreadyImported", "already_imported") ?? false;
-    // Resolving cache tokens involves desktop path APIs. Keep the first paint
-    // bounded even when a user has already imported a very large library.
-    const shouldResolveMedia = games.length < MAX_STEAM_PREVIEW_MEDIA;
-    const coverToken = shouldResolveMedia ? readString(record, "coverUrl", "cover_url") : "";
-    const heroToken = shouldResolveMedia ? readString(record, "heroUrl", "hero_url") : "";
-    const [coverUrl, heroUrl] = await Promise.all([
-      coverToken ? resolveMediaUrl(coverToken) : Promise.resolve(""),
-      heroToken ? resolveMediaUrl(heroToken) : Promise.resolve(""),
-    ]);
-
-    games.push({
-      appId,
-      title,
-      locationLabel: readString(record, "locationLabel", "location_label"),
-      lastUpdated: readString(record, "lastUpdated", "last_updated"),
-      selected: readBoolean(record, "selected") ?? !alreadyImported,
-      alreadyImported,
-      coverUrl,
-      heroUrl,
-    });
-  }
-
-  return {
-    status: rawStatus,
-    libraries: Math.max(0, Math.floor(readNumber(result, "libraries") ?? 0)),
-    games,
-    message: readString(result, "message"),
-  };
-}
-
-async function normaliseSteamPreviewMedia(result: unknown): Promise<Map<string, SteamPreviewMedia>> {
-  const records = Array.isArray(result) ? result.filter(isRecord) : [];
-  const media = new Map<string, SteamPreviewMedia>();
-
-  for (const record of records) {
-    const appId = readSteamAppId(record);
-    if (!appId || media.has(appId)) {
-      continue;
-    }
-    const coverToken = readString(record, "coverUrl", "cover_url");
-    const heroToken = readString(record, "heroUrl", "hero_url");
-    const [coverUrl, heroUrl] = await Promise.all([
-      coverToken ? resolveMediaUrl(coverToken) : Promise.resolve(""),
-      heroToken ? resolveMediaUrl(heroToken) : Promise.resolve(""),
-    ]);
-    if (!coverUrl && !heroUrl) {
-      continue;
-    }
-    media.set(appId, { appId, coverUrl, heroUrl });
-  }
-
-  return media;
-}
-
-function normaliseSteamImportResult(result: unknown): SteamImportResult {
-  if (!isRecord(result)) {
-    throw new Error("Steam returned an invalid import result.");
-  }
-
-  return {
-    importedIds: readStringArray(result, "importedIds", "imported_ids"),
-    updatedIds: readStringArray(result, "updatedIds", "updated_ids"),
-    skippedAppIds: readStringArray(result, "skippedAppIds", "skipped_app_ids"),
-  };
-}
-
 function normaliseSteamAccountStatus(result: unknown): SteamAccountStatus | null {
   if (!isRecord(result)) {
     return null;
   }
   const connected = readBoolean(result, "connected") ?? false;
   const steamId = readString(result, "steamId", "steam_id");
+  const personaName = readString(result, "personaName", "persona_name");
   const rawMethod = readString(result, "method");
   const method = rawMethod === "web" || rawMethod === "api_key" ? rawMethod : "";
   if (connected && (!steamId || !method)) {
     return null;
   }
-  return { connected, steamId, method };
+  return { connected, steamId, method, personaName };
 }
 
 function normaliseSteamAccountSyncResult(result: unknown): SteamAccountSyncResult | null {
@@ -6563,21 +6022,6 @@ function steamAccountSyncSummary(result: SteamAccountSyncResult): string {
     hostDeviceLabel() +
     "."
   );
-}
-
-function steamImportSummary(result: SteamImportResult): string {
-  const parts: string[] = [];
-  if (result.importedIds.length > 0) {
-    parts.push(result.importedIds.length === 1 ? "1 game imported" : result.importedIds.length + " games imported");
-  }
-  if (result.updatedIds.length > 0) {
-    parts.push(result.updatedIds.length === 1 ? "1 library entry updated" : result.updatedIds.length + " library entries updated");
-  }
-  if (result.skippedAppIds.length > 0) {
-    parts.push(result.skippedAppIds.length === 1 ? "1 game skipped" : result.skippedAppIds.length + " games skipped");
-  }
-
-  return parts.length > 0 ? parts.join(" · ") + "." : "No games needed importing.";
 }
 
 function readImportedId(result: unknown): string | undefined {
@@ -6656,17 +6100,6 @@ function readStringArray(record: BackendRecord, ...keys: string[]): string[] {
   return [];
 }
 
-function readSteamAppId(record: BackendRecord): string {
-  const value = record.appId ?? record.app_id;
-  const parsed =
-    typeof value === "string" && /^\d+$/.test(value.trim())
-      ? Number(value.trim())
-      : typeof value === "number"
-        ? value
-        : Number.NaN;
-  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 0xffff_ffff ? String(parsed) : "";
-}
-
 function isRecord(value: unknown): value is BackendRecord {
   return typeof value === "object" && value !== null;
 }
@@ -6688,7 +6121,7 @@ function shell(): string {
       <!-- The topbar is the document banner, so it sits outside the page
            wrapper: a <header> nested in <main> is not a banner, and each page
            owns the only <main> on screen. -->
-      <header class="topbar" aria-label="Primary navigation" data-tauri-drag-region>
+      <header class="topbar" aria-label="Primary navigation" data-tauri-drag-region data-nav-row>
         <div class="nav-cluster">
           <div class="library-menu-control">
             <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="Open library sources" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
@@ -6775,8 +6208,11 @@ function shell(): string {
       <div class="scene-overlay scene-overlay--left" aria-hidden="true"></div>
       <div class="scene-overlay scene-overlay--bottom" aria-hidden="true"></div>
 
-      <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="Previous game">${icon("chevron-left")}</button>
-      <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="Next game">${icon("chevron-right")}</button>
+      <!-- The arrows are left and right for the pointer. The keys already are
+           left and right, so they walk past these rather than stopping on a
+           second way to do what they just did. -->
+      <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="Previous game" data-nav-skip>${icon("chevron-left")}</button>
+      <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="Next game" data-nav-skip>${icon("chevron-right")}</button>
 
       <section class="hero-content" aria-live="polite">
         <!-- The wordmark when a store published one, the title text when it did
@@ -6815,7 +6251,9 @@ function shell(): string {
         <!-- Play stands alone. A card opens its own page on a second click and
              the detail route is a link away, so a chevron beside Play was one
              affordance too many for the one thing this scene is for. -->
-        <div class="hero-actions">
+        <!-- Left and right on Play change the game it would start, and focus
+             stays on Play: the rail below is the same choice, one row down. -->
+        <div class="hero-actions" data-nav-steps>
           <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
         </div>
       </section>
@@ -6826,13 +6264,13 @@ function shell(): string {
                never disagree about what is on screen. -->
           <h2 id="recently-played-title">Recently Played</h2>
         </div>
-        <div id="game-cards" class="game-cards" role="list" aria-label="Recently Played"></div>
+        <div id="game-cards" class="game-cards" role="list" aria-label="Recently Played" data-nav-rail></div>
       </section>
 
       <!-- The browse bar. One button cycles the mode, the row beside it holds
            that mode's segments, and the mark on the left is the app's own
            mood. -->
-      <footer class="browse-bar" aria-label="Library browsing">
+      <footer class="browse-bar" aria-label="Library browsing" data-nav-row>
         <!-- A switch, not a button that happens to remember a state: the role
              says so, and the track says so. -->
         <button id="rage-toggle" class="browse-bar__mood" type="button" role="switch" aria-checked="false">
@@ -6897,14 +6335,17 @@ function shell(): string {
 
       <div id="app-page-settings" class="app-page app-page--scroll app-page--settings">
         <div class="settings-layout">
+          <!-- One word and one glyph per section. The sidebar carries the
+               section's name and nothing else: its description is already the
+               line under the page title, so saying it twice cost a second line
+               on every tab. -->
           <nav class="settings-sidebar" aria-label="Settings sections">
-            <p class="settings-sidebar__title">Settings</p>
             <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
               ${SETTINGS_SECTIONS.map(
                 (section) => `
               <button type="button" role="tab" class="settings-section-link" id="settings-tab-${section.id}" data-settings-section="${section.id}" aria-controls="settings-panel-${section.id}" aria-selected="false" tabindex="-1">
-                <strong>${section.label}</strong>
-                <small>${section.description}</small>
+                ${icon(section.icon, "settings-section-link__icon")}
+                <strong>${section.tab}</strong>
               </button>`,
               ).join("")}
             </div>
@@ -6917,6 +6358,9 @@ function shell(): string {
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
+              <!-- One list, no cards: the section's rows sit directly on the
+                   page surface, so the only outline on screen is the one
+                   around the settings themselves. -->
               <div class="settings-card" data-settings-searchable>
                 <div class="settings-row">
                   <label class="settings-row__copy" for="preference-start-page">
@@ -6944,8 +6388,6 @@ function shell(): string {
                     <option value="au">Australia</option>
                   </select>
                 </div>
-              </div>
-              <div class="settings-card" data-settings-searchable>
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>Reset preferences</strong>
@@ -6963,20 +6405,16 @@ function shell(): string {
                    row, whether its price data is reachable. Steam is in that
                    list too — it used to own two cards above it, which made the
                    one store that needs no introduction the loudest thing on the
-                   page. Its two extra affordances, signing in and scanning this
-                   Mac for installed games, expand under its row. -->
-              <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-labelledby="source-accounts-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("collections")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="source-accounts-title">Game libraries &amp; providers</strong>
-                    <small>Connect a store to see the games you own, and check where store data can come from.</small>
-                  </div>
-                  <!-- Two different refreshes, and the difference matters: the
-                       first only re-reads which accounts are connected, the
-                       second re-syncs every one of their libraries. -->
+                   page. Its one extra affordance, signing in, expands under its
+                   row. -->
+              <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="Game libraries and providers">
+                <!-- No title, no pitch: the rows below are their own heading. -->
+                <header class="settings-card__header settings-card__header--actions">
+                  <!-- One refresh, not two: re-reading the connected accounts and
+                       re-syncing their libraries are the same wish from where the
+                       user stands, and a second, icon-only button next to this one
+                       only ever asked which of the two they meant. -->
                   <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">Refresh all libraries</button>
-                  <button id="source-accounts-refresh" type="button" class="steam-header-button" data-source-action="refresh" aria-label="Refresh library source connections">${icon("refresh")}</button>
                 </header>
 
                 <div class="steam-source-block">
@@ -6985,46 +6423,23 @@ function shell(): string {
                     <strong id="steam-account-title" class="steam-inline-panel__title">Steam library</strong>
                     <div id="steam-account-body" class="steam-account-body"></div>
                   </div>
-                  <div id="steam-import-panel" class="steam-inline-panel" aria-labelledby="steam-import-title" aria-describedby="steam-import-detail" hidden>
-                    <div class="steam-inline-panel__header">
-                      <div class="settings-card__copy">
-                        <strong id="steam-import-title" class="steam-inline-panel__title">Import installed games</strong>
-                        <small id="steam-import-detail">A local Steam source</small>
-                      </div>
-                      <button id="steam-refresh" type="button" class="steam-header-button" data-steam-action="refresh" aria-label="Refresh Steam library" hidden>${icon("refresh")}</button>
-                      <button type="button" class="steam-header-button" data-steam-row-action="close-import" aria-label="Close installed games">${icon("close")}</button>
-                    </div>
-                    <div id="steam-import-body" class="steam-import-body"></div>
-                    <footer id="steam-import-footer" class="steam-import-footer" hidden>
-                      <p id="steam-selection-summary"></p>
-                      <button id="steam-import-selected" class="steam-import-button" type="button" data-steam-action="import">Import selected</button>
-                    </footer>
-                  </div>
                 </div>
 
                 <div id="source-accounts-body" class="source-accounts-body"></div>
                 <div class="source-providers">
-                  <p class="source-providers__label">Store data only</p>
                   <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
               </section>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
-              <section id="plugins-catalog-panel" class="settings-card" data-settings-searchable aria-labelledby="plugins-catalog-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("grid")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="plugins-catalog-title">Plugins</strong>
-                    <small>Runners that come with Orivo, and emulators you can add.</small>
-                  </div>
-                </header>
-
+              <!-- No card header: the page title already says "Plugins &
+                   Runners", and the two groups below name themselves. -->
+              <section id="plugins-catalog-panel" class="settings-card" data-settings-searchable>
                 <div class="plugins-group">
                   <p class="plugins-group__label">Installed</p>
                   <div id="plugins-installed-list" class="plugins-group__list">
                     <div class="settings-row plugin-row">
-                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("monitor")}</span>
                       <div class="settings-row__copy">
                         <strong>Wine</strong>
                         <small>Wine-Staging runner and isolated profiles</small>
@@ -7033,7 +6448,6 @@ function shell(): string {
                       <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
                     </div>
                     <div class="settings-row plugin-row">
-                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("search")}</span>
                       <div class="settings-row__copy">
                         <strong>Wallpaper Searcher</strong>
                         <small>Finds wallpaper artwork from IGDB and Google Images</small>
@@ -7047,7 +6461,7 @@ function shell(): string {
                 <div class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <p class="plugins-group__label">Available</p>
-                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>Install from file…</button>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
@@ -7060,8 +6474,7 @@ function shell(): string {
 
               <section id="wallpaper-plugin-panel" class="settings-card" aria-labelledby="wallpaper-plugin-title" hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
-                  <span class="settings-card__mark" aria-hidden="true">${icon("search")}</span>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
                   <div class="settings-card__copy">
                     <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
                     <small>Wallpaper search built into Orivo</small>
@@ -7126,8 +6539,7 @@ function shell(): string {
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
-                  <span class="settings-card__mark" aria-hidden="true">${icon("monitor")}</span>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
                   <div class="settings-card__copy">
                     <strong id="wine-settings-title">Wine-Staging</strong>
                     <small>Runner health and isolated Wine profiles</small>
@@ -7138,14 +6550,11 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-appearance" data-settings-panel="appearance" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
-              <section class="settings-card" data-settings-searchable aria-labelledby="motion-preference-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("navigate")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="motion-preference-title">Motion</strong>
-                    <small>Motion controls the hero cross-fades, card transitions, and panel animations. "System" follows the OS, which on Windows means the "Animation effects" accessibility/performance setting.</small>
-                  </div>
-                </header>
+              <!-- One card, two labelled groups: the choices already say what
+                   they do, so three more headers above them were the same
+                   information set twice. -->
+              <div class="settings-card" data-settings-searchable>
+                <p class="settings-group__label" id="motion-preference-title">Motion</p>
                 <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="full" />
@@ -7160,52 +6569,26 @@ function shell(): string {
                     <span><strong>Reduced</strong><small>Always keep motion to a minimum in Orivo.</small></span>
                   </label>
                 </div>
-              </section>
-              <section class="settings-card" data-settings-searchable aria-labelledby="showcase-preference-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("grid")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="showcase-preference-title">Demo games (debug)</strong>
-                    <small>Seed the library with the bundled showcase games. Off by default — use it only to test the interface without importing real games.</small>
-                  </div>
-                </header>
+                <p class="settings-group__label">Beta &amp; debug</p>
                 <div class="settings-choices">
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-show-showcase" />
-                    <span><strong>Show demo games</strong><small>Adds Elden Ring, Cyberpunk 2077 and other fixtures to your library.</small></span>
+                    <span><strong>Show demo games</strong><small>Seeds the library with Elden Ring, Cyberpunk 2077 and other bundled fixtures, so the interface can be tested without importing real games.</small></span>
                   </label>
-                </div>
-              </section>
-              <section class="settings-card" data-settings-searchable aria-labelledby="beta-preference-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("sparkle")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="beta-preference-title">Beta features</strong>
-                    <small>Surfaces that are still being built. They are hidden by default because they are not finished, not because they are broken.</small>
-                  </div>
-                </header>
-                <div class="settings-choices">
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-beta" />
-                    <span><strong>Show the Me dashboard</strong><small>Your play habits, scored and charted. Reads your library only.</small></span>
+                    <span><strong>Show the Me dashboard</strong><small>Your play habits, scored and charted. Unfinished, and off until you ask for it.</small></span>
                   </label>
-                </div>
-              </section>
-              <section class="settings-card" data-settings-searchable aria-labelledby="sample-social-preference-title">
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("users")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="sample-social-preference-title">Sample social data (debug)</strong>
-                    <small>Fill every game's detail page with placeholder achievements, friends and activity so those sections can be reviewed without a live feed. Off by default.</small>
-                  </div>
-                </header>
-                <div class="settings-choices">
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-editorial-games" />
+                    <span><strong>Show the hand-written shelf</strong><small>Puts Orivo's own forty-seven games back in the Store beside what the shops have just released. They were written to stand in for a catalogue that did not exist yet.</small></span>
+                  </label>
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-debug-social" />
-                    <span><strong>Show sample achievements &amp; friends</strong><small>Adds demo trophies, a friends rail and an activity feed to game pages that have none.</small></span>
+                    <span><strong>Show sample achievements &amp; friends</strong><small>Fills game pages that have none with placeholder trophies, a friends rail and an activity feed.</small></span>
                   </label>
                 </div>
-              </section>
+              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
@@ -7253,12 +6636,7 @@ function shell(): string {
                 </div>
               </div>
               <div class="settings-card" data-settings-searchable>
-                <header class="settings-card__header">
-                  <div class="settings-card__copy">
-                    <strong>Attributions</strong>
-                    <small>Providers and projects Orivo builds on.</small>
-                  </div>
-                </header>
+                <p class="settings-group__label">Attributions</p>
                 <ul class="settings-attributions">
                   <li>Steam and the Steam logo are trademarks of Valve Corporation. Orivo is not affiliated with or endorsed by Valve.</li>
                   <li>Wine and Wine-Staging are provided by the WineHQ project under the LGPL.</li>
