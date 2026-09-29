@@ -337,7 +337,10 @@ const CATEGORY_KEYWORDS: Readonly<Record<string, string[]>> = {
   "good-for-brain": ["puzzle", "reflexion", "strategie", "strategy", "logique", "cartes", "enquete"],
   "short-sessions": ["courte", "short", "arcade", "roguelike"],
   "strong-stories": ["recits", "story", "stories", "histoire", "narration", "aventure"],
-  relaxing: ["relaxant", "relax", "cozy", "detente", "contemplat", "simulation"],
+  // "occasionnel" is what Steam calls Casual in French, and the genre a live
+  // listing arrives with. Without it the tab stays empty for every game the
+  // shop sends, however well it fits.
+  relaxing: ["relaxant", "relax", "cozy", "detente", "contemplat", "simulation", "occasionnel"],
 };
 
 export function matchesCategory(game: GameSummary, category: StoreCategory): boolean {

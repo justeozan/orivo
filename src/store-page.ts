@@ -963,12 +963,31 @@ export function createStorePage(options: StorePageOptions): AppPage {
     // The block under the picture carries on with the picture, so the card
     // needs the same file twice. It is one request: the second use is served
     // out of the browser's cache, and a source that fails takes both with it.
-    const takeTone = (): void => {
-      const tone = capsuleTone(art);
+    const wearTone = (image: HTMLImageElement): void => {
+      const tone = capsuleTone(image);
       if (!tone) return;
       card.style.setProperty("--card-hue", `${tone.hue}`);
       card.style.setProperty("--card-sat", `${tone.saturation}%`);
       card.style.setProperty("--card-lum", `${tone.lightness}%`);
+    };
+
+    const takeTone = (): void => {
+      if (!art.src) return;
+      const sameOrigin = new URL(art.src, location.href).origin === location.origin;
+      if (sameOrigin) {
+        wearTone(art);
+        return;
+      }
+      // A shop's own art is another origin, and a canvas will not give up a
+      // pixel of it unless the image was asked for in CORS mode. Reading it
+      // through a second request rather than putting `crossOrigin` on the card
+      // itself keeps the two failures apart: a host that declines costs the
+      // block its colour, never the card its picture.
+      const probe = new Image();
+      probe.crossOrigin = "anonymous";
+      probe.decoding = "async";
+      probe.addEventListener("load", () => wearTone(probe), { once: true });
+      probe.src = art.src;
     };
     const showArt = (url: string): void => {
       art.src = url;
@@ -992,10 +1011,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
         media.classList.add("store-card__media--missing");
       }
     });
-    // A few games have no screenshot that survives the crop and fall back to
-    // their capsule, which already carries the wordmark; printing the title
-    // over it would show the name twice.
-    const artHasWordmark = /\/capsule\.jpg$/.test(art.src || "");
+    // Store art carries the game's name — that is what it is for. The shelf's
+    // own files are `capsule.jpg`; a game that arrives live from Steam brings
+    // `capsule_616x353.jpg`, or `header.jpg` when it is too new to have a
+    // capsule. Printing a title over any of them shows the name twice.
+    const artHasWordmark = /\/(capsule[^/]*|header)\.jpg(\?|$)/.test(art.src || "");
     media.append(art, element("span", "store-card__veil"));
     // A shop that quoted nothing leaves the slot empty rather than printing a
     // blank price frame the shopper would read as "free".

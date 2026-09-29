@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The Store shows what has just come out. Every refresh reads Steam's own ranked new-release listing — `filter=popularnew`, ordered by the audience a release found rather than by the hour it was published, because the unranked feed for any given week opens on three asset flips — and adds the games the catalogue does not already carry. A game Orivo has written about is never pulled in twice and never has its own copy overwritten by what a storefront says about it. Announcements, downloadable content, and listings their own publisher flagged as adult sexual content are left where they are. What arrives brings its price, its genres, how it is played and the platforms it runs on, and the chips file it from those alone — it has no editorial entry, so it shows no scores, no verdict and no reason: the card leaves those slots empty rather than filling them. Its artwork is the 616×353 capsule the card is cut for when the listing is old enough to have one, and the listing's own header — the same picture, 18% narrower — when it is not. The block underneath still takes its colour from whichever arrived, read through a second request in CORS mode so a host that declines costs the block its colour and never the card its picture.
+
 ### Removed
 
 - Importing installed Steam games by walking local manifests. The scan itself stays, because it is what tells a synced library which owned games are actually on disk, but nothing offers to walk it any more: connecting a Steam library, syncing it, and importing a single game from disk are the three ways a game gets in now, and the preview that showed what the scan had found went with them.

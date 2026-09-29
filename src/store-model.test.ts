@@ -9,6 +9,7 @@ import {
   selectBestOffer,
   selectStoreGames,
   fitStats,
+  matchesCategory,
   storeCategoryLabel,
   STORE_CATEGORIES,
   type StoreBrowsePage,
@@ -464,6 +465,18 @@ describe("selectStoreGames", () => {
 
   it("returns an empty list rather than inventing results", () => {
     expect(selectStoreGames(stateWith({ home, platforms: ["switch"] }))).toEqual([]);
+  });
+});
+
+describe("matchesCategory", () => {
+  it("files a game a shop sent by the genres that shop gave it", () => {
+    // No editorial entry at all: what the card is filed under has to come from
+    // the game's own facts, in the language the shop answered in.
+    const live = game({ curation: undefined, genres: ["Aventure", "Occasionnel"], tags: ["Solo"] });
+    expect(matchesCategory(live, "strong-stories")).toBe(true);
+    expect(matchesCategory(live, "relaxing")).toBe(true);
+    expect(matchesCategory(live, "good-for-brain")).toBe(false);
+    expect(matchesCategory(live, "all-games")).toBe(true);
   });
 });
 
