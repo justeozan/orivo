@@ -36,6 +36,11 @@ use std::{
 /// outlive interest in it and the map must not become a leak.
 const MAX_RETAINED_JOBS: usize = 256;
 
+/// Who the scheduler's own journal lines belong to. Not a plugin id: it is the
+/// host talking about itself, and the journal's per-plugin fairness treats it as
+/// one more holder rather than as a privileged one.
+const SCHEDULER_JOURNAL_ID: &str = "orivo.plugin-scheduler";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerLimits {
     /// Plugin work is never the reason Orivo feels slow, so it gets a small
@@ -486,10 +491,23 @@ impl PluginScheduler {
 
 impl Drop for PluginScheduler {
     fn drop(&mut self) {
+        let mut abandoned = 0;
         if let Ok(mut state) = self.inner.state.lock() {
             state.stopping = true;
+            abandoned = state.queue.len();
             state.queue.clear();
         }
+        // Outside the lock, because `record` writes to stderr and a failed write
+        // while holding this one would poison it. Worth recording at all because a
+        // shutdown that silently drops queued work is the one failure a caller
+        // sees as a disconnected channel and nothing else — and because it is the
+        // only signal a test has that the queue is gone.
+        self.inner.journal.record(
+            next_correlation_id(),
+            SCHEDULER_JOURNAL_ID,
+            "shutdown",
+            format!("{abandoned} queued job(s) abandoned"),
+        );
         self.inner.wake.notify_all();
         let workers = self
             .workers
@@ -1056,11 +1074,19 @@ mod tests {
     /// the queued one is cleared exactly as it is when Orivo closes.
     #[test]
     fn a_dropped_scheduler_abandons_what_it_never_ran() {
-        let scheduler = scheduler(SchedulerLimits {
-            max_concurrency: 1,
-            queue_depth_per_plugin: 4,
-            ..SchedulerLimits::default()
-        });
+        // Its own journal, kept: the shutdown line is how this test knows the
+        // queue is gone rather than guessing at it with a sleep. Twenty
+        // milliseconds was enough on macOS and not on a Windows runner, where the
+        // worker picked the queued job up before the drop had cleared it.
+        let journal = Arc::new(PluginJournal::default());
+        let scheduler = PluginScheduler::new(
+            SchedulerLimits {
+                max_concurrency: 1,
+                queue_depth_per_plugin: 4,
+                ..SchedulerLimits::default()
+            },
+            Arc::clone(&journal),
+        );
         let gate = Gate::new();
         let ran = Arc::new(AtomicUsize::new(0));
 
@@ -1084,9 +1110,16 @@ mod tests {
             .unwrap();
 
         // The drop clears the queue before it joins the worker, which is still
-        // inside the first job; releasing the gate afterwards lets it exit.
+        // inside the first job; releasing the gate afterwards lets it exit. The
+        // gate stays shut until the queue has provably been cleared.
         let closing = thread::spawn(move || drop(scheduler));
-        thread::sleep(Duration::from_millis(20));
+        assert!(
+            eventually(|| journal
+                .entries()
+                .iter()
+                .any(|entry| entry.decision == "shutdown")),
+            "the scheduler never reported its shutdown"
+        );
         gate.open();
         running.wait().unwrap();
         closing.join().unwrap();

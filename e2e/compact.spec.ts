@@ -180,6 +180,7 @@ test.describe("every route", () => {
     { hash: "#/games/steam%3A1245620", name: "game" as const },
     { hash: "#/me", name: "library" as const },
     { hash: "#/settings/general", name: "settings" as const },
+    { hash: "#/settings/plugins", name: "settings" as const },
   ];
 
   for (const route of routes) {
@@ -190,6 +191,17 @@ test.describe("every route", () => {
       expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
     });
   }
+
+  test("the Third-party runners panel opens and stays inside the screen", async ({ page }) => {
+    await openRoute(page, "#/settings/plugins", "settings");
+    await page.locator("[data-plugin-open='runners']").click();
+    await expect(page.locator("#runners-panel")).toBeVisible();
+    await expect(page.locator("#runners-panel-body")).toContainText(
+      "Install a runner plugin to add an emulator",
+    );
+    const overflow = await documentOverflow(page);
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  });
 });
 
 test.describe("the other pages", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_UPDATE_POLICY,
   createDefaultPluginManagerClient,
   createPluginManagerController,
   emptyPluginCatalog,
@@ -10,11 +11,13 @@ import {
   pluginErrorMessage,
   pluginPercent,
   readPluginCatalog,
+  readUpdatePolicy,
   type AvailablePluginView,
   type InstalledPluginView,
   type PluginCatalogView,
   type PluginInstallProgress,
   type PluginManagerClient,
+  type PluginUpdatePolicy,
 } from "./plugin-manager";
 
 // ---------------------------------------------------------------------------
@@ -30,6 +33,9 @@ function installed(overrides: Partial<InstalledPluginView> = {}): InstalledPlugi
     state: "ready",
     message: "",
     trusted: true,
+    rollbackTo: null,
+    rollbackTrusted: null,
+    updateTo: null,
     ...overrides,
   };
 }
@@ -73,6 +79,7 @@ function createFakePluginManager(
   const calls: string[] = [];
   const teardowns: string[] = [];
   const listeners = new Set<(next: PluginInstallProgress) => void>();
+  let policy: PluginUpdatePolicy = { ...DEFAULT_UPDATE_POLICY };
   const client: PluginManagerClient = {
     async getCatalog(signal) {
       calls.push("getCatalog");
@@ -89,6 +96,29 @@ function createFakePluginManager(
     async uninstall(pluginId, signal) {
       calls.push(`uninstall:${pluginId}`);
       if (overrides.uninstall) await overrides.uninstall(pluginId, signal);
+    },
+    async refreshCatalog(signal) {
+      calls.push("refreshCatalog");
+      return overrides.refreshCatalog ? overrides.refreshCatalog(signal) : catalog();
+    },
+    async update(pluginId, signal) {
+      calls.push(`update:${pluginId}`);
+      if (overrides.update) await overrides.update(pluginId, signal);
+    },
+    async rollback(pluginId, signal) {
+      calls.push(`rollback:${pluginId}`);
+      return overrides.rollback ? overrides.rollback(pluginId, signal) : "1.0.0";
+    },
+    async getUpdatePolicy(signal) {
+      calls.push("getUpdatePolicy");
+      return overrides.getUpdatePolicy ? overrides.getUpdatePolicy(signal) : policy;
+    },
+    async setUpdatePolicy(automatic, signal) {
+      calls.push(`setUpdatePolicy:${automatic}`);
+      policy = overrides.setUpdatePolicy
+        ? await overrides.setUpdatePolicy(automatic, signal)
+        : readUpdatePolicy({ automatic });
+      return policy;
     },
     subscribe(onProgress) {
       calls.push("subscribe");
@@ -241,6 +271,9 @@ describe("readPluginCatalog", () => {
       state: "invalid",
       message: "",
       trusted: false,
+      rollbackTo: null,
+      rollbackTrusted: null,
+      updateTo: null,
     });
     expect(formatPluginStatus(view.installed[0])).toBe("Invalid · unsigned");
   });
@@ -262,7 +295,7 @@ describe("createPluginManagerController", () => {
     await controller.load(liveSignal());
     expect(controller.catalog().available[0].name).toBe("Dolphin");
     expect(controller.progressFor("com.orivo.dolphin")).toBeNull();
-    expect(fake.calls).toEqual(["getCatalog", "subscribe"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe"]);
 
     fake.emit(progress({ phase: "downloading", percent: 12 }));
     expect(controller.progressFor("com.orivo.dolphin")?.phase).toBe("downloading");
@@ -303,7 +336,13 @@ describe("createPluginManagerController", () => {
     await controller.load(liveSignal());
     await controller.load(liveSignal());
 
-    expect(fake.calls).toEqual(["getCatalog", "subscribe", "getCatalog"]);
+    expect(fake.calls).toEqual([
+      "getCatalog",
+      "getUpdatePolicy",
+      "subscribe",
+      "getCatalog",
+      "getUpdatePolicy",
+    ]);
   });
 
   it("starts at downloading on click and reloads the catalogue once installed", async () => {
@@ -326,6 +365,7 @@ describe("createPluginManagerController", () => {
 
     expect(fake.calls).toEqual([
       "getCatalog",
+      "getUpdatePolicy",
       "subscribe",
       "installFromRegistry:com.orivo.dolphin",
       "getCatalog",
@@ -352,6 +392,7 @@ describe("createPluginManagerController", () => {
     // A refused install changed nothing on disk, so nothing is re-read.
     expect(fake.calls).toEqual([
       "getCatalog",
+      "getUpdatePolicy",
       "subscribe",
       "installFromRegistry:com.orivo.dolphin",
     ]);
@@ -363,7 +404,13 @@ describe("createPluginManagerController", () => {
     await controller.load(liveSignal());
 
     await expect(controller.installFromFile()).resolves.toBe("com.orivo.mame");
-    expect(fake.calls).toEqual(["getCatalog", "subscribe", "installFromFile", "getCatalog"]);
+    expect(fake.calls).toEqual([
+      "getCatalog",
+      "getUpdatePolicy",
+      "subscribe",
+      "installFromFile",
+      "getCatalog",
+    ]);
   });
 
   it("treats a cancelled picker as a no-op", async () => {
@@ -373,7 +420,7 @@ describe("createPluginManagerController", () => {
 
     await expect(controller.installFromFile()).resolves.toBeNull();
     // Nothing changed on disk, so the panel is not made to flicker.
-    expect(fake.calls).toEqual(["getCatalog", "subscribe", "installFromFile"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe", "installFromFile"]);
   });
 
   it("hands a refused file install back to the caller for a toast", async () => {
@@ -386,7 +433,7 @@ describe("createPluginManagerController", () => {
     await controller.load(liveSignal());
 
     await expect(controller.installFromFile()).rejects.toBe("Ce paquet n'est pas un plugin Orivo.");
-    expect(fake.calls).toEqual(["getCatalog", "subscribe", "installFromFile"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe", "installFromFile"]);
   });
 
   it("reloads the catalogue after an uninstall and forgets the old progress", async () => {
@@ -409,6 +456,7 @@ describe("createPluginManagerController", () => {
 
     expect(fake.calls).toEqual([
       "getCatalog",
+      "getUpdatePolicy",
       "subscribe",
       "uninstall:com.orivo.dolphin",
       "getCatalog",
@@ -432,7 +480,7 @@ describe("createPluginManagerController", () => {
       "Le plugin est en cours d'utilisation.",
     );
     expect(controller.catalog().installed).toHaveLength(1);
-    expect(fake.calls).toEqual(["getCatalog", "subscribe", "uninstall:com.orivo.dolphin"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe", "uninstall:com.orivo.dolphin"]);
   });
 
   it("drops a catalogue that resolves after the activation was cancelled", async () => {
@@ -475,7 +523,7 @@ describe("createPluginManagerController", () => {
     await expect(controller.installFromFile()).resolves.toBeNull();
     await controller.uninstall("com.orivo.dolphin");
     await flush();
-    expect(fake.calls).toEqual(["getCatalog", "subscribe"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe"]);
   });
 
   it("stops listening as soon as onChange is unsubscribed", async () => {
@@ -488,6 +536,131 @@ describe("createPluginManagerController", () => {
     await controller.load(liveSignal());
     off();
     fake.emit(progress());
+    expect(changes).toBe(1);
+  });
+
+  it("loads the update policy alongside the catalogue and can flip it", async () => {
+    const fake = createFakePluginManager();
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+    expect(controller.updatePolicy()).toEqual({ automatic: false });
+
+    await controller.setAutomaticUpdates(true);
+    expect(controller.updatePolicy()).toEqual({ automatic: true });
+    expect(fake.calls.at(-1)).toBe("setUpdatePolicy:true");
+  });
+
+  it("starts at downloading and reloads the catalogue once an update lands", async () => {
+    const fake = createFakePluginManager({
+      getCatalog: async () =>
+        fake.calls.filter((call) => call === "getCatalog").length > 1
+          ? catalog({ installed: [installed({ version: "6.0.0", updateTo: null })] })
+          : catalog({ installed: [installed({ updateTo: "6.0.0" })] }),
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+    expect(controller.catalog().installed[0].updateTo).toBe("6.0.0");
+
+    const started = controller.update("com.orivo.dolphin");
+    expect(controller.progressFor("com.orivo.dolphin")?.phase).toBe("downloading");
+    await started;
+
+    expect(controller.progressFor("com.orivo.dolphin")?.phase).toBe("installed");
+    expect(controller.catalog().installed[0].version).toBe("6.0.0");
+    expect(controller.catalog().installed[0].updateTo).toBeNull();
+  });
+
+  it("turns a refused update into a failed phase carrying the host's message, and rejects", async () => {
+    const fake = createFakePluginManager({
+      update: async () => {
+        throw "Ce plugin n'est plus dans le registre.";
+      },
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    // Rejects, so a caller cannot mistake this for success and toast one —
+    // the row is where the failure is said, in a phrase.
+    await expect(controller.update("com.orivo.dolphin")).rejects.toBe(
+      "Ce plugin n'est plus dans le registre.",
+    );
+    const failed = controller.progressFor("com.orivo.dolphin");
+    expect(failed?.phase).toBe("failed");
+    expect(failed?.message).toBe("Ce plugin n'est plus dans le registre.");
+  });
+
+  it("ignores a second update while one is already in flight for the same plugin", async () => {
+    let calls = 0;
+    const fake = createFakePluginManager({
+      update: async () => {
+        calls += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      },
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    const first = controller.update("com.orivo.dolphin");
+    const second = controller.update("com.orivo.dolphin");
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(1);
+  });
+
+  it("reloads the catalogue after a rollback", async () => {
+    const fake = createFakePluginManager({
+      getCatalog: async () =>
+        fake.calls.filter((call) => call === "getCatalog").length > 1
+          ? catalog({ installed: [installed({ version: "1.0.0", rollbackTo: null })] })
+          : catalog({ installed: [installed({ version: "2.0.0", rollbackTo: "1.0.0" })] }),
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+    expect(controller.catalog().installed[0].rollbackTo).toBe("1.0.0");
+
+    await controller.rollback("com.orivo.dolphin");
+
+    expect(controller.catalog().installed[0].version).toBe("1.0.0");
+    expect(controller.catalog().installed[0].rollbackTo).toBeNull();
+  });
+
+  it("keeps the cached catalogue when a registry refresh cannot be reached", async () => {
+    const fake = createFakePluginManager({
+      refreshCatalog: async () => {
+        throw new Error("offline");
+      },
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+    const before = controller.catalog();
+
+    await controller.refreshCatalog();
+
+    expect(controller.catalog()).toEqual(before);
+  });
+
+  it("puts the automatic-updates toggle back and rejects when the host cannot save it", async () => {
+    const fake = createFakePluginManager({
+      setUpdatePolicy: async () => {
+        throw "That setting could not be saved.";
+      },
+    });
+    const controller = createPluginManagerController(fake.client);
+    await controller.load(liveSignal());
+    expect(controller.updatePolicy()).toEqual({ automatic: false });
+
+    let changes = 0;
+    controller.onChange(() => {
+      changes += 1;
+    });
+    await expect(controller.setAutomaticUpdates(true)).rejects.toBe(
+      "That setting could not be saved.",
+    );
+
+    // The write failed, so the toggle must still read what the host holds —
+    // never the value the user just clicked to.
+    expect(controller.updatePolicy()).toEqual({ automatic: false });
+    // Still repaints once, so a stale checkbox does not linger checked.
     expect(changes).toBe(1);
   });
 });
@@ -511,7 +684,7 @@ describe("a host without the plugin commands", () => {
     expect(controller.catalog().available).toEqual([]);
     // The panel still paints, so the event channel is still worth holding: an
     // install can only ever be started from a row, and there are none.
-    expect(fake.calls).toEqual(["getCatalog", "subscribe"]);
+    expect(fake.calls).toEqual(["getCatalog", "getUpdatePolicy", "subscribe"]);
   });
 
   it("never lets the default client's catalogue throw outside the desktop shell", async () => {

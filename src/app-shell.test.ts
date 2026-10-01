@@ -307,6 +307,21 @@ describe("application shell", () => {
     expect(menu.querySelector("#library-source-list")?.textContent).toBe("");
     expect(menu.querySelectorAll("[data-library-action='add-source']")).toHaveLength(1);
   });
+
+  // Winlator's entry point is Android's. On a desktop it must not be in the
+  // menu at all — not disabled, not present-and-explaining — because this menu
+  // is one of the reference screenshots.
+  it("keeps the Android emulator entries off a desktop", () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    expect(menu.querySelector("[data-library-action='winlator-folder']")).toBeNull();
+    expect(menu.querySelector("[data-library-action='console-folder']")).toBeNull();
+    expect(menu.textContent).not.toContain("Winlator");
+    // These are Android applications; a desktop row for them would be a dead end,
+    // and this menu is one of the reference screenshots.
+    expect(menu.textContent).not.toContain("RetroArch");
+    expect(menu.textContent).not.toContain("PPSSPP");
+  });
 });
 
 /**
@@ -1066,6 +1081,207 @@ describe("application shell against the desktop backend", () => {
  * of ten titles nobody owns — and left the one screen whose whole job is to ask
  * for a connection with nothing to ask for.
  */
+/**
+ * The Winlator confirmation is the one screen in Orivo that turns a file on
+ * shared storage into something one tap from running, so what it says about that
+ * file is load-bearing. Android only, which is why it gets its own harness.
+ */
+describe("the Android source confirmations", () => {
+  let root: HTMLElement;
+  let userAgent: ReturnType<typeof vi.spyOn>;
+
+  const reviewItems = (): string[] =>
+    Array.from(root.querySelectorAll<HTMLElement>(".library-source-review__list li")).map(
+      (item) => item.textContent ?? "",
+    );
+
+  beforeEach(async () => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    userAgent = vi
+      .spyOn(navigator, "userAgent", "get")
+      .mockReturnValue("Mozilla/5.0 (Linux; Android 17; sdk_gphone64_arm64) AppleWebKit/537.36");
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_library":
+          return [];
+        case "get_preferences":
+          return {};
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "" };
+        case "connect_console_rom_folder":
+          return {
+            connected: true,
+            token: 3,
+            emulator: "retroarch",
+            emulatorLabel: "RetroArch",
+            emulatorInstalled: true,
+            emulatorInstaller: "com.android.vending",
+            folderLabel: "Roms",
+            message: "Connected Roms.",
+            found: [
+              {
+                gameRef: "rom:aa",
+                title: "Alter Ego",
+                systemLabel: "NES",
+                fileName: "Alter Ego.nes",
+                folderPath: "",
+                duplicateTitle: "none",
+                alreadyImported: false,
+              },
+              {
+                gameRef: "rom:bb",
+                title: "Alter Ego",
+                systemLabel: "NES",
+                fileName: "Free Coins.nes",
+                folderPath: "new",
+                duplicateTitle: "folder",
+                alreadyImported: false,
+              },
+            ],
+          };
+        case "connect_winlator_export_folder":
+          return {
+            connected: true,
+            token: 9,
+            folderLabel: "Frontend",
+            message: "Connected Frontend.",
+            found: [
+              {
+                gameRef: "shortcut:aa",
+                title: "Celeste",
+                fileName: "Celeste.desktop",
+                folderPath: "",
+                duplicateTitle: "none",
+                alreadyImported: false,
+              },
+              {
+                gameRef: "shortcut:bb",
+                title: "Celeste",
+                fileName: "Free Coins.desktop",
+                folderPath: "new",
+                duplicateTitle: "folder",
+                alreadyImported: false,
+              },
+            ],
+          };
+        default:
+          return undefined;
+      }
+    });
+    root = document.createElement("div");
+    document.body.append(root);
+    mountApp(root, { storePage: stubPage("Store") });
+    await settle();
+  });
+
+  afterEach(() => {
+    userAgent.mockRestore();
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  it("names the file and the folder of each shortcut, and says which name is taken twice", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='winlator-folder']")!
+      .click();
+    await settle();
+
+    const items = reviewItems();
+    expect(items).toHaveLength(2);
+    // Two shortcuts called "Celeste": the title alone cannot be answered, so the
+    // file, its folder and the collision are all on the row — and the rows that
+    // have to be read come first.
+    expect(items[0]).toContain("Frontend/new/Free Coins.desktop");
+    expect(items[0]).toContain("Another file in this folder uses this name");
+    expect(items[1]).toContain("Frontend/Celeste.desktop");
+  });
+
+  it("offers one row per emulator and asks about the folder that row connects", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const rows = Array.from(
+      root.querySelectorAll<HTMLButtonElement>("[data-library-action='console-folder']"),
+    ).map((row) => row.dataset.consoleEmulator);
+    expect(rows).toEqual(["retroarch", "ppsspp"]);
+
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='console-folder'][data-console-emulator='retroarch']")!
+      .click();
+    await settle();
+
+    expect(tauri.invoke).toHaveBeenCalledWith("connect_console_rom_folder", {
+      emulator: "retroarch",
+    });
+    const items = reviewItems();
+    expect(items).toHaveLength(2);
+    // The console, the file and the folder — the title alone is the file's own
+    // claim about itself — with the colliding row first.
+    expect(items[0]).toContain("NES · Roms/new/Free Coins.nes");
+    expect(items[0]).toContain("Another file in this folder uses this name");
+    expect(items[1]).toContain("NES · Roms/Alter Ego.nes");
+  });
+
+  it("hands the host back the token of the list it showed, and says who installed the emulator", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='console-folder'][data-console-emulator='retroarch']")!
+      .click();
+    await settle();
+
+    expect(root.querySelector(".library-source-review__note")?.textContent).toBe(
+      "RetroArch on this device came from Google Play.",
+    );
+
+    root.querySelector<HTMLButtonElement>("[data-library-action='console-import']")!.click();
+    await settle();
+    // Every reference the list showed, and only those: the button and the rows
+    // are one set, whatever order each is in.
+    expect(tauri.invoke).toHaveBeenCalledWith("import_console_roms", {
+      token: 3,
+      gameRefs: ["rom:aa", "rom:bb"],
+    });
+  });
+
+  it("never writes a file name as markup", async () => {
+    tauri.invoke.mockImplementation(async (command) => {
+      if (command === "get_library") return [];
+      if (command === "get_preferences") return {};
+      if (command === "get_steam_account_status")
+        return { connected: false, steamId: "", method: "" };
+      if (command === "connect_winlator_export_folder")
+        return {
+          connected: true,
+          token: 9,
+          folderLabel: "Frontend",
+          message: "Connected Frontend.",
+          found: [
+            {
+              gameRef: "shortcut:aa",
+              title: "<img src=x onerror=alert(1)>",
+              fileName: "<script>alert(2)</script>.desktop",
+              folderPath: "",
+              duplicateTitle: "none",
+              alreadyImported: false,
+            },
+          ],
+        };
+      return undefined;
+    });
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    root
+      .querySelector<HTMLButtonElement>("[data-library-action='winlator-folder']")!
+      .click();
+    await settle();
+
+    const list = root.querySelector<HTMLElement>(".library-source-review__list")!;
+    expect(list.querySelector("script")).toBeNull();
+    expect(list.querySelector("img")).toBeNull();
+    expect(list.textContent).toContain("<script>alert(2)</script>.desktop");
+  });
+});
+
 describe("the library welcome screen", () => {
   let root: HTMLElement;
   const backend = {

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The storage access framework itself needs no permission at all: that is the
+     whole point of it, and this file stayed empty for it.
+
+     What it carries instead is the one thing an Orivo *build* cannot declare
+     anywhere else. `src-tauri/gen/android` is regenerated and untracked, so the
+     app manifest is not something a commit in this repository can change — but a
+     Tauri plugin's Android library project is tracked, and Gradle merges its
+     manifest into the app's. That makes this the only place a `<queries>` entry
+     can be delivered from.
+
+     Package visibility is not a permission and grants nothing: an explicit
+     component already bypasses intent filters, so Orivo could *launch* these
+     emulators without it. What it buys is the ability to *ask* about them — which
+     is how the host reads RetroArch's real core directory instead of composing a
+     path, and how the user is shown who installed the app their game is about to
+     be handed to. Each entry is one of the packages in
+     `console_runner.rs::launch_surface`; nothing here widens what Orivo can see
+     beyond that closed list. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.retroarch.aarch64" />
+        <package android:name="com.retroarch" />
+        <package android:name="com.retroarch.ra32" />
+        <package android:name="org.ppsspp.ppsspp" />
+        <package android:name="org.ppsspp.ppssppgold" />
+    </queries>
+</manifest>

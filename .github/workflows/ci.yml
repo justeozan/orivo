@@ -147,6 +147,41 @@ jobs:
       - name: Check the Rust crate
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      # `plugin_runtime.rs` is the one module whose implementation genuinely
+      # differs per platform — handle-relative opens, a granted folder's trust,
+      # that folder's identity — and `cargo check` cannot say whether any of it
+      # is *right*. Windows is where that gap cost something: a change that
+      # dropped every subdirectory from a plugin's directory listing shipped and
+      # was found by reading the code, not by a test, because the tests that
+      # would have caught it were `#[cfg(unix)]`. This runs the plugin host's own
+      # tests where nothing else does.
+      #
+      # `plugin_compile_cache::` is here for the same reason and was missed once:
+      # it opens slots without following a link, refuses a directory sitting at
+      # one, and sets a directory's mode, and every one of those is spelled
+      # differently on Windows. Its tests had never run there — a directory at a
+      # slot name could not even be *opened* without
+      # `FILE_FLAG_BACKUP_SEMANTICS`, so the slot stayed obstructed forever, and
+      # nothing said so.
+      #
+      # Deliberately not the whole suite: the rest of the crate is
+      # platform-independent and already covered on macOS and Linux, and a
+      # Windows runner is the slowest in this matrix. The module paths are spelled
+      # out rather than filtered on `plugin_`, which is a substring match and also
+      # caught, for instance,
+      # `catalog::tests::a_profile_cannot_change_the_plugin_that_owns_it` — a test
+      # in another module, which this step has no business gating on.
+      #
+      # `--nocapture`, because several of these tests report *how* they reached the
+      # thing they assert — which reparse-point mechanism the volume allowed,
+      # whether a cancellation landed inside the window it races — and on Windows
+      # this job is the only place anyone sees it.
+      - name: Test the plugin host (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: >
+          cargo test --manifest-path src-tauri/Cargo.toml --lib --
+          plugin_runtime:: plugin_scheduler:: plugin_compile_cache:: --nocapture
+
       # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
       # `wit_compatibility` test is the one thing here that is *supposed* to
       # fail on a breaking change to wit/orivo-plugin.wit — a check that never
@@ -155,6 +190,74 @@ jobs:
       - name: Test the plugin SDK
         if: matrix.platform == 'ubuntu-22.04'
         run: cargo test -p orivo-plugin-sdk
+
+  plugin-artifact:
+    # `plugins/ryujinx/package/component.wasm` is committed with a SHA-256 the
+    # Rust suite checks, which proves the *manifest* and the blob agree and
+    # nothing more: both come from the same commit, so a digest updated by hand
+    # would pass. This job is the other half — it rebuilds the component from
+    # source, under the pinned toolchain, and fails if the bytes differ. Without
+    # it "reproducible" rests on one machine having done it once.
+    #
+    # It costs about two minutes and runs on every PR. Two minutes is the whole
+    # point: the alternative is finding out that the pin drifted the next time
+    # somebody needs to change the plugin, with no way to tell a toolchain bump
+    # from a tampered artefact. It is cheap because nothing here builds Orivo —
+    # no Tauri, no wasmtime, no `dist/` — only a `[workspace]`-of-its-own crate
+    # whose single dependency is `wit-bindgen`.
+    name: Plugin artifact (reproducible build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The version comes out of the file rustup itself reads, so this step and
+      # `build.sh`'s own check cannot disagree about what is pinned.
+      - name: Install the pinned Rust toolchain
+        run: |
+          PINNED=$(awk -F'"' '/^channel/ {print $2}' plugins/ryujinx/rust-toolchain.toml)
+          # `rust-src` is not a convenience here: without it, a `#[track_caller]`
+          # location inside the standard library keeps the `/rustc/<commit>`
+          # prefix baked into the shipped `.rlib` instead of resolving against a
+          # local checkout, which is forty bytes of difference no
+          # `--remap-path-prefix` can reach. `build.sh` refuses to run without it.
+          rustup toolchain install "$PINNED" --profile minimal \
+            --component rust-src --target wasm32-unknown-unknown
+
+      # The pinned release binary rather than `cargo install`: building
+      # wasm-tools from source costs minutes and a compiler cache, and what this
+      # job needs is the exact encoder the host's wasmtime matches. The tarball
+      # is fetched by tag, and `build.sh` refuses any other version anyway.
+      - name: Install the pinned wasm-tools
+        run: |
+          VERSION=1.246.2
+          curl -sSfL -o /tmp/wasm-tools.tar.gz \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v$VERSION/wasm-tools-$VERSION-x86_64-linux.tar.gz"
+          tar -xzf /tmp/wasm-tools.tar.gz -C /tmp
+          install -m 0755 "/tmp/wasm-tools-$VERSION-x86_64-linux/wasm-tools" /usr/local/bin/wasm-tools
+          wasm-tools --version
+
+      - name: Cache the plugin build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'plugins/ryujinx -> target'
+          key: ryujinx-plugin
+
+      # A digest that differs is a build to fix, never an artefact to re-hash:
+      # this step prints both so the diff is visible in the log, and fails.
+      - name: Rebuild the component and compare its digest
+        run: |
+          plugins/ryujinx/build.sh
+          DECLARED=$(python3 -c "import json;print(json.load(open('plugins/ryujinx/package/manifest.json'))['artifacts'][0]['sha256'])")
+          ACTUAL=$(shasum -a 256 plugins/ryujinx/package/component.wasm | cut -d' ' -f1)
+          echo "declared $DECLARED"
+          echo "rebuilt  $ACTUAL"
+          test "$DECLARED" = "$ACTUAL"
+
+      # The digest is only meaningful if the committed bytes are the ones that
+      # were compared, so the rebuild must have changed nothing on disk.
+      - name: The committed artefact is byte-identical
+        run: git diff --exit-code -- plugins/ryujinx/package/component.wasm
 
   android:
     name: Android (cargo check)

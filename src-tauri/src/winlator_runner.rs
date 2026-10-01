@@ -8,11 +8,20 @@
 //! builds one closed, explicit Android intent. There is no shell, no
 //! `Runtime.exec`, and no command string anywhere in the path.
 //!
+//! Finding the shortcut is a second boundary, and it has two shapes. On a
+//! device Orivo reads Winlator's export folder through a storage access
+//! grant — no manifest permission, a `ContentResolver` instead of a path —
+//! while a readable directory is what every desktop build and every test here
+//! uses. Both arrive as a [`WinlatorShortcutSource`], so the bounded walk, the
+//! scope checks, the size cap and the fingerprint are written once and the
+//! platform only decides where the bytes come from.
+//!
 //! What Winlator's side of the contract actually is, and why the shapes below
 //! look the way they do, is recorded in `docs/winlator-runner.md`.
 
 pub use crate::catalog::WINLATOR_RUNNER_ID;
 use crate::catalog::{WinlatorDistribution, WinlatorProfile, WinlatorShortcutInventoryEntry};
+use crate::winlator_saf::{DocumentTree, DocumentTreeGrant};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -32,6 +41,8 @@ pub const MAX_PAGE_SIZE: usize = 100;
 /// file larger than this is not one, and is refused rather than parsed.
 const MAX_SHORTCUT_BYTES: u64 = 64 * 1024;
 const MAX_SHORTCUT_TITLE_CHARS: usize = 160;
+/// What a granted folder is called when its own name cannot be shown.
+const DEFAULT_ROOT_LABEL: &str = "Authorized shortcut folder";
 
 /// The default directory Winlator Cmod writes an exported frontend shortcut
 /// into when the user has not chosen another one. It is shared storage, which
@@ -120,6 +131,14 @@ pub enum WinlatorRunnerError {
     WinlatorRefusedLaunch,
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     LaunchFailed,
+    /// The three below belong to the storage access grant. Only the first is
+    /// reachable off a device — it is the answer to a folder Orivo cannot turn
+    /// into a path — but all three carry their sentence everywhere, so a desktop
+    /// build cannot drift out of sync with what a device says.
+    ExportFolderUnsupported,
+    ExportFolderTooBroad,
+    ExportFolderNotConnected,
+    ExportFolderAccessLost,
 }
 
 impl std::fmt::Display for WinlatorRunnerError {
@@ -159,6 +178,23 @@ impl std::fmt::Display for WinlatorRunnerError {
                 "Winlator refused the launch request. This build does not allow another app to start a game."
             }
             Self::LaunchFailed => "Winlator could not start this game. Try again.",
+            Self::ExportFolderUnsupported => {
+                "Orivo can only read a folder in this device's own storage. Choose the folder Winlator exports its shortcuts into."
+            }
+            // The one sentence that names a path, because it is the one the
+            // user has to go and find. It is the constant, not a copy of it.
+            Self::ExportFolderTooBroad => {
+                return write!(
+                    formatter,
+                    "That folder is one every app can drop files into. Choose the folder Winlator exports its shortcuts into — {DEFAULT_FRONTEND_SHORTCUT_DIRECTORY} by default."
+                );
+            }
+            Self::ExportFolderNotConnected => {
+                "Connect the folder Winlator exports its shortcuts into, then try again."
+            }
+            Self::ExportFolderAccessLost => {
+                "Orivo no longer has access to the folder Winlator exports into. Connect it again."
+            }
         };
         formatter.write_str(message)
     }
@@ -240,6 +276,321 @@ impl AndroidIntent {
     pub fn extras(&self) -> &[AndroidIntentExtra] {
         &self.extras
     }
+}
+
+/// Where a profile's exported shortcuts are read from.
+///
+/// Two grants, one pipeline. A readable directory canonicalises and opens a
+/// pathname; a storage access grant resolves a document identifier and opens a
+/// stream. Everything above this trait — the bounded walk, the size cap, the
+/// title, the fingerprint, the intent — cannot tell them apart, which is why the
+/// SAF path is exercised by the same tests and not by a parallel one.
+pub trait WinlatorShortcutSource {
+    /// The granted folders, labelled for display. Each is also the boundary a
+    /// resolved shortcut is checked against.
+    fn roots(&self) -> Result<Vec<ShortcutRoot>, WinlatorRunnerError>;
+
+    /// One directory's immediate children, in no particular order.
+    fn entries(&self, directory: &Path) -> Result<Vec<ShortcutEntry>, WinlatorRunnerError>;
+
+    /// Turn a candidate into the identity the host will store and hand to
+    /// Winlator, refusing anything the profile did not grant.
+    fn resolve(&self, shortcut: &Path) -> Result<PathBuf, WinlatorRunnerError>;
+
+    /// Read one shortcut, bounded by [`MAX_SHORTCUT_BYTES`].
+    fn read(&self, shortcut: &Path) -> Result<Vec<u8>, WinlatorRunnerError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutRoot {
+    pub directory: PathBuf,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutEntry {
+    pub path: PathBuf,
+    pub kind: ShortcutEntryKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutEntryKind {
+    Directory,
+    File,
+    /// Counted against the scan's budget and never opened: a symlink, a device
+    /// node, or a provider row that did not belong to the folder being listed.
+    Ignored,
+}
+
+impl ShortcutEntry {
+    fn ignored() -> Self {
+        // The walker matches on the kind before it ever looks at the path, so an
+        // ignored entry deliberately carries none.
+        Self {
+            path: PathBuf::new(),
+            kind: ShortcutEntryKind::Ignored,
+        }
+    }
+}
+
+/// A grant that is an ordinary readable directory.
+pub struct FilesystemShortcuts<'a> {
+    directories: &'a [PathBuf],
+}
+
+impl<'a> FilesystemShortcuts<'a> {
+    pub fn for_profile(profile: &'a WinlatorProfile) -> Self {
+        Self {
+            directories: &profile.shortcut_directories,
+        }
+    }
+}
+
+impl WinlatorShortcutSource for FilesystemShortcuts<'_> {
+    fn roots(&self) -> Result<Vec<ShortcutRoot>, WinlatorRunnerError> {
+        let mut roots = Vec::new();
+        for directory in self.directories {
+            let directory =
+                fs::canonicalize(directory).map_err(|_| WinlatorRunnerError::AccessDenied)?;
+            if !directory.is_dir() {
+                return Err(WinlatorRunnerError::AccessDenied);
+            }
+            roots.push(ShortcutRoot {
+                label: safe_label(&directory, DEFAULT_ROOT_LABEL),
+                directory,
+            });
+        }
+        Ok(roots)
+    }
+
+    fn entries(&self, directory: &Path) -> Result<Vec<ShortcutEntry>, WinlatorRunnerError> {
+        let listing = fs::read_dir(directory).map_err(|_| WinlatorRunnerError::AccessDenied)?;
+        let mut entries = Vec::new();
+        for entry in listing {
+            let entry = entry.map_err(|_| WinlatorRunnerError::AccessDenied)?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| WinlatorRunnerError::AccessDenied)?;
+            // Never traverse a symlink: the canonicalisation in `resolve` is a
+            // second line of defence for files and overlapping granted roots.
+            let kind = if file_type.is_symlink() {
+                ShortcutEntryKind::Ignored
+            } else if file_type.is_dir() {
+                ShortcutEntryKind::Directory
+            } else if file_type.is_file() {
+                ShortcutEntryKind::File
+            } else {
+                ShortcutEntryKind::Ignored
+            };
+            entries.push(ShortcutEntry {
+                path: entry.path(),
+                kind,
+            });
+        }
+        Ok(entries)
+    }
+
+    fn resolve(&self, shortcut: &Path) -> Result<PathBuf, WinlatorRunnerError> {
+        let shortcut =
+            fs::canonicalize(shortcut).map_err(|_| WinlatorRunnerError::ShortcutMissing)?;
+        if !shortcut.is_file() || !is_winlator_shortcut(&shortcut) {
+            return Err(WinlatorRunnerError::ShortcutMissing);
+        }
+        if !belongs_to_grant(&shortcut, self.directories)? {
+            return Err(WinlatorRunnerError::ShortcutOutsideScope);
+        }
+        Ok(shortcut)
+    }
+
+    fn read(&self, shortcut: &Path) -> Result<Vec<u8>, WinlatorRunnerError> {
+        read_shortcut_bytes(shortcut)
+    }
+}
+
+/// A grant the user handed over with `ACTION_OPEN_DOCUMENT_TREE`.
+///
+/// Every shortcut is checked twice here, because the two halves of a SAF grant
+/// can disagree: once as a document identifier that has to sit under the granted
+/// tree, and once as a path that has to sit under the directory that tree stands
+/// for. The first stops a provider from answering with somebody else's row; the
+/// second stops an identifier that resolves outside the folder — a `..` in the
+/// middle of it — from becoming the path Orivo hands to Winlator.
+pub struct DocumentTreeShortcuts {
+    trees: Vec<GrantedTree>,
+}
+
+struct GrantedTree {
+    grant: DocumentTreeGrant,
+    tree: Box<dyn DocumentTree>,
+}
+
+impl DocumentTreeShortcuts {
+    pub fn new() -> Self {
+        Self { trees: Vec::new() }
+    }
+
+    pub fn with_tree(mut self, grant: DocumentTreeGrant, tree: Box<dyn DocumentTree>) -> Self {
+        self.trees.push(GrantedTree { grant, tree });
+        self
+    }
+
+    /// The granted tree a path belongs to, and the identifier that names it
+    /// there. A path no grant covers never becomes a document.
+    fn locate(&self, path: &Path) -> Result<(&GrantedTree, String), WinlatorRunnerError> {
+        if self.trees.is_empty() {
+            return Err(WinlatorRunnerError::ExportFolderNotConnected);
+        }
+        self.trees
+            .iter()
+            .find_map(|granted| {
+                granted
+                    .grant
+                    .document_id_for(path)
+                    .ok()
+                    .map(|document_id| (granted, document_id))
+            })
+            .ok_or(WinlatorRunnerError::ShortcutOutsideScope)
+    }
+}
+
+impl WinlatorShortcutSource for DocumentTreeShortcuts {
+    fn roots(&self) -> Result<Vec<ShortcutRoot>, WinlatorRunnerError> {
+        if self.trees.is_empty() {
+            return Err(WinlatorRunnerError::ExportFolderNotConnected);
+        }
+        Ok(self
+            .trees
+            .iter()
+            .map(|granted| ShortcutRoot {
+                directory: granted.grant.directory().to_path_buf(),
+                label: safe_label(granted.grant.directory(), DEFAULT_ROOT_LABEL),
+            })
+            .collect())
+    }
+
+    fn entries(&self, directory: &Path) -> Result<Vec<ShortcutEntry>, WinlatorRunnerError> {
+        // The granted folder is the one path with no identifier *inside* the
+        // tree, because it is the tree.
+        let (granted, document_id) = match self
+            .trees
+            .iter()
+            .find(|granted| granted.grant.directory() == directory)
+        {
+            Some(granted) => (granted, granted.grant.tree_document_id().to_string()),
+            None => self.locate(directory)?,
+        };
+        Ok(granted
+            .tree
+            .children(&document_id)?
+            .into_iter()
+            .map(|row| {
+                match granted.grant.path_for(&row.document_id) {
+                    // A provider is free to answer a listing with any row at
+                    // all, so a row that does not resolve to a child of the
+                    // folder being listed is dropped rather than followed.
+                    Ok(path) if path.parent() == Some(directory) => ShortcutEntry {
+                        path,
+                        kind: if row.is_directory() {
+                            ShortcutEntryKind::Directory
+                        } else {
+                            ShortcutEntryKind::File
+                        },
+                    },
+                    _ => ShortcutEntry::ignored(),
+                }
+            })
+            .collect())
+    }
+
+    fn resolve(&self, shortcut: &Path) -> Result<PathBuf, WinlatorRunnerError> {
+        self.locate(shortcut)?;
+        if !is_winlator_shortcut(shortcut) {
+            return Err(WinlatorRunnerError::ShortcutMissing);
+        }
+        // There is no canonicalisation and no existence probe here on purpose: a
+        // path Orivo reaches only through SAF cannot be `stat`ed, and the read
+        // that follows is the only honest answer about whether it is still there.
+        Ok(shortcut.to_path_buf())
+    }
+
+    fn read(&self, shortcut: &Path) -> Result<Vec<u8>, WinlatorRunnerError> {
+        let (granted, document_id) = self.locate(shortcut)?;
+        granted.tree.read(&document_id, MAX_SHORTCUT_BYTES)
+    }
+}
+
+/// The source a profile is read through on this platform.
+///
+/// On a device a profile that carries a storage access grant is read through it,
+/// and the grant has to still be persisted: a permission the user revoked in the
+/// system settings is a sentence asking them to reconnect, never a silent empty
+/// library. Everything else — every desktop build, and a device profile granted
+/// a plainly readable directory — reads the filesystem.
+pub fn shortcut_source_for_profile(
+    profile: &WinlatorProfile,
+) -> Result<Box<dyn WinlatorShortcutSource + '_>, WinlatorRunnerError> {
+    if profile.shortcut_trees.is_empty() {
+        return Ok(Box::new(FilesystemShortcuts::for_profile(profile)));
+    }
+    Ok(Box::new(document_tree_source(profile)?))
+}
+
+fn document_tree_source(
+    profile: &WinlatorProfile,
+) -> Result<DocumentTreeShortcuts, WinlatorRunnerError> {
+    document_tree_source_with(
+        profile,
+        &crate::winlator_saf::external_storage_root()?,
+        &crate::winlator_saf::persisted_read_tree_uris()?,
+        crate::winlator_saf::document_tree,
+    )
+}
+
+/// The decisions above, with the device's three answers passed in: where the
+/// shared volume is mounted, which grants survived, and what reads a tree. Only
+/// this shape can be exercised without a device, and the checks are the point.
+fn document_tree_source_with(
+    profile: &WinlatorProfile,
+    external_storage_root: &Path,
+    persisted: &[String],
+    reader: impl Fn(&str) -> Box<dyn DocumentTree>,
+) -> Result<DocumentTreeShortcuts, WinlatorRunnerError> {
+    let mut source = DocumentTreeShortcuts::new();
+    for tree_uri in &profile.shortcut_trees {
+        // A permission the user revoked from the system settings simply stops
+        // being listed. Asking for it back is the only honest answer; reading the
+        // folder by pathname instead would be reaching around the grant.
+        if !persisted.iter().any(|granted| granted == tree_uri) {
+            return Err(WinlatorRunnerError::ExportFolderAccessLost);
+        }
+        let grant = DocumentTreeGrant::parse(tree_uri, external_storage_root)?;
+        // Re-checked on every use, not only when the folder was picked: a grant
+        // persisted by an older build, or one whose folder turned out to be a
+        // drop folder, must stop being read rather than be trusted because it is
+        // already in the catalog.
+        grant.refuse_if_too_broad()?;
+        source = source.with_tree(grant, reader(tree_uri));
+    }
+    Ok(source)
+}
+
+/// Validate a folder the user just picked, before anything is persisted.
+///
+/// The picker hands back whatever provider the user browsed to, including ones
+/// whose documents are rows in a cloud index. Orivo has to hand Winlator a *file
+/// path*, so a folder it cannot name as a path is refused here with a sentence
+/// rather than stored and discovered to be useless at launch.
+pub fn grant_for_picked_folder(tree_uri: &str) -> Result<DocumentTreeGrant, WinlatorRunnerError> {
+    let external_storage_root = crate::winlator_saf::external_storage_root()?;
+    let grant = DocumentTreeGrant::parse(tree_uri, &external_storage_root)?;
+    grant.refuse_if_too_broad()?;
+    if !crate::winlator_saf::persisted_read_tree_uris()?
+        .iter()
+        .any(|granted| granted == grant.tree_uri())
+    {
+        return Err(WinlatorRunnerError::ExportFolderAccessLost);
+    }
+    Ok(grant)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -330,13 +681,16 @@ fn parse_container_id(value: &str) -> Option<u32> {
         .filter(|id| *id >= 1 && *id <= 9_999)
 }
 
-/// Enumerate the exported shortcuts inside a profile's granted directories.
+/// Enumerate the exported shortcuts a profile's grants currently expose.
 ///
-/// The shape mirrors the Wine scanner on purpose: directories are walked
-/// breadth-bounded and depth-bounded, symlinks are never followed, and every
-/// candidate is canonicalised again before it receives an opaque reference.
+/// The shape mirrors the Wine scanner on purpose — breadth-bounded,
+/// depth-bounded, cancellable, symlinks never followed, every candidate
+/// re-resolved before it receives an opaque reference — and it is written once
+/// over a [`WinlatorShortcutSource`], so a folder read through SAF is walked by
+/// exactly the code a readable directory is.
 pub fn scan_winlator_shortcuts(
     profile: &WinlatorProfile,
+    source: &dyn WinlatorShortcutSource,
     cancelled: &AtomicBool,
     limits: ScanLimits,
     mut progress: impl FnMut(usize),
@@ -353,20 +707,15 @@ pub fn scan_winlator_shortcuts(
 
     let mut candidates = BTreeMap::new();
     let mut scanned_files = 0;
-    for directory in &profile.shortcut_directories {
+    for root in source.roots()? {
         cancelled_or(cancelled)?;
-        let root = fs::canonicalize(directory).map_err(|_| WinlatorRunnerError::AccessDenied)?;
-        if !root.is_dir() {
-            return Err(WinlatorRunnerError::AccessDenied);
-        }
-        let label = safe_label(&root, "Authorized shortcut folder");
         scan_directory(
+            source,
             &root,
-            &root,
-            &label,
+            &root.directory,
             0,
             limits,
-            profile,
+            profile.container_id,
             cancelled,
             &mut scanned_files,
             &mut candidates,
@@ -382,23 +731,20 @@ pub fn scan_winlator_shortcuts(
 
 #[allow(clippy::too_many_arguments)]
 fn scan_directory(
-    root: &Path,
+    source: &dyn WinlatorShortcutSource,
+    root: &ShortcutRoot,
     directory: &Path,
-    label: &str,
     depth: usize,
     limits: ScanLimits,
-    profile: &WinlatorProfile,
+    container_fallback: Option<u32>,
     cancelled: &AtomicBool,
     scanned_files: &mut usize,
     candidates: &mut BTreeMap<String, ScannedWinlatorShortcut>,
     progress: &mut impl FnMut(usize),
 ) -> Result<(), WinlatorRunnerError> {
     cancelled_or(cancelled)?;
-    let entries = fs::read_dir(directory).map_err(|_| WinlatorRunnerError::AccessDenied)?;
-    let mut entries = entries
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| WinlatorRunnerError::AccessDenied)?;
-    entries.sort_by_key(|entry| entry.file_name());
+    let mut entries = source.entries(directory)?;
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
 
     for entry in entries {
         cancelled_or(cancelled)?;
@@ -409,47 +755,51 @@ fn scan_directory(
         if *scanned_files % 32 == 0 {
             progress(*scanned_files);
         }
-        let file_type = entry
-            .file_type()
-            .map_err(|_| WinlatorRunnerError::AccessDenied)?;
-        // Never traverse a symlink: canonicalisation below is a second line of
-        // defence for files and overlapping granted roots.
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if file_type.is_dir() {
-            if depth < limits.max_depth {
-                scan_directory(
-                    root,
-                    &path,
-                    label,
-                    depth + 1,
-                    limits,
-                    profile,
-                    cancelled,
-                    scanned_files,
-                    candidates,
-                    progress,
-                )?;
+        match entry.kind {
+            ShortcutEntryKind::Ignored => {}
+            ShortcutEntryKind::Directory => {
+                if depth < limits.max_depth {
+                    scan_directory(
+                        source,
+                        root,
+                        &entry.path,
+                        depth + 1,
+                        limits,
+                        container_fallback,
+                        cancelled,
+                        scanned_files,
+                        candidates,
+                        progress,
+                    )?;
+                }
             }
-            continue;
+            ShortcutEntryKind::File => {
+                if !is_winlator_shortcut(&entry.path) {
+                    continue;
+                }
+                let Ok(shortcut) = source.resolve(&entry.path) else {
+                    continue;
+                };
+                if shortcut == root.directory || !shortcut.starts_with(&root.directory) {
+                    continue;
+                }
+                // A shortcut that cannot be read is skipped rather than failing
+                // the whole scan: one unreadable file must not hide a whole
+                // library.
+                let Ok(candidate) = read_shortcut_candidate(
+                    source,
+                    &shortcut,
+                    &root.label,
+                    container_fallback,
+                    cancelled,
+                ) else {
+                    continue;
+                };
+                candidates
+                    .entry(candidate.game_ref.clone())
+                    .or_insert(candidate);
+            }
         }
-        if !file_type.is_file() || !is_winlator_shortcut(&path) {
-            continue;
-        }
-        let shortcut = fs::canonicalize(path).map_err(|_| WinlatorRunnerError::AccessDenied)?;
-        if shortcut == root || !shortcut.starts_with(root) || !shortcut.is_file() {
-            continue;
-        }
-        // A shortcut that cannot be read is skipped rather than failing the
-        // whole scan: one unreadable file must not hide a whole library.
-        let Ok(candidate) = read_shortcut_candidate(&shortcut, label, profile, cancelled) else {
-            continue;
-        };
-        candidates
-            .entry(candidate.game_ref.clone())
-            .or_insert(candidate);
     }
     progress(*scanned_files);
     Ok(())
@@ -474,6 +824,7 @@ pub fn page_winlator_inventory(
 /// the native host resolves, scope-checks and hashes the stored path itself.
 pub fn validate_winlator_shortcut_for_profile(
     profile: &WinlatorProfile,
+    source: &dyn WinlatorShortcutSource,
     shortcut: &Path,
     cancelled: &AtomicBool,
 ) -> Result<ScannedWinlatorShortcut, WinlatorRunnerError> {
@@ -484,28 +835,38 @@ pub fn validate_winlator_shortcut_for_profile(
         .validate()
         .map_err(|_| WinlatorRunnerError::InvalidProfile)?;
     cancelled_or(cancelled)?;
-    let shortcut = fs::canonicalize(shortcut).map_err(|_| WinlatorRunnerError::ShortcutMissing)?;
-    if !shortcut.is_file() || !is_winlator_shortcut(&shortcut) {
-        return Err(WinlatorRunnerError::ShortcutMissing);
-    }
+    let shortcut = source.resolve(shortcut)?;
     let label = shortcut
         .parent()
-        .map(|directory| safe_label(directory, "Authorized shortcut folder"))
-        .unwrap_or_else(|| "Authorized shortcut folder".into());
-    read_shortcut_candidate(&shortcut, &label, profile, cancelled)
+        .map(|directory| safe_label(directory, DEFAULT_ROOT_LABEL))
+        .unwrap_or_else(|| DEFAULT_ROOT_LABEL.into());
+    read_shortcut_candidate(source, &shortcut, &label, profile.container_id, cancelled)
 }
 
 /// Recheck a scan snapshot at the exact moment it crosses into persistence. A
 /// scan is only a preview: Winlator may have re-exported the shortcut, or a
 /// symlink may have been inserted, before the user pressed Import.
+///
+/// The game reference is a hash of the *path*, so on its own it says nothing
+/// about what is at that path now — and the title and the container the user was
+/// shown come out of the file's bytes. The content digest is therefore part of
+/// what is being confirmed: a file rewritten between the preview and the
+/// confirmation is refused, so the shortcut that gets imported, and whose
+/// fingerprint the launch guard then pins, is the one the user actually read a
+/// name for.
 pub fn revalidate_winlator_import_candidate(
     profile: &WinlatorProfile,
+    source: &dyn WinlatorShortcutSource,
     candidate: &ScannedWinlatorShortcut,
     cancelled: &AtomicBool,
 ) -> Result<ScannedWinlatorShortcut, WinlatorRunnerError> {
-    let current =
-        validate_winlator_shortcut_for_profile(profile, &candidate.shortcut_path, cancelled)?;
-    if candidate.game_ref != current.game_ref {
+    let current = validate_winlator_shortcut_for_profile(
+        profile,
+        source,
+        &candidate.shortcut_path,
+        cancelled,
+    )?;
+    if candidate.game_ref != current.game_ref || candidate.fingerprint != current.fingerprint {
         return Err(WinlatorRunnerError::ShortcutNotLaunchable);
     }
     Ok(ScannedWinlatorShortcut {
@@ -514,21 +875,19 @@ pub fn revalidate_winlator_import_candidate(
     })
 }
 
-/// Read, bound, hash and parse one shortcut that is already known to be a file.
+/// Read, bound, hash and parse one shortcut the source has already resolved.
 /// The digest is taken from the same bytes that were parsed, so the fingerprint
 /// can never describe a different revision of the file than the title and the
 /// container id do.
 fn read_shortcut_candidate(
+    source: &dyn WinlatorShortcutSource,
     shortcut: &Path,
     directory_label: &str,
-    profile: &WinlatorProfile,
+    container_fallback: Option<u32>,
     cancelled: &AtomicBool,
 ) -> Result<ScannedWinlatorShortcut, WinlatorRunnerError> {
     cancelled_or(cancelled)?;
-    if !belongs_to_grant(shortcut, &profile.shortcut_directories)? {
-        return Err(WinlatorRunnerError::ShortcutOutsideScope);
-    }
-    let bytes = read_shortcut_bytes(shortcut)?;
+    let bytes = source.read(shortcut)?;
     let fingerprint = format!("sha256:{:x}", Sha256::digest(&bytes));
     // A shortcut Winlator wrote is ASCII `key=value` text. Anything that is not
     // valid UTF-8 is not one, and is refused rather than lossily decoded.
@@ -543,7 +902,7 @@ fn read_shortcut_candidate(
         shortcut_path: shortcut.to_path_buf(),
         // The profile-level container is a fallback, never an override: the
         // shortcut Winlator exported knows which container it belongs to.
-        container_id: entry.container_id.or(profile.container_id),
+        container_id: entry.container_id.or(container_fallback),
         fingerprint,
     })
 }
@@ -606,6 +965,7 @@ fn shortcut_file_error(error: io::Error) -> WinlatorRunnerError {
 /// before the intent leaves the process.
 pub fn prepare_winlator_launch(
     profile: &WinlatorProfile,
+    source: &dyn WinlatorShortcutSource,
     game: &WinlatorShortcutInventoryEntry,
     intent: &WinlatorLaunchIntent,
 ) -> Result<PreparedWinlatorLaunch, WinlatorRunnerError> {
@@ -631,6 +991,7 @@ pub fn prepare_winlator_launch(
 
     let current = validate_winlator_shortcut_for_profile(
         profile,
+        source,
         &game.shortcut_path,
         &AtomicBool::new(false),
     )?;
@@ -702,12 +1063,12 @@ impl PreparedWinlatorLaunch {
     /// Send the prepared intent. Nothing is spawned and no process is owned:
     /// Winlator starts, and Orivo's only feedback is whether Android accepted
     /// the hand-off.
-    pub fn launch(&self) -> Result<(), WinlatorRunnerError> {
+    pub fn launch(&self, source: &dyn WinlatorShortcutSource) -> Result<(), WinlatorRunnerError> {
         // This is deliberately immediately before the hand-off. The earlier
-        // checks resolved a canonical path; this content-addressed recheck
-        // rejects a shortcut rewritten while the launch was being prepared
+        // checks resolved the shortcut against its grant; this content-addressed
+        // recheck rejects one rewritten while the launch was being prepared
         // without changing its pathname.
-        let bytes = read_shortcut_bytes(&self.shortcut_path)?;
+        let bytes = source.read(&self.shortcut_path)?;
         if format!("sha256:{:x}", Sha256::digest(&bytes)) != self.fingerprint {
             return Err(WinlatorRunnerError::ShortcutNotLaunchable);
         }
@@ -910,17 +1271,26 @@ fn shortcut_title_from_filename(path: &Path) -> String {
         .unwrap_or_else(|| "Winlator game".into())
 }
 
+/// Text out of a shortcut file, reduced to what may be shown. The rule — a
+/// control character refuses the string, a character nobody can see is removed —
+/// is shared, because a title that *reads* identically has to *compare*
+/// identically on both sides of the duplicate check.
 fn display_text(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty() && !trimmed.chars().any(char::is_control))
-        .then(|| trimmed.chars().take(MAX_SHORTCUT_TITLE_CHARS).collect())
+    crate::source_review::display_text(value, MAX_SHORTCUT_TITLE_CHARS)
+}
+
+/// How a shortcut is named on the confirmation: the file itself, and the folders
+/// between the connected one and it.
+///
+/// `Name=` is not an identity — any file may carry any name, including one a game
+/// already in the library uses — so the rule is shared with every other source
+/// that asks this question, and lives in `source_review`.
+pub fn shortcut_origin(root: &Path, shortcut: &Path) -> crate::source_review::FileOrigin {
+    crate::source_review::file_origin(root, shortcut, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 fn safe_label(path: &Path, fallback: &str) -> String {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .and_then(display_text)
-        .unwrap_or_else(|| fallback.into())
+    crate::source_review::folder_label(path, fallback, MAX_SHORTCUT_TITLE_CHARS)
 }
 
 /// Hash the shortcut bytes independently from the persistent game reference.
@@ -967,6 +1337,13 @@ mod tests {
         fs::canonicalize(path).unwrap()
     }
 
+    /// Every test below reads a real directory, which is what a desktop build
+    /// and a device with a plainly readable folder both do. The storage access
+    /// grant has its own tests, against a fake provider.
+    fn filesystem(profile: &WinlatorProfile) -> FilesystemShortcuts<'_> {
+        FilesystemShortcuts::for_profile(profile)
+    }
+
     fn profile(granted: &Path) -> WinlatorProfile {
         WinlatorProfile {
             id: "winlator-test".into(),
@@ -974,6 +1351,7 @@ mod tests {
             distribution: WinlatorDistribution::Cmod,
             container_id: None,
             shortcut_directories: vec![granted.to_path_buf()],
+            shortcut_trees: Vec::new(),
             enabled: true,
             last_imported_at: None,
         }
@@ -1041,6 +1419,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1068,6 +1447,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1097,7 +1477,12 @@ mod tests {
         let outside = write_shortcut(&elsewhere, "Doom.desktop", &exported_shortcut("Doom", 1));
         let profile = profile(&granted);
         assert_eq!(
-            validate_winlator_shortcut_for_profile(&profile, &outside, &AtomicBool::new(false)),
+            validate_winlator_shortcut_for_profile(
+                &profile,
+                &filesystem(&profile),
+                &outside,
+                &AtomicBool::new(false)
+            ),
             Err(WinlatorRunnerError::ShortcutOutsideScope)
         );
     }
@@ -1113,6 +1498,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1131,7 +1517,12 @@ mod tests {
         );
         let profile = profile(&granted);
         assert_eq!(
-            validate_winlator_shortcut_for_profile(&profile, &oversized, &AtomicBool::new(false)),
+            validate_winlator_shortcut_for_profile(
+                &profile,
+                &filesystem(&profile),
+                &oversized,
+                &AtomicBool::new(false)
+            ),
             Err(WinlatorRunnerError::ShortcutTooLarge)
         );
     }
@@ -1147,6 +1538,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1155,7 +1547,8 @@ mod tests {
         let candidate = &scan.shortcuts[0];
         let entry = inventory(&profile, candidate);
         let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
-        let prepared = prepare_winlator_launch(&profile, &entry, &intent).unwrap();
+        let prepared =
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
 
         assert_eq!(prepared.title(), "Celeste");
         let intent = prepared.intent();
@@ -1205,6 +1598,7 @@ mod tests {
 
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1233,6 +1627,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1241,7 +1636,8 @@ mod tests {
         let candidate = &scan.shortcuts[0];
         let entry = inventory(&profile, candidate);
         let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
-        let prepared = prepare_winlator_launch(&profile, &entry, &intent).unwrap();
+        let prepared =
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
         assert!(
             prepared
                 .intent()
@@ -1265,6 +1661,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1280,9 +1677,84 @@ mod tests {
             &exported_shortcut("Celeste", 5),
         );
         assert_eq!(
-            prepare_winlator_launch(&profile, &entry, &intent),
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent),
             Err(WinlatorRunnerError::ShortcutNotLaunchable)
         );
+    }
+
+    /// The file the user vouched for is the file that gets imported.
+    ///
+    /// The preview names a game; between that sentence and "Add this game" the
+    /// file behind it can be rewritten, and every reference Orivo holds — the
+    /// game reference included — is derived from the *path*. So the content
+    /// digest is the only thing that can tell the two files apart, and a
+    /// mismatch is a refusal rather than an import of whatever is there now.
+    #[test]
+    fn refuses_to_import_a_shortcut_rewritten_after_the_user_was_shown_it() {
+        let granted = temporary_directory("rewritten-before-import");
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Celeste", 4),
+        );
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        // The same pathname, a different program, a different name on the
+        // confirmation the user already read.
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Not Celeste", 9),
+        );
+        assert_eq!(
+            revalidate_winlator_import_candidate(
+                &profile,
+                &filesystem(&profile),
+                &previewed,
+                &AtomicBool::new(false),
+            ),
+            Err(WinlatorRunnerError::ShortcutNotLaunchable)
+        );
+    }
+
+    /// The same file still imports, so the check above is a content check and
+    /// not a ban on importing at all.
+    #[test]
+    fn imports_the_shortcut_the_preview_actually_showed() {
+        let granted = temporary_directory("unchanged-before-import");
+        write_shortcut(
+            &granted,
+            "Celeste.desktop",
+            &exported_shortcut("Celeste", 4),
+        );
+        let profile = profile(&granted);
+        let scan = scan_winlator_shortcuts(
+            &profile,
+            &filesystem(&profile),
+            &AtomicBool::new(false),
+            ScanLimits::default(),
+            |_| {},
+        )
+        .unwrap();
+        let previewed = scan.shortcuts[0].clone();
+
+        let imported = revalidate_winlator_import_candidate(
+            &profile,
+            &filesystem(&profile),
+            &previewed,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(imported, previewed);
     }
 
     /// The same check has to hold between preparing the intent and sending it,
@@ -1298,6 +1770,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1306,7 +1779,8 @@ mod tests {
         let candidate = &scan.shortcuts[0];
         let entry = inventory(&profile, candidate);
         let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
-        let prepared = prepare_winlator_launch(&profile, &entry, &intent).unwrap();
+        let prepared =
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
 
         write_shortcut(
             &granted,
@@ -1314,7 +1788,7 @@ mod tests {
             &exported_shortcut("Celeste", 5),
         );
         assert_eq!(
-            prepared.launch(),
+            prepared.launch(&filesystem(&profile)),
             Err(WinlatorRunnerError::ShortcutNotLaunchable)
         );
     }
@@ -1334,6 +1808,7 @@ mod tests {
         profile.distribution = WinlatorDistribution::Official;
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1343,7 +1818,7 @@ mod tests {
         let entry = inventory(&profile, candidate);
         let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
         assert_eq!(
-            prepare_winlator_launch(&profile, &entry, &intent),
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent),
             Err(WinlatorRunnerError::DistributionNotLaunchable)
         );
     }
@@ -1359,6 +1834,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1370,12 +1846,12 @@ mod tests {
         let other_profile =
             WinlatorLaunchIntent::new("winlator-other", &candidate.game_ref).unwrap();
         assert_eq!(
-            prepare_winlator_launch(&profile, &entry, &other_profile),
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &other_profile),
             Err(WinlatorRunnerError::InvalidIntent)
         );
         let other_game = WinlatorLaunchIntent::new(&profile.id, "shortcut:deadbeef").unwrap();
         assert_eq!(
-            prepare_winlator_launch(&profile, &entry, &other_game),
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &other_game),
             Err(WinlatorRunnerError::InvalidIntent)
         );
     }
@@ -1402,6 +1878,7 @@ mod tests {
         let mut profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1413,12 +1890,13 @@ mod tests {
 
         profile.enabled = false;
         assert_eq!(
-            prepare_winlator_launch(&profile, &entry, &intent),
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent),
             Err(WinlatorRunnerError::ProfileDisabled)
         );
         assert_eq!(
             scan_winlator_shortcuts(
                 &profile,
+                &filesystem(&profile),
                 &AtomicBool::new(false),
                 ScanLimits::default(),
                 |_| {}
@@ -1439,6 +1917,7 @@ mod tests {
         assert_eq!(
             scan_winlator_shortcuts(
                 &profile,
+                &filesystem(&profile),
                 &AtomicBool::new(true),
                 ScanLimits::default(),
                 |_| {}
@@ -1461,6 +1940,7 @@ mod tests {
         assert_eq!(
             scan_winlator_shortcuts(
                 &profile,
+                &filesystem(&profile),
                 &AtomicBool::new(false),
                 ScanLimits {
                     max_files: 2,
@@ -1485,6 +1965,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1520,6 +2001,7 @@ mod tests {
         let profile = profile(&granted);
         let scan = scan_winlator_shortcuts(
             &profile,
+            &filesystem(&profile),
             &AtomicBool::new(false),
             ScanLimits::default(),
             |_| {},
@@ -1528,10 +2010,499 @@ mod tests {
         let candidate = &scan.shortcuts[0];
         let entry = inventory(&profile, candidate);
         let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
-        let prepared = prepare_winlator_launch(&profile, &entry, &intent).unwrap();
+        let prepared =
+            prepare_winlator_launch(&profile, &filesystem(&profile), &entry, &intent).unwrap();
         assert_eq!(
-            prepared.launch(),
+            prepared.launch(&filesystem(&profile)),
             Err(WinlatorRunnerError::PlatformUnsupported)
+        );
+    }
+    /// Everything below reads the folder the way a device does: through a storage
+    /// access grant, with a provider that answers from memory and sometimes lies.
+    mod through_a_storage_access_grant {
+        use super::*;
+        use crate::winlator_saf::{DIRECTORY_MIME_TYPE, TreeDocument, fake::FakeDocumentTree};
+
+        const FRONTEND_TREE: &str = "content://com.android.externalstorage.documents/tree/primary%3ADownload%2FWinlator%2FFrontend";
+        const FRONTEND_DOCUMENT: &str = "primary:Download/Winlator/Frontend";
+        const EXTERNAL_ROOT: &str = "/storage/emulated/0";
+        const FRONTEND_PATH: &str = "/storage/emulated/0/Download/Winlator/Frontend";
+
+        fn granted_profile() -> WinlatorProfile {
+            WinlatorProfile {
+                id: "winlator-saf".into(),
+                display_name: "Winlator".into(),
+                distribution: WinlatorDistribution::Cmod,
+                container_id: None,
+                shortcut_directories: vec![PathBuf::from(FRONTEND_PATH)],
+                shortcut_trees: vec![FRONTEND_TREE.into()],
+                enabled: true,
+                last_imported_at: None,
+            }
+        }
+
+        fn source(tree: FakeDocumentTree) -> DocumentTreeShortcuts {
+            let grant = DocumentTreeGrant::parse(FRONTEND_TREE, Path::new(EXTERNAL_ROOT)).unwrap();
+            DocumentTreeShortcuts::new().with_tree(grant, Box::new(tree))
+        }
+
+        fn frontend(documents: &[(&str, String)]) -> FakeDocumentTree {
+            let mut tree = FakeDocumentTree::new(FRONTEND_DOCUMENT);
+            for (name, contents) in documents {
+                tree = tree.with_document(&format!("{FRONTEND_DOCUMENT}/{name}"), contents);
+            }
+            tree
+        }
+
+        fn scan(
+            profile: &WinlatorProfile,
+            source: &DocumentTreeShortcuts,
+        ) -> Result<WinlatorScanResult, WinlatorRunnerError> {
+            scan_winlator_shortcuts(
+                profile,
+                source,
+                &AtomicBool::new(false),
+                ScanLimits::default(),
+                |_| {},
+            )
+        }
+
+        /// The point of the whole grant: a shortcut Orivo can only *read* through
+        /// a `ContentResolver` still resolves to the file path Winlator opens.
+        #[test]
+        fn adopts_a_shortcut_it_can_only_read_through_the_grant() {
+            let profile = granted_profile();
+            let source = source(frontend(&[
+                ("Celeste.desktop", exported_shortcut("Celeste", 2)),
+                ("FRONTEND_INSTRUCTIONS.txt", "am start -n ...".into()),
+                ("metadata.pegasus.txt", "collection: Windows".into()),
+            ]));
+            let scan = scan(&profile, &source).unwrap();
+
+            assert_eq!(scan.shortcuts.len(), 1);
+            let shortcut = &scan.shortcuts[0];
+            assert_eq!(shortcut.title, "Celeste");
+            assert_eq!(shortcut.container_id, Some(2));
+            assert_eq!(
+                shortcut.shortcut_path,
+                Path::new("/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop")
+            );
+            assert!(shortcut.fingerprint.starts_with("sha256:"));
+        }
+
+        /// Winlator's `shortcut_path` extra is a file path. A content URI there
+        /// would be a file Winlator cannot open, so this is the assertion that
+        /// says the SAF grant did not leak into the hand-off.
+        #[test]
+        fn hands_winlator_a_file_path_and_never_a_content_uri() {
+            let profile = granted_profile();
+            let source = source(frontend(&[(
+                "Celeste.desktop",
+                exported_shortcut("Celeste", 4),
+            )]));
+            let scan = scan(&profile, &source).unwrap();
+            let candidate = &scan.shortcuts[0];
+            let entry = inventory(&profile, candidate);
+            let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
+            let prepared = prepare_winlator_launch(&profile, &source, &entry, &intent).unwrap();
+
+            assert_eq!(
+                prepared.intent().extras(),
+                [
+                    AndroidIntentExtra::Int {
+                        key: "container_id",
+                        value: 4
+                    },
+                    AndroidIntentExtra::Text {
+                        key: "shortcut_name",
+                        value: "Celeste".into()
+                    },
+                    AndroidIntentExtra::Text {
+                        key: "shortcut_path",
+                        value: "/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop"
+                            .into()
+                    },
+                ]
+            );
+        }
+
+        /// A provider answers a listing with whatever rows it likes. Orivo checks
+        /// every one of them against the grant instead of following it.
+        #[test]
+        fn drops_a_provider_row_that_does_not_belong_to_the_folder() {
+            let profile = granted_profile();
+            let tree = frontend(&[("Celeste.desktop", exported_shortcut("Celeste", 1))])
+                // Somebody else's document, inside no grant of ours.
+                .with_stray_row(
+                    FRONTEND_DOCUMENT,
+                    TreeDocument {
+                        document_id: "primary:Download/Secrets/Keys.desktop".into(),
+                        display_name: "Keys.desktop".into(),
+                        mime_type: "application/octet-stream".into(),
+                        size: Some(64),
+                    },
+                )
+                // An identifier that looks inside the tree and resolves outside it.
+                .with_stray_row(
+                    FRONTEND_DOCUMENT,
+                    TreeDocument {
+                        document_id: format!("{FRONTEND_DOCUMENT}/../../../etc/hosts.desktop"),
+                        display_name: "hosts.desktop".into(),
+                        mime_type: "application/octet-stream".into(),
+                        size: Some(64),
+                    },
+                )
+                // A directory row pointing back at the folder being listed, which
+                // is how a provider would make the walk loop.
+                .with_stray_row(
+                    FRONTEND_DOCUMENT,
+                    TreeDocument {
+                        document_id: FRONTEND_DOCUMENT.into(),
+                        display_name: "Frontend".into(),
+                        mime_type: DIRECTORY_MIME_TYPE.into(),
+                        size: None,
+                    },
+                );
+            let source = source(tree);
+            let scan = scan(&profile, &source).unwrap();
+
+            let titles = scan
+                .shortcuts
+                .iter()
+                .map(|shortcut| shortcut.title.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(titles, ["Celeste"]);
+            // Every row still counted against the budget: a provider cannot buy
+            // unbounded work by answering with rows that are then discarded.
+            assert_eq!(scan.scanned_files, 4);
+        }
+
+        /// The row is inside the grant, so every scope check passes — and it is
+        /// still not a child of the folder being listed. A provider that can
+        /// answer one listing with another folder's documents decides what the
+        /// walk sees, and the depth limit stops meaning anything: here the
+        /// subfolder is never listed as a child, so its document can only arrive
+        /// by way of the stray row.
+        #[test]
+        fn drops_a_row_the_provider_claims_as_a_child_of_the_wrong_folder() {
+            let profile = granted_profile();
+            let tree = frontend(&[("Celeste.desktop", exported_shortcut("Celeste", 1))])
+                .with_document(
+                    &format!("{FRONTEND_DOCUMENT}/RPG/Ys.desktop"),
+                    &exported_shortcut("Ys", 3),
+                )
+                .with_stray_row(
+                    FRONTEND_DOCUMENT,
+                    TreeDocument {
+                        document_id: format!("{FRONTEND_DOCUMENT}/RPG/Ys.desktop"),
+                        display_name: "Ys.desktop".into(),
+                        mime_type: "application/octet-stream".into(),
+                        size: Some(64),
+                    },
+                );
+            let scan = scan(&profile, &source(tree)).unwrap();
+            let titles = scan
+                .shortcuts
+                .iter()
+                .map(|shortcut| shortcut.title.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(titles, ["Celeste"]);
+        }
+
+        #[test]
+        fn walks_a_subfolder_the_provider_reports() {
+            let profile = granted_profile();
+            let tree = frontend(&[("Celeste.desktop", exported_shortcut("Celeste", 1))])
+                .with_directory(&format!("{FRONTEND_DOCUMENT}/RPG"))
+                .with_document(
+                    &format!("{FRONTEND_DOCUMENT}/RPG/Ys.desktop"),
+                    &exported_shortcut("Ys", 3),
+                );
+            let source = source(tree);
+            let scan = scan(&profile, &source).unwrap();
+
+            let mut paths = scan
+                .shortcuts
+                .iter()
+                .map(|shortcut| shortcut.shortcut_path.clone())
+                .collect::<Vec<_>>();
+            paths.sort();
+            assert_eq!(
+                paths,
+                [
+                    PathBuf::from("/storage/emulated/0/Download/Winlator/Frontend/Celeste.desktop"),
+                    PathBuf::from("/storage/emulated/0/Download/Winlator/Frontend/RPG/Ys.desktop"),
+                ]
+            );
+        }
+
+        #[test]
+        fn refuses_a_document_too_large_to_be_a_shortcut() {
+            let profile = granted_profile();
+            let oversized = "x".repeat(MAX_SHORTCUT_BYTES as usize + 1);
+            let source = source(frontend(&[("Huge.desktop", oversized)]));
+            assert_eq!(scan(&profile, &source).unwrap().shortcuts.len(), 0);
+            assert_eq!(
+                validate_winlator_shortcut_for_profile(
+                    &profile,
+                    &source,
+                    Path::new("/storage/emulated/0/Download/Winlator/Frontend/Huge.desktop"),
+                    &AtomicBool::new(false)
+                ),
+                Err(WinlatorRunnerError::ShortcutTooLarge)
+            );
+        }
+
+        #[test]
+        fn refuses_a_shortcut_outside_the_granted_folder() {
+            let profile = granted_profile();
+            let source = source(frontend(&[(
+                "Celeste.desktop",
+                exported_shortcut("Celeste", 1),
+            )]));
+            for outside in [
+                "/storage/emulated/0/Download/Celeste.desktop",
+                "/storage/emulated/0/Download/Winlator/FrontendEvil/Celeste.desktop",
+                "/etc/hosts.desktop",
+            ] {
+                assert_eq!(
+                    validate_winlator_shortcut_for_profile(
+                        &profile,
+                        &source,
+                        Path::new(outside),
+                        &AtomicBool::new(false)
+                    ),
+                    Err(WinlatorRunnerError::ShortcutOutsideScope),
+                    "accepted {outside}"
+                );
+            }
+        }
+
+        /// The window between preparing the intent and sending it is the one an
+        /// attacker controls, and re-exporting a shortcut is how Winlator itself
+        /// walks into it.
+        #[test]
+        fn refuses_to_send_an_intent_for_a_document_rewritten_mid_launch() {
+            let profile = granted_profile();
+            let tree = frontend(&[("Celeste.desktop", exported_shortcut("Celeste", 4))]);
+            let source = source(tree.clone());
+            let scan = scan(&profile, &source).unwrap();
+            let candidate = &scan.shortcuts[0];
+            let entry = inventory(&profile, candidate);
+            let intent = WinlatorLaunchIntent::new(&profile.id, &candidate.game_ref).unwrap();
+            let prepared = prepare_winlator_launch(&profile, &source, &entry, &intent).unwrap();
+
+            tree.write(
+                &format!("{FRONTEND_DOCUMENT}/Celeste.desktop"),
+                &exported_shortcut("Celeste", 5),
+            );
+            assert_eq!(
+                prepared.launch(&source),
+                Err(WinlatorRunnerError::ShortcutNotLaunchable)
+            );
+        }
+
+        #[test]
+        fn a_cancelled_grant_scan_reads_nothing() {
+            let profile = granted_profile();
+            let tree = frontend(&[("Celeste.desktop", exported_shortcut("Celeste", 1))]);
+            let source = source(tree.clone());
+            assert_eq!(
+                scan_winlator_shortcuts(
+                    &profile,
+                    &source,
+                    &AtomicBool::new(true),
+                    ScanLimits::default(),
+                    |_| {}
+                ),
+                Err(WinlatorRunnerError::Cancelled)
+            );
+            assert_eq!(tree.reads(), 0);
+        }
+
+        #[test]
+        fn a_grant_scan_beyond_its_file_budget_is_refused_rather_than_truncated() {
+            let profile = granted_profile();
+            let documents = (0..4)
+                .map(|index| (format!("Game{index}.desktop"), exported_shortcut("Game", 1)))
+                .collect::<Vec<_>>();
+            let mut tree = FakeDocumentTree::new(FRONTEND_DOCUMENT);
+            for (name, contents) in &documents {
+                tree = tree.with_document(&format!("{FRONTEND_DOCUMENT}/{name}"), contents);
+            }
+            assert_eq!(
+                scan_winlator_shortcuts(
+                    &profile,
+                    &source(tree),
+                    &AtomicBool::new(false),
+                    ScanLimits {
+                        max_files: 2,
+                        max_depth: 2
+                    },
+                    |_| {}
+                ),
+                Err(WinlatorRunnerError::TooManyFiles)
+            );
+        }
+
+        /// One unreadable document must not hide the rest of a library.
+        #[test]
+        fn skips_a_document_the_provider_refuses_and_keeps_the_others() {
+            let profile = granted_profile();
+            let tree = frontend(&[
+                ("Celeste.desktop", exported_shortcut("Celeste", 1)),
+                ("Braid.desktop", exported_shortcut("Braid", 2)),
+            ])
+            .with_unreadable(&format!("{FRONTEND_DOCUMENT}/Braid.desktop"));
+            let scan = scan(&profile, &source(tree)).unwrap();
+            let titles = scan
+                .shortcuts
+                .iter()
+                .map(|shortcut| shortcut.title.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(titles, ["Celeste"]);
+        }
+
+        /// A permission the user revoked in the system settings stops being
+        /// persisted. Reading the folder by pathname instead would be reaching
+        /// around the grant, so the answer is a sentence asking for it back.
+        #[test]
+        fn a_revoked_grant_asks_to_be_connected_again() {
+            let profile = granted_profile();
+            assert_eq!(
+                document_tree_source_with(
+                    &profile,
+                    Path::new(EXTERNAL_ROOT),
+                    &[
+                        "content://com.android.externalstorage.documents/tree/primary%3AOther"
+                            .to_string()
+                    ],
+                    |_| Box::new(FakeDocumentTree::default()),
+                )
+                .err(),
+                Some(WinlatorRunnerError::ExportFolderAccessLost)
+            );
+            // Still granted: the same profile resolves to a readable source.
+            assert!(
+                document_tree_source_with(
+                    &profile,
+                    Path::new(EXTERNAL_ROOT),
+                    &[FRONTEND_TREE.to_string()],
+                    |_| Box::new(FakeDocumentTree::new(FRONTEND_DOCUMENT)),
+                )
+                .is_ok()
+            );
+        }
+
+        /// Every use of a grant re-checks how broad it is, not only the moment
+        /// it was picked: a grant persisted by an older build, or one whose
+        /// folder is a drop folder, must stop being read rather than be trusted
+        /// because it is already in the catalog.
+        #[test]
+        fn refuses_to_read_a_grant_on_a_folder_anything_can_write_into() {
+            let mut profile = granted_profile();
+            for tree_uri in [
+                "content://com.android.externalstorage.documents/tree/primary%3A",
+                "content://com.android.externalstorage.documents/tree/primary%3ADownload",
+                "content://com.android.externalstorage.documents/tree/primary%3ADCIM",
+            ] {
+                profile.shortcut_trees = vec![tree_uri.into()];
+                assert_eq!(
+                    document_tree_source_with(
+                        &profile,
+                        Path::new(EXTERNAL_ROOT),
+                        &profile.shortcut_trees,
+                        |_| Box::new(FakeDocumentTree::default()),
+                    )
+                    .err(),
+                    Some(WinlatorRunnerError::ExportFolderTooBroad),
+                    "read {tree_uri}"
+                );
+            }
+        }
+
+        /// The sentence has to name the folder to look for, and name it once:
+        /// the constant is the only place that path is written.
+        #[test]
+        fn the_refusal_names_winlators_own_export_folder() {
+            assert!(
+                WinlatorRunnerError::ExportFolderTooBroad
+                    .to_string()
+                    .contains(DEFAULT_FRONTEND_SHORTCUT_DIRECTORY)
+            );
+        }
+
+        /// A folder whose documents are rows in a cloud index can never become a
+        /// path Winlator opens, so it is refused before anything is persisted.
+        #[test]
+        fn refuses_a_grant_on_a_provider_that_has_no_file_path() {
+            let mut profile = granted_profile();
+            profile.shortcut_trees =
+                vec!["content://com.android.providers.downloads.documents/tree/downloads".into()];
+            assert_eq!(
+                document_tree_source_with(
+                    &profile,
+                    Path::new(EXTERNAL_ROOT),
+                    &profile.shortcut_trees,
+                    |_| Box::new(FakeDocumentTree::default()),
+                )
+                .err(),
+                Some(WinlatorRunnerError::ExportFolderUnsupported)
+            );
+        }
+
+        /// There is no document provider on a desktop, and no honest fallback: a
+        /// profile that carries a grant must not quietly read the pathname.
+        #[cfg(not(target_os = "android"))]
+        #[test]
+        fn a_desktop_host_refuses_a_grant_instead_of_reading_the_path_behind_it() {
+            let profile = granted_profile();
+            assert_eq!(
+                shortcut_source_for_profile(&profile).err(),
+                Some(WinlatorRunnerError::ExportFolderUnsupported)
+            );
+        }
+    }
+
+    /// Each error carries its own sentence on every platform, including the three
+    /// only a device produces. A duplicate would mean one of them is unsayable.
+    #[test]
+    fn every_refusal_has_its_own_sentence() {
+        let messages = [
+            WinlatorRunnerError::Cancelled,
+            WinlatorRunnerError::PlatformUnsupported,
+            WinlatorRunnerError::DistributionNotLaunchable,
+            WinlatorRunnerError::ProfileDisabled,
+            WinlatorRunnerError::InvalidProfile,
+            WinlatorRunnerError::ShortcutMissing,
+            WinlatorRunnerError::ShortcutOutsideScope,
+            WinlatorRunnerError::ShortcutNotLaunchable,
+            WinlatorRunnerError::AccessDenied,
+            WinlatorRunnerError::TooManyFiles,
+            WinlatorRunnerError::ShortcutTooLarge,
+            WinlatorRunnerError::InvalidIntent,
+            WinlatorRunnerError::InvalidPage,
+            WinlatorRunnerError::WinlatorMissing,
+            WinlatorRunnerError::WinlatorRefusedLaunch,
+            WinlatorRunnerError::LaunchFailed,
+            WinlatorRunnerError::ExportFolderUnsupported,
+            WinlatorRunnerError::ExportFolderNotConnected,
+            WinlatorRunnerError::ExportFolderAccessLost,
+        ]
+        .map(|error| error.to_string());
+        let distinct = messages.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(distinct.len(), messages.len());
+        assert!(messages.iter().all(|message| message.ends_with('.')));
+    }
+
+    /// A source with no grant at all is the state between installing Orivo and
+    /// connecting a folder, and it has to say so rather than read nothing.
+    #[test]
+    fn a_grant_that_was_never_connected_says_so() {
+        let source = DocumentTreeShortcuts::new();
+        assert_eq!(
+            source.roots().err(),
+            Some(WinlatorRunnerError::ExportFolderNotConnected)
         );
     }
 }

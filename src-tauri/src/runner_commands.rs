@@ -192,6 +192,12 @@ impl ThirdPartyRunnerService {
     }
 
     fn runtime(&self) -> Result<PluginRuntime, RunnerHostError> {
+        // Every path that loads a runner package comes through here, and every one
+        // of them is something the user asked for: listing runners, creating a
+        // profile, granting a folder, importing, launching. None of them runs at
+        // startup, which is why this is where the compile cache is allowed to
+        // open — see `plugin_compile_cache::permit`.
+        crate::plugin_compile_cache::permit();
         match self.runtime.as_ref() {
             Some(runtime) => Ok(runtime.clone()),
             None => PluginRuntime::shared().map_err(|_| RunnerHostError::RuntimeUnavailable),
@@ -497,11 +503,12 @@ impl ThirdPartyRunnerService {
     /// game already imported, which is the plan's promise 6 for a plugin that
     /// is disabled or deleted.
     ///
-    /// `plugin_installer` owns the uninstall command and is another lot's file,
-    /// so it has to call this — the `#[allow(dead_code)]` is that one missing
-    /// line and nothing else. Until it lands, the package identity recorded on
-    /// each grant is what stops a replacement from inheriting them.
-    #[allow(dead_code)]
+    /// Called from `lib.rs`, on the installer's identity-change seam: on an
+    /// uninstall, and on any change of package that breaks the consent chain —
+    /// a different signer, an unsigned build, or a rollback to an older one.
+    /// The package identity recorded on each grant is the second line of
+    /// defence, for a package that changes without the installer being the one
+    /// that changed it.
     pub fn forget_plugin(&self, plugin_id: &str) -> Result<(), RunnerHostError> {
         let revoked_at = unix_millis();
         let plugin_id = plugin_id.to_owned();
@@ -1020,6 +1027,7 @@ mod tests {
         PluginManifest,
     };
     use crate::plugin_runtime::{EpochMode, PluginLimits};
+    use crate::plugin_update::PackageChannel;
     use crate::runner_host::{RunnerHostError, resolve_game_file};
     use std::{
         fs,
@@ -1178,6 +1186,77 @@ mod tests {
             folder
         }
 
+        /// The other half of the junction: the installer, over the same plugin
+        /// root, with the observer `lib.rs` registers wired to this service.
+        ///
+        /// It is the real wiring rather than a stand-in — the store announces
+        /// that a package changed, `grant_verdict` decides whether the consent
+        /// chain survived it, and `forget_plugin` is what records that it did
+        /// not. A junction tested with a hand-written callback would prove the
+        /// callback works and nothing about what `lib.rs` does.
+        /// Returns the announcement counter beside it: "the package did not
+        /// change" and "the package changed and the chain held" are different
+        /// facts, and a test that only looks at the ledger cannot tell them
+        /// apart.
+        fn installer(
+            &self,
+        ) -> (
+            crate::plugin_installer::PluginInstallerService,
+            Arc<AtomicU64>,
+        ) {
+            let installer = crate::plugin_installer::PluginInstallerService::new(
+                self.plugin_root.clone(),
+                env!("CARGO_PKG_VERSION"),
+            );
+            let announced = Arc::new(AtomicU64::new(0));
+            let counter = Arc::clone(&announced);
+            installer.observe_identity(Arc::new(move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }));
+            let runners = Arc::clone(&self.service);
+            installer.observe_identity(Arc::new(move |change| {
+                let lapsed = match change {
+                    crate::plugin_update::IdentityChange::Removed { .. } => true,
+                    crate::plugin_update::IdentityChange::Activated { previous, current } => {
+                        crate::plugin_update::grant_verdict(previous.as_ref(), current)
+                            == crate::plugin_update::GrantVerdict::Revalidate
+                    }
+                };
+                if lapsed {
+                    let _ = runners.forget_plugin(change.plugin_id());
+                }
+            }));
+            (installer, announced)
+        }
+
+        /// Install the fixture through the real transaction, under a channel of
+        /// the caller's choosing. The package the harness writes by hand is the
+        /// same one, so what changes between calls is only how it arrived.
+        fn install(
+            &self,
+            installer: &crate::plugin_installer::PluginInstallerService,
+            channel: crate::plugin_update::PackageChannel,
+        ) -> Result<(), String> {
+            let files = crate::plugin_installer::read_package(&fixture_package())?;
+            crate::plugin_installer::install_verified(
+                installer,
+                FIXTURE_PLUGIN_ID,
+                "1.0.0",
+                channel,
+                &files,
+                false,
+            )
+            .map(|_| ())
+        }
+
+        fn grants_active(&self) -> usize {
+            self.catalog()
+                .plugin_grants
+                .iter()
+                .filter(|grant| grant.is_active())
+                .count()
+        }
+
         /// The marker the installer writes beside a package it accepted with a
         /// release signature. Removing it is what a hand-loaded package taking
         /// over an installed id looks like from here.
@@ -1189,13 +1268,40 @@ mod tests {
         }
     }
 
-    fn write_fixture_plugin(plugin_root: &Path) {
-        let directory = plugin_root.join(FIXTURE_PLUGIN_ID);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("component.wasm"), FIXTURE).unwrap();
+    /// The fixture as a `.orivo-plugin` archive, so the junction tests can put
+    /// it through the installer's real transaction instead of writing the tree
+    /// by hand the way `write_fixture_plugin` does.
+    fn fixture_package() -> Vec<u8> {
+        use flate2::{Compression, write::GzEncoder};
+        let files: [(&str, Vec<u8>); 2] = [
+            (
+                "manifest.json",
+                serde_json::to_vec(&fixture_manifest()).unwrap(),
+            ),
+            ("component.wasm", FIXTURE.to_vec()),
+        ];
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (path, contents) in &files {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, contents.as_slice())
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn fixture_component_sha256() -> String {
         let mut digest = Sha256::new();
         digest.update(FIXTURE);
-        let manifest = PluginManifest {
+        format!("{:x}", digest.finalize())
+    }
+
+    fn fixture_manifest() -> PluginManifest {
+        let component_sha256 = fixture_component_sha256();
+        PluginManifest {
             id: FIXTURE_PLUGIN_ID.into(),
             name: "Fixture Runner".into(),
             version: "1.0.0".into(),
@@ -1207,20 +1313,39 @@ mod tests {
             artifacts: vec![ArtifactDescriptor {
                 path: "component.wasm".into(),
                 kind: ArtifactKind::Component,
-                sha256: format!("{:x}", digest.finalize()),
+                sha256: component_sha256,
                 byte_size: FIXTURE.len() as u64,
             }],
-        };
+        }
+    }
+
+    fn write_fixture_plugin(plugin_root: &Path) {
+        let directory = plugin_root.join(FIXTURE_PLUGIN_ID);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("component.wasm"), FIXTURE).unwrap();
         fs::write(
             directory.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
+            serde_json::to_vec(&fixture_manifest()).unwrap(),
         )
         .unwrap();
+        let component_sha256 = fixture_component_sha256();
         // Installed from the signed registry channel, which is the state whose
-        // grants must not carry over to a package that arrives another way.
+        // grants must not carry over to a package that arrives another way. The
+        // record names the component it was earned by — the format is
+        // `plugin_update`'s, written inside the install transaction — so this
+        // fixture has to stand in for a real install rather than for a file
+        // that merely exists.
         let trusted = plugin_root.join(".staging").join("trusted");
         fs::create_dir_all(&trusted).unwrap();
-        fs::write(trusted.join(FIXTURE_PLUGIN_ID), b"1").unwrap();
+        fs::write(
+            trusted.join(FIXTURE_PLUGIN_ID),
+            serde_json::json!({
+                "signer": "orivo-release-v1",
+                "componentSha256": component_sha256,
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
 
     /// A fake emulation application: this test binary, copied.
@@ -2118,6 +2243,215 @@ mod tests {
                 .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
                 .is_ok(),
             "one missing folder blocked a game in a folder that is still here"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The junction with the installer
+    //
+    // Four guarantees, each the thing E2 could narrow from its side but not
+    // close. The installer decides when a package has stopped being the package
+    // a permission was given to; this service decides what that costs. Both
+    // halves run here, wired exactly as `lib.rs` wires them.
+    // -----------------------------------------------------------------------
+
+    /// Trust is a statement about bytes, not about a file next to them.
+    ///
+    /// The check used to be `.staging/trusted/<id>.is_file()`, which would say
+    /// "signed" for any marker anyone dropped there — including a stale one
+    /// naming a component that is no longer installed. The installer's record
+    /// now names the digest it was earned by and is written inside the install
+    /// transaction, so the answer moves with the component.
+    #[test]
+    fn a_package_is_signed_only_for_the_component_the_transaction_accepted() {
+        let harness = Harness::new("junction-bytes", THREE_ROMS);
+        let (installer, _) = harness.installer();
+
+        // A bare marker of the shape the old check accepted, planted by hand.
+        fs::write(harness.trust_marker(), b"1").unwrap();
+        assert!(
+            !harness
+                .service
+                .package(FIXTURE_PLUGIN_ID)
+                .unwrap()
+                .identity()
+                .trusted,
+            "a file that merely exists is not a signature"
+        );
+
+        // A real signed install writes a record that names the component.
+        harness
+            .install(
+                &installer,
+                PackageChannel::Official {
+                    signer: "orivo-release-v1".into(),
+                },
+            )
+            .expect("installs");
+        let identity = harness.service.package(FIXTURE_PLUGIN_ID).unwrap();
+        assert!(identity.identity().trusted);
+        assert_eq!(identity.identity().fingerprint, fixture_component_sha256());
+
+        // And the record answers about the component, not the id: the digest
+        // the host is about to invoke is the question.
+        assert!(
+            !crate::plugin_installer::component_channel(
+                &harness.plugin_root,
+                FIXTURE_PLUGIN_ID,
+                &"0".repeat(64),
+            )
+            .is_official()
+        );
+    }
+
+    /// An uninstall takes the permissions and leaves the library. Same rule as
+    /// `forgetting_a_plugin_takes_its_permissions_and_leaves_its_games`, but
+    /// reached the way a user reaches it — through the installer — so the hook
+    /// is proved to be wired rather than proved to exist.
+    #[test]
+    fn uninstalling_through_the_installer_revokes_the_grants_and_keeps_the_games() {
+        let harness = Harness::new("junction-uninstall", THREE_ROMS);
+        let (installer, _) = harness.installer();
+        harness
+            .install(
+                &installer,
+                PackageChannel::Official {
+                    signer: "orivo-release-v1".into(),
+                },
+            )
+            .expect("installs");
+        harness.configured_profile();
+        harness.import();
+        assert!(harness.grants_active() > 0);
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_ok()
+        );
+
+        installer.uninstall(FIXTURE_PLUGIN_ID).expect("uninstalls");
+
+        let catalog = harness.catalog();
+        assert_eq!(
+            harness.grants_active(),
+            0,
+            "the permissions went with the package"
+        );
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
+        assert_eq!(profile.status, RunnerProfileStatus::Unvalidated);
+        assert_eq!(
+            profile.game_directories.len(),
+            1,
+            "the folder the user picked stays"
+        );
+        assert_eq!(
+            catalog.runner_inventory.len(),
+            3,
+            "and so does every game imported"
+        );
+    }
+
+    /// The same package arriving again the same way is not a new package, so
+    /// nobody is told and nothing is asked again. This is the case that has to
+    /// keep working, or every reinstall would cost the user their folders.
+    ///
+    /// The announcement count is the point. Without it the test passes even if
+    /// `grant_verdict` always answered `Revalidate`, because an install that
+    /// changes nothing raises no event to apply a verdict to — which proves the
+    /// comparison, not the rule. The rule's `Keep` branch needs a *second*
+    /// version of the component to reach end to end, and the reference fixture
+    /// reports exactly one; it is pinned in
+    /// `permissions_follow_a_package_only_forward_and_only_under_one_signer`.
+    #[test]
+    fn a_reinstall_of_the_same_package_tells_nobody_and_costs_nothing() {
+        let harness = Harness::new("junction-keep", THREE_ROMS);
+        let (installer, announced) = harness.installer();
+        let official = PackageChannel::Official {
+            signer: "orivo-release-v1".into(),
+        };
+        harness
+            .install(&installer, official.clone())
+            .expect("installs");
+        harness.configured_profile();
+        harness.import();
+        let before = harness.grants_active();
+        assert!(before > 0);
+        let announcements = announced.load(Ordering::Relaxed);
+
+        harness
+            .install(&installer, official)
+            .expect("installs again");
+
+        assert_eq!(
+            announced.load(Ordering::Relaxed),
+            announcements,
+            "the same bytes under the same channel are not a change"
+        );
+        assert_eq!(harness.grants_active(), before);
+        assert_eq!(
+            harness
+                .catalog()
+                .runner_profile(ACCEPTED_PROFILE_ID)
+                .unwrap()
+                .status,
+            RunnerProfileStatus::Valid
+        );
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_ok()
+        );
+    }
+
+    /// A rollback reaches a version the user had, which is exactly why it must
+    /// not be assumed to be the version they consented to *for these folders*.
+    /// Here it goes back to an unsigned build: the signature that carried the
+    /// consent forward is gone, so the profile returns to "needs revalidation"
+    /// with its folders and its games intact.
+    #[test]
+    fn a_rollback_suspends_the_grants_without_touching_the_library() {
+        let harness = Harness::new("junction-rollback", THREE_ROMS);
+        let (installer, _) = harness.installer();
+        // The harness writes a signed package by hand; start from nothing, so
+        // the two versions below are the only ones in play.
+        installer.uninstall(FIXTURE_PLUGIN_ID).unwrap();
+        harness
+            .install(&installer, PackageChannel::Development)
+            .expect("installs");
+        harness
+            .install(
+                &installer,
+                PackageChannel::Official {
+                    signer: "orivo-release-v1".into(),
+                },
+            )
+            .expect("installs over it, and keeps the first as the way back");
+        harness.configured_profile();
+        harness.import();
+        assert!(harness.grants_active() > 0);
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_ok()
+        );
+
+        installer.roll_back(FIXTURE_PLUGIN_ID).expect("rolls back");
+
+        assert_eq!(harness.grants_active(), 0);
+        let catalog = harness.catalog();
+        let profile = catalog.runner_profile(ACCEPTED_PROFILE_ID).unwrap();
+        assert_eq!(profile.status, RunnerProfileStatus::Unvalidated);
+        assert_eq!(profile.game_directories.len(), 1);
+        assert_eq!(catalog.runner_inventory.len(), 3);
+        assert!(
+            harness
+                .service
+                .launch(FIXTURE_PLUGIN_ID, ACCEPTED_PROFILE_ID, "alpha")
+                .is_err(),
+            "a suspended grant is not a usable one"
         );
     }
 

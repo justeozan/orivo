@@ -1,0 +1,6 @@
+# Copied out of the `tauri` crate by its build script on every Android build.
+/android/.tauri/
+/android/build/
+/android/.gradle/
+# `tauri-plugin` creates this even for a plugin with no commands.
+/permissions/

@@ -66,6 +66,20 @@ const MAX_DIRECTORY_SCAN: usize = 4_096;
 /// A candidate's external id is what names a file inside a granted folder, so it
 /// is held to the host's opaque-id grammar rather than to a filename's.
 const MAX_EXTERNAL_ID_LENGTH: usize = 256;
+/// What puts a hex-encoded entry name in a namespace of its own.
+///
+/// `plugin_runtime::valid_entry_name` never reports a name containing `:`, so no
+/// identifier a plugin could have learned from a listing can begin with this —
+/// which is what makes the two forms unable to describe one reference, and
+/// therefore what removes any need to rank them. A `game_ref` is the key of a
+/// library card (see [`runner_game_id`]), so a reference that could mean two
+/// files is a card that can be silently re-pointed at the next refresh.
+const HEX_REFERENCE_PREFIX: &str = "x:";
+/// The longest entry name a hex reference can stand for: two digits per byte
+/// inside what is left of [`MAX_EXTERNAL_ID_LENGTH`] after the prefix. Past it an
+/// id names nothing the host could have listed, so decoding one is work with no
+/// possible answer.
+const MAX_HEX_REFERENCE_BYTES: usize = (MAX_EXTERNAL_ID_LENGTH - HEX_REFERENCE_PREFIX.len()) / 2;
 /// How long a caller waits for a queued job beyond the deadline that stops the
 /// component itself. A job can be behind another plugin's work, and waiting
 /// forever for the queue is how a panel stops opening.
@@ -345,8 +359,8 @@ impl RunnerPackage {
         }
         Ok(Self {
             identity: PluginPackageIdentity {
+                trusted: package_is_trusted(plugin_root, plugin_id, &sha256),
                 fingerprint: sha256,
-                trusted: package_is_trusted(plugin_root, plugin_id),
             },
             runtime: runtime.clone(),
             manifest,
@@ -591,20 +605,17 @@ pub fn directory_grant_is_active(
         })
 }
 
-/// The marker the installer writes beside a package it accepted with the
-/// release key.
+/// Whether the installer accepted a release signature for *these bytes*.
 ///
-/// Reading it here duplicates a path `plugin_installer` owns, which is a seam
-/// that should be an accessor on its service rather than a shared constant.
-/// The layout is host-owned state about *how* a package arrived and lives
-/// outside the plugin's own directory, so a package cannot declare itself
-/// trusted by writing one.
-fn package_is_trusted(plugin_root: &Path, plugin_id: &str) -> bool {
-    plugin_root
-        .join(".staging")
-        .join("trusted")
-        .join(plugin_id)
-        .is_file()
+/// It used to read the marker file's path directly, for existence — which
+/// answers the weaker question "is there a marker beside this plugin" and would
+/// still have said yes after a component was swapped underneath one. The
+/// installer's record now names the digest it was earned by and is written
+/// inside the install transaction, so this is a statement about the component
+/// the host is about to invoke rather than about a file next to it.
+fn package_is_trusted(plugin_root: &Path, plugin_id: &str, component_sha256: &str) -> bool {
+    crate::plugin_installer::component_channel(plugin_root, plugin_id, component_sha256)
+        .is_official()
 }
 
 // ---------------------------------------------------------------------------
@@ -692,65 +703,192 @@ fn usable_profile<'catalog>(
 // Resolving what the plugin is not allowed to name
 // ---------------------------------------------------------------------------
 
-/// Find the one file a candidate's external id names inside the profile's
-/// granted folders, and say which folder it was found in.
+/// Every file in a profile's granted folders that a plugin could name at all,
+/// read once.
 ///
-/// The rule is the host's and it is deliberately narrow: a match is a file whose
-/// name, or whose name without its final extension, is exactly the external id.
-/// Nothing is recursive, symbolic links are not followed, and an id that matches
-/// in more than one place is refused rather than guessed — an ambiguous
-/// resolution is how a runner ends up starting a different game than the one the
-/// user picked.
+/// Resolution used to walk every granted folder again for each candidate, so a
+/// page of fifty cost fifty directory reads of the same folder — measured at
+/// roughly five times the per-game catalogue write it was supposed to be
+/// dominated by (`docs/performance.md` § 7). A page now reads its folders once
+/// and answers from that.
+///
+/// It holds names, not paths. Whether a name is really a regular file inside the
+/// granted folder is asked again, from an open descriptor, for each name a
+/// reference actually matches — so the answer is about the file that is there
+/// now, and a folder of four thousand entries does not cost four thousand
+/// canonicalisations to look one game up.
+pub struct GrantedLibrary {
+    folders: Vec<GrantedFolderListing>,
+}
+
+struct GrantedFolderListing {
+    grant_id: String,
+    root: PathBuf,
+    /// Only the names `host-files` would have reported: a plugin may name what it
+    /// could have been shown, and nothing else.
+    names: Vec<String>,
+}
+
+impl GrantedLibrary {
+    /// Read each folder the permission still covers.
+    ///
+    /// A folder the permission no longer covers is not a folder to read. The
+    /// launch path already refused an entry resolved in one; leaving the
+    /// *resolution* free to look meant a revoked or swapped folder still decided
+    /// what an import saw — and a name it happened to share could lose the game
+    /// that was allowed.
+    pub fn read(profile: &RunnerProfile, granted: &BTreeSet<String>) -> Self {
+        let mut folders = Vec::new();
+        for directory in &profile.game_directories {
+            if !granted.contains(&directory.id) {
+                continue;
+            }
+            let Ok(opened) = open_granted_directory(directory, IdentityCheck::Require) else {
+                continue;
+            };
+            let root = opened.canonical;
+            let Ok(entries) = fs::read_dir(&root) else {
+                continue;
+            };
+            let mut names = Vec::new();
+            for entry in entries.take(MAX_DIRECTORY_SCAN).filter_map(Result::ok) {
+                // `file_type` here comes from the directory entry, so a symbolic
+                // link reports as one instead of as whatever it points at.
+                if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(name) = name.to_str().filter(|name| listable_entry_name(name)) else {
+                    continue;
+                };
+                names.push(name.to_owned());
+            }
+            folders.push(GrantedFolderListing {
+                grant_id: directory.id.clone(),
+                root,
+                names,
+            });
+        }
+        Self { folders }
+    }
+
+    /// Find the one file an external id names, and say which folder it was found
+    /// in.
+    ///
+    /// The rule is the host's and it is deliberately narrow: a match is a file
+    /// whose name, or whose name without its final extension, is exactly the
+    /// external id, or one whose name the id spells in the hex form below.
+    /// Nothing is recursive, symbolic links are not followed, and an id that
+    /// matches more than once is refused rather than ranked — an ambiguous
+    /// resolution is how a runner starts a different game than the one the user
+    /// picked, and how a card that already exists gets re-pointed at the next
+    /// refresh, since `game_ref` is that card's key (see [`runner_game_id`]).
+    pub fn resolve(&self, external_id: &str) -> Result<(String, PathBuf), RunnerHostError> {
+        if !valid_opaque_id(external_id, MAX_EXTERNAL_ID_LENGTH) {
+            return Err(RunnerHostError::GameUnresolvable);
+        }
+        let decoded = decoded_entry_name(external_id);
+        let mut matches = Vec::new();
+        for folder in &self.folders {
+            for name in &folder.names {
+                let stem = name
+                    .rsplit_once('.')
+                    .map_or(name.as_str(), |(stem, _)| stem);
+                if name != external_id
+                    && stem != external_id
+                    && decoded.as_deref() != Some(name.as_str())
+                {
+                    continue;
+                }
+                if let Ok(canonical) = canonical_file_inside(&folder.root.join(name), &folder.root)
+                {
+                    matches.push((folder.grant_id.clone(), canonical));
+                }
+            }
+        }
+        matches.sort();
+        matches.dedup();
+        match matches.len() {
+            1 => Ok(matches.remove(0)),
+            _ => Err(RunnerHostError::GameUnresolvable),
+        }
+    }
+}
+
+/// One candidate, one folder read.
+///
+/// Test-only: nothing in a release build resolves a single reference any more,
+/// because the only production caller resolves a whole page and reads its folders
+/// once for it ([`resolve_page_candidates`]). What the suites want is the rule
+/// rather than the page, and saying it in one line beats building a listing to use
+/// exactly once.
+#[cfg(test)]
 pub fn resolve_game_file(
     profile: &RunnerProfile,
     granted: &BTreeSet<String>,
     external_id: &str,
 ) -> Result<(String, PathBuf), RunnerHostError> {
-    if !valid_opaque_id(external_id, MAX_EXTERNAL_ID_LENGTH) {
-        return Err(RunnerHostError::GameUnresolvable);
+    GrantedLibrary::read(profile, granted).resolve(external_id)
+}
+
+/// Whether the host could have told a plugin about this name at all.
+///
+/// The same question `host-files` answers when it lists a folder, asked here
+/// because resolution must not be the weaker side of it: a plugin may name what
+/// it could have been shown. A plain identifier already could not reach a hidden
+/// file — the opaque grammar makes an id start with an alphanumeric — so the
+/// leading dot is that rule restated for the hex form rather than a new policy.
+/// It matters on any exFAT or FAT volume, where macOS writes an AppleDouble
+/// `._<name>` sidecar beside every file: it carries the same extension as the
+/// dump it shadows, and a four-kilobyte sidecar handed to an emulator is not a
+/// launch.
+fn listable_entry_name(name: &str) -> bool {
+    !name.starts_with('.') && crate::plugin_runtime::valid_entry_name(name)
+}
+
+/// The entry name a hex reference stands for, or `None` for an id that is not
+/// one.
+///
+/// This decodes; it does not authorise. What comes back is compared against the
+/// names the host read out of a granted folder, never joined onto a path, so a
+/// decoded `../secret` is simply a name no entry has. Three things are refused
+/// outright, and each of them is a way one file could have had more than one
+/// reference — which the catalogue would have turned into more than one card,
+/// because it keys a card by the reference and not by the path:
+///
+/// * anything without the [`HEX_REFERENCE_PREFIX`] namespace;
+/// * upper-case digits, so a name of *k* hex-significant bytes has one spelling
+///   rather than 2^k;
+/// * a name the host would never have listed ([`listable_entry_name`]).
+///
+/// The length bound is here so an id that is merely long cannot make the host
+/// allocate.
+fn decoded_entry_name(external_id: &str) -> Option<String> {
+    let digits = external_id.strip_prefix(HEX_REFERENCE_PREFIX)?.as_bytes();
+    if digits.is_empty()
+        || !digits.len().is_multiple_of(2)
+        || digits.len() / 2 > MAX_HEX_REFERENCE_BYTES
+    {
+        return None;
     }
-    let mut matches = Vec::new();
-    for directory in &profile.game_directories {
-        // A folder the permission no longer covers is not a folder to read. The
-        // launch path already refused an entry resolved in one; leaving the
-        // *resolution* free to look meant a revoked or swapped folder still
-        // decided what an import saw — and a name it happened to share could
-        // lose the game that was allowed.
-        if !granted.contains(&directory.id) {
-            continue;
-        }
-        let Ok(opened) = open_granted_directory(directory, IdentityCheck::Require) else {
-            continue;
-        };
-        let root = opened.canonical;
-        let Ok(entries) = fs::read_dir(&root) else {
-            continue;
-        };
-        for entry in entries.take(MAX_DIRECTORY_SCAN).filter_map(Result::ok) {
-            // `file_type` here comes from the directory entry, so a symbolic
-            // link reports as one instead of as whatever it points at.
-            if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
-            if name != external_id && stem != external_id {
-                continue;
-            }
-            let path = entry.path();
-            if let Ok(canonical) = canonical_file_inside(&path, &root) {
-                matches.push((directory.id.clone(), canonical));
-            }
-        }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks(2) {
+        let high = lower_hex_digit(pair[0])?;
+        let low = lower_hex_digit(pair[1])?;
+        bytes.push((high << 4) | low);
     }
-    matches.sort();
-    matches.dedup();
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        _ => Err(RunnerHostError::GameUnresolvable),
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|name| listable_entry_name(name))
+}
+
+/// Lower case only. `char::to_digit(16)` accepts both cases, which is what gave
+/// one file 2^k references.
+fn lower_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
     }
 }
 
@@ -1299,6 +1437,11 @@ pub struct CommittedPage {
 /// commit: a plugin that answers with fifty ids naming nothing would otherwise
 /// hold the catalog's write lease for fifty directory scans, and every other
 /// write in the app behind it.
+///
+/// Once per page, not once per candidate. Each folder is listed one time and
+/// every candidate is answered from that listing, which is also what makes a page
+/// internally consistent: fifty candidates used to be fifty separate readings of
+/// the same folder, and the second half of a page could disagree with the first.
 fn resolve_page_candidates(
     profile: &RunnerProfile,
     profile_id: &str,
@@ -1306,12 +1449,11 @@ fn resolve_page_candidates(
     page: &PluginDiscoveryPage,
     imported_at: u64,
 ) -> (Vec<RunnerGameInventoryEntry>, usize) {
+    let library = GrantedLibrary::read(profile, granted);
     let mut entries = Vec::with_capacity(page.games.len());
     let mut skipped = 0;
     for candidate in &page.games {
-        let Ok((directory_grant_id, game_path)) =
-            resolve_game_file(profile, granted, &candidate.external_id)
-        else {
+        let Ok((directory_grant_id, game_path)) = library.resolve(&candidate.external_id) else {
             skipped += 1;
             continue;
         };
@@ -1587,6 +1729,172 @@ mod tests {
             Err(RunnerHostError::GameUnresolvable)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The grammar an external id has to pass allows `[A-Za-z0-9._\-:]`, and a
+    /// Switch dump is conventionally called `Title [0100…][v0].nsp`. Without the
+    /// hex form there is no id a plugin could return for that file at all, so
+    /// the first official runner would import nothing out of a normally named
+    /// library.
+    #[test]
+    fn resolves_a_candidate_by_the_hex_encoding_of_a_name_the_grammar_forbids() {
+        let root = temporary_root("hex-name");
+        fs::create_dir_all(root.join("games")).unwrap();
+        let name = "Super Mario Odyssey [0100000000010000][v0].nsp";
+        fs::write(root.join("games").join(name), b"not a real dump").unwrap();
+        let profile = profile_over(&root);
+
+        // The plugin cannot spell this name; it can only spell its bytes.
+        assert!(!valid_opaque_id(name, MAX_EXTERNAL_ID_LENGTH));
+        let (grant, path) =
+            resolve_game_file(&profile, &all_slots(&profile), &hex_of(name)).unwrap();
+        assert_eq!(grant, "fixture-games");
+        assert_eq!(path.file_name().unwrap(), name);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A hex reference lives in its own namespace, so a file *called* the hex of
+    /// another one's name cannot collide with it. This is the first half of why
+    /// there is no winner to pick: the two forms cannot describe one id.
+    ///
+    /// A `game_ref` is the key of a library card (`runner_game_id`), so silently
+    /// re-pointing one is not a resolution detail — the next refresh would
+    /// overwrite `game_path` on a card the user already has.
+    #[test]
+    fn a_file_named_like_a_hex_reference_cannot_be_reached_by_one() {
+        let root = temporary_root("hex-collision");
+        fs::create_dir_all(root.join("games")).unwrap();
+        // "ab" hex-encodes to "6162" under the old, unprefixed scheme, and
+        // "6162" is also a perfectly legal file name.
+        fs::write(root.join("games/ab"), b"the hex-addressed one").unwrap();
+        fs::write(root.join("games/6162"), b"the literally named one").unwrap();
+        let profile = profile_over(&root);
+
+        // The plain id still names the file that is literally called that.
+        let (_, path) = resolve_game_file(&profile, &all_slots(&profile), "6162").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"the literally named one");
+        // And the hex id names the other one, with no ambiguity between them:
+        // `valid_entry_name` never lists a name containing `:`, so no plain id
+        // learned from a listing can ever start with `x:`.
+        let (_, path) = resolve_game_file(&profile, &all_slots(&profile), &hex_of("ab")).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"the hex-addressed one");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The second half: more than one match is refused, whichever form found
+    /// them. There used to be a precedence rule here, and precedence is how a
+    /// card gets re-pointed without anyone being told.
+    #[test]
+    fn two_files_answering_one_reference_are_refused_rather_than_ranked() {
+        let root = temporary_root("hex-ambiguous");
+        fs::create_dir_all(root.join("games")).unwrap();
+        fs::create_dir_all(root.join("more")).unwrap();
+        // The same name in two granted folders of one profile: the hex form
+        // describes both, and neither is the obvious answer.
+        fs::write(root.join("games/Zelda [0100F2C0115B6000].xci"), b"one").unwrap();
+        fs::write(root.join("more/Zelda [0100F2C0115B6000].xci"), b"two").unwrap();
+        let mut profile = profile_over(&root);
+        profile.game_directories.push(RunnerGrantedDirectory {
+            id: "second".into(),
+            path: fs::canonicalize(root.join("more")).unwrap(),
+            device: None,
+            inode: None,
+        });
+
+        assert_eq!(
+            resolve_game_file(
+                &profile,
+                &all_slots(&profile),
+                &hex_of("Zelda [0100F2C0115B6000].xci"),
+            ),
+            Err(RunnerHostError::GameUnresolvable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// One file, one reference. `to_digit(16)` used to accept upper-case, so a
+    /// name of *k* hex-significant bytes had 2^k references — and the catalogue
+    /// keys a card by the reference, not by the path, so each variant would have
+    /// become its own card for the same file.
+    #[test]
+    fn only_the_lower_case_hex_form_of_a_name_resolves() {
+        let root = temporary_root("hex-case");
+        fs::create_dir_all(root.join("games")).unwrap();
+        fs::write(root.join("games/Zelda [0100F2C0115B6000].xci"), b"one").unwrap();
+        let profile = profile_over(&root);
+        let canonical = hex_of("Zelda [0100F2C0115B6000].xci");
+
+        assert!(resolve_game_file(&profile, &all_slots(&profile), &canonical).is_ok());
+        let shouted = format!(
+            "{}{}",
+            HEX_REFERENCE_PREFIX,
+            canonical[HEX_REFERENCE_PREFIX.len()..].to_ascii_uppercase()
+        );
+        assert_ne!(shouted, canonical);
+        assert_eq!(
+            resolve_game_file(&profile, &all_slots(&profile), &shouted),
+            Err(RunnerHostError::GameUnresolvable)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A plugin may only name what the host could have shown it. A plain id
+    /// could never name a hidden file — the opaque grammar makes an id start with
+    /// an alphanumeric — and the hex form must not be the way around that:
+    /// macOS writes an AppleDouble `._<name>` sidecar beside every file on an
+    /// exFAT volume, and handing a four-kilobyte sidecar to an emulator is not a
+    /// launch.
+    #[test]
+    fn a_reference_cannot_name_a_file_the_listing_would_never_have_shown() {
+        let root = temporary_root("hex-unlistable");
+        fs::create_dir_all(root.join("games")).unwrap();
+        for name in [
+            "._Super Mario Odyssey [0100000000010000][v0].nsp",
+            ".hidden.nsp",
+            "with:a:colon.nsp",
+            "CON",
+        ] {
+            fs::write(root.join("games").join(name), b"never a game").unwrap();
+        }
+        let profile = profile_over(&root);
+
+        for name in [
+            "._Super Mario Odyssey [0100000000010000][v0].nsp",
+            ".hidden.nsp",
+            "with:a:colon.nsp",
+            "CON",
+        ] {
+            assert_eq!(
+                resolve_game_file(&profile, &all_slots(&profile), &hex_of(name)),
+                Err(RunnerHostError::GameUnresolvable),
+                "{name} is not a name host-files would list"
+            );
+        }
+        // And the plain form, which is where this actually changed behaviour. A
+        // hidden name was never reachable that way — the opaque grammar makes an
+        // id start with an alphanumeric — but `with:a:colon.nsp` and `CON` both
+        // pass that grammar and used to resolve by exact name, even though no
+        // listing could ever have offered either.
+        for name in ["with:a:colon.nsp", "with:a:colon", "CON"] {
+            assert!(valid_opaque_id(name, MAX_EXTERNAL_ID_LENGTH));
+            assert_eq!(
+                resolve_game_file(&profile, &all_slots(&profile), name),
+                Err(RunnerHostError::GameUnresolvable),
+                "{name} is not a name host-files would list"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn hex_of(value: &str) -> String {
+        let digits: String = value
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("{HEX_REFERENCE_PREFIX}{digits}")
     }
 
     /// The external id is what a plugin *chose*, so it is held to the host's

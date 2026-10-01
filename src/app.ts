@@ -41,6 +41,28 @@ import {
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { prefersReducedMotion } from "./motion";
+import {
+  isWinlatorHost,
+  normaliseWinlatorExportFolder,
+  normaliseWinlatorImportResult,
+  winlatorReviewList,
+  winlatorReviewPrompt,
+  winlatorShortcutsToOffer,
+  winlatorWaitingToast,
+  type WinlatorShortcut,
+} from "./winlator-source";
+import {
+  CONSOLE_EMULATORS,
+  consoleReviewList,
+  consoleReviewPrompt,
+  consoleEmulatorNote,
+  consoleRomsToOffer,
+  isConsoleEmulatorHost,
+  normaliseConsoleImportResult,
+  normaliseConsoleRomFolder,
+  type ConsoleRom,
+} from "./console-source";
+import type { SourceReviewEntry } from "./source-review";
 
 import { fallbackLibrary, type LibraryGame } from "./mock-library";
 import {
@@ -121,6 +143,16 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
+import {
+  createDefaultPluginHealthClient,
+  phraseJournalEntry,
+  pluginHealthErrorMessage,
+  pluginHealthSummary,
+  type PluginHealthView,
+  type PluginJournalEntryView,
+} from "./plugin-health";
+import { createDefaultRunnerManagerClient, createRunnerManagerController } from "./runner-manager";
+import { mountRunnerPanel } from "./runner-view";
 import { createDefaultQuikyClient } from "./quiky-install";
 import {
   NAV_STEP_EVENT,
@@ -206,7 +238,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher";
+type PluginId = "wine" | "wallpaper-searcher" | "runners";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
@@ -319,6 +351,24 @@ interface State {
   onboarding: OnboardingState;
   notifications: NotificationsState;
   libraryMenuOpen: boolean;
+  // What Winlator's export folder holds that the library does not, waiting for
+  // the user to say yes: a shortcut is a command, so it is never assumed.
+  winlatorReview: {
+    token: number;
+    folderLabel: string | null;
+    shortcuts: WinlatorShortcut[];
+  } | null;
+  // The same question for a console emulator's ROM folder, held separately
+  // because it names the emulator that would open them.
+  consoleReview: {
+    token: number;
+    emulator: string;
+    emulatorLabel: string;
+    emulatorInstalled: boolean;
+    emulatorInstaller: string | null;
+    folderLabel: string | null;
+    roms: ConsoleRom[];
+  } | null;
   steamAccount: SteamAccountState;
   sourceAccounts: SourceAccountsState;
   wineSettings: WineSettingsState;
@@ -392,6 +442,7 @@ const SOURCE_ACCOUNT_CONNECTED_EVENT = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
+const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 /**
  * The stores whose logo ships as its own file, under their own brand, for the
@@ -436,6 +487,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       highlighted: [],
     },
     libraryMenuOpen: false,
+    winlatorReview: null,
+    consoleReview: null,
     steamAccount: {
       open: false,
       phase: "idle",
@@ -509,6 +562,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     search: get<HTMLInputElement>("#topbar-search"),
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
+    librarySourceList: get<HTMLElement>("#library-source-list"),
     toast: get<HTMLElement>("#toast"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
@@ -519,10 +573,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
+    runnersPanel: get<HTMLElement>("#runners-panel"),
+    runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
+    pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
@@ -1502,11 +1559,159 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     state.steamAccount.status?.connected === true ||
     state.games.some((game) => game.source === "steam");
 
+  // Same rule for every other store: a synced game is proof the account was
+  // connected, even before Settings has loaded its status list.
+  const renderLibrarySources = (): void => {
+    const list = refs.librarySourceList;
+    list.replaceChildren();
+
+    if (steamSourceConnected()) {
+      const steam = document.createElement("button");
+      steam.type = "button";
+      steam.className = "library-source-action";
+      steam.setAttribute("role", "menuitem");
+      steam.dataset.libraryAction = "source-steam";
+      steam.innerHTML =
+        `<span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>` +
+        `<span class="library-source-action__copy"><strong>Steam</strong><small>Connected · import installed games</small></span>` +
+        icon("chevron-right", "library-source-action__chevron");
+      list.append(steam);
+    }
+
+    // Connected stores are deliberately not listed here. They live in
+    // Settings › Libraries & Sources, which is where they can actually be
+    // managed; repeating them in this menu made it long without adding an
+    // action beyond "sync now".
+
+    renderWinlatorReview(list);
+    renderConsoleReview(list);
+  };
+
+  /**
+   * One confirmation, for either source that turns a file in a shared folder into
+   * a card. Everything in it came out of such a file, so all of it goes in through
+   * `textContent`: `innerHTML` would let a file name write markup.
+   */
+  const renderSourceReview = (
+    list: HTMLElement,
+    review: {
+      heading: string;
+      prompt: string;
+      /** One line about the source itself, above the files it found. */
+      note?: string | null;
+      entries: SourceReviewEntry[];
+      importAction: string;
+      dismissAction: string;
+    },
+  ): void => {
+    const heading = document.createElement("p");
+    heading.className = "library-source-menu__label";
+    heading.textContent = review.heading;
+    const prompt = document.createElement("p");
+    prompt.className = "library-source-review__prompt";
+    prompt.textContent = review.prompt;
+    if (review.note) {
+      const note = document.createElement("small");
+      note.className = "library-source-review__note";
+      note.textContent = review.note;
+      prompt.append(note);
+    }
+    const found = document.createElement("ul");
+    found.className = "library-source-review__list";
+    for (const entry of review.entries) {
+      const item = document.createElement("li");
+      const title = document.createElement("strong");
+      title.textContent = entry.title;
+      // The file and its folder: the title is whatever the file says, so this is
+      // the part the user can actually go and check.
+      const origin = document.createElement("span");
+      origin.className = "library-source-review__origin";
+      origin.textContent = entry.origin;
+      item.append(title, origin);
+      if (entry.collision) {
+        const collision = document.createElement("span");
+        collision.className = "library-source-review__collision";
+        collision.textContent = entry.collision;
+        item.append(collision);
+      }
+      found.append(item);
+    }
+
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "library-source-action library-source-action--review";
+    add.setAttribute("role", "menuitem");
+    add.dataset.libraryAction = review.importAction;
+    const addCopy = document.createElement("span");
+    addCopy.className = "library-source-action__copy";
+    const addLabel = document.createElement("strong");
+    // The count is the list's, not a separate number: the button imports exactly
+    // the rows above it, and saying so with the same value is what keeps that true.
+    addLabel.textContent =
+      review.entries.length === 1
+        ? "Add this game"
+        : `Add these ${review.entries.length} games`;
+    addCopy.append(addLabel);
+    add.append(addCopy);
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "library-source-action library-source-action--review";
+    dismiss.setAttribute("role", "menuitem");
+    dismiss.dataset.libraryAction = review.dismissAction;
+    const dismissCopy = document.createElement("span");
+    dismissCopy.className = "library-source-action__copy";
+    const dismissLabel = document.createElement("strong");
+    dismissLabel.textContent = "Not now";
+    dismissCopy.append(dismissLabel);
+    dismiss.append(dismissCopy);
+
+    list.append(heading, prompt, found, add, dismiss);
+  };
+
+  const renderWinlatorReview = (list: HTMLElement): void => {
+    const review = state.winlatorReview;
+    if (!review || review.shortcuts.length === 0) {
+      return;
+    }
+    const { entries } = winlatorReviewList(review.shortcuts, review.folderLabel);
+    renderSourceReview(list, {
+      heading: review.folderLabel ? `Winlator · ${review.folderLabel}` : "Winlator",
+      prompt: winlatorReviewPrompt(review.shortcuts),
+      entries,
+      importAction: "winlator-import",
+      dismissAction: "winlator-dismiss",
+    });
+  };
+
+  const renderConsoleReview = (list: HTMLElement): void => {
+    const review = state.consoleReview;
+    if (!review || review.roms.length === 0) {
+      return;
+    }
+    const { entries } = consoleReviewList(review.roms, review.folderLabel);
+    renderSourceReview(list, {
+      heading: review.folderLabel
+        ? `${review.emulatorLabel} · ${review.folderLabel}`
+        : review.emulatorLabel,
+      prompt: consoleReviewPrompt(review.roms, review.emulatorLabel),
+      // What the emulator's own install looks like from here. A game is about to
+      // be handed to that app, so who put it on the device is worth a line.
+      note: consoleEmulatorNote(review),
+      entries,
+      importAction: "console-import",
+      dismissAction: "console-dismiss",
+    });
+  };
+
   const setLibraryMenuOpen = (open: boolean, focus?: "first" | "last", restoreFocus = false): void => {
     state.libraryMenuOpen = open;
     refs.libraryMenu.hidden = !open;
     refs.libraryMenuButton.setAttribute("aria-expanded", String(open));
     refs.topbar.classList.toggle("is-library-menu-open", open);
+    if (open) {
+      renderLibrarySources();
+    }
 
     if (open && focus) {
       requestAnimationFrame(() => focusLibraryMenuItem(focus));
@@ -1626,6 +1831,142 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   };
 
+  const connectWinlatorExportFolder = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      closeLibraryMenu();
+      showToast("Connecting a folder is available in the Orivo app.");
+      return;
+    }
+
+    try {
+      const answer = normaliseWinlatorExportFolder(
+        await invoke<unknown>("connect_winlator_export_folder"),
+      );
+      if (!answer) {
+        closeLibraryMenu();
+        showToast("Orivo could not read the folder you chose.");
+        return;
+      }
+      const waiting = winlatorShortcutsToOffer(answer);
+      state.winlatorReview = waiting.length
+        ? { token: answer.token, folderLabel: answer.folderLabel, shortcuts: waiting }
+        : null;
+      // Nothing was imported: the host found shortcuts and is asking. The menu
+      // stays open, now carrying that question, instead of closing on a toast
+      // the user would have to act on from memory.
+      if (state.winlatorReview) {
+        setLibraryMenuOpen(true);
+      } else {
+        closeLibraryMenu();
+      }
+      showToast(answer.message);
+    } catch (error) {
+      closeLibraryMenu();
+      showToast(messageFromError(error, "Orivo could not connect that folder."));
+    }
+  };
+
+  const importWinlatorShortcuts = async (): Promise<void> => {
+    const review = state.winlatorReview;
+    if (!review || !isTauriRuntime()) {
+      return;
+    }
+    closeLibraryMenu();
+    state.winlatorReview = null;
+    try {
+      const result = normaliseWinlatorImportResult(
+        await invoke<unknown>("import_winlator_shortcuts", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
+          gameRefs: review.shortcuts.map((shortcut) => shortcut.gameRef),
+        }),
+      );
+      if (!result) {
+        showToast("Orivo could not add those Winlator games.");
+        return;
+      }
+      if (result.importedIds.length > 0) {
+        await refreshLibrary(result.importedIds[0]);
+      }
+      showToast(result.message);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not add those Winlator games."));
+    }
+  };
+
+  const connectConsoleRomFolder = async (emulator: string): Promise<void> => {
+    if (!isTauriRuntime()) {
+      closeLibraryMenu();
+      showToast("Connecting a folder is available in the Orivo app.");
+      return;
+    }
+
+    try {
+      const answer = normaliseConsoleRomFolder(
+        await invoke<unknown>("connect_console_rom_folder", { emulator }),
+      );
+      if (!answer) {
+        closeLibraryMenu();
+        showToast("Orivo could not read the folder you chose.");
+        return;
+      }
+      const waiting = consoleRomsToOffer(answer);
+      state.consoleReview = waiting.length
+        ? {
+            token: answer.token,
+            emulator: answer.emulator,
+            emulatorLabel: answer.emulatorLabel,
+            emulatorInstalled: answer.emulatorInstalled,
+            emulatorInstaller: answer.emulatorInstaller,
+            folderLabel: answer.folderLabel,
+            roms: waiting,
+          }
+        : null;
+      // Nothing was imported: the host found files and is asking. The menu stays
+      // open, now carrying that question, instead of closing on a toast the user
+      // would have to act on from memory.
+      if (state.consoleReview) {
+        setLibraryMenuOpen(true);
+      } else {
+        closeLibraryMenu();
+      }
+      showToast(answer.message);
+    } catch (error) {
+      closeLibraryMenu();
+      showToast(messageFromError(error, "Orivo could not connect that folder."));
+    }
+  };
+
+  const importConsoleRoms = async (): Promise<void> => {
+    const review = state.consoleReview;
+    if (!review || !isTauriRuntime()) {
+      return;
+    }
+    closeLibraryMenu();
+    state.consoleReview = null;
+    try {
+      const result = normaliseConsoleImportResult(
+        await invoke<unknown>("import_console_roms", {
+          // The list's own token: the host refuses an answer that belongs to a
+          // scan it has already replaced.
+          token: review.token,
+          gameRefs: review.roms.map((rom) => rom.gameRef),
+        }),
+      );
+      if (!result) {
+        showToast("Orivo could not add those games.");
+        return;
+      }
+      if (result.importedIds.length > 0) {
+        await refreshLibrary(result.importedIds[0]);
+      }
+      showToast(result.message);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not add those games."));
+    }
+  };
+
   const wineActionButton = (
     action: string,
     label: string,
@@ -1723,6 +2064,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   const pluginManager = createPluginManagerController(createDefaultPluginManagerClient());
   pluginManager.onChange(() => renderPluginList());
 
+  // Health and the journal are a second, smaller surface (`plugin_health.rs`):
+  // whether a plugin is degraded, and the sentences behind why. Kept apart
+  // from the catalogue above so a registry with no health commands — an older
+  // host binary — still renders the rest of the panel exactly as before.
+  const pluginHealthClient = createDefaultPluginHealthClient();
+  let pluginHealthById = new Map<string, PluginHealthView>();
+  let pluginHealthIdsKey = "";
+  // `null` means the last read failed; absent means never (yet) read this
+  // time it was opened — the panel tells all three states apart.
+  let pluginJournalById = new Map<string, PluginJournalEntryView[] | null>();
+  let openPluginLogId: string | null = null;
+
+  // "Add an emulator" and the runner profiles inside Plugins & Runners own
+  // their whole subtree (`runner-view.ts`): this call is the only thing this
+  // file does with them beyond toggling the panel's `hidden` attribute.
+  const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
+  mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
+
   const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
     row.className = "settings-row plugin-catalog-row";
@@ -1799,6 +2158,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         .join(" · ") || "Plugin tiers";
     copy.append(name, details);
 
+    const health = pluginHealthById.get(plugin.id) ?? null;
+    const healthSummary = pluginHealthSummary(health);
+    if (healthSummary) {
+      const healthLine = document.createElement("small");
+      healthLine.className = "plugin-row__health";
+      if (health?.degraded) healthLine.classList.add("plugin-row__health--degraded");
+      healthLine.textContent = healthSummary;
+      copy.append(healthLine);
+    }
+
     const state = document.createElement("span");
     state.className = "plugin-row__state";
     // A plugin the host refused to load must not read in the same green as one
@@ -1807,15 +2176,210 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (plugin.state === "invalid") state.classList.add("plugin-row__state--error");
     state.textContent = formatPluginStatus(plugin);
 
+    const actions = document.createElement("div");
+    actions.className = "plugin-row__actions";
+
+    if (health?.degraded) {
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "settings-button settings-button--quiet";
+      resume.dataset.pluginResume = plugin.id;
+      resume.textContent = "Resume";
+      actions.append(resume);
+    }
+    const updateProgress = pluginManager.progressFor(plugin.id);
+    const updateBusy = isPluginInstallBusy(updateProgress);
+    if (plugin.updateTo || updateBusy) {
+      const update = document.createElement("button");
+      update.type = "button";
+      update.className = "settings-button settings-button--quiet";
+      update.dataset.pluginUpdate = plugin.id;
+      // A second click while one is already running must not restart it — the
+      // controller itself ignores it too, but the button should already look
+      // like there is nothing left to click.
+      update.disabled = updateBusy;
+      update.textContent = updateBusy
+        ? updateProgress?.phase === "downloading"
+          ? `Downloading ${pluginPercent(updateProgress)}%`
+          : updateProgress?.phase === "verifying"
+            ? "Verifying…"
+            : "Installing…"
+        : `Update to v${plugin.updateTo}`;
+      actions.append(update);
+      if (updateProgress?.phase === "failed") {
+        const failed = document.createElement("small");
+        failed.className = "plugin-row__update-error";
+        failed.textContent = updateProgress.message || "This update did not finish.";
+        copy.append(failed);
+      }
+    }
+    if (plugin.rollbackTo) {
+      const rollback = document.createElement("button");
+      rollback.type = "button";
+      rollback.className = "settings-button settings-button--quiet";
+      rollback.dataset.pluginRollback = plugin.id;
+      // Said in the button itself, before the click that would act on it: a
+      // rollback is allowed to put a development build back in place of a
+      // signed one, and that is not the same kind of "previous version".
+      rollback.textContent =
+        plugin.rollbackTrusted === false
+          ? `Go back to v${plugin.rollbackTo} (unsigned)`
+          : `Go back to v${plugin.rollbackTo}`;
+      actions.append(rollback);
+    }
+
+    const log = document.createElement("button");
+    log.type = "button";
+    log.className = "settings-button settings-button--quiet";
+    log.dataset.pluginLog = plugin.id;
+    log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
+    log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
+    actions.append(log);
+
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "settings-button settings-button--quiet plugin-uninstall-button";
     remove.dataset.pluginUninstall = plugin.id;
     remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
     remove.textContent = "Uninstall";
+    actions.append(remove);
 
-    row.append(copy, state, remove);
+    row.append(copy, state, actions);
+
+    if (openPluginLogId === plugin.id) {
+      row.append(renderPluginLogPanel(plugin.id));
+    }
     return row;
+  };
+
+  const renderPluginLogPanel = (pluginId: string): HTMLElement => {
+    const panel = document.createElement("div");
+    panel.className = "plugin-row__log";
+    const entries = pluginJournalById.get(pluginId);
+    if (entries === undefined) {
+      panel.textContent = "Loading…";
+    } else if (entries === null) {
+      // A failed read must never look like a quiet, healthy plugin — the one
+      // case this panel exists to tell apart from the other.
+      panel.classList.add("plugin-row__log--error");
+      panel.textContent = "Orivo could not read this plugin's log. Try again.";
+    } else if (entries.length === 0) {
+      panel.textContent = "No recent activity.";
+    } else {
+      const list = document.createElement("ul");
+      for (const line of entries) {
+        const item = document.createElement("li");
+        item.textContent = phraseJournalEntry(line);
+        list.append(item);
+      }
+      panel.append(list);
+    }
+    return panel;
+  };
+
+  /**
+   * Health is a second command from a second module, so a freshly rendered
+   * registry list re-fetches it only when the id set actually changed — a
+   * caller that wants a forced re-check (after `resume`, after an import
+   * settles, or on opening the Plugins section) calls this directly instead
+   * of going through that guard.
+   */
+  const refreshPluginHealth = async (pluginIds: string[]): Promise<void> => {
+    if (pluginIds.length === 0) {
+      pluginHealthIdsKey = "";
+      pluginHealthById = new Map();
+      return;
+    }
+    const rows = await pluginHealthClient.getHealthReport(
+      pluginIds,
+      new AbortController().signal,
+    );
+    if (rows.length === 0) {
+      // The default client collapses every failure — no Tauri, an older host
+      // binary, a dropped IPC call — to an empty list, the same as a host
+      // with no health commands at all. A real report always answers one row
+      // per id it was given, so an empty one back for a non-empty request
+      // means the read failed, not that every plugin is healthy. The id key
+      // is left unset so the next render retries instead of caching this as
+      // "nothing to report".
+      return;
+    }
+    pluginHealthIdsKey = pluginIds.join(",");
+    pluginHealthById = new Map(rows.map((row) => [row.pluginId, row]));
+    renderDiscoveredPlugins();
+  };
+
+  // A runner import can push the plugin that ran it towards `degraded`
+  // (repeated `discover-page` failures), so health is worth a fresh read as
+  // soon as one settles — not continuously while it runs, only at the
+  // transition away from "running", which is what this tracks per profile.
+  const runnerImportPhaseByProfile = new Map<string, string>();
+  runnerManager.onChange(() => {
+    let settled = false;
+    for (const runner of runnerManager.runners()) {
+      for (const profile of runner.profiles) {
+        const phase = runnerManager.importFor(profile.id)?.phase ?? null;
+        const previous = runnerImportPhaseByProfile.get(profile.id) ?? null;
+        if (previous === "running" && phase !== null && phase !== "running") settled = true;
+        if (phase !== null) runnerImportPhaseByProfile.set(profile.id, phase);
+      }
+    }
+    if (settled) {
+      void refreshPluginHealth(pluginManager.catalog().installed.map((entry) => entry.id));
+    }
+  });
+
+  const resumeInstalledPlugin = async (pluginId: string): Promise<void> => {
+    try {
+      await pluginHealthClient.resume(pluginId, new AbortController().signal);
+    } catch (error) {
+      showToast(pluginHealthErrorMessage(error));
+    }
+    await refreshPluginHealth(pluginManager.catalog().installed.map((plugin) => plugin.id));
+  };
+
+  // The row itself shows progress and any failure (renderInstalledPluginRow
+  // reads pluginManager.progressFor), the same way a registry install already
+  // does — so this has nothing left to guess about the outcome, and nothing
+  // to toast on success either. The controller rejects on failure so this does
+  // not also print a lying "updated" toast; it is caught and dropped here.
+  const updateInstalledPlugin = (pluginId: string): void => {
+    void pluginManager.update(pluginId).catch(() => {});
+  };
+
+  const rollbackInstalledPlugin = async (pluginId: string): Promise<void> => {
+    const name = pluginName(pluginId);
+    const target = pluginManager.catalog().installed.find((entry) => entry.id === pluginId);
+    const unsigned = target?.rollbackTrusted === false;
+    try {
+      await pluginManager.rollback(pluginId);
+      showToast(
+        unsigned
+          ? `${name} went back to an unsigned build.`
+          : `${name} went back to a previous version.`,
+      );
+    } catch (error) {
+      showToast(pluginErrorMessage(error));
+    }
+  };
+
+  const togglePluginLog = async (pluginId: string): Promise<void> => {
+    if (openPluginLogId === pluginId) {
+      openPluginLogId = null;
+      renderDiscoveredPlugins();
+      return;
+    }
+    openPluginLogId = pluginId;
+    // Always a fresh read: a log cached from an earlier visit could be exactly
+    // the failure this panel must never quietly present as "nothing happened",
+    // and the log can genuinely change between visits regardless.
+    pluginJournalById.delete(pluginId);
+    renderDiscoveredPlugins();
+    const entries = await pluginHealthClient.getJournal(pluginId, new AbortController().signal);
+    if (openPluginLogId === pluginId) {
+      pluginJournalById.set(pluginId, entries);
+      renderDiscoveredPlugins();
+    }
   };
 
   // Quiky is the Store's installer, not a plugin the user manages: it has no
@@ -1844,6 +2408,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const installed = pluginManager.catalog().installed;
     const rows = installed.map(renderInstalledPluginRow);
     refs.pluginsInstalledList.append(...rows);
+
+    const ids = installed.map((plugin) => plugin.id);
+    if (ids.join(",") !== pluginHealthIdsKey) {
+      void refreshPluginHealth(ids);
+    }
   };
 
   /**
@@ -1884,8 +2453,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    refs.runnersPanel.hidden = state.pluginView !== "runners";
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
+    refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
     const matches = available.filter(
@@ -1944,6 +2515,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
+    // Cheap and always fresh: a background import or a plugin update can
+    // change a profile's status between visits, so every open re-reads it.
+    if (id === "runners") void runnerManager.load(new AbortController().signal);
   };
 
   const renderWineSettingsPanel = (): void => {
@@ -4482,6 +5056,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       navigate({ page: "settings", section: "libraries", attachGameId: null });
     } else if (action === "local") {
       void importGame();
+    } else if (action === "winlator-folder") {
+      void connectWinlatorExportFolder();
+    } else if (action === "winlator-import") {
+      void importWinlatorShortcuts();
+    } else if (action === "console-folder") {
+      // The slug names a menu row; the host refuses anything outside its own
+      // closed set, so nothing here has to be trusted.
+      void connectConsoleRomFolder(trigger.dataset.consoleEmulator ?? "");
+    } else if (action === "console-import") {
+      void importConsoleRoms();
+    } else if (action === "console-dismiss") {
+      closeLibraryMenu();
+      state.consoleReview = null;
+    } else if (action === "winlator-dismiss") {
+      // Declining is not a refusal to see them again: the shortcuts stay in the
+      // folder, and the same entry lists them next time.
+      state.winlatorReview = null;
+      closeLibraryMenu();
     }
   });
 
@@ -4757,6 +5349,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       state.sourceAccounts.lastSync.set(result.provider, result);
       renderSourceAccountsPanel();
     });
+    // The background pass runs after the first paint and imports nothing: it
+    // says what is waiting, and the user decides. Nothing is refreshed here
+    // because nothing changed.
+    void listen<unknown>(WINLATOR_SHORTCUTS_WAITING_EVENT, (event) => {
+      const waiting = winlatorWaitingToast(event.payload);
+      if (waiting) showToast(waiting);
+    });
     void listen<WineLaunchStatusEvent>(WINE_LAUNCH_STATUS_EVENT, (event) => {
       const payload = event.payload;
       if (
@@ -4983,7 +5582,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       if (route.section === "plugins") void refreshWineRunnerSettings();
       // The catalogue is re-read on every visit: a plugin installed from the
       // file picker in a previous session has to show up without a restart.
-      if (route.section === "plugins") void pluginManager.load(activation.signal);
+      if (route.section === "plugins") {
+        // A plugin can turn `degraded` while Settings is closed — during a
+        // background import, say — so its health is worth a fresh read on
+        // every visit too, not only when the installed id set has changed.
+        pluginHealthIdsKey = "";
+        void pluginManager.load(activation.signal);
+      }
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
@@ -5121,7 +5726,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "runners") {
       openPluginDetail(pluginId);
       return;
     }
@@ -5147,6 +5752,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
     if (target?.closest("[data-plugin-install-file]")) {
       void installPluginFromFile();
+      return;
+    }
+    if (target?.closest("[data-plugin-refresh-registry]")) {
+      void pluginManager.refreshCatalog();
+      return;
+    }
+    const resumeId = target?.closest<HTMLButtonElement>("[data-plugin-resume]")?.dataset.pluginResume;
+    if (resumeId) {
+      void resumeInstalledPlugin(resumeId);
+      return;
+    }
+    const updateId = target?.closest<HTMLButtonElement>("[data-plugin-update]")?.dataset.pluginUpdate;
+    if (updateId) {
+      updateInstalledPlugin(updateId);
+      return;
+    }
+    const rollbackId = target?.closest<HTMLButtonElement>("[data-plugin-rollback]")?.dataset
+      .pluginRollback;
+    if (rollbackId) {
+      void rollbackInstalledPlugin(rollbackId);
+      return;
+    }
+    const logId = target?.closest<HTMLButtonElement>("[data-plugin-log]")?.dataset.pluginLog;
+    if (logId) {
+      void togglePluginLog(logId);
       return;
     }
 
@@ -5194,6 +5824,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       target.checked
     ) {
       void savePreferences({ motion: target.value as MotionPreference });
+    }
+    if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
+      // The controller repaints the checkbox back to the host's own value
+      // either way; this only needs to say why it did not stick.
+      void pluginManager.setAutomaticUpdates(target.checked).catch((error) => {
+        showToast(pluginErrorMessage(error));
+      });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -6145,6 +6782,30 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
               </button>
+              <!-- Android only, and deliberately not a desktop no-op: Winlator is
+                   an Android application, and the folder chooser this opens does
+                   not exist anywhere else. -->
+              ${
+                isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? `<button type="button" class="library-source-action" role="menuitem" data-library-action="winlator-folder">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>Winlator shortcuts</strong><small>Review what Winlator exported, and add what you want</small></span>
+              </button>`
+                  : ""
+              }
+              <!-- One row per emulator, Android only and for the same reason: the
+                   emulator is an Android application and so is the chooser. The
+                   slug is the host's own token for it. -->
+              ${
+                isConsoleEmulatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? CONSOLE_EMULATORS.map(
+                      (emulator) => `<button type="button" class="library-source-action" role="menuitem" data-library-action="console-folder" data-console-emulator="${emulator.slug}">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>${emulator.label} games</strong><small>${emulator.description}</small></span>
+              </button>`,
+                    ).join("")
+                  : ""
+              }
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
@@ -6455,13 +7116,29 @@ function shell(): string {
                       <span class="plugin-row__state">Installed</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
+                    <div class="settings-row plugin-row">
+                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("gamepad")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Third-party runners</strong>
+                        <small>Emulator plugins, and the profiles you build for them</small>
+                      </div>
+                      <span class="plugin-row__state">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="runners" aria-label="Open third-party runner settings">${icon("chevron-right")}</button>
+                    </div>
                   </div>
                 </div>
 
                 <div class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <p class="plugins-group__label">Available</p>
-                    <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>Install from file…</button>
+                    <div class="plugins-group__header-actions">
+                      <label class="plugins-automatic-updates">
+                        <input id="plugins-automatic-updates" type="checkbox" />
+                        <span>Automatic updates</span>
+                      </label>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>Check for updates</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                    </div>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
@@ -6535,6 +7212,18 @@ function shell(): string {
                     <small>Saved keys are picked up immediately — no restart needed.</small>
                   </div>
                 </div>
+              </section>
+
+              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" hidden>
+                <header class="settings-card__header">
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
+                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="runners-panel-title">Third-party runners</strong>
+                    <small>Add an emulator: pick its application, the folders it should read, and import your games</small>
+                  </div>
+                </header>
+                <div id="runners-panel-body"></div>
               </section>
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>

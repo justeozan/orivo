@@ -829,6 +829,17 @@ pub fn winlator_game_launchable(catalog: &Catalog, profile_id: &str, game_ref: &
             .is_some()
 }
 
+/// The same two questions for a console emulator: is its profile still here and
+/// enabled, and does the private ROM record behind the card exist.
+pub fn console_game_launchable(catalog: &Catalog, profile_id: &str, game_ref: &str) -> bool {
+    catalog
+        .console_profile(profile_id)
+        .is_some_and(|profile| profile.enabled)
+        && catalog
+            .console_inventory_entry(profile_id, game_ref)
+            .is_some()
+}
+
 fn project_catalog_game(
     game: &Game,
     catalog: &Catalog,
@@ -862,6 +873,13 @@ fn project_catalog_game(
             game_ref,
         } if runner_id == WINLATOR_RUNNER_ID => {
             cfg!(target_os = "android") && winlator_game_launchable(catalog, profile_id, game_ref)
+        }
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if crate::catalog::is_console_runner_id(runner_id) => {
+            cfg!(target_os = "android") && console_game_launchable(catalog, profile_id, game_ref)
         }
         LaunchTarget::Runner { .. } => false,
         // Epic tells us, through the launcher's own manifests, whether this
@@ -1519,6 +1537,7 @@ mod tests {
                 shortcut_directories: vec![std::path::PathBuf::from(
                     "/storage/emulated/0/Download/Winlator/Frontend",
                 )],
+                shortcut_trees: Vec::new(),
                 enabled: true,
                 last_imported_at: None,
             })

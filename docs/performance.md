@@ -9,6 +9,11 @@ chiffres est un lot séparé. Chaque nombre ci-dessous est reproductible avec le
 commandes données en fin de document, et daté de sa mesure : un chiffre sans
 date ni condition machine n'est qu'une anecdote.
 
+Ce préambule est celui du lot de mesure (O1). Le premier lot d'optimisation à
+partir de ces chiffres est arrivé depuis : la section **3 bis** porte
+l'avant/après du cache de compilation des composants (P5), mesuré avec le même
+banc que la section 3 et dans le même run.
+
 ## Méthode
 
 - **Préchauffage puis répétitions.** Chaque mesure sépare une première
@@ -83,27 +88,45 @@ qu'un retour anticipé sur liste vide).
 | --- | --- | --- | --- |
 | `Catalog::load_with_migration` (lecture + parse JSON) | 90 µs | 418 µs | 4,6 ms |
 | `Catalog::save_atomically` (sérialisation + écriture atomique) | 554 µs | 1,4 ms | 11,5 ms |
-| `auto_apply_wine_to_direct_games` | 26,2 ms\* | 22,5 ms\* | 25,9 ms\* |
-| `auto_apply_winlator_shortcuts` | 0 ns | 0 ns | 0 ns |
+| ~~`auto_apply_wine_to_direct_games`~~\* | — | — | — |
+| ~~`auto_apply_winlator_shortcuts`~~\*\* | — | — | — |
 
-\* Ce chiffre ne dépend pas de `n` : c'est le coût fixe d'une sonde disque
-(`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
-canonicalisés) qui s'exécute une seule fois par appel dès qu'un jeu Windows
-local existe et qu'aucun profil Wine managé n'est encore associé — jamais une
-fois par jeu. Sur la machine partagée de cette mesure, une répétition sur
-cinq a atteint 960 ms au lieu de ~25 ms (contention disque avec sept builds
-concurrents) : à surveiller si ce chiffre revient sur une machine calme, mais
-pas traité comme une régression ici. `auto_apply_winlator_shortcuts` est un
-vrai no-op sur macOS (`cfg!(target_os = "android")`), donc à coût nul quelle
-que soit `n` sur cette plateforme — la mesure le confirme plutôt que de le
-supposer.
+\* Cette ligne mesurait `auto_apply_wine_to_direct_games` — 26,2 ms, 22,5 ms et
+25,9 ms respectivement (médiane des cinq répétitions), coût fixe d'une sonde
+disque (`wine_runner::detect_wine_staging`, une douzaine de chemins candidats
+canonicalisés) qui s'exécutait une seule fois par appel dès qu'un jeu Windows
+local existait et qu'aucun profil Wine managé n'était encore associé — jamais
+une fois par jeu — tant que la passe tournait dans `AppState::load`. Depuis
+O2b elle n'y tourne plus du tout, pour la même raison et de la même façon que
+Winlator ci-dessous (M1, #44) : elle est passée en tâche de fond après le
+premier rendu, en pages bornées et annulables (`WINE_AUTO_APPLY_PAGE_SIZE`).
+`bench_catalog_at_size` ne la mesure donc plus ici — le coût de démarrage
+qu'elle représentait est zéro par construction, prouvé par ce même banc
+(`cargo test --release perf_bench::bench_catalog -- --ignored --nocapture`) :
+les trois tailles tournent maintenant en ~0,1 s au total contre plusieurs
+centaines de ms avant, l'écart étant exactement les cinq répétitions × 3
+tailles de sonde disque qui s'exécutaient ici. Son coût réel, inchangé, est
+mesuré séparément par `bench_wine_auto_apply_at_size` :
+28,2 ms / 27,4 ms / 29,9 ms (médiane, n=10 / 1 000 / 10 000) — la même sonde,
+au même prix, simplement plus sur le chemin de démarrage. Sur la machine
+partagée de cette mesure, une répétition sur cinq a occasionnellement dépassé
+largement la médiane (jusqu'à 85-100 ms selon le run, contention disque avec
+sept builds concurrents) : à surveiller si ce chiffre revient sur une machine
+calme, mais pas traité comme une régression ici.
+
+\*\* Cette ligne mesurait `auto_apply_winlator_shortcuts` — un no-op vérifié
+hors Android (`cfg!(target_os = "android")`), à 0 ns quelle que soit `n` — tant
+que la passe tournait dans `AppState::load`. Depuis M1 (#44) elle n'y tourne
+plus du tout : elle est passée en tâche de fond après le premier rendu, ne lit
+que le dossier que l'utilisateur a connecté par SAF, et n'écrit rien. Le banc
+ne la mesure donc plus ici, faute de pouvoir synthétiser un grant ; le coût de
+démarrage qu'elle représentait est zéro par construction.
 
 **Lecture :** le parse/sérialisation JSON croît linéairement et reste sous la
 milliseconde jusqu'à 1 000 jeux, environ 4-12 ms à 10 000 — largement sous un
-budget de premier rendu perçu. Les deux passes d'auto-application sont soit un
-no-op vérifié (Winlator hors Android), soit un coût fixe indépendant de la
-taille de la bibliothèque (Wine), jamais une boucle par jeu qui écrirait sur
-le disque.
+budget de premier rendu perçu. Les deux passes d'auto-application — Wine et
+Winlator — ont maintenant quitté le chemin de démarrage : aucune boucle par
+jeu qui écrirait sur le disque ne reste synchrone avec le premier rendu.
 
 ## 3. Plugins — coût de découverte, avec et sans composants installés
 
@@ -126,11 +149,14 @@ Coût par composant : ~31 ms, constant, cohérent avec le test déjà présent d
 (`reports_what_a_prepared_component_costs_against_a_cold_one`, qui a mesuré
 30,98 ms de compilation Wasmtime à froid pour ce même fixture le même jour).
 Ce coût est celui d'une compilation Cranelift à froid, payée une fois par
-composant à chaque appel de ces deux commandes — il n'y a pas de cache de
-compilation inter-appels (`Component::new` recompile toujours), et pas de
-palier observé à `MAX_PROBED_PLUGINS` (16) : ce plafond réduit l'étape
-interactive (`get-identity`/`health-check`), pas la compilation, qui reste
-payée pour chaque composant découvert.
+composant à chaque appel de ces deux commandes, et sans palier observé à
+`MAX_PROBED_PLUGINS` (16) : ce plafond réduit l'étape interactive
+(`get-identity`/`health-check`), pas la compilation, qui reste payée pour chaque
+composant découvert. Les chiffres de ce tableau sont ceux d'un processus **sans
+cache de compilation** — ce qu'était Orivo quand ils ont été pris, et ce que
+reste un processus dont le cache n'est pas configuré ou dont la clé
+d'installation est indisponible. La section suivante mesure ce que le cache leur
+retire.
 
 **Pourquoi ceci ne dégrade jamais premier rendu, rail ou recherche locale :**
 ce n'est pas une hypothèse, c'est ce que montre le code. `get_plugin_catalog`
@@ -140,6 +166,71 @@ ouvre Réglages → Plugins ou le flux « Ajouter un émulateur »
 (`src-tauri/src/lib.rs:1235`, `src-tauri/src/plugin_installer.rs:192`) — jamais
 depuis `AppState::load` ni depuis un chemin de rendu. Le tableau ci-dessus
 borne donc le pire cas de ces deux écrans, pas un coût caché du démarrage.
+
+## 3 bis. Plugins — ce que le cache de compilation retire (P5)
+
+Banc : `src-tauri/src/perf_bench.rs`, `bench_plugin_compile_cache_*`. Même
+commande, même machine et même run que la section 3, mais avec une différence
+assumée dans la fixture : **les copies portent des octets distincts** (une
+section custom WebAssembly ajoutée au composant fixture, ignorée par le modèle de
+composants et par Cranelift). La section 3 installe N copies d'un même composant,
+ce qui est la bonne forme pour mesurer une compilation et la mauvaise pour
+mesurer un cache — N paquets partageraient *un* artefact et flatteraient un cache
+censé en garder un par composant. Ici, N composants distincts occupent N
+emplacements distincts.
+
+Trois lignes pour le même travail : sans cache du tout (l'état d'avant ce lot),
+un cache qui voit chaque composant pour la première fois, et un cache qui les
+détient déjà.
+
+| Composants installés | Sans cache (médiane) | Cache froid (une fois) | Cache chaud (médiane) |
+| --- | --- | --- | --- |
+| 1 | 32,8 ms | 40,3 ms | **1,9 ms** |
+| 8 | 258,9 ms | 305,3 ms | **14,4 ms** |
+| 20 | 645,8 ms | 763,2 ms | **36,2 ms** |
+
+Par composant : **~32 ms → ~1,8 ms**, soit un facteur ~18, et le coût par
+composant reste plat de 1 à 20 (1,88 / 1,80 / 1,81 ms) — c'est ce qui valide la
+lecture ci-dessus, puisque N artefacts distincts se rechargent au même prix
+unitaire qu'un seul.
+
+Le chemin de lecture a changé après la contre-revue (ouverture non bloquante,
+refus d'un créneau qui n'est pas un fichier ordinaire), donc le banc a été rejoué
+sur le code livré. La machine partagée était plus chargée à ce moment-là et les
+valeurs absolues le montrent : 41,5 / 297,1 / 809,2 ms sans cache et 2,5 / 15,0 /
+54,6 ms à chaud, pour 1 / 8 / 20 composants. Ce qui survit à la contention est le
+rapport — 16,6× / 19,9× / 14,8× — et c'est la raison pour laquelle le tableau
+ci-dessus garde la mesure du run le plus calme plutôt que de faire passer du bruit
+pour une régression ou pour un gain.
+
+Trois choses que ce tableau ne dit pas, et qu'il faut lire avec lui.
+
+- **Le cache froid est plus lent que l'absence de cache**, de 8 à 117 ms selon N :
+  la première passe compile *et* sérialise *et* écrit. C'est payé une fois par
+  composant et par version du moteur, pas une fois par ouverture, et c'est la
+  raison pour laquelle cette colonne est mesurée à part au lieu d'être noyée dans
+  une médiane.
+- **Le chaud n'est pas du pur `deserialize`.** La découverte sonde aussi
+  `get-identity` et `health-check`, donc les ~1,8 ms restants par composant
+  contiennent l'instanciation et deux appels invités. Ce qui change vraiment :
+  l'écran à 20 composants passe sous le budget interactif de 150 ms du plan
+  (36 ms), alors qu'il était à 646 ms.
+- **Rien de ceci n'est lu au démarrage — mais il a fallu le rendre vrai.** La
+  première version de ce lot l'affirmait à tort : `start_background_maintenance`
+  demande au registre ce qui est installé pour voir si une mise à jour consentie
+  attend, et ce passage atteignait `prepare_component` comme un panneau de
+  réglages, donc une compilation par plugin à chaque lancement — sur le runtime
+  async, et avec un cache derrière, la lecture de la clé au lancement. Deux
+  corrections : ce passage lit désormais les manifestes et ne compile plus rien
+  (`PluginRegistry::installed_manifests`), et le cache ne s'ouvre qu'après qu'une
+  surface ouverte par l'utilisateur l'a permis (`plugin_compile_cache::permit`),
+  de sorte qu'un chemin de fond ajouté plus tard est sans cache par défaut. Les
+  chiffres de la section 2 ont été repris dans le même run et n'ont pas bougé
+  (`load_with_migration` 4,06 ms et `save_atomically` 10,29 ms à n=10 000, contre
+  4,6 et 11,5 ms avant) ; et les lignes `bench_plugin_surfaces_*` de la section 3,
+  prises dans ce même processus, sont restées à ~32 ms par composant parce
+  qu'aucun cache n'y est permis — ce qui mesure aussi, au passage, qu'un processus
+  sans cache se comporte exactement comme avant.
 
 ## 4. Taille du bundle
 
@@ -217,6 +308,109 @@ mesurés dans Chromium desktop (section 1) : l'écart est cohérent avec un
 rendu logiciel d'émulateur plutôt qu'avec un défaut de l'application — mais
 seul un vrai appareil pourra le confirmer ou l'infirmer.
 
+## 7. Le runner Ryujinx en plugin, installé (étape 2.4)
+
+Banc : `src-tauri/src/perf_bench.rs`, fonctions `bench_ryujinx_*`. Mesuré le
+2026-09-27 sur la même machine partagée et dans les mêmes conditions que les
+sections 2, 3 et 3 bis, en profil `release`, `--test-threads=1`. **Rebasé sur le
+cache de compilation (#49)** : les chiffres ci-dessous sont mesurés deux fois,
+sans cache et avec, parce que c’est la seule façon de dire ce que le composant
+coûte réellement à un import.
+
+C’est le premier plugin réel que le dépôt contient (`plugins/ryujinx/`, voir
+[`docs/ryujinx-runner.md`](ryujinx-runner.md)), donc la première fois que
+« avec un plugin installé » désigne autre chose que N copies du fixture
+adversarial. Le paquet est installé par la vraie transaction, sur le canal
+développeur ; le dossier accordé contient N fausses ROMs nommées comme un dump
+l’est vraiment (`Bench Game 12 [010000000000000C][v0].nsp`) ; l’application
+d’émulation est un bundle `.app` fabriqué par le banc. Aucun vrai Ryujinx,
+aucune vraie clé, aucun vrai jeu.
+
+| Mesure | n=1 | n=100 | n=1000 |
+| --- | --- | --- | --- |
+| Import, **sans cache** (premier / relancé) | 33,7 / 33,8 ms | 37,0 / 37,3 ms | 59,1 / 62,3 ms |
+| Import, **cache chaud** (premier / relancé) | **2,0 / 1,9 ms** | **5,0 / 5,2 ms** | **27,9 / 29,5 ms** |
+| Jeux réellement importés / pages | 1 / 1 | 100 / 2 | **256 / 6** |
+| `prepare_runner_launch` du premier jeu (médiane) | 172 µs | 198 µs | 184 µs |
+| `Catalog::load_with_migration` après import (médiane) | 14,8 µs | 214,8 µs | 558,6 µs |
+
+Ouverture de Réglages → Plugins et du flux émulateur, avec ce seul plugin
+installé :
+
+| Commande | Sans cache | Cache froid | Cache chaud |
+| --- | --- | --- | --- |
+| `get_plugin_catalog` (Réglages → Plugins) | 33,6 ms | 40,4 ms | **1,85 ms** |
+| `get_runner_plugins` (flux « Ajouter un émulateur ») | 33,6 ms | — | — |
+
+Compteurs du cache après cette série : `hits: 5, misses: 1, stores: 1`, aucun
+artefact refusé.
+
+**Ce que ces chiffres disent, et ce que deux mesures précédentes disaient de
+travers.**
+
+1. **1000 fichiers n’en font pas 1000.** À n=1000, l’import en écrit **256** :
+   `MAX_DIRECTORY_ENTRIES` (256, `plugin_runtime.rs`) borne ce que le host
+   accepte de dire à *n’importe quel* plugin d’un dossier, donc le reste de la
+   bibliothèque est invisible — pas lent, invisible. La coupe laisse une ligne
+   `files-truncated` dans le journal, que Réglages → Plugins affiche, mais le
+   contrat n’a aucun champ pour le dire au plugin. C’est la limite produit la
+   plus dure de ce palier ; elle est consignée dans
+   [`docs/ryujinx-runner.md`](ryujinx-runner.md) et reste à trancher (pagination
+   de `list-directory` en v2, ou plusieurs dossiers accordés par profil).
+2. **Une première mesure a trouvé un vrai défaut, et il est corrigé.** Le même
+   banc donnait 164,0 ms à n=1000 avant que `resolve_page_candidates` ne lise ses
+   dossiers accordés **une fois par page** au lieu d’une fois par candidat : une
+   page de cinquante coûtait cinquante parcours du même dossier, soit ≈ 0,51 ms
+   par jeu pour une écriture catalogue qui en vaut environ dix fois moins. La
+   résolution passe par un `GrantedLibrary` construit une fois par page. Une page
+   est aussi devenue cohérente avec elle-même : sa seconde moitié ne peut plus
+   contredire la première sur le contenu du dossier.
+3. **Avec le cache de #49, la compilation n’est plus la part dominante d’un
+   import — la bibliothèque l’est.** C’est le deuxième énoncé de cette section
+   qui devient faux, et il faut le dire plutôt que le laisser vieillir : sans
+   cache, un import paie ≈ 33 ms de Cranelift à chaque appel de
+   `RunnerPackage::load` et ça domine tout jusqu’à quelques centaines de jeux ;
+   avec cache, la même charge tombe à 2,0 ms à n=1 et à 27,9 ms pour 256 jeux,
+   où il ne reste presque que les transactions catalogue (≈ 0,11 ms par jeu, six
+   commits atomiques). Les deux imports mesurés avec cache sont des **succès de
+   cache**, et c’est le cas de production : `ThirdPartyRunnerService::runtime`
+   autorise le cache à chaque geste runner, et le geste qui paie la compilation à
+   froid est celui qui a choisi l’émulateur, pas l’import.
+4. **La compilation à froid est payée à l’ouverture de l’écran, une fois pour
+   toutes.** 40,4 ms contre 33,6 ms sans cache — compiler *et* écrire coûte
+   légèrement plus que compiler — puis **1,85 ms** à chaque ouverture suivante,
+   soit un facteur 18. C’est la même forme que la section 3 bis mesure sur N
+   copies du fixture, vérifiée ici sur un second composant indépendant plutôt
+   que supposée.
+5. **Le premier lancement est à trois ordres de grandeur du budget.** Le contrat
+   de performance du plan donne « budget initial de 150 ms » à une invocation
+   interactive : `prepare_runner_launch` — `prepare-launch` sous le budget,
+   validation de l’intent, résolution du binaire dans le bundle `.app` et du
+   fichier de jeu dans le dossier accordé — tient en **≈ 0,2 ms**, et ne varie
+   pas avec la taille de la bibliothèque. Ce chiffre exclut `spawn`, qui
+   démarrerait un vrai émulateur.
+6. **Le démarrage ne paie rien pour ce plugin, mais une carte runner coûte plus
+   qu’une carte ordinaire.** « Aucun composant tiers n’est requis avant le
+   premier shell utilisable » reste vrai par construction, et #49 l’a resserré :
+   `AppState::load` ne touche jamais `PluginRuntime::shared()`, et le cache
+   lui-même ne s’ouvre pas avant un geste à propos d’un plugin
+   (`plugin_compile_cache::permit`). Ce que le démarrage paie vraiment après un
+   import, c’est du JSON : **559 µs** pour 256 cartes runner. La croissance est
+   linéaire comme en section 2, mais la pente ne l’est pas la même — **≈ 2,2 µs
+   par carte runner contre ≈ 0,4 µs par jeu ordinaire, environ cinq fois plus
+   raide**. La raison est dans le schéma et pas dans le code de lecture : un jeu
+   runner est *deux* enregistrements, la carte plus sa ligne d’inventaire privée
+   (`RunnerGameInventoryEntry` : chemin résolu, créneau de grant, provider, id
+   externe), et les chemins y sont longs. À une bibliothèque Switch de 2 000 jeux
+   cela ferait environ 4,5 ms de démarrage, toujours très en dessous du premier
+   rendu ; à surveiller si une intégration future importe des dizaines de milliers
+   de lignes.
+
+Aucun budget n’est proposé pour ces lignes : le seul seuil que le plan fixe déjà
+(150 ms interactif) est respecté avec une marge de trois ordres de grandeur, et
+la valeur qui restait à surveiller — la compilation — est désormais celle que la
+section 3 bis borne.
+
 ## Budgets proposés
 
 Des propositions, pas des seuils déjà décidés — à valider par l'équipe avant
@@ -233,7 +427,8 @@ une marge :
 | `Catalog::load_with_migration` à 10 000 jeux | < 20 ms | 4,6 ms |
 | `Catalog::save_atomically` à 10 000 jeux | < 30 ms | 11,5 ms |
 | Tâches longues pendant la navigation au clavier dans le rail | 0 | 0 |
-| `get_plugin_catalog` / `get_runner_plugins`, par composant | < 60 ms | ~31 ms |
+| `get_plugin_catalog` / `get_runner_plugins`, par composant, sans cache | < 60 ms | ~32 ms |
+| `get_plugin_catalog` / `get_runner_plugins`, par composant, cache chaud | < 5 ms | ~1,8 ms |
 
 ## Reproduire ces mesures
 
@@ -244,6 +439,14 @@ pnpm exec playwright test -c perf/web/playwright.perf.config.ts
 
 # Rust, catalogue et plugins — --release, sinon les chiffres ne veulent rien dire
 cargo test --manifest-path src-tauri/Cargo.toml --release perf_bench -- --ignored --nocapture --test-threads=1
+
+# L'avant/après du cache de compilation (section 3 bis)
+cargo test --manifest-path src-tauri/Cargo.toml --release \
+  perf_bench::bench_plugin_compile_cache -- --ignored --nocapture --test-threads=1
+
+# Le runner Ryujinx en plugin (section 7) — même banc, filtré
+cargo test --manifest-path src-tauri/Cargo.toml --release perf_bench::bench_ryujinx \
+  -- --ignored --nocapture --test-threads=1
 
 # Le coût de compilation à froid d'un seul composant, déjà présent dans le dépôt
 cargo test --manifest-path src-tauri/Cargo.toml --release \

@@ -113,7 +113,8 @@ These exist so a suite can be adversarial without reaching into private state.
   each of them: a grant is a descriptor, not a path, so a test can swap the folder
   or a parent afterwards and watch the grant hold.
 - **Grants that outlive the value.** A descriptor pins a folder for as long as a
-  `PluginGrants` lives, and nothing longer. Whatever persists grants stores a
+  `PluginGrants` lives, and nothing longer. `DirectoryIdentity` is a device and an
+  inode on Unix and a volume serial number and a file index on Windows. Whatever persists grants stores a
   *path*, and a path is answered by whatever is at it on the next start, so the
   approval also records `PluginGrants::directory_identity` — the folder's device
   and inode, as two plain integers — and `PluginGrants::resolve_pinned` refuses
@@ -145,25 +146,126 @@ These exist so a suite can be adversarial without reaching into private state.
 
 ### Gaps, and where they are
 
-Three of these are open, and this section exists so nobody reads the code as
-closing them.
+Windows used to be three gaps and is now one. `plugin_runtime`'s tests run on
+`windows-latest` in CI (`Test the plugin host (Windows)`), so what is described
+here as closed has been *executed* there rather than reasoned about.
 
-- **Windows does not pin a grant.** `openat` has an equivalent there —
-  `NtCreateFile` with a directory handle as `RootDirectory`, which is what `std`'s
-  unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`) — so the
-  swapped-parent and junction redirection *is* closable; it is not closed. Neither
-  is the folder identity, which needs `GetFileInformationByHandle`. Both need code
-  that cannot be type-checked on the machine this was written on: `cargo check
-  --target x86_64-pc-windows-msvc` stops in `ring`'s build script for want of a
-  Windows C toolchain, and Orivo's CI only `cargo check`s Windows. A stored
-  identity is therefore *refused* on Windows rather than waved through, which is
-  the direction that fails safe.
-- **The hard-link rule does not fire on Windows.** `EntryFacts` cannot count links
-  there without the same handle query, so it reports one name and the rule never
-  triggers. `FolderTrust` is unknown there too, for want of a DACL read.
-- **A listing enumerates through a path.** Names come from `read_dir`; every fact
-  comes from the handle. An attacker who swaps a parent can hide entries, never
-  reveal one. Enumerating from the descriptor needs `fdopendir`/`readdir`.
+Closed. Each of these is executed on the runner; where a bullet's *mechanism*
+cannot be produced there — a real filter driver serving a placeholder is the one
+that cannot — the bullet says so rather than letting the heading imply otherwise:
+
+- **A granted folder is a handle on Windows too.** `NtCreateFile` with the
+  directory handle as `RootDirectory` is the `openat` equivalent, the same pattern
+  `std`'s unstable `fs::Dir` uses (`std/src/sys/fs/windows/dir.rs:95-103`). A
+  junction re-pointed at a folder the user never approved — which `mklink /J`
+  makes with no privilege at all — no longer redirects a read or a listing.
+- **The link count** comes from `GetFileInformationByHandle`, so the hard-link rule
+  fires on Windows.
+- **The folder's identity is the whole identifier.** `GetFileInformationByHandleEx`
+  with `FileIdInfo` gives 128 bits and a 64-bit volume serial number, which is what
+  ReFS — and therefore a Dev Drive — actually uses; the 64-bit file index the older
+  query reports is a truncation of it with no uniqueness guarantee. The fallback to
+  that index is only reached on a filesystem answering neither NTFS's nor ReFS's
+  query, where it is the only identity on offer.
+- **A reparse point is only a redirection when its tag names one.**
+  `IsReparseTagNameSurrogate` (`ntifs.h`, one bit) separates a symbolic link or a
+  junction from a file whose bytes merely live elsewhere: a OneDrive placeholder
+  that has not been downloaded, or a deduplicated file. Refusing all of them alike
+  made a granted folder under OneDrive-managed Documents look empty to a plugin,
+  and every read in it fail. (A WOF-compressed file has the same shape on paper
+  and turns out not to be a case this host ever saw: wof.sys hides the tag, so
+  such a file was never mistaken for a link in the first place — see the WOF
+  paragraph below.) A non-redirecting reparse point is now
+  reopened relative to the handle *following* it, which is what lets a filter
+  driver serve the file the user actually has. Executed on the runner as far as
+  the listing goes; the served-by-a-real-driver half is the gap named under
+  "Still open", because no runner here has a driver to do the serving.
+- **Not every non-surrogate tag is followed, and the two opens that follow one
+  are compared.** Clearing the name-surrogate bit says a tag is not a *name*; it
+  says nothing about who serves the bytes behind it, and single-instance storage
+  and the container-layer filter can in principle serve a *different* file's
+  data through a tag shaped exactly like a OneDrive placeholder.
+  `reparse_tag_is_followed` follows only `IO_REPARSE_TAG_WOF` (`ntifs.h`,
+  `0x80000017`) and the cloud-file family `IO_REPARSE_TAG_CLOUD`..`_F`
+  (`winnt.h`, base `0x9000001A`, provider nibble at `0x0000F000`).
+  `IO_REPARSE_TAG_DEDUP` is deliberately excluded even though it is a real,
+  documented Microsoft tag: Data Deduplication can hand back a chunk shared
+  with another file, and the identity check below cannot see that — it only
+  confirms the second open reached the same *file*, never that dedup served
+  that file's own bytes rather than a collision — and Windows client, which is
+  what Orivo ships to, does not have the feature at all. Anything not on the
+  list is refused before the second open is even attempted, and the journal is
+  told why (`reparse-tag-refused`). And because the same name is resolved
+  twice — once to read the tag, again to read the file — anything can happen to
+  it in between: the entry the second open reaches is now checked against the
+  first one's `FileIdInfo`, and a mismatch (a symbolic link swapped in for a
+  placeholder, the realistic case, since the first open's `FILE_SHARE_DELETE`
+  is what lets the entry be replaced while it is still held) is refused rather
+  than trusted (`reparse-entry-changed`).
+
+  Three of the four answers `open_entry_for_reading` can reach are asserted on
+  the runner, against a tag `reparse_tag_is_followed` actually trusts rather than
+  `plant_unrecognised_reparse_point`'s stand-in: the fallback (nothing claims the
+  tag, the first handle stands), the identity *match* (the seam takes the reparse
+  point off the same file, so the second open reaches it and the two `FileIdInfo`
+  answers agree), and the identity *mismatch* (the seam points the name at
+  another file). Each is asserted on which answer was reached and not on the
+  bytes, because the fallback and the match return the same bytes from the same
+  file — a byte comparison would pass either way, and did, while the match was
+  in fact unreachable.
+
+  The trusted tag is `IO_REPARSE_TAG_CLOUD`, hand-planted through
+  `FSCTL_SET_REPARSE_POINT` the same way `IO_REPARSE_TAG_DEDUP` proved plantable
+  before dedup came off the list. Nothing on the runner is registered to *claim*
+  it, which is what makes the fallback reachable and the served-by-a-driver path
+  not; see "Still open".
+
+  `compact /c /exe:LZX` was tried before it, and three earlier rounds of this
+  work concluded from `is_reparse_point` answering "no" that it produced no WOF
+  placeholder at all. That was an inference, and the runner has since contradicted
+  it: `FSCTL_GET_EXTERNAL_BACKING` reports a compacted file **externally backed**,
+  provider 2 and algorithm 1 — the file provider, LZX — while both attribute
+  queries, `is_reparse_point`'s and production's own `reparse_tag`, answer "no
+  reparse point". wof.sys keeps its own tag out of what this host can ask. The
+  consequence is stated because it is the useful part: a real WOF file reaches
+  `FollowOutcome::NoReparsePoint`, never the whitelist, and is read
+  transparently — which is correct, and is what
+  `a_compacted_file_reads_back_whatever_this_host_makes_of_its_tag` asserts, byte
+  for byte. `IO_REPARSE_TAG_WOF` therefore stays on the followed list for the
+  case where the tag *is* visible, with no test exercising it, because nothing
+  available here can make it visible.
+- **A listing still opens nothing that matters.** Entries are opened for
+  `FILE_READ_ATTRIBUTES` only: no data, no cloud hydration, and never refused over
+  another opener's share mode. Only `read_file` follows a placeholder, which is
+  what a plugin asking to read it should cost.
+
+Still open:
+
+- **A real filter serving a trusted tag's data is untested**, as distinct from
+  the identity check, which is not. Nothing registered on the runner claims
+  `IO_REPARSE_TAG_CLOUD`, and no attribute query there has ever seen a
+  `IO_REPARSE_TAG_WOF` placeholder to follow, so no test reaches the second open
+  by way of a driver *serving* anything: the identity-match test gets there by
+  removing the reparse point instead, which proves the comparison and not the
+  filter. A real cloud-sync provider registered through the Cloud Files API, or a
+  Windows image where a WOF placeholder stays visible, is what would close the
+  difference; neither is available in CI today.
+- **`FolderTrust` is unknown on Windows**, because telling a private folder from a
+  shared one means reading the DACL — `GetSecurityInfo`, walking the ACEs, and then
+  deciding which well-known SIDs count as somebody else, which is security policy
+  rather than a query. Unknown means not private, so the consequence is a *stricter*
+  rule than Unix's: every multiply-linked file in a granted folder is refused
+  there, including the user's own. Nothing is exposed by it; a deduplicated library
+  loses entries it should keep.
+- **A listing enumerates through a path on both platforms.** Names come from
+  `read_dir`; every fact comes from the handle. An attacker who redirects a parent
+  can hide entries, never reveal one. Enumerating from the handle needs
+  `fdopendir`/`readdir` on Unix and `NtQueryDirectoryFile` on Windows.
+- **A 128-bit identity has nowhere to be stored yet.** `DirectoryIdentity::wide` is
+  what a Dev Drive needs, and `DirectoryIdentity::new` is the 64-bit form every
+  other filesystem hands out; the catalogue keeps two `u64`s, so a wide identity
+  cannot be persisted and a reload would compare unequal — which refuses, never
+  accepts. Widening that record belongs with whoever owns the catalogue.
 
 A listing cut at 256 entries leaves a `files-truncated` decision behind. The
 contract has no field for it — see the ABI note in the PR that added this — so the

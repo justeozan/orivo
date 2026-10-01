@@ -1502,6 +1502,52 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .library-source-menu__label:first-child { margin-top: 7px; }
 
+/* The Winlator review: a question inside the menu rather than a dialog over it,
+   because nothing in Orivo is modal and the answer belongs where the folder was
+   connected. The titles come out of files on shared storage, so they are set as
+   text, never as markup. */
+.library-source-review__prompt {
+  margin: 0 12px 6px;
+  color: #efeaf6;
+  font-size: 13px;
+  line-height: 1.35;
+}
+/* The review's two answers carry no icon, so they take the whole row instead of
+   being squeezed into the 32px icon column. */
+.library-source-action--review { grid-template-columns: minmax(0, 1fr); }
+/* The whole list, not the first few: the button below it imports every row, so
+   the list has to be complete and is scrollable rather than truncated. Taller
+   than one screenful of a menu on purpose — the rows that need reading are
+   sorted to the top, and the rest are a scroll away rather than hidden. */
+.library-source-review__list {
+  margin: 0 12px 8px;
+  padding-left: 16px;
+  color: #b7b1c2;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 232px;
+  overflow-y: auto;
+}
+.library-source-review__note {
+  display: block;
+  margin-top: 4px;
+  color: #8f8a9b;
+  font-size: 11px;
+}
+.library-source-review__list li + li { margin-top: 6px; }
+.library-source-review__list strong { color: #efeaf6; font-weight: 600; }
+/* The file and its folder sit under the title rather than beside it: they are
+   long, and truncating the one thing that distinguishes two identical names
+   would undo the point of showing it. */
+.library-source-review__origin,
+.library-source-review__collision {
+  display: block;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.library-source-review__origin { color: #8f8a9b; }
+.library-source-review__collision { color: #e8b86b; }
+
 /* ---------------------------------------------------------------------------
    Settings page (a normal page: no backdrop, no focus trap, no Escape-to-close)
    --------------------------------------------------------------------------- */
@@ -1781,8 +1827,16 @@ body[data-mood="rage"] { --violet: #f2453c; }
   margin-bottom: 10px;
 }
 .plugins-group__header .plugins-group__label { margin: 0; }
+.plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .plugins-group__action { font-size: 12.5px; }
 .plugins-group__action .icon { width: 14px; height: 14px; }
+.plugins-automatic-updates {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #b7b2c1;
+  font-size: 12px;
+}
 /* A grid, not a flex row with `space-between`: the copy column has to start at
    the same x on every row, and a row that happens to have no chevron must not
    pull its status label across. */
@@ -1806,6 +1860,32 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-row--soon { opacity: .84; }
 .plugin-row__state--warn { color: #ecd08a; }
 .plugin-row__state--error { color: #f0a3a3; }
+.plugin-row__health { display: block; margin-top: 2px; color: #a9e6b3; }
+.plugin-row__health--degraded { color: #f0a3a3; }
+.plugin-row__update-error { display: block; margin-top: 2px; color: #f0a3a3; }
+/* Replaces the single Uninstall button as the row's fourth grid column, so a
+   row with an update, a rollback and a log toggle still lines up with one
+   that only has Uninstall. */
+.plugin-row__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* The log is guest text, several lines long, so it gets its own row rather
+   than fighting the four-column grid a plugin row otherwise keeps to. */
+.plugin-row__log {
+  grid-column: 1 / -1;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 10px;
+  color: #b7b2c1;
+  background: rgba(12,12,17,.5);
+  font-size: 12px;
+}
+.plugin-row__log ul { margin: 0; padding-left: 18px; }
+.plugin-row__log li + li { margin-top: 4px; }
+.plugin-row__log--error { color: #f0a3a3; }
 .plugin-uninstall-button { font-size: 12.5px; }
 /* The row's only control is its caret: a bare glyph that brightens on hover,
    with nothing drawn around it. */
@@ -1873,6 +1953,45 @@ body[data-mood="rage"] { --violet: #f2453c; }
   background: linear-gradient(90deg, #b9aff6, #f0edff);
   transition: width 200ms ease;
 }
+
+/* Third-party runners: one group per installed runner plugin, one card per
+   profile the user built for it ("Add an emulator"). */
+#runners-panel-body { display: grid; gap: 16px; padding: 4px 18px 18px; }
+.runner-group { display: grid; gap: 10px; }
+.runner-group__header { display: flex; align-items: center; gap: 10px; }
+.runner-group__header strong { color: #f2eff7; font-size: 14px; }
+.runner-group__state {
+  color: #ecd08a;
+  font-size: 12px;
+}
+.runner-profile-list { display: grid; gap: 10px; }
+.runner-profile-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  background: rgba(255,255,255,.04);
+}
+.runner-profile-card__header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.runner-profile-card__header strong { color: #f2eff7; font-size: 13px; }
+.runner-profile-card__status { color: #a9e6b3; font-size: 12px; }
+.runner-profile-card__status--error { color: #f0a3a3; }
+.runner-profile-card__status--pending { color: #9b96a6; }
+.runner-profile-card__toggle { display: flex; align-items: center; gap: 7px; color: #b7b2c1; font-size: 12px; }
+.runner-directory-list { display: grid; gap: 4px; }
+.runner-directory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(255,255,255,.06);
+  color: #d8d4e0;
+  font-size: 12px;
+}
+.runner-directory-row__revoked { color: #f0a3a3; }
+.runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 
 .plugin-back-button { height: 32px; padding: 0 12px; }
 .plugin-back-button .icon { width: 14px; height: 14px; }

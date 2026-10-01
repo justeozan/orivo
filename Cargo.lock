@@ -3069,6 +3069,8 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "getrandom 0.3.4",
+ "hmac",
  "jni 0.21.1",
  "keyring",
  "keyring-core",
@@ -3085,6 +3087,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "tauri-plugin-orivo-saf",
  "tauri-plugin-process",
  "tauri-plugin-updater",
  "tokio",
@@ -4725,6 +4728,15 @@ dependencies = [
  "url",
  "windows",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-orivo-saf"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tauri",
+ "tauri-plugin",
 ]
 
 [[package]]

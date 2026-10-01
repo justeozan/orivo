@@ -43,6 +43,19 @@ jamais une commande, jamais un shell, et testable sur l’hôte. Ce que Winlator
 expose réellement, quelles distributions sont lançables et pourquoi, est consigné
 dans [`docs/winlator-runner.md`](winlator-runner.md).
 
+Deux autres adapters natifs suivent le même précédent : les **émulateurs de
+consoles** sur Android. RetroArch et PPSSPP sont des applications déjà installées
+par le joueur, donc là encore le profil Orivo n’est qu’une référence — l’émulateur,
+la console, et les dossiers de ROM accordés — et le lancement est une Intent
+Android explicite construite par une fonction pure dont les clés d’extra sont des
+constantes de compilation. La nouveauté est la *forme du passage* : PPSSPP déclare
+le schéma `content` et lit `intent.getData()`, donc il reçoit le document même
+qu’Orivo a lu, avec `FLAG_GRANT_READ_URI_PERMISSION` — jamais un chemin. RetroArch
+prend un chemin, donc la même règle `primary:` stricte que Winlator s’applique, et
+elle est *réutilisée* plutôt que réécrite. Ce que chaque émulateur expose
+réellement, lesquels sont écartés et pourquoi, est consigné dans
+[`docs/console-emulators.md`](console-emulators.md).
+
 L’installateur de packages est désormais implémenté. Un plugin arrive sous
 forme d’archive `.orivo-plugin` (tar gzippé) contenant `manifest.json`,
 `component.wasm`, ses assets déclarés et une signature Ed25519 optionnelle. Le
@@ -57,6 +70,69 @@ paquet choisi à la main par l’utilisateur s’installe en `Development` et
 s’affiche comme non signé partout. Un paquet ne peut pas transporter de binaire
 natif : `blocked_payload_path` refuse `.exe`, `.dylib`, `.so`, `.dll` et les
 scripts, et toute entrée non déclarée dans le manifeste invalide l’archive.
+
+L’étape 3.1 est faite pour sa première moitié. Un **index de registry signé**
+(`plugin_index.rs`) complète le registre compilé dans le binaire : enveloppe
+versionnée dont la signature Ed25519 couvre les octets exacts du document,
+récupération HTTPS limitée à une allowlist compilée et revérifiée à chaque
+redirection, cache ETag/TTL sur disque, et un numéro de séquence qui ne recule
+jamais — parce qu’une signature reste valide pour toujours et que rejouer un
+index ancien est la façon dont un registre cache une mise à jour. Le chemin
+d’affichage ne lit que le cache ; rafraîchir est une commande séparée et
+annulable. Un document *vérifié* repasse malgré tout la même grammaire qu’un
+document inconnu : une signature dit qui a écrit, jamais que ce qui est écrit
+est sensé.
+
+Trois choses que la signature ne donne pas, et qu’il a fallu ajouter. Le
+**plancher anti-rejeu** ne vient jamais d’un champ du fichier de cache — une
+valeur écrite là se réécrit, à zéro pour laisser passer un vieil index, ou à
+`u64::MAX` pour geler le client sur celui qu’il a. Il vient d’une constante
+compilée et de l’index en cache *qui vérifie encore*. Le document porte une
+**date d’expiration signée** : sans elle, qui contrôle le réseau ou le dépôt
+tient tous les clients sur une seule vue du registry, et le plancher ne voit
+rien puisque rien ne recule ; passé ce délai, Orivo revient au registre
+compilé. Et l’index est haché derrière une **étiquette de domaine** : un paquet
+et un index étaient signés de la même façon avec la même clé, si bien que le
+`signature.ed25519` livré dans chaque paquet était une signature valide sur un
+« document d’index » — seuls des champs JSON obligatoires différents séparaient
+les deux rôles.
+
+La jonction entre les deux est désormais faite. Le registre de grants ne demande
+plus si un fichier existe à côté du plugin : il demande à l’installateur si
+*ces octets-là* sont ceux pour lesquels la transaction a accepté une signature.
+Et une permission ne survit à un changement de paquet que si la chaîne de
+consentement tient — même signataire, et strictement en avant : une
+rétrogradation est signée elle aussi, et c’est justement la version dont le
+`validate-profile` ou la découverte étaient peut-être plus faibles. Tout le
+reste — désinstallation, remplacement, rollback, retour à un build de
+développement — révoque les permissions et renvoie les profils à « à
+revalider », en gardant les dossiers choisis et tous les jeux importés.
+
+L’installateur expose enfin **l’identité du paquet** : pour la version vivante
+d’un plugin, sa version, le SHA-256 du composant qui tournera réellement, et
+quelle clé l’a signé. Un grant, comme un profil de runner jugé valide, est un
+accord avec un *paquet* et non avec un identifiant : un observateur enregistré
+depuis `lib.rs` est prévenu à chaque fois que ce paquet change — mise à jour,
+rollback, reprise après coupure — et à la désinstallation. Le marqueur de canal
+nomme l’empreinte pour laquelle il a été écrit, donc remplacer le composant sous
+un plugin installé coûte le badge officiel au lieu d’en hériter, et un build de
+développement ne peut pas remplacer un paquet signé sans une désinstallation
+faite par l’utilisateur.
+
+L’installation, la mise à jour et le rollback sont devenus **une transaction**
+(`plugin_update.rs`). Le candidat est déballé dans un répertoire de staging,
+noté une première fois hors du chemin — contrat et empreintes, sans exécuter le
+composant —, puis la version vivante est *archivée* au lieu d’être supprimée, le
+candidat est basculé, et le host le sonde à son emplacement définitif : identité
+et `health-check` sous budget de sonde, sans aucun grant. Un refus là déclenche
+le rollback automatiquement ; un rollback manuel rejoue la même séquence à
+l’envers. Chaque étape est un `rename`, et un fichier de journal écrit avant la
+première dit laquelle était en cours : au démarrage suivant, une coupure à
+n’importe quelle étape laisse soit l’ancienne version intacte, soit la nouvelle
+complète et sondée. Le point de non-retour est un seul `rename` du journal sur
+`previous.json`, qui est aussi la description de la version conservée. Orivo ne
+garde qu’**une** version précédente : une mise à jour annulée dépense le
+créneau, jamais la version qui tourne.
 
 Une extension `installer` complète le contrat v1. Le plugin ne fournit que des
 données — un catalogue borné de titres avec URL, empreinte et tailles — et le
@@ -153,6 +229,106 @@ bibliothèque. Ce que ce palier n’apporte pas : l’interface « Ajouter un
 émulateur » et l’écran Réglages → Plugins, qui consommeront ces commandes, ainsi
 que l’import de ROMs par métadonnées et les runners GPTK/CrossOver.
 
+Le contrat de performance a gagné sa première optimisation. Un composant n'est
+plus recompilé à chaque ouverture : `plugin_compile_cache.rs` garde l'artefact
+que Wasmtime sait sérialiser dans un dossier de cache appartenant à l'hôte, et
+ouvrir une surface qui découvre vingt composants passe de 646 ms à 36 ms
+([`docs/performance.md`](performance.md), section 3 bis). Ce module est aussi le
+seul endroit du dépôt où une erreur ne refuse pas un plugin mais exécute du code
+natif : `Component::deserialize` est `unsafe` parce qu'il fait confiance à ses
+octets — ils *sont* du code machine, et il les rend exécutables sans revalider ce
+qu'un compilateur aurait validé. Un fichier de cache venu d'ailleurs que d'Orivo
+serait donc une exécution de code arbitraire dans Orivo, avec l'autorité d'Orivo
+et hors de tout bac à sable — pire que tout ce qu'un plugin peut faire, justement
+parce qu'un plugin est derrière un bac à sable et que ceci ne le serait pas. La
+règle est donc étroite : un artefact n'est désérialisé que si un HMAC-SHA256 sous
+une clé de 256 bits conservée dans le trousseau système dit qu'Orivo l'a écrit,
+pour *ce* composant et *ce* moteur.
+
+**Ce que cette clé est, et ce qu'elle n'est pas.** C'est un stockage
+confidentiel, pas un canal authentifié, et la différence décide de ce que le
+cache peut promettre. Elle refuse ce qui arrive réellement : un artefact corrompu
+ou tronqué, un artefact laissé par une version antérieure de Wasmtime ou par une
+autre configuration d'`Engine`, un artefact venu d'une **autre installation ou
+d'un autre compte** — dossier copié, sauvegarde restaurée, dossier synchronisé —,
+un artefact emprunté au créneau d'un autre composant, et **un plugin qui
+essaierait d'en forger un** : un plugin n'a que `files.read` sur des dossiers
+choisis par l'utilisateur et aucune écriture, donc il ne peut ni déposer le
+fichier ni atteindre la clé. Elle ne refuse pas, sur aucune plateforme, **un
+autre programme lancé par le même utilisateur** : sous Linux (Secret Service) et
+Windows (Credential Manager) le secret est lisible par tout processus du même
+utilisateur ; sur macOS la recherche ne vise que le trousseau *par défaut*, donc
+un programme peut créer l'élément avant Orivo, ou faire de son propre trousseau
+le trousseau par défaut, et un build signé ad hoc n'offre de toute façon aucune
+identité de code qu'une ACL pourrait nommer. C'est dit plutôt que maquillé parce
+que le même attaquant peut déjà remplacer Orivo lui-même — les builds macOS n'ont
+ni signature Developer ID ni runtime durci, et l'installation Windows est par
+utilisateur. Le cache n'est donc pas le maillon faible aujourd'hui, et il ne doit
+pas le devenir : dès que les builds macOS seront signés Developer ID avec le
+runtime durci, cette clé devra passer dans le trousseau « data protection »
+derrière un groupe d'accès.
+
+Tout le reste découle de « un artefact est régénérable » : absent, altéré,
+étranger, trop gros, pas même un fichier ordinaire, ou produit par un autre
+moteur, c'est une recompilation silencieuse depuis les octets que le registre a
+déjà vérifiés — jamais une erreur que l'utilisateur voit, jamais un chargement
+douteux. Le cache est borné, écrit par `rename`, réclame ce qu'une version
+précédente de Wasmtime a laissé, et se purge en entier : la sixième promesse,
+enfin munie d'une porte. Et rien ne l'ouvre — ni le trousseau derrière lui —
+avant que l'utilisateur ne fasse quelque chose *à propos d'un plugin* : nommer le
+dossier est tout ce que fait la configuration, et un cache n'existe qu'après un
+appel à `plugin_compile_cache::permit`, qui a exactement quatre appelants, tous
+des actions explicites (ouvrir Réglages → Plugins, demander l'installation d'un
+titre, et les deux portes des runners). Formulé ainsi plutôt que « jamais au
+démarrage », parce que les deux premières versions de cette phrase étaient
+fausses : la tâche de maintenance du lancement atteignait `prepare_component`, et
+`get_quiky_status` — que la page Boutique appelle simplement en s'affichant, donc
+au lancement pour qui a la Boutique en page de départ — permettait le cache.
+Afficher une page n'est pas un geste à propos d'un plugin.
+
+L’étape 2.1 est faite, et c’est la première fois que le système de plugins sert
+à quelque chose : **Ryujinx** (Switch, macOS) est un plugin runner officiel
+publié dans le dépôt sous forme de **composant WebAssembly**, dans
+`plugins/ryujinx/`, construit par son propre script avec son SHA-256 committé
+et chargé par le host exactement comme le paquet d’un tiers. Wine et Winlator
+restent des adapters Rust ; celui-ci est du code invité sous le bac à sable. Il
+ne fait qu’une chose : lister le seul dossier accordé et dire lesquels de ces
+*noms* sont des jeux Switch. Il n’appelle **jamais** `read-file`, donc les
+`prod.keys`, le firmware et les sauvegardes qui vivent dans ce même dossier sont
+hors d’atteinte par construction — et c’est le compteur `bytes_read` du host qui
+le prouve, pas une promesse. Orivo n’embarque ni Ryujinx, ni clé, ni firmware,
+ni jeu : l’utilisateur installe l’émulateur lui-même et le choisit au sélecteur.
+
+Une chose a dû bouger côté host pour que ce palier veuille dire quelque chose.
+La référence externe qu’un plugin rend doit passer la grammaire d’id opaque
+(`[A-Za-z0-9._\-:]`), et un dump Switch s’appelle par convention
+`Titre [0100…][v0].nsp` — espaces et crochets. Aucune référence n’existait donc
+pour ces fichiers, et une bibliothèque nommée normalement importait zéro jeu.
+Le résolveur accepte désormais, à côté du nom en clair, **`x:` suivi du nom
+d’entrée en hexadécimal minuscule**, sans rien changer à la frontière — l’id
+reste opaque, le fichier sort toujours du listing du host dans un dossier
+accordé, et rien de ce que le plugin dit n’est joint à un chemin. Ce qui
+s’élargit, c’est seulement *quels noms un plugin peut prononcer*. Les trois
+détails de cette forme sont là parce qu’une référence est la clé d’une carte de
+bibliothèque (`runner_game_id`) : `x:` est un espace de noms qu’aucun nom de
+fichier ne peut atteindre (le host ne liste jamais un nom contenant `:`), donc
+les deux formes ne peuvent pas décrire un même fichier et il n’y a aucune
+priorité à arbitrer ; la casse minuscule est la seule orthographe, sinon un
+fichier aurait eu 2^k références et donc 2^k cartes ; et plus d’une
+correspondance est refusée au lieu d’être classée. Une référence ne peut nommer
+que ce que le host aurait pu montrer : ni nom caché — le sidecar AppleDouble
+`._<nom>` qu’écrit macOS sur une clé exFAT porte le même suffixe que le dump
+qu’il double — ni nom que `valid_entry_name` refuserait. Une page ne lit
+désormais ses dossiers accordés qu’une fois, au lieu d’une fois par candidat. Élargir `runner-profile` ou
+ajouter un mode de lancement reste une décision ouverte, hors de ce palier :
+`docs/ryujinx-runner.md` dit ce que Ryujinx accepte, ce que le contrat v1 ne
+peut pas exprimer (plein écran, dossier de données) et ce que publier ce plugin
+sur le canal officiel demanderait — une clé de release et un index signé, qui
+ne sont pas dans ce dépôt. L’étape 2.4 est mesurée avec ce plugin installé :
+démarrage, ouverture de Réglages → Plugins, import de 1 / 100 / 1000 fausses
+ROMs et préparation du premier lancement sont dans
+[`docs/performance.md`](performance.md), § 7.
+
 Un écart assumé avec la suite de ce document : les tables SQLite décrites plus
 bas (`plugin_jobs`, `plugin_health`…) n’existent pas. Le dépôt n’a aucune
 dépendance SQLite et son catalogue est un JSON versionné (`catalog.rs`, schéma
@@ -160,7 +336,10 @@ v8). Les grants, les profils et les références externes y vivent, parce
 qu’accorder un dossier et enregistrer la permission de le lire doivent réussir ou
 échouer ensemble ; l’état des jobs reste dans le scheduler et le journal reste un
 anneau borné en mémoire, parce que rien de ce que le host en tire n’avait besoin
-de survivre au processus. Révoquer écrit une date au lieu de supprimer une ligne,
+de survivre au processus. Ce que l’installateur persiste en propre — la version
+conservée, le journal de transaction, le marqueur de canal et le cache d’index —
+vit en fichiers sous la racine des plugins, dans des répertoires pointés que la
+découverte ignore. Révoquer écrit une date au lieu de supprimer une ligne,
 de sorte que « ce plugin pouvait lire ce dossier entre ces deux dates » reste une
 question à laquelle le registre répond.
 
