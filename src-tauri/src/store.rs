@@ -2230,26 +2230,27 @@ pub trait UrlOpener: Send + Sync {
     fn open(&self, url: &str) -> Result<(), String>;
 }
 
-/// The opener plugin's Android path needs an `AppHandle`, which
-/// [`UrlOpener::open`] deliberately does not carry. Only Android goes through
-/// the plugin, so the handle is parked here during setup instead of widening
-/// the trait for every platform.
-#[cfg(target_os = "android")]
-static ANDROID_APP: OnceLock<AppHandle> = OnceLock::new();
+/// The opener plugin's mobile path needs an `AppHandle`, which
+/// [`UrlOpener::open`] deliberately does not carry. Only phones go through the
+/// plugin, so the handle is parked here during setup instead of widening the
+/// trait for every platform.
+#[cfg(mobile)]
+static MOBILE_APP: OnceLock<AppHandle> = OnceLock::new();
 
-#[cfg(target_os = "android")]
-pub fn set_android_app(app: AppHandle) {
-    let _ = ANDROID_APP.set(app);
+#[cfg(mobile)]
+pub fn set_mobile_app(app: AppHandle) {
+    let _ = MOBILE_APP.set(app);
 }
 
-/// `webbrowser::open` must not be used here: it reads its context from
-/// `ndk-context`, which this app never initialises, so it panics inside the
-/// JNI thread and aborts the whole process. The opener plugin hands the URL to
-/// its own Kotlin `OpenerPlugin`, which fires the browser intent directly.
-#[cfg(target_os = "android")]
-fn open_url_android(url: &str) -> Result<(), String> {
+/// `webbrowser::open` must not be used here: on Android it reads its context
+/// from `ndk-context`, which this app never initialises, so it panics inside
+/// the JNI thread and aborts the whole process. The opener plugin hands the URL
+/// to its own native code instead — a browser intent on Android, `UIApplication`
+/// on iOS.
+#[cfg(mobile)]
+fn open_url_mobile(url: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let app = ANDROID_APP
+    let app = MOBILE_APP
         .get()
         .ok_or("Orivo is not ready to open a browser yet.")?;
     app.opener()
@@ -2261,11 +2262,11 @@ pub struct SystemUrlOpener;
 
 impl UrlOpener for SystemUrlOpener {
     fn open(&self, url: &str) -> Result<(), String> {
-        #[cfg(target_os = "android")]
+        #[cfg(mobile)]
         {
-            open_url_android(url)
+            open_url_mobile(url)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(desktop)]
         {
             // A fixed absolute binary, one argument, and no shell. The argument is
             // already known to start with `https://`, so it can never be read as a

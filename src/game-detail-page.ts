@@ -1040,6 +1040,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     );
     button.type = "button";
     button.dataset.focusKey = "primary-action";
+    // What the keys land on when the page opens: the thing it is for.
+    button.dataset.navAnchor = "";
     button.dataset.action = descriptor.kind;
     button.disabled = descriptor.disabled;
     button.title = descriptor.hint;
@@ -1138,6 +1140,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
+        // Closing the menu is what the key was for, not leaving the page too.
+        event.preventDefault();
         closeMoreMenu(button, menu);
         button.focus();
       }

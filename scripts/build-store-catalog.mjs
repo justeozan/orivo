@@ -278,13 +278,18 @@ async function main() {
     const genres = genreList(curated.genresFr);
     const gameId = `steam:${game.appId}`;
     const heroUrl = await media(game.slug, "hero.jpg", ["capsule.jpg", "cover.jpg"]);
-    // `landscapeUrl` is what the card shows. A hand-picked scene beats the
-    // capsule, which is mostly wordmark once it is cropped this small.
+    // `landscapeUrl` is what the card shows: the store's own capsule, which is
+    // the art the game was sold with and carries its wordmark. The card frame
+    // is cut to the capsule's exact shape, so none of it is lost — which is
+    // what a hand-picked screenshot used to be preferred for, back when the
+    // frame was a different shape and cropped the wordmark away.
     const pick = scenes.get(game.slug);
     const sceneFile = pick && pick.scene >= 0 ? `scene-${pick.scene}.jpg` : null;
-    const landscapeUrl = sceneFile
-      ? await media(game.slug, sceneFile, ["capsule.jpg", "hero.jpg", "cover.jpg"])
-      : await media(game.slug, "capsule.jpg", ["hero.jpg", "cover.jpg"]);
+    const landscapeUrl = await media(game.slug, "capsule.jpg", [
+      ...(sceneFile ? [sceneFile] : []),
+      "hero.jpg",
+      "cover.jpg",
+    ]);
     const coverUrl = await media(game.slug, "cover.jpg", ["capsule.jpg", "hero.jpg"]);
     if (!heroUrl) {
       missing.push(`${game.slug} (no artwork)`);

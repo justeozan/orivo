@@ -409,7 +409,7 @@ Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'
 - runtime Tauri v2, fenetre et capabilities minimales;
 - shell TypeScript/CSS avec navigation clavier/manette;
 - SQLite, migrations et catalogue minimal;
-- import d'une source — **SteamSource implémenté** : scan local des installations et connexion de bibliothèque Steam directement depuis le desktop, avec secrets dans le Trousseau, synchronisation non bloquante, fusion AppID, preview/import idempotent et launch target typé;
+- import d'une source — **SteamSource implémenté** : connexion de bibliothèque Steam directement depuis le desktop, avec secrets dans le Trousseau, synchronisation non bloquante, fusion AppID, import idempotent et launch target typé ; le scan local des manifests ne dit plus quels jeux possédés sont déjà installés;
 - recherche FTS5;
 - lancement d'un jeu;
 - cache media scope et page Library.
@@ -464,3 +464,253 @@ Toute nouvelle fonctionnalite doit repondre a ces questions avant implementation
 4. Quelle capability est necessaire si un plugin ou une integration est implique?
 5. Que se passe-t-il hors ligne, sans artwork ou sans permission?
 6. Quel est son impact sur le frame budget, le focus clavier et l'accessibilite?
+
+---
+
+## 15. Architecture UI et design system
+
+> Statut: **recherche faite, decision a acter.** Cette section fige l'etude
+> "equivalent React + Tailwind + shadcn pour Orivo" et le calendrier
+> d'implementation. Elle ne modifie aucune decision des sections 1 a 14.
+
+### 15.1 Constat: l'etat reel du frontend
+
+Mesures sur un build frais (`pnpm build`, Vite 8.1.5):
+
+| Indicateur | Valeur |
+| --- | --- |
+| Poids 1er ecran (gzip) | **~83 kB** (CSS 15.47 + JS 67.47) |
+| Poids total app (gzip) | **~198 kB** (brut 730 kB) |
+| Lignes CSS | **7 568** dans 5 fichiers |
+| Lignes TS (hors tests/generes) | **19 262** |
+| Classes CSS distinctes | **692** |
+| Couleurs hex en dur | **242** + 309 `rgba()` |
+| Composants `render*`/`build*` | **103** |
+| Routes | 6 (`library`, `store`, `game`, `me`, `settings`, `not-found`) |
+
+Repartition du CSS: `styles.css` (2 357 ln, global), puis une feuille par page
+(`game-detail-page.css` 2 371, `me-page.css` 1 166, `store-page.css` 1 112,
+`library-onboarding.css` 562) avec prefixes reserves `store-`, `gd-`, `me-`.
+
+**Le trou principal:** `docs/DESIGN.md` definit une palette nommee
+(`--void-window`, `--abyss-sidebar`, `--moon-white`, `--orivo-violet`,
+`--glass-border`...) qui n'apparait **aucune fois** dans le CSS execute.
+Le spec design et le code ont diverge; il n'existe aucun contrat entre les deux.
+
+### 15.2 Probleme a resoudre
+
+Deux besoins distincts, souvent confondus:
+
+1. **Un fichier unique** qui definit le system design et dont toute l'app derive.
+2. **Un systeme vierge** (boutons, dialogs, tabs...) que le style Orivo vient
+   modifier, sans reimplementer l'a11y et le clavier a chaque fois.
+
+Le besoin (1) est une couche **tokens**. Le besoin (2) est une couche
+**primitives**. Tailwind seul ne couvre que (1).
+
+### 15.3 Les possibilites etudiees
+
+#### Couche A -- "le fichier unique"
+
+| # | Option | Principe | Pertinence Orivo |
+| --- | --- | --- | --- |
+| A1 | **Tailwind v4 `@theme` (CSS-first)** | Un bloc `@theme {}` en CSS = tokens **et** generation des utility classes. Zero `tailwind.config.js`. | Le plus direct: le fichier unique est du CSS et alimente `var(--x)` + les classes |
+| A2 | **Style Dictionary + W3C DTCG** (`tokens/*.json` -> `variables.css`) | Spec standard (stable oct. 2025). Sort **CSS + TS + doc + Figma**. | Le plus robuste si `DESIGN.md` doit derive du code |
+| A3 | **CSS pur + `@layer`** (open-props) | `:root` + cascade layers, zero build | Le moins de risque, mais ne genere pas d'utilities |
+| A4 | **twgen** (tokens TS -> codegen `@theme`) | Tokens types en TS, genere le CSS + switch runtime | Si le theme doit etre type dans le code |
+
+A1/A3 sont non-exclusifs: `tokens.json` -> Style Dictionary -> `@theme` est le
+montage courant.
+
+#### Couche B -- "le systeme vierge"
+
+| # | Option | Type | Fit TS vanilla |
+| --- | --- | --- | --- |
+| B1 | **shadcn-html** (`codylindley/shadcn-html`) | HTML sémantique + CSS tokens + JS vanilla, zero build; chaque composant = 1 dossier (`component-skill.md` + `.css` + `.js`) | Excellent |
+| B2 | **5H3LL-UI** | shadcn-compatible **vanilla HTML/CSS/JS + Tailwind v4**, CLI de copy, 8 style packs remplaçables | Excellent -- le seul avec un vrai CLI type `shadcn add` |
+| B3 | **Basecoat** | Classes CSS type shadcn via `@apply`, JS par Alpine.js | Bon, mais depend d'Alpine |
+| B4 | **plain-elements** | Primitives **headless en Web Components light-DOM** (dialog, popover, tabs, tooltip...), aucun style | Excellent pour la couche comportement (a11y, focus, clavier) |
+| B5 | **bast-ui** | Radix/BaseUI-like en web components (FAST), ~10.7 kB | Bon, mais Shadow DOM -> CSS global invisible |
+| B6 | **Web Awesome (ex-Shoelace)** | 50+ composants, theming via `--wa-*`, `@layer` | Moyen -- look impose, `::part()` |
+| B7 | **Whiskeyjack** | Design system **Tauri-first**, tokens -> CSS/JS/Swift/Kotlin, registry shadcn | Non -- React + Tailwind 3 |
+| B8 | **zesdk** | Kit vanilla Tauri 2, tokens light/dark, composants promise-based | Correct -- mais maison, look impose |
+| B9 | **rust-ui/ui (Leptos)** | Le vrai "shadcn de Rust" | Non -- reecriture totale |
+| B10 | **React + shadcn + Tailwind v4** | Le standard absolu | Non -- 19 262 lignes TS a reecrire |
+
+### 15.4 Schema d'architecture cible
+
+```text
++---------------------------------------------------------------------+
+|  SOURCE UNIQUE DE VERITE                                           |
+|  tokens/orivo.tokens.json   (W3C DTCG: $type / $value / $description) |
+|  +- palette, roles semantiques, typo, spacing, radius, shadow,      |
+|     motion, breakpoints, form-factor                                |
++-----------------------------+---------------------------------------+
+                              |  Style Dictionary (ou twgen)
+                              v
++---------------------------------------------------------------------+
+|  GENERES -- jamais edites a la main (header "DO NOT EDIT")          |
+|  src/generated/tokens.css  -> @theme + :root + [data-theme]         |
+|  src/generated/tokens.ts   -> types et valeurs pour le JS           |
+|  docs/TOKENS.md            -> la doc design = le CSS reel           |
++-----------------------------+---------------------------------------+
+                              v
++---------------------------------------------------------------------+
+| COUCHE 1 -- PRIMITIFS VIERGES (le "shadcn" d'Orivo)                |
+| src/ui/   copie en repo, stylet uniquement par var()                 |
+|   button/   .ui-btn      [data-variant][data-size]                  |
+|   card/     .ui-card                                             |
+|   dialog/   <ui-dialog> (light DOM) + .ui-dialog                      |
+|   tabs/ menu/ tooltip/ input/ switch/ badge/ toast/ skeleton/        |
+|   AUCUNE couleur en dur. 100% var(--orivo-*)                        |
++---------------------------------------------------------------------+
+| COUCHE 2 -- SKIN ORIVO                                              |
+| src/styles/skin-orivo.css   <- TU ECRIS ICI TON STYLE              |
+| .ui-btn[data-variant=primary] { ... }   (reecriture autorisee)     |
++---------------------------------------------------------------------+
+| COUCHE 3 -- LAYOUT / PAGES (existant, migre progressivement)        |
+| styles.css - store-page.css - gd-... - me-...                       |
+|   remplace progressivement les classes par .ui-*                    |
+|   garde data-form-factor, spatial-nav, page-lifecycle               |
++---------------------------------------------------------------------+
+
+Ordre des @layer (evite les guerres de specificite):
+  @layer theme, base, ui, skin, pages;
+  -> les CSS pages (non-layered) gagnent par defaut, sans !important
+```
+
+**Regle d'or:** `grep -rE "#[0-9a-fA-F]{6}" src/ui/` doit renvoyer zero resultat.
+
+### 15.5 Tableau comparatif des specs
+
+`#1-#2` sont mesures, `#3-#8` sont estimes.
+
+| # | Stack | Poids final (gzip) | Lignes source | Rapidite d'execution | Flexibilite | **Note /10** |
+| --- | --- | --- | --- | --- | --- | :-: |
+| 1 | **HTML + CSS pur** (statique) | **15-25 kB** total | ~6 000-8 000 | 10/10 -- zero runtime | 3/10 -- aucun etat ni logique | **4.0** |
+| 2 | **Vanilla TS + CSS** (Orivo actuel) | **83 kB** 1er / **198 kB** total | **26 830** | 8/10 -- DOM direct; -1 pour le `innerHTML` de 554 ln | 7/10 -- tout controle, 0 contrat design | **6.5** |
+| 3 | **Vanilla TS + tokens + primitives vierges** | **78-85 kB** 1er / **185-195 kB** total | **~24 000-26 000** | 8/10 -- runtime identique a #2 | 9/10 -- un fichier = tout le design | **9.0** |
+| 4 | **shadcn + vanilla TS** (Tailwind v4 + 5H3LL-UI / shadcn-html) | **75-85 kB** 1er / **180-195 kB** total | **~22 000-25 000** | 8/10 -- meme runtime, Tailwind = build only | 9/10 -- CLI type `shadcn add` | **8.5** |
+| 5 | **React 19 + shadcn + Tailwind v4** | **130-145 kB** 1er / **235-260 kB** total | **~26 000-32 000** | 7/10 -- +50 kB runtime, mount cost, vdom diff | 9.5/10 -- ecosysteme le plus large | **8.0** |
+| 6 | **Web Components headless** (plain-elements + tokens) | **85-95 kB** 1er / **195-210 kB** total | **~25 000** | 8.5/10 -- light DOM natif, a11y gratuite | 8/10 -- ecosysteme jeune | **8.0** |
+| 7 | **Web Awesome / Shoelace** | **150-170 kB** 1er / **280-310 kB** total | **~22 000** | 7/10 -- Lit + Shadow DOM | 5/10 -- look impose, `::part()` | **6.0** |
+| 8 | **Leptos + rust-ui** | **180-250 kB** (WASM) | **~20 000-25 000 Rust** | 9/10 -- DOM compile | 4/10 -- quasi aucune lib | **5.0** |
+
+Lecture:
+
+- **#3 / #4 sont le point optimal**: meme poids que l'actuel (voire -5%), **-2 000
+  a -5 000 lignes**, et la note monte parce que le CSS epars disparaît -- pas
+  parce que le runtime accelererait.
+- **#5 (React) coute +50 a +60 kB gzip** pour un gain de flexibilite marginal sur
+  une app desktop 6 pages, plus la reecriture des 19 262 lignes TS.
+- **#1 est un faux bond**: plus leger, mais les 103 builders, le router,
+  `spatial-nav` et `page-lifecycle` seraient tous a refaire.
+- **#7 est le seul qui alourdit reellement** (+70 a +110 kB) pour *moins* de
+  flexibilite.
+
+Reserves: "rapidite d'execution" = runtime avec code optimal. Sur une app 6 pages,
+**les ecarts #2-#6 sont < 5 ms**; ce critere ne doit pas trancher. Les vrais
+discriminants sont le **poids 1er ecran** et le **cout de migration**.
+
+### 15.6 Recommandation
+
+Stack composee, sans exclusivite:
+
+```text
+tokens/orivo.tokens.json --Style Dictionary--> tokens.css (@theme) + tokens.ts
+        |
+        +- source de truth pour docs/DESIGN.md (genere, plus jamais desynchronise)
+
+src/ui/   = primitives vierges
+            +- B2 (5H3LL-UI CLI) pour les composants "boite"
+            +- B4 (plain-elements) pour dialog/popover/tabs/menu
+              (a11y gratuite, light-DOM -> le CSS global continue de marcher)
+
+src/styles/skin-orivo.css = le style Orivo, reecrit les .ui-* via var()
+```
+
+Pourquoi pas Tailwind seul: Tailwind ne resout que la couche A. La couche B --
+"un systeme vierge que mon style modifiera" -- manquerait. D'ou le couple
+**tokens + registry de primitives**.
+
+Choix structurants a ne pas re-ouvrir:
+
+- **Light DOM, pas de Shadow DOM** -- `styles.css` (2 357 lignes) ne voit pas
+  l'interieur d'un shadow root.
+- **Incrimental, pas de big-bang** -- migration page par page, cohabitation
+  possible via les `@layer`.
+- **Aucune couleur en dur dans `src/ui/`** -- c'est ce qui rend le fichier
+  unique reellement unique.
+
+### 15.7 Ce que ca permet d'ameliore
+
+| Avant | Apres | Gain |
+| --- | --- | --- |
+| 242 hex + 309 `rgba()` en dur | 0 dans `src/ui/`, tout passe par `var(--orivo-*)` | Re-skin = 1 fichier, zero recherche/remplacement |
+| `DESIGN.md` derive du CSS (0 correspondance) | `docs/TOKENS.md` **genere** depuis les tokens | Spec et code ne peuvent plus diverger |
+| 7 568 ln CSS, 692 classes ad-hoc | ~4 500 ln CSS + primitives `ui-*` | **-40 % de CSS**, fini les classes jumellees entre pages |
+| 103 builders qui refont l'a11y a la main | primitives B4 avec clavier/focus/roles fournis | Accessibilite (section 3.7 des principes) par defaut, pas par effort |
+| Chaque page re-invente bouton/dialog/tabs | 1 seule source par composant | Ajouter un composant = 1 fois, pas 5 |
+| Pas de guard lint | `grep -rE "#[0-9a-fA-F]{6}" src/ui/` = 0 en CI | Regression design bloquee avant merge |
+| Poids 1er ecran 83 kB gzip | ~78-85 kB gzip | **Neutre a legerement meilleur** -- pas de taxe |
+
+Ce que ca **n'ameliorera pas**: le runtime (meme DOM direct), les 19 262 lignes
+de logique TS, ni le poids de `sentry-sdk` (49 kB gzip).
+
+### 15.8 Quand l'implementer
+
+Calendrier aligne sur l'**ordre de construction de la section 12**.
+
+#### Phase 0 -- bloqueur technique (a faire avant toute migration)
+
+| Tache | Pourquoi | Effort |
+| --- | --- | --- |
+| Remonter `build.target` de `safari13` dans `vite.config.ts` | `@layer` >= Safari 15.4, `@property` >= 16.4, `:has()` >= 15.4 -- rien de tout ca ne passe sous `safari13`. WebView2 (Chromium recent) n'est pas concerne; WKWebView suit la version de macOS. | 0.5 j + validation WebKit cible |
+| Verifier la CSP (`style-src 'self' 'unsafe-inline'`) vs composants light-DOM | Empeche une mauvaise surprise en fin de migration | 0.5 j |
+| Figler l'ordre `@layer theme, base, ui, skin, pages` | Sinon les pages existantes gagnent en ordre source et le skin est inappliquable | 0.5 j |
+
+#### Phase 1 -- tokens (a lancer en parallele de la **Phase 1** produit, des que le catalogue est stable)
+
+- Extraire `docs/DESIGN.md` -> `tokens/orivo.tokens.json` (W3C DTCG).
+- Brancher Style Dictionary -> `src/generated/tokens.css` + `tokens.ts`.
+- Ne **pas** migrer les pages: simplement alimenter `:root` et mesurer.
+- **Critere de done:** `docs/TOKENS.md` genere, build vert, poids 1er ecran
+  <= 85 kB gzip, aucun changement visuel (snapshot e2e `visual` identique).
+
+#### Phase 2 -- primitives vierges (caler apres la **Phase 2 "identite visuelle"**)
+
+Pourquoi ici: l'identite (hero, glass, blur, motion) est deja posee et stable.
+Migrer avant = migrer deux fois; migrer maintenant = figer le vocabulaire.
+
+- Introduire `src/ui/` avec 6 composants a fort renouvellement:
+  `button`, `card`, `badge`, `switch`, `tabs`, `skeleton`.
+- Skin Orivo dans `src/styles/skin-orivo.css`.
+- **Critere de done:** 0 hex dans `src/ui/`, e2e vert, et au moins **une page**
+  entierement `ui-*`.
+- **Garde-fou:** ne pas toucher a `form-factor.ts` (33 selecteurs
+  `data-form-factor`), `spatial-nav.ts`, `page-lifecycle.ts` pendant la
+  migration.
+
+#### Phase 3 -- migration des pages (au fil de la **Phase 3 "valeur produit"**)
+
+- Ordre conseille: `settings` (le plus statique, risque minime) -> `me` ->
+  `store` -> `game-detail` -> `library`/shell (le plus expose, en dernier).
+- Chaque page: une PR dediee, critere de done = e2e vert + `git diff` CSS <= 0.
+- **Ne pas migrer** tant qu'une page est en feature-freeze produit.
+
+#### Ne pas faire maintenant
+
+- **React (#5)**: reecriture de 19 262 lignes pour +50 kB gzip. A reevaluer
+  uniquement si l'app depasse ~15 routes avec des etats clients complexes.
+- **Leptos (#8)**: eco embryonnaire, poids WASM, big-bang total.
+- **Web Awesome (#7)**: +70 a +110 kB pour moins de flexibilite.
+- **Tailwind utilitaires partout**: ne l'adopter que si le cout des classes
+  inline se revele inferieur au CSS actuel -- option #4, pas un acquis.
+
+### 15.9 Decisions encore ouvertes (UI)
+
+- [ ] A1/A2/A3: `@theme` pur, Style Dictionary, ou les deux en cascade.
+- [ ] B2 vs B1 comme source de primitives (CLI 5H3LL-UI vs copy manuel shadcn-html).
+- [ ] Version minimale de WebKit/macOS ciblee apres remontee de `build.target`.
+- [ ] Si les tokens doivent aussi supporter un theme clair un jour (`[data-theme]`).
+- [ ] Nom du prefixe: `.ui-*` propose, valide contre les 692 classes existantes.

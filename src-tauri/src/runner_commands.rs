@@ -985,7 +985,7 @@ pub fn cancel_runner_import(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 fn pick_application() -> Result<PathBuf, String> {
     rfd::FileDialog::new()
         .set_title("Choose the emulator application for this runner")
@@ -993,12 +993,12 @@ fn pick_application() -> Result<PathBuf, String> {
         .ok_or_else(|| "No emulator was chosen.".to_string())
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn pick_application() -> Result<PathBuf, String> {
-    Err("Third-party runners cannot be configured on Android yet.".into())
+    Err("Third-party runners cannot be configured on this device yet.".into())
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 fn pick_directory() -> Result<PathBuf, String> {
     rfd::FileDialog::new()
         .set_title("Choose a games folder for this runner")
@@ -1006,9 +1006,9 @@ fn pick_directory() -> Result<PathBuf, String> {
         .ok_or_else(|| "No folder was chosen.".to_string())
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 fn pick_directory() -> Result<PathBuf, String> {
-    Err("Third-party runners cannot be configured on Android yet.".into())
+    Err("Third-party runners cannot be configured on this device yet.".into())
 }
 
 #[cfg(test)]

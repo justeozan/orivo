@@ -335,6 +335,11 @@ describe("application shell against the desktop backend", () => {
     sources: [] as Record<string, unknown>[],
     sourceSync: null as Record<string, unknown> | null,
     providers: [] as Record<string, unknown>[],
+    /** What `get_steam_account_status` reports: the Steam row renders from it. */
+    steamStatus: { connected: false, steamId: "", method: "", personaName: "" } as Record<
+      string,
+      unknown
+    >,
   };
 
   const mount = (): void => {
@@ -375,7 +380,7 @@ describe("application shell against the desktop backend", () => {
         case "get_preferences":
           return {};
         case "get_steam_account_status":
-          return { connected: false, steamId: "", method: "" };
+          return backend.steamStatus;
         case "get_wine_runner_settings":
           return {
             runner: { state: "ready", available: true, version: "9.0", message: "" },
@@ -638,11 +643,10 @@ describe("application shell against the desktop backend", () => {
   });
 
   it("keeps a card that stays on screen attached while the window slides", async () => {
-    // The rail renders a 48-card window around the selection. Walking through
-    // the middle of a longer library slides that window every step, and
-    // rebuilding the rail there detached every card — which cancels its
-    // transitions, so the cover stopped growing from portrait to landscape for
-    // the whole middle of the list and only started again at the ends, where
+    // The rail renders a 48-card window of a longer library, and moving that
+    // window used to rebuild the rail, detaching every card — which cancels its
+    // transitions, so the cover stopped growing from portrait to landscape
+    // through the middle of the list and only started again at the ends, where
     // the window is pinned and stops moving.
     backend.library = Array.from({ length: 70 }, (_, index) => ({
       ...alpha,
@@ -661,11 +665,12 @@ describe("application shell against the desktop backend", () => {
     const rail = root.querySelector<HTMLElement>("#game-cards");
     if (!rail) throw new Error("the rail must exist");
 
-    // Land in the middle, where the window really does slide on every step.
+    // Land in the middle, then cross the margin the window keeps around its
+    // edges, which is what moves it.
     cardFor("xbox:40")?.click();
     await settle();
-    const survivor = cardFor("xbox:41");
-    expect(survivor, "a card either side of the selection is on screen").not.toBeNull();
+    const survivor = cardFor("xbox:53");
+    expect(survivor, "the card being selected next is already in the window").not.toBeNull();
 
     const detached: Node[] = [];
     const observer = new MutationObserver((records) => {
@@ -673,15 +678,15 @@ describe("application shell against the desktop backend", () => {
     });
     observer.observe(rail, { childList: true });
 
-    cardFor("xbox:41")?.click();
+    cardFor("xbox:53")?.click();
     await settle();
     observer.takeRecords().forEach((record) => detached.push(...Array.from(record.removedNodes)));
     observer.disconnect();
 
-    // Something did leave the window, or this test would be proving nothing.
+    // The window did move, or this test would be proving nothing.
     expect(detached.length).toBeGreaterThan(0);
     expect(detached).not.toContain(survivor);
-    expect(cardFor("xbox:41")).toBe(survivor);
+    expect(cardFor("xbox:53")).toBe(survivor);
   });
 
   it("shows each store's price-data health on its own row instead of a second card", async () => {
@@ -709,6 +714,35 @@ describe("application shell against the desktop backend", () => {
     // One card now, not two.
     expect(root.querySelectorAll("#provider-status-list")).toHaveLength(1);
     expect(root.querySelector("#source-accounts-panel #provider-status-list")).not.toBeNull();
+  });
+
+  it("names the Steam account by its persona, and falls back to its id", async () => {
+    const accountName = (): string | null =>
+      root.querySelector<HTMLElement>(
+        "[data-source-row='steam'] .source-account-row__account-name",
+      )?.textContent ?? null;
+
+    backend.steamStatus = {
+      connected: true,
+      steamId: "76561198000000000",
+      method: "web",
+      personaName: "Robin",
+    };
+    mount();
+    await goto("#/settings/libraries");
+    expect(accountName()).toBe("Robin");
+
+    // A profile Steam would not describe (private, missing, offline) leaves the
+    // account identified by the id it is actually known by.
+    backend.steamStatus = {
+      connected: true,
+      steamId: "76561198000000000",
+      method: "web",
+      personaName: "",
+    };
+    await goto("#/settings/general");
+    await goto("#/settings/libraries");
+    expect(accountName()).toBe("76561198000000000");
   });
 
   it("presents each store in its own colours in Settings and in white in the library", async () => {
@@ -826,7 +860,7 @@ describe("application shell against the desktop backend", () => {
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Windows only");
     expect(play?.textContent).not.toContain("Install");
-    expect(play?.disabled).toBe(true);
+    expect(play?.hasAttribute("aria-disabled")).toBe(true);
     expect(play?.classList.contains("is-blocked")).toBe(true);
     expect(play?.getAttribute("aria-label")).toBe("Fall Guys has no macOS version");
   });
@@ -850,7 +884,7 @@ describe("application shell against the desktop backend", () => {
     // "Windows only" would be a confident lie about a Linux-only GOG title.
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Linux only");
-    expect(play?.disabled).toBe(true);
+    expect(play?.hasAttribute("aria-disabled")).toBe(true);
   });
 
   it("leaves the Play button alone when the same game is browsed on Windows", async () => {
@@ -872,7 +906,7 @@ describe("application shell against the desktop backend", () => {
     // "No macOS build" is a fact about the game, not about this machine.
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Install");
-    expect(play?.disabled).toBe(false);
+    expect(play?.hasAttribute("aria-disabled")).toBe(false);
   });
 
   it("blocks a game on Windows when the store says it has no Windows build", async () => {
@@ -893,7 +927,7 @@ describe("application shell against the desktop backend", () => {
 
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("macOS only");
-    expect(play?.disabled).toBe(true);
+    expect(play?.hasAttribute("aria-disabled")).toBe(true);
     expect(play?.getAttribute("aria-label")).toBe(
       "Mac Thing has no Windows version",
     );
@@ -917,7 +951,7 @@ describe("application shell against the desktop backend", () => {
 
     const play = root.querySelector<HTMLButtonElement>("#play-button");
     expect(play?.textContent).toContain("Install");
-    expect(play?.disabled).toBe(false);
+    expect(play?.hasAttribute("aria-disabled")).toBe(false);
   });
 
   it("shows a running Epic download as a percentage instead of a dead button", async () => {
@@ -971,6 +1005,58 @@ describe("application shell against the desktop backend", () => {
     // never discard it.
     await goto("#/library");
     expect(libraryCardIds()).toContain(beta.id);
+  });
+
+  /**
+   * A library longer than the rail renders. The window used to be centred on
+   * the selection, so every step slid it by one and gave all 48 cards the next
+   * game along: the selected card stayed at the same card, at the same place,
+   * and only the artwork moved. Walking a big library read as being stuck
+   * against an edge.
+   */
+  it("holds the rendered window still while the selection walks a long library", async () => {
+    backend.library = Array.from({ length: 130 }, (_, index) => ({
+      id: `local:game-${String(index).padStart(3, "0")}`,
+      title: `Game ${index}`,
+      source: "local",
+      launchable: true,
+      lastPlayedAt: `${index} days ago`,
+      playTimeSeconds: (130 - index) * 3_600,
+    }));
+    mount();
+    await goto("#/library");
+
+    // The scene's next-game arrow, which is the same one-step move the arrow
+    // keys and a controller ask for. jsdom lays nothing out, so the keys
+    // themselves have no geometry to walk and cannot drive this.
+    const step = async (): Promise<void> => {
+      root.querySelector<HTMLButtonElement>("#next-game")?.click();
+      await settle();
+    };
+    const selected = (): string =>
+      root.querySelector<HTMLElement>("#game-cards .game-card.is-selected")?.dataset.gameId ?? "";
+
+    const rendered = libraryCardIds();
+    expect(rendered.length).toBeLessThan(backend.library.length);
+
+    // A dozen steps move the selection a dozen cards without touching the rail.
+    const first = selected();
+    for (let count = 0; count < 10; count += 1) await step();
+    expect(selected()).not.toBe(first);
+    expect(libraryCardIds()).toEqual(rendered);
+
+    // Far enough in, the window does move — and when it does it brings a whole
+    // new stretch of the library, rather than shuffling along by one a step.
+    let moves = 0;
+    let previous = libraryCardIds();
+    for (let count = 0; count < 40; count += 1) {
+      await step();
+      const now = libraryCardIds();
+      if (now[0] !== previous[0]) moves += 1;
+      previous = now;
+    }
+    expect(moves).toBeGreaterThan(0);
+    expect(moves).toBeLessThan(4);
   });
 });
 

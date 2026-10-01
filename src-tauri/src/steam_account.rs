@@ -34,14 +34,30 @@ static CREDENTIAL_CACHE: OnceLock<Mutex<Option<StoredSteamCredential>>> = OnceLo
 fn credential_cache() -> &'static Mutex<Option<StoredSteamCredential>> {
     CREDENTIAL_CACHE.get_or_init(|| Mutex::new(None))
 }
+
+/// Persona names resolved this run, keyed by steam id. A Settings repaint
+/// asks for status often enough that one lookup per account per run is the
+/// difference between a name and a hundred profile requests.
+static PERSONA_CACHE: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+
+fn persona_cache() -> &'static Mutex<BTreeMap<String, String>> {
+    PERSONA_CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
 const OWNED_GAMES_ENDPOINT: &str = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/";
+/// Steam's public profile view: the one profile lookup that needs no
+/// credential, so reading a display name never opens the keychain.
+const PROFILE_ENDPOINT: &str = "https://steamcommunity.com/profiles/";
 const STORE_APP_DETAILS_ENDPOINT: &str = "https://store.steampowered.com/api/appdetails";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const PERSONA_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const STORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_RETRIES: usize = 3;
 const MAX_CONCURRENT_STORE_REQUESTS: usize = 4;
 const MAX_STEAM_ID_LENGTH: usize = 20;
 const MAX_SECRET_LENGTH: usize = 4_096;
+/// Steam caps a persona name far below this; anything longer is a document
+/// that was not a profile.
+const MAX_PERSONA_NAME_LENGTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedSteamGame {
@@ -76,6 +92,9 @@ pub struct SteamAccountStatus {
     pub connected: bool,
     pub steam_id: String,
     pub method: String,
+    /// The profile's display name, resolved without any credential. Empty
+    /// whenever Steam has nothing to show, in which case the id stands in.
+    pub persona_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,12 +247,14 @@ pub fn account_status() -> Result<SteamAccountStatus, SteamAccountError> {
             connected: true,
             steam_id: steam_id.to_string(),
             method: method.to_string(),
+            persona_name: String::new(),
         });
     }
     Ok(SteamAccountStatus {
         connected: false,
         steam_id: String::new(),
         method: String::new(),
+        persona_name: String::new(),
     })
 }
 
@@ -242,7 +263,107 @@ fn connected_status(credential: &StoredSteamCredential) -> SteamAccountStatus {
         connected: true,
         steam_id: credential.steam_id().to_string(),
         method: credential.method().to_string(),
+        persona_name: String::new(),
     }
+}
+
+/// Add the profile's display name to a status report, best effort.
+///
+/// The lookup rides on Steam's public profile view rather than on the
+/// credential, so it never opens the keychain and never asks the user for
+/// anything. A private profile, a missing profile, or an offline Steam all
+/// read as "no name": the report still comes back, with the raw id as it was
+/// before.
+pub async fn resolve_persona_name(mut status: SteamAccountStatus) -> SteamAccountStatus {
+    if !status.connected || status.steam_id.is_empty() {
+        return status;
+    }
+    if let Some(name) = persona_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&status.steam_id).cloned())
+    {
+        status.persona_name = name;
+        return status;
+    }
+    let name = fetch_persona_name(&status.steam_id)
+        .await
+        .unwrap_or_default();
+    if !name.is_empty() {
+        if let Ok(mut cache) = persona_cache().lock() {
+            cache.insert(status.steam_id.clone(), name.clone());
+        }
+    }
+    status.persona_name = name;
+    status
+}
+
+async fn fetch_persona_name(steam_id: &str) -> Option<String> {
+    // The id reaches the URL, so it is validated the same way a credential is.
+    let steam_id = validate_steam_id(steam_id).ok()?;
+    let client = reqwest::Client::builder()
+        .timeout(PERSONA_REQUEST_TIMEOUT)
+        .user_agent("Orivo/0.2 Steam library sync")
+        .build()
+        .ok()?;
+    let response = client
+        .get(format!("{PROFILE_ENDPOINT}{steam_id}?xml=1"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    persona_name_from_profile(&response.text().await.ok()?, &steam_id)
+}
+
+/// Read the persona name out of Steam's public profile view.
+///
+/// A visible profile answers with a small XML document that names the account
+/// it belongs to; a private or missing profile comes back as an `<error>`
+/// document, and a sign-in wall comes back as HTML. Neither repeats the id the
+/// request asked for, so both read as "no name".
+fn persona_name_from_profile(body: &str, steam_id: &str) -> Option<String> {
+    if profile_tag(body, "error").is_some() {
+        return None;
+    }
+    if profile_tag(body, "steamID64")?.trim() != steam_id {
+        return None;
+    }
+    sanitize_persona_name(&profile_tag(body, "steamID")?)
+}
+
+/// The text between `<tag>` and `</tag>`, with one round of CDATA unwrapped.
+fn profile_tag(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let rest = body.get(body.find(&open)? + open.len()..)?;
+    let raw = rest.get(..rest.find(&close)?)?.trim();
+    let text = raw
+        .strip_prefix("<![CDATA[")
+        .and_then(|value| value.strip_suffix("]]>"))
+        .unwrap_or(raw);
+    Some(text.to_string())
+}
+
+fn sanitize_persona_name(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() || collapsed.chars().count() > MAX_PERSONA_NAME_LENGTH {
+        return None;
+    }
+    Some(collapsed)
 }
 
 fn cached_credential() -> Option<StoredSteamCredential> {
@@ -322,11 +443,13 @@ pub async fn connect_api_key(
     fetch_owned_games_for_credential(&credential).await?;
     let steam_id = credential.steam_id().to_string();
     save_credential(credential)?;
-    Ok(SteamAccountStatus {
+    Ok(resolve_persona_name(SteamAccountStatus {
         connected: true,
         steam_id,
         method: "api_key".to_string(),
+        persona_name: String::new(),
     })
+    .await)
 }
 
 pub fn disconnect() -> Result<(), SteamAccountError> {
@@ -780,6 +903,69 @@ mod tests {
                 if api_key == "ABCDEF0123456789ABCDEF0123456789"
         ));
         assert!(api_key_credential("76561198000000000".into(), "not-a-key".into()).is_err());
+    }
+
+    #[test]
+    fn reads_a_persona_name_out_of_a_public_profile_document() {
+        let body = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><profile>
+            <steamID64>76561197960435530</steamID64>
+            <steamID><![CDATA[Robin]]></steamID>
+            <onlineState>offline</onlineState>
+            <privacyState>public</privacyState>
+        </profile>"#;
+
+        assert_eq!(
+            persona_name_from_profile(body, "76561197960435530"),
+            Some("Robin".to_string())
+        );
+    }
+
+    #[test]
+    fn reads_a_plain_text_persona_name_and_collapses_its_whitespace() {
+        let body = "<profile><steamID64>76561198000000000</steamID64>\
+                    <steamID>  Two  Words \n Here </steamID></profile>";
+
+        assert_eq!(
+            persona_name_from_profile(body, "76561198000000000"),
+            Some("Two Words Here".to_string())
+        );
+    }
+
+    #[test]
+    fn lends_no_name_to_anything_that_is_not_the_profile_asked_for() {
+        // A private or missing profile comes back as an error document.
+        let error =
+            "<profile><error><![CDATA[The specified profile is private.]]></error></profile>";
+        assert_eq!(persona_name_from_profile(error, "76561198000000000"), None);
+
+        // Another account's document never lends its name.
+        let other = "<profile><steamID64>76561198000000001</steamID64>\
+                     <steamID>Someone Else</steamID></profile>";
+        assert_eq!(persona_name_from_profile(other, "76561198000000000"), None);
+
+        // A sign-in wall is HTML: it repeats no id at all.
+        assert_eq!(
+            persona_name_from_profile(
+                "<html><head><title>Sign In</title></head></html>",
+                "76561198000000000"
+            ),
+            None
+        );
+
+        // Whitespace alone collapses to nothing, which is not a name.
+        let blank = "<profile><steamID64>76561198000000000</steamID64>\
+                     <steamID><![CDATA[   ]]></steamID></profile>";
+        assert_eq!(persona_name_from_profile(blank, "76561198000000000"), None);
+
+        // Neither is a run longer than Steam would ever issue.
+        let oversized = format!(
+            "<profile><steamID64>76561198000000000</steamID64><steamID>{}</steamID></profile>",
+            "x".repeat(MAX_PERSONA_NAME_LENGTH + 1)
+        );
+        assert_eq!(
+            persona_name_from_profile(&oversized, "76561198000000000"),
+            None
+        );
     }
 
     #[test]
