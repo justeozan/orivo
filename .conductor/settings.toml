@@ -38,3 +38,21 @@ icon = "app-window"
 command = "./scripts/run-linux-docker.sh"
 available_in = [ "local" ]
 icon = "container"
+
+# Test Orivo on Android: one command for both hosts. A phone that is plugged
+# in — or advertising wireless debugging, in which case the script asks for the
+# pairing code — wins, because it is the only host that answers the question
+# docs/performance.md §6 says an emulator cannot. Otherwise the `Orivo_Test`
+# AVD is booted. See scripts/run-android.sh.
+[scripts.run.android]
+command = "./scripts/run-android.sh"
+available_in = [ "local" ]
+icon = "device-mobile"
+
+# Test Orivo on iOS: boot a simulator (the booted one, else the newest iPhone),
+# install the app if it is not there yet, then launch it. See
+# scripts/run-ios-simulator.sh.
+[scripts.run.ios-simulator]
+command = "./scripts/run-ios-simulator.sh"
+available_in = [ "local" ]
+icon = "device-mobile"

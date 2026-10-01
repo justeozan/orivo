@@ -472,11 +472,11 @@ pub async fn rollback_plugin(
 pub fn install_plugin_from_file(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<Option<String>, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     {
         return Ok(None);
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     {
         let Some(selected) = rfd::FileDialog::new()
             .set_title("Choose an Orivo plugin package")

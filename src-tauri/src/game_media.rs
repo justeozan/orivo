@@ -525,7 +525,7 @@ pub trait MediaFilePicker: Send + Sync + 'static {
 #[derive(Debug, Default)]
 pub struct NativeFilePicker;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(desktop)]
 impl MediaFilePicker for NativeFilePicker {
     fn choose_import(&self, kind: GameMediaKind) -> Option<PathBuf> {
         let dialog = rfd::FileDialog::new().set_title(match kind {
@@ -549,7 +549,7 @@ impl MediaFilePicker for NativeFilePicker {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(mobile)]
 impl MediaFilePicker for NativeFilePicker {
     fn choose_import(&self, _kind: GameMediaKind) -> Option<PathBuf> {
         None

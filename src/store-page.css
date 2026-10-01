@@ -12,9 +12,25 @@
 .store-page {
   /* Layout */
   --pad: 46px;
-  --card-w: 276px;
+  /* Cut to the capsule. Steam serves every one of them at 616×353, and the
+     frame below carries that exact ratio, so the art the game was sold with
+     arrives whole: no crop across it, no bars around it. The width rides the
+     same viewport-height axis as every other step on this page, because the
+     art's height is what it buys: a shorter window gets a narrower card rather
+     than a picture sliced to fit one that stayed wide. */
+  --card-w: clamp(252px, 40svh, 380px);
   --card-gap: 16px;
   --card-radius: 14px;
+  /* The fused cut. How far the picture carries on into the block below it, how
+     far it rises back over its own foot, and how far out of focus it is by the
+     time it crosses. It is let through at full strength: at anything less the
+     first row below the cut stops being the last row above it, which is the
+     one thing that has to hold. Measured over the shelf's first six capsules,
+     the break at the cut is about 1.6 levels of 255 this way, and four times
+     that at 0.85. */
+  --seam-depth: 58px;
+  --seam-rise: 22px;
+  --seam-blur: 15px;
 
   /* The page never scrolls: it is exactly one screen tall. Every vertical step
      is a clamp indexed on the viewport height, so at the design's 1536×1024 the
@@ -23,21 +39,21 @@
   --pad-top: clamp(66px, 11.836svh, 121.2px);
   --pad-bottom: clamp(12px, 2.344svh, 24px);
   --gap-eyebrow: clamp(3px, 0.82svh, 8.4px);
-  --gap-lead: clamp(10px, 2.207svh, 22.6px);
   --gap-action: clamp(12px, 2.52svh, 25.8px);
   --gap-shelf: clamp(14px, 3.535svh, 36.2px);
-  --gap-label: clamp(7px, 1.348svh, 13.8px);
-  --gap-row: clamp(8px, 1.5625svh, 16px);
+  --gap-row: clamp(14px, 2.7svh, 28px);
   --size-title: clamp(26px, 4.6875svh, 48px);
   --lh-title: clamp(28px, 4.98svh, 51px);
   --size-eyebrow: clamp(12px, 1.4648svh, 15px);
   --lh-eyebrow: clamp(16px, 1.953svh, 20px);
-  --size-lead: clamp(12.5px, 1.5625svh, 16px);
-  --lh-lead: clamp(18px, 2.246svh, 23px);
   --h-action: clamp(34px, 4.492svh, 46px);
   --h-chipbar: clamp(36px, 4.492svh, 46px);
-  --h-banner: clamp(54px, 7.422svh, 76px);
-  --card-max-h: 400px;
+  /* A ceiling, not a height: the card measures itself now, and at the widest
+     cut the picture and the facts together come to just over 400px. The cap is
+     what stops a very tall window from turning the shelf into four posters —
+     it must sit above what the card asks for, or it would cut the verdict off
+     the foot of every one of them. */
+  --card-max-h: 440px;
 
   /* Glass. One recipe, three densities. */
   --glass: rgba(18, 20, 24, 0.42);
@@ -124,16 +140,20 @@
   );
 }
 
-/* Bottom: the shelf, the filters and the banner all sit on near-black. */
+/* Bottom: it used to be solid black over the whole lower two fifths of the
+   window, because a banner, a label and a row of chips all had to be read off
+   it. Two of those are gone and the chips carry their own glass, so the veil
+   only has to keep the foot of the page quiet — the photograph runs behind the
+   shelf now, which is what the cards are made of glass to show. */
 .store-backdrop__scrim--bottom {
   background: linear-gradient(
     0deg,
-    rgba(11, 11, 13, 1) 0%,
-    rgba(11, 11, 13, 1) 41%,
-    rgba(11, 11, 13, 0.8) 51%,
-    rgba(11, 11, 13, 0.55) 58%,
-    rgba(11, 11, 13, 0.22) 66%,
-    rgba(11, 11, 13, 0) 71%
+    rgba(9, 10, 12, 0.82) 0%,
+    rgba(9, 10, 12, 0.7) 14%,
+    rgba(9, 10, 12, 0.46) 34%,
+    rgba(9, 10, 12, 0.26) 50%,
+    rgba(9, 10, 12, 0.1) 64%,
+    rgba(9, 10, 12, 0) 74%
   );
 }
 
@@ -209,42 +229,30 @@
   -webkit-line-clamp: 2;
 }
 
-.store-hero__lead {
-  display: -webkit-box;
-  overflow: hidden;
-  height: calc(2 * var(--lh-lead));
-  margin: var(--gap-lead) 0 0;
-  max-width: 460px;
-  color: var(--ink-3);
-  font-size: var(--size-lead);
-  line-height: var(--lh-lead);
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
 .store-hero__action {
   height: var(--h-action);
   margin-top: var(--gap-action);
-  padding: 0 23px;
-  /* The stroke in the design is top-weighted, not a flat ring: the button is a
-     hairline catching the light, with the photograph showing straight through. */
-  border: 1px solid transparent;
+  padding: 0 26px;
+  /* The topbar's search field, rounded all the way: one hairline ring, a dark
+     pane at a third of an opacity, and the photograph behind it blurred rather
+     than hidden. Orivo's glass, not a button drawn on top of it. */
+  border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: 999px;
-  color: var(--ink-2);
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.02)) padding-box,
-    linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.02) 60%) border-box;
-  font-size: 16px;
-  font-weight: 400;
-  transition: background 160ms ease, transform 160ms ease;
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
+  color: #ede6e2;
+  background: rgba(22, 20, 23, 0.31);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.11), inset 0 1px rgba(255, 255, 255, 0.055);
+  font-size: 15px;
+  font-weight: 450;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  backdrop-filter: blur(22px) saturate(130%);
 }
 
-.store-hero__action:hover {
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.09)) padding-box,
-    linear-gradient(180deg, rgba(255, 255, 255, 0.4), rgba(255, 255, 255, 0.06) 60%) border-box;
+.store-hero__action:hover,
+.store-hero__action[data-nav-focus] {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fdfbfa;
+  background: rgba(34, 32, 36, 0.44);
 }
 
 .store-hero__action:active { transform: scale(0.985); }
@@ -394,7 +402,7 @@
   background: rgba(255, 255, 255, 0.07);
 }
 
-.store-why__close:hover { color: var(--ink); background: rgba(255, 255, 255, 0.13); }
+.store-why__close:hover, .store-why__close[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.13); }
 .store-why__close .icon { width: 13px; height: 13px; }
 
 /* ---------------------------------------------------------------------------
@@ -408,24 +416,6 @@
   flex-direction: column;
   margin-top: var(--gap-shelf);
 }
-
-.store-shelf__label {
-  display: flex;
-  /* The design places this row well inside the shelf rather than on the page
-     gutter; reproduced literally, and capped so it stays sane when narrow. */
-  margin: 0 0 var(--gap-label) min(302px, 21vw);
-  align-items: center;
-  gap: 11.5px;
-  flex: none;
-  font-size: 15px;
-  line-height: 20px;
-}
-
-.store-shelf__leaf { color: var(--leaf); }
-.store-shelf__leaf .icon { width: 16px; height: 16px; }
-
-.store-shelf__lead { color: #eef1ef; font-weight: 600; }
-.store-shelf__tail { color: #ccd1d0; font-weight: 400; }
 
 .store-rail {
   position: relative;
@@ -445,7 +435,11 @@
   height: calc(100% + 6px);
   overflow-x: auto;
   overflow-y: hidden;
-  align-items: flex-start;
+  /* The cards are as tall as what they say, and the band they are given is
+     taller than that. They sit at the foot of it, with the chip bar: the room
+     the banner and the label gave back goes above them, into the one part of
+     the window where the photograph is not veiled. */
+  align-items: flex-end;
   padding: 3px;
   margin: -3px;
   gap: var(--card-gap);
@@ -476,7 +470,8 @@
   backdrop-filter: blur(14px) saturate(120%);
 }
 
-.store-rail__arrow:hover {
+.store-rail__arrow:hover,
+.store-rail__arrow[data-nav-focus] {
   background: rgba(255, 255, 255, 0.1);
   transform: translateY(-50%) scale(1.06);
 }
@@ -493,12 +488,31 @@
 .store-card {
   position: relative;
   width: var(--card-w);
-  height: min(100%, var(--card-max-h));
+  /* The block under the picture is the hero's panel of reasons — the same
+     lifted blue-grey behind the same blur — with one change: its colour is the
+     artwork's own, read off the capsule when the card is built. The hue and
+     what is left of the saturation say which game it is; the lightness follows
+     the foot of the picture, so a near-white cover is not handed a dark slab to
+     stand on. These are the fallbacks, and what a picture with no colour in it
+     keeps. */
+  --card-hue: 211;
+  --card-sat: 21%;
+  --card-lum: 23%;
+  /* The picture keeps the capsule's shape and the body keeps its facts, so the
+     card is exactly the sum of the two: a taller shelf hands the space back to
+     the page rather than padding the foot of every card with nothing. */
+  height: auto;
+  max-height: min(100%, var(--card-max-h));
   flex: none;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.145);
   border-radius: var(--card-radius);
-  background: #0a0c0e;
+  /* The pane is the whole card, not the block: put it on the block alone and it
+     has to arrive from nothing at the cut, which leaves a band a few pixels
+     under the cut where neither it nor the reflection covers much — 46% of the
+     page showing through at the worst row, read as a bright line across every
+     card. Behind the artwork it costs nothing, the artwork being opaque. */
+  background: hsl(var(--card-hue) var(--card-sat) var(--card-lum) / 0.52);
   transition: border-color 200ms ease, box-shadow 200ms ease;
 }
 
@@ -522,27 +536,15 @@
   text-align: left;
 }
 
-/* The ring traces the card's own edge instead of floating four pixels inside
-   it. A focused card is already the featured one — border plus outer stroke —
-   so an inset line on top of that read as three separate frames. */
-.store-card__open:focus-visible,
-.store-card__open[data-nav-focus] {
-  outline-offset: -1px;
-  border-radius: var(--card-radius);
-}
-/* One frame, not two: the card drops its own outer ring while it wears a
-   focus ring. */
-.store-card:has(.store-card__open:focus-visible) ,
-.store-card:has(.store-card__open[data-nav-focus]) {
-  box-shadow: none;
-}
-
 .store-card__media {
   position: relative;
-  min-height: 84px;
-  /* The body's content height is fixed; the artwork takes whatever is left, so
-     a shorter window loses picture rather than losing a row of facts. */
-  flex: 1 1 auto;
+  /* The capsule's own shape, so the whole of it is shown. The body keeps what
+     the frame leaves; a shorter window now shortens the facts rather than the
+     picture, because a picture cut to fit is the thing this frame exists to
+     avoid. */
+  aspect-ratio: 616 / 353;
+  min-height: 0;
+  flex: none;
   overflow: hidden;
   background: #14161b;
 }
@@ -555,11 +557,21 @@
   transition: transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.store-card:hover .store-card__art { transform: scale(1.035); }
+/* Walked with the keys or a pad, a card scrolled into view brings the next one
+   with it: the shelf moves at the card before its edge, not once the edge is
+   reached, so what comes next is always in sight. */
+.store-rail__track[data-nav-driven] .store-card__open {
+  scroll-margin-inline: calc(var(--card-w) + var(--card-gap) + 16px);
+}
 
-/* Capsule art reads as its own title block, so the veil under it only has to
-   carry the price chip, not a line of text. */
-.store-card__media--wordmark .store-card__veil { height: 34%; opacity: 0.55; }
+.store-card:hover .store-card__art,
+.store-card:has(.store-card__open[data-nav-focus]) .store-card__art { transform: scale(1.035); }
+
+/* Capsule art reads as its own title block, so the veil under it carries no
+   text at all. What is left of it is the foot of the picture being taken down
+   to meet its own reflection in the block below — which is why it is now as
+   deep as that reflection is bright, and no deeper. */
+.store-card__media--wordmark .store-card__veil { height: 34%; opacity: 0.22; }
 .store-card__media--missing .store-card__art { opacity: 0; }
 
 /* Reads the title back off any artwork. */
@@ -614,15 +626,107 @@
 .store-card__price:empty { display: none; }
 
 .store-card__body {
+  position: relative;
   display: flex;
+  /* The colour is the card's, behind this. What the block adds is the blur —
+     and no hairline of light along its top edge, where the hero's panel wears
+     one: a surface that begins exactly at the cut is a line across it. */
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  backdrop-filter: blur(24px) saturate(130%);
+  /* Not clipped: the reflection has to reach back over the foot of the picture
+     for the two to cross-fade at all. The card clips it, which is where the
+     rounded corner is anyway. */
   flex: none;
   flex-direction: column;
   padding: clamp(7px, 1.081svh, 11.07px) 16px clamp(11px, 1.777svh, 18.2px);
 }
 
+/* The facts ride over the picture's continuation, and are never blurred by it. */
+.store-card__body > * { position: relative; z-index: 1; }
+
+/* There is no edge between the picture and the facts. The block carries on
+   with the same picture — mirrored, so the first row of the reflection is the
+   picture's last one, and out of focus, so nothing in it can be read as a
+   second image. It rises a little over the foot of the artwork as well, which
+   is what takes the hard line out of the cut: on both sides of it, the same
+   colours at the same moment, one sharp and one not. */
+.store-card__body::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: calc(-1 * var(--seam-rise));
+  right: calc(-1 * var(--seam-blur) * 2);
+  left: calc(-1 * var(--seam-blur) * 2);
+  height: calc(var(--seam-depth) + var(--seam-rise));
+  /* The element is flipped, so everything below it is written upside down: the
+     background is anchored at what becomes the cut, and the mask runs from the
+     far end back to it. Anchoring to the box rather than to the cut itself puts
+     the end of the picture inside the part the mask throws away — a blur that
+     runs off the end of a picture thins it, and thinning it here would draw the
+     very line this exists to remove. The reflection therefore begins a hair's
+     breadth up the picture rather than at its last row: at this radius, nothing
+     to see. */
+  /* The veil over the foot of the artwork is part of what the picture looks
+     like there, so the reflection wears it too — mirrored like everything else
+     in this element: deepest at the cut, gone again over the distance the veil
+     itself covers. Without it the reflection comes back unveiled and lays a
+     bright ridge along the join, which is the one thing it is here to avoid.
+     The reach is the veil's own height: a share of the frame, and the frame is
+     the card's width cut to the capsule's shape. */
+  --veil-ink: 10, 12, 14;
+  --veil-alpha: 0.95;
+  --veil-reach: calc((var(--card-w) - 2px) * 0.298);
+  background-image:
+    linear-gradient(
+      to top,
+      rgba(var(--veil-ink), var(--veil-alpha)) var(--seam-rise),
+      rgba(var(--veil-ink), 0) calc(var(--seam-rise) + var(--veil-reach))
+    ),
+    var(--card-art);
+  background-position: center bottom;
+  background-repeat: no-repeat;
+  background-size: auto, cover;
+  filter: blur(var(--seam-blur));
+  transform: scaleY(-1);
+  /* Written from the far end back to the cut, because the element is upside
+     down. Full strength where it meets the picture, then off fast: the facts
+     are read on the block, not on the photograph. */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgba(0, 0, 0, 0.05) calc(var(--seam-depth) - 30px),
+    rgba(0, 0, 0, 0.14) calc(var(--seam-depth) - 17px),
+    rgba(0, 0, 0, 0.36) calc(var(--seam-depth) - 7px),
+    #000 var(--seam-depth),
+    transparent calc(var(--seam-depth) + var(--seam-rise))
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgba(0, 0, 0, 0.05) calc(var(--seam-depth) - 30px),
+    rgba(0, 0, 0, 0.14) calc(var(--seam-depth) - 17px),
+    rgba(0, 0, 0, 0.36) calc(var(--seam-depth) - 7px),
+    #000 var(--seam-depth),
+    transparent calc(var(--seam-depth) + var(--seam-rise))
+  );
+  pointer-events: none;
+}
+
+/* Capsule art wears a far lighter veil over a shorter run, and so does its
+   reflection. */
+.store-card__media--wordmark ~ .store-card__body::before {
+  --veil-alpha: 0.21;
+  --veil-reach: calc((var(--card-w) - 2px) * 0.195);
+}
+
+/* Nothing to continue: no artwork, no reflection. */
+.store-card__media--missing ~ .store-card__body::before { display: none; }
+
 .store-card__genres {
   overflow: hidden;
-  color: #c6cbc9;
+  /* Lifted with the surface under it: the block used to be near-black and is
+     now a pane of glass over a photograph, which is several stops brighter. */
+  color: #e9edeb;
   font-size: 13px;
   line-height: 16px;
   text-overflow: ellipsis;
@@ -648,10 +752,24 @@
   white-space: nowrap;
 }
 
+/* A game with no scores of its own leaves no gap where they would have been. */
+.store-card__stats:empty { display: none; }
+
 .store-card__stats {
   display: flex;
   margin-top: clamp(4px, 0.615svh, 6.3px);
   flex-direction: column;
+}
+
+/* What the card says under the art, as the window loses height. The picture
+   keeps its shape all the way down, so these are what yields: the five-dot
+   scores first, then the one-line verdict. The genre and the two chips are the
+   last to go, and they never do. */
+@media (max-height: 580px) {
+  .store-card__stats { display: none; }
+}
+@media (max-height: 500px) {
+  .store-card__tagline { display: none; }
 }
 
 .store-card__stat {
@@ -663,7 +781,7 @@
 
 .store-card__stat-label {
   overflow: hidden;
-  color: #adb3b2;
+  color: #d5dad9;
   font-size: 12.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -689,7 +807,7 @@
   overflow: hidden;
   height: 17px;
   margin-top: clamp(6px, 1.123svh, 11.5px);
-  color: #8d9391;
+  color: #c2c8c6;
   font-size: 12.5px;
   line-height: 17px;
   text-overflow: ellipsis;
@@ -718,9 +836,10 @@
 .store-card:hover .store-card__wishlist,
 .store-card--featured .store-card__wishlist,
 .store-card__wishlist:focus-visible,
+.store-card__wishlist[data-nav-focus],
 .store-card__wishlist[aria-pressed="true"] { opacity: 1; }
 
-.store-card__wishlist:hover { background: rgba(0, 0, 0, 0.3); transform: scale(1.08); }
+.store-card__wishlist:hover, .store-card__wishlist[data-nav-focus] { background: rgba(0, 0, 0, 0.3); transform: scale(1.08); }
 .store-card__wishlist .icon { width: 22px; height: 22px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5)); }
 .store-card__wishlist[aria-pressed="true"] { color: #ff8fa8; }
 
@@ -758,12 +877,14 @@
 .store-card:hover .store-card__install,
 .store-card--featured .store-card__install,
 .store-card__install:focus-visible,
+.store-card__install[data-nav-focus],
 .store-card__install[data-phase="queued"],
 .store-card__install[data-phase="downloading"],
 .store-card__install[data-phase="extracting"],
 .store-card__install[data-phase="failed"] { opacity: 1; }
 
-.store-card__install:hover[aria-disabled="false"] {
+.store-card__install:hover[aria-disabled="false"],
+.store-card__install[data-nav-focus][aria-disabled="false"] {
   border-color: var(--accent);
   background: rgba(0, 0, 0, 0.45);
 }
@@ -857,6 +978,8 @@
 }
 
 .store-chip:hover { background: rgba(255, 255, 255, 0.05); }
+/* The pointer's tint is too faint to find a chip by; the keys get a stronger one. */
+.store-chip[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.12); }
 
 .store-chip--active {
   background: rgba(255, 255, 255, 0.09);
@@ -876,6 +999,10 @@
 }
 
 .store-chip--platform.store-chip--active[data-platform="pc"] .store-chip__icon { color: #5a9fe0; }
+
+/* A chip that is on already wears a plate; the keys brighten it. */
+.store-chip--active[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.18); }
+.store-chip--platform.store-chip--active[data-platform="pc"][data-nav-focus] { background: rgba(76, 146, 222, 0.34); }
 
 .store-platform-group { position: relative; }
 
@@ -937,57 +1064,6 @@
 .store-more-panel__message { display: block; color: var(--ink-4); font-size: 12px; line-height: 1.35; }
 
 /* ---------------------------------------------------------------------------
-   Mindful banner
-   --------------------------------------------------------------------------- */
-
-.store-banner {
-  display: flex;
-  height: var(--h-banner);
-  flex: none;
-  margin-top: var(--gap-row);
-  align-items: center;
-  gap: 24px;
-  padding: 0 22px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.037);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
-}
-
-.store-banner__leaf { color: var(--leaf); }
-.store-banner__leaf .icon { width: 18px; height: 18px; }
-
-.store-banner__copy {
-  margin: 0;
-  flex: 1;
-  color: #adb3b2;
-  font-size: 14px;
-  line-height: 21px;
-  white-space: pre-line;
-}
-
-.store-banner__lead { color: #e4e7e6; font-weight: 600; }
-
-.store-banner__action {
-  display: inline-flex;
-  height: clamp(34px, 4.297svh, 44px);
-  align-items: center;
-  gap: 10px;
-  padding: 0 20px;
-  border: 0;
-  border-radius: 12px;
-  color: var(--ink-2);
-  background: rgba(255, 255, 255, 0.03);
-  font-size: clamp(13px, 1.5625svh, 16px);
-  white-space: nowrap;
-  transition: background 160ms ease;
-}
-
-.store-banner__action:hover { background: rgba(255, 255, 255, 0.08); }
-.store-banner__action .icon { width: 17px; height: 17px; }
-
-/* ---------------------------------------------------------------------------
    Status
    --------------------------------------------------------------------------- */
 
@@ -1043,10 +1119,9 @@
   .store-chipbar::-webkit-scrollbar { display: none; }
 }
 
-/* Very short windows cannot show a five-row card, so the least load-bearing
-   line goes first rather than the layout breaking. */
+/* Very short windows cannot show three rows of reasons, so the panel keeps a
+   line each. What the card drops, and when, is decided beside the card. */
 @media (max-height: 700px) {
-  .store-card__tagline { display: none; }
   .store-highlight__text { -webkit-line-clamp: 1; }
 }
 
@@ -1080,23 +1155,27 @@ html[data-form-factor="compact"] .store-page__body {
   overflow: visible;
 }
 html[data-form-factor="compact"] .store-rail { min-height: var(--card-max-h); }
-/* `min(100%, …)` resolves against an auto track once the page scrolls. */
-html[data-form-factor="compact"] .store-card { height: var(--card-max-h); }
+/* `min(100%, …)` resolves against an auto track once the page scrolls, so the
+   phone pins the card rather than letting it measure itself. */
+html[data-form-factor="compact"] .store-card { height: var(--card-max-h); max-height: none; }
 
 html[data-form-factor="compact"] .store-page {
   --pad: 16px;
   --pad-top: calc(var(--topbar-height) + 8px);
   --pad-bottom: 8px;
-  --card-w: 138px;
+  /* Same cut, one screen down: wide enough that the capsule still reads at a
+     phone's size rather than becoming a 78px strip. */
+  --card-w: 190px;
   --card-max-h: 208px;
   --card-gap: 10px;
+  /* The card is half the size here and the block under it is two lines, so the
+     cut fades over a third of the distance rather than swallowing them. */
+  --seam-depth: 34px;
+  --seam-rise: 11px;
+  --seam-blur: 8px;
   --size-title: clamp(20px, 5.4svh, 26px);
   --lh-title: clamp(22px, 5.8svh, 28px);
-  --size-lead: 12px;
-  --lh-lead: 16px;
   --gap-shelf: 10px;
-  --gap-label: 6px;
-  --gap-lead: 6px;
   --gap-action: 8px;
   --h-action: 40px;
   --h-chipbar: 40px;
@@ -1104,9 +1183,3 @@ html[data-form-factor="compact"] .store-page {
 /* A three-row panel pinned to the right edge has nowhere to go on a short
    screen, and it is the one piece of the hero the shelf can do without. */
 html[data-form-factor="compact"] .store-highlights { display: none; }
-/* The design indents this row to clear the panel above. With the panel gone,
-   the indent is a third of the width spent on nothing. */
-html[data-form-factor="compact"] .store-shelf__label { margin-left: 0; }
-/* Two lines of editorial standfirst are two lines of games not shown. The
-   title and the button carry the same promise. */
-html[data-form-factor="compact"] .store-hero__lead { display: none; }

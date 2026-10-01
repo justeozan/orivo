@@ -100,7 +100,7 @@ test.describe("topbar search", () => {
     }
   });
 
-  test(":focus-within paints a 2px ring around the search pill", async ({ page }) => {
+  test("focusing the search pill paints no ring", async ({ page }) => {
     for (const route of ROUTES) {
       await openRoute(page, route.hash, route.name);
 
@@ -112,15 +112,15 @@ test.describe("topbar search", () => {
       });
       const blurred = await topbarSearchProbe(page);
       expect(blurred.focusWithin, `${route.label}: search should start unfocused`).toBe(false);
-      expect(blurred.ringWidth, `${route.label}: no ring while unfocused`).not.toBeCloseTo(2, 1);
+      expect(blurred.ringWidth, `${route.label}: no ring while unfocused`).toBeCloseTo(0, 1);
 
       await page.locator("#topbar-search").focus();
       const focused = await topbarSearchProbe(page);
       expect(focused.focusWithin, `${route.label}: .search-control :focus-within`).toBe(true);
       expect(
         focused.ringWidth,
-        `${route.label}: the focus ring must be a visible 2px, got ${focused.ringWidth}px`,
-      ).toBeCloseTo(2, 1);
+        `${route.label}: focus must paint no ring, got ${focused.ringWidth}px`,
+      ).toBeCloseTo(0, 1);
     }
   });
 
@@ -169,4 +169,18 @@ test.describe("no circular spinners", () => {
       }
     });
   }
+});
+
+test.describe("the library browse bar", () => {
+  test("keeps its segments and Activity, and carries no mood switch", async ({ page }) => {
+    await openRoute(page, "#/library", "library");
+
+    await expect(page.locator("#browse-segments .browse-bar__segment")).toHaveCount(2);
+    await expect(page.locator("#browse-mode")).toBeVisible();
+
+    // The switch is out of the product rather than merely out of the way: the
+    // state it drives stays in the document, the stylesheet takes the control
+    // out of sight, and so out of the tab order with it.
+    await expect(page.locator("#rage-toggle")).toBeHidden();
+  });
 });

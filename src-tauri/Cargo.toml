@@ -51,7 +51,10 @@ url = "2"
 wasmtime = { version = "=44.0.0", default-features = false, features = ["component-model", "cranelift", "runtime"] }
 tauri-plugin-opener = "2"
 
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# `rfd` only implements its dialog traits for desktop targets — there is no iOS
+# backend alongside `backend/macos.rs`, so it cannot compile for iOS at all. The
+# native pickers live behind the `desktop` cfg alias for the same reason.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 rfd = "0.15"
 
 [dependencies.tauri-plugin-orivo-saf]
@@ -68,6 +71,14 @@ ndk-context = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+
+# `keyring`'s default `v1` feature turns on `apple-native-keyring-store/keychain`
+# but never `protected`, and that crate compile_error!s on iOS without it. There
+# is no `keyring` feature that enables `protected` alone — only `cli`, which
+# would also pull in the Linux stores. Depending on it directly here makes cargo
+# unify the two features, and only when the target is iOS.
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1.0", features = ["protected"] }
 
 [target.'cfg(windows)'.dependencies]
 # `Win32_Foundation` is `HANDLE`, `FILETIME` and the other shared scalars that

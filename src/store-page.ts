@@ -253,6 +253,112 @@ const PLATFORM_ICONS: Readonly<Record<StorePlatform, IconName>> = {
   emulators: "emulator",
 };
 
+/**
+ * The tone a capsule is carried by, for the block of facts printed under it.
+ *
+ * Three numbers, and each is there for a reason:
+ *
+ * - **Hue**, not the average colour — averaging a picture returns mud, and a
+ *   grey sky over half the frame would outvote the one thing in it that has a
+ *   colour. The pixels go into coarse buckets, each weighed by how much of the
+ *   picture it is *and* how colourful it is.
+ * - **Saturation**, dropped almost to nothing for artwork that has no colour of
+ *   its own. A black-and-white cover given the panel's blue-grey reads cold
+ *   against a warm page, which is a card that does not belong to itself.
+ * - **Lightness**, read off the foot of the picture — the part the block is
+ *   printed directly under. A near-white cover over a dark block is a hole cut
+ *   in the card; following the artwork is what keeps the two one object. The
+ *   range is narrow on purpose: the facts are printed on this.
+ *
+ * Costs one small readback per distinct capsule, on the image's own load event,
+ * and is remembered for the rest of the session.
+ */
+interface CapsuleTone {
+  hue: number;
+  saturation: number;
+  lightness: number;
+}
+
+const TONE_CACHE = new Map<string, CapsuleTone>();
+
+function capsuleTone(image: HTMLImageElement): CapsuleTone | null {
+  const cached = TONE_CACHE.get(image.src);
+  if (cached !== undefined) return cached;
+  if (!image.naturalWidth) return null;
+
+  const width = 48;
+  const height = Math.max(1, Math.round((width * image.naturalHeight) / image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+
+  let pixels: Uint8ClampedArray;
+  try {
+    context.drawImage(image, 0, 0, width, height);
+    pixels = context.getImageData(0, 0, width, height).data;
+  }
+  catch {
+    // A capsule served from a store's CDN taints the canvas. The card keeps the
+    // panel's own blue-grey, which is what it looked like before any of this.
+    return null;
+  }
+
+  const buckets = new Map<number, { r: number; g: number; b: number; n: number; weight: number }>();
+  for (let index = 0; index < pixels.length; index += 4) {
+    const r = pixels[index];
+    const g = pixels[index + 1];
+    const b = pixels[index + 2];
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const light = (max + min) / 510;
+    if (light < 0.08 || light > 0.94) continue;
+    const saturation = max === min ? 0 : (max - min) / (255 - Math.abs(max + min - 255));
+    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    const bucket = buckets.get(key) ?? { r: 0, g: 0, b: 0, n: 0, weight: 0 };
+    bucket.r += r;
+    bucket.g += g;
+    bucket.b += b;
+    bucket.n += 1;
+    bucket.weight += 0.25 + saturation * saturation;
+    buckets.set(key, bucket);
+  }
+
+  let best: { r: number; g: number; b: number; n: number; weight: number } | null = null;
+  for (const bucket of buckets.values()) if (!best || bucket.weight > best.weight) best = bucket;
+  if (!best) return null;
+
+  const r = best.r / best.n;
+  const g = best.g / best.n;
+  const b = best.b / best.n;
+  const max = Math.max(r, g, b);
+  const delta = max - Math.min(r, g, b);
+
+  let hue = 211;
+  if (max === r) hue = ((g - b) / delta) % 6;
+  else if (max === g) hue = (b - r) / delta + 2;
+  else hue = (r - g) / delta + 4;
+  hue = delta < 6 ? 211 : Math.round(((hue * 60) % 360 + 360) % 360);
+  // Artwork with no colour of its own gets a pane with none either.
+  const saturation = delta < 14 ? 5 : 21;
+
+  // The foot of the picture: the eighth of it the block is printed under.
+  const from = Math.floor(height * 0.82) * width * 4;
+  let sum = 0;
+  let count = 0;
+  for (let index = from; index < pixels.length; index += 4) {
+    sum += (0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2]) / 255;
+    count += 1;
+  }
+  const foot = count ? sum / count : 0.3;
+  const lightness = Math.round(Math.min(34, Math.max(16, 16 + foot * 22)));
+
+  const tone = { hue, saturation, lightness };
+  TONE_CACHE.set(image.src, tone);
+  return tone;
+}
+
 function requestErrorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return "";
   if (typeof error === "string" && error.trim()) return error;
@@ -312,11 +418,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     backdropLayers: [] as HTMLImageElement[],
     heroEyebrow: null as HTMLElement | null,
     heroTitle: null as HTMLElement | null,
-    heroLead: null as HTMLElement | null,
     heroAction: null as HTMLButtonElement | null,
     heroOffer: null as HTMLElement | null,
     highlightList: null as HTMLElement | null,
-    shelfLabel: null as HTMLElement | null,
     railTrack: null as HTMLElement | null,
     arrowPrevious: null as HTMLButtonElement | null,
     arrowNext: null as HTMLButtonElement | null,
@@ -525,7 +629,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const copy = element("div", "store-hero__copy");
     nodes.heroEyebrow = element("p", "store-hero__eyebrow");
     nodes.heroTitle = element("h1", "store-hero__title");
-    nodes.heroLead = element("p", "store-hero__lead");
     nodes.heroAction = element("button", "store-hero__action");
     nodes.heroAction.type = "button";
     nodes.heroAction.dataset.focusKey = "hero-action";
@@ -539,7 +642,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       renderWhyPanel();
     });
     nodes.heroOffer = element("p", "store-hero__offer");
-    copy.append(nodes.heroEyebrow, nodes.heroTitle, nodes.heroLead, nodes.heroAction, nodes.heroOffer);
+    copy.append(nodes.heroEyebrow, nodes.heroTitle, nodes.heroAction, nodes.heroOffer);
 
     const highlights = element("aside", "store-highlights");
     highlights.setAttribute("aria-label", "Pourquoi cette sélection");
@@ -555,15 +658,21 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
   const buildShelf = (): HTMLElement => {
     const shelf = element("section", "store-shelf");
-    nodes.shelfLabel = element("p", "store-shelf__label");
     const rail = element("div", "store-rail");
     nodes.railTrack = element("div", "store-rail__track");
     nodes.railTrack.setAttribute("role", "list");
+    // Left and right are the keys that change the game on this page: they walk
+    // this rail rather than whatever control happens to be nearest, and up or
+    // down come back to the featured card.
+    nodes.railTrack.setAttribute("data-nav-rail", "");
     nodes.railTrack.addEventListener("scroll", () => syncArrows(), { passive: true });
 
+    // The arrows scroll the shelf for the pointer. The keys scroll it by
+    // walking the cards, so they pass these by.
     nodes.arrowPrevious = element("button", "store-rail__arrow store-rail__arrow--previous");
     nodes.arrowPrevious.type = "button";
     nodes.arrowPrevious.dataset.focusKey = "rail-previous";
+    nodes.arrowPrevious.dataset.navSkip = "";
     nodes.arrowPrevious.setAttribute("aria-label", "Voir les jeux précédents");
     nodes.arrowPrevious.append(iconElement("arrow-left"));
     nodes.arrowPrevious.addEventListener("click", () => scrollRail(-1));
@@ -571,6 +680,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     nodes.arrowNext = element("button", "store-rail__arrow store-rail__arrow--next");
     nodes.arrowNext.type = "button";
     nodes.arrowNext.dataset.focusKey = "rail-next";
+    nodes.arrowNext.dataset.navSkip = "";
     nodes.arrowNext.setAttribute("aria-label", "Voir plus de jeux");
     nodes.arrowNext.append(iconElement("arrow-right"));
     nodes.arrowNext.addEventListener("click", () => scrollRail(1));
@@ -579,7 +689,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     nodes.emptyState.hidden = true;
 
     rail.append(nodes.railTrack, nodes.arrowPrevious, nodes.arrowNext);
-    shelf.append(nodes.shelfLabel, rail, nodes.emptyState);
+    shelf.append(rail, nodes.emptyState);
     return shelf;
   };
 
@@ -589,6 +699,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
     nodes.categoryBar = element("nav", "store-chipbar store-chipbar--categories");
     nodes.categoryBar.setAttribute("aria-label", "Catégories");
+    // A strip of chips is a row: left and right walk it, on into the platform
+    // chips beside it, and up or down come back to the chip last left.
+    nodes.categoryBar.setAttribute("data-nav-row", "");
     for (const option of STORE_CATEGORIES) {
       const chip = element("button", "store-chip", option.label);
       chip.type = "button";
@@ -605,6 +718,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const platformGroup = element("div", "store-platform-group");
     nodes.platformBar = element("nav", "store-chipbar store-chipbar--platforms");
     nodes.platformBar.setAttribute("aria-label", "Plateformes");
+    nodes.platformBar.setAttribute("data-nav-row", "");
     for (const option of STORE_PLATFORMS) {
       const chip = element("button", "store-chip store-chip--platform");
       chip.type = "button";
@@ -645,36 +759,13 @@ export function createStorePage(options: StorePageOptions): AppPage {
     return filters;
   };
 
-  const buildBanner = (): HTMLElement => {
-    const banner = element("aside", "store-banner");
-    banner.setAttribute("aria-label", "Habitudes de jeu");
-    const copy = element("p", "store-banner__copy");
-    copy.append(
-      element("b", "store-banner__lead", "Rappelle-toi :"),
-      element(
-        "span",
-        "store-banner__text",
-        " chaque heure de jeu peut t'apporter quelque chose.\nChoisis la qualité, pas la quantité.",
-      ),
-    );
-    const habits = element("button", "store-banner__action");
-    habits.type = "button";
-    habits.dataset.focusKey = "store-habits";
-    habits.append(iconElement("chart"), element("span", "", "Voir mes habitudes"));
-    habits.addEventListener("click", () =>
-      options.navigate({ page: "settings", section: "general", attachGameId: null }),
-    );
-    banner.append(iconElement("leaf", "store-banner__leaf"), copy, habits);
-    return banner;
-  };
-
   const buildSkeleton = (): void => {
     if (!pageRoot) return;
     const body = element("div", "store-page__body");
     nodes.status = element("div", "store-status");
     nodes.status.setAttribute("aria-live", "polite");
     nodes.status.hidden = true;
-    body.append(buildHero(), buildShelf(), buildFilters(), buildBanner());
+    body.append(buildHero(), buildShelf(), buildFilters());
     pageRoot.replaceChildren(buildBackdrop(), body, nodes.status);
   };
 
@@ -719,7 +810,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const heroCopy = selectHeroCopy(state, games);
     if (nodes.heroEyebrow) nodes.heroEyebrow.textContent = heroCopy.eyebrow;
     if (nodes.heroTitle) nodes.heroTitle.textContent = heroCopy.title;
-    if (nodes.heroLead) nodes.heroLead.textContent = heroCopy.lead;
     if (nodes.heroAction) nodes.heroAction.textContent = heroCopy.actionLabel;
     if (nodes.heroOffer) {
       const previewed = heroCopy.gameId
@@ -731,15 +821,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
     renderHighlights(heroCopy.highlights);
     setBackdrop(heroCopy.backgroundUrl);
-  };
-
-  const renderShelfLabel = (): void => {
-    if (!nodes.shelfLabel) return;
-    nodes.shelfLabel.replaceChildren(
-      iconElement("leaf", "store-shelf__leaf"),
-      element("strong", "store-shelf__lead", "Moins de bruit."),
-      element("span", "store-shelf__tail", "Plus de sens."),
-    );
   };
 
   const previewGame = (gameId: string | null): void => {
@@ -864,6 +945,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
     open.type = "button";
     open.dataset.focusKey = `game-${game.id}`;
     open.dataset.navOpen = game.id;
+    // An entry of the shelf's rail: left and right step between the cards.
+    open.dataset.navItem = "";
     open.setAttribute("aria-label", `Ouvrir ${game.title}`);
     open.addEventListener("click", () =>
       options.navigate({ page: "game", gameId: game.id, from: "store" }),
@@ -877,19 +960,62 @@ export function createStorePage(options: StorePageOptions): AppPage {
     // an unreadable sliver at this size. Each fallback is tried once.
     const artSources = [game.landscapeUrl, game.coverUrl, game.heroUrl].filter(Boolean);
     let artIndex = 0;
-    art.src = artSources[0] ?? "";
+    // The block under the picture carries on with the picture, so the card
+    // needs the same file twice. It is one request: the second use is served
+    // out of the browser's cache, and a source that fails takes both with it.
+    const wearTone = (image: HTMLImageElement): void => {
+      const tone = capsuleTone(image);
+      if (!tone) return;
+      card.style.setProperty("--card-hue", `${tone.hue}`);
+      card.style.setProperty("--card-sat", `${tone.saturation}%`);
+      card.style.setProperty("--card-lum", `${tone.lightness}%`);
+    };
+
+    const takeTone = (): void => {
+      if (!art.src) return;
+      const sameOrigin = new URL(art.src, location.href).origin === location.origin;
+      if (sameOrigin) {
+        wearTone(art);
+        return;
+      }
+      // A shop's own art is another origin, and a canvas will not give up a
+      // pixel of it unless the image was asked for in CORS mode. Reading it
+      // through a second request rather than putting `crossOrigin` on the card
+      // itself keeps the two failures apart: a host that declines costs the
+      // block its colour, never the card its picture.
+      const probe = new Image();
+      probe.crossOrigin = "anonymous";
+      probe.decoding = "async";
+      probe.addEventListener("load", () => wearTone(probe), { once: true });
+      probe.src = art.src;
+    };
+    const showArt = (url: string): void => {
+      art.src = url;
+      if (url) card.style.setProperty("--card-art", `url("${url}")`);
+      else card.style.removeProperty("--card-art");
+      card.style.removeProperty("--card-hue");
+      card.style.removeProperty("--card-sat");
+      card.style.removeProperty("--card-lum");
+      if (art.complete) takeTone();
+    };
+    art.addEventListener("load", takeTone);
+    showArt(artSources[0] ?? "");
     art.alt = "";
     art.loading = index < 6 ? "eager" : "lazy";
     art.decoding = "async";
     art.addEventListener("error", () => {
       artIndex += 1;
-      if (artIndex < artSources.length) art.src = artSources[artIndex];
-      else media.classList.add("store-card__media--missing");
+      if (artIndex < artSources.length) showArt(artSources[artIndex]);
+      else {
+        card.style.removeProperty("--card-art");
+        media.classList.add("store-card__media--missing");
+      }
     });
-    // A few games have no screenshot that survives the crop and fall back to
-    // their capsule, which already carries the wordmark; printing the title
-    // over it would show the name twice.
-    const artHasWordmark = /\/capsule\.jpg$/.test(art.src || "");
+    // Store art carries the game's name — that is what it is for. The shelf's
+    // own files are `capsule.jpg`; a game that arrives live from Steam brings
+    // `capsule_616x353.jpg`, or `header.jpg` when it is too new to have a
+    // capsule. Printing a title over any of them shows the name twice.
+    const artHasWordmark = /\/(capsule[^/]*|header)\.jpg(\?|$)/.test(art.src || "");
     media.append(art, element("span", "store-card__veil"));
     // A shop that quoted nothing leaves the slot empty rather than printing a
     // blank price frame the shopper would read as "free".
@@ -970,6 +1096,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const featured = previewId ? card.dataset.gameId === previewId : index === 0;
       card.classList.toggle("store-card--featured", featured);
       card.classList.toggle("store-card--previewing", Boolean(previewId) && featured);
+      // The featured card is where the keys come back to on the shelf.
+      card.querySelector(".store-card__open")?.toggleAttribute("data-nav-selected", featured);
     });
   };
 
@@ -1124,7 +1252,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     if (!pageRoot) return;
     const focusSnapshot = captureFocus();
     const games = visibleGames();
-    renderShelfLabel();
     renderCards(games);
     renderHero(games);
     renderFilters();
@@ -1229,6 +1356,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     // window-level listener would otherwise fire while the Store is off-screen.
     if (!pageRoot?.isConnected || pageRoot.closest("[hidden]")) return;
     if (event.key !== "Escape") return;
+    // A panel that closed used the key: a controller's B stops here instead of
+    // also leaving the Store.
+    if (whyOpen || morePlatformsOpen) event.preventDefault();
     if (whyOpen) {
       whyOpen = false;
       renderWhyPanel();

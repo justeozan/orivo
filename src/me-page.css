@@ -212,7 +212,8 @@
   transition: border-color 140ms ease, background 140ms ease;
 }
 
-.me-head__select:hover {
+.me-head__select:hover,
+.me-head__select[data-nav-focus] {
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.075);
 }
@@ -610,7 +611,8 @@
   transition: border-color 140ms ease, background 140ms ease;
 }
 
-.me-schema__detail:hover {
+.me-schema__detail:hover,
+.me-schema__detail[data-nav-focus] {
   border-color: rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.085);
 }
@@ -844,7 +846,8 @@
   transition: color 140ms ease, border-color 140ms ease;
 }
 
-.me-risk__more:hover {
+.me-risk__more:hover,
+.me-risk__more[data-nav-focus] {
   border-color: rgba(255, 255, 255, 0.2);
   color: var(--me-text);
 }
@@ -995,7 +998,8 @@
   transition: color 140ms ease;
 }
 
-.me-reco__button:hover .me-reco__label {
+.me-reco__button:hover .me-reco__label,
+.me-reco__button[data-nav-focus] .me-reco__label {
   color: #fff;
 }
 
@@ -1097,14 +1101,6 @@
 }
 
 /* --------------------------------------------------------------- responsive */
-
-/* Navigation clavier / manette : anneau de focus commun aux cibles de la page.
-   Chaque carte du dashboard est focusable, donc l'anneau se pose sur la carte
-   elle-même plutôt que sur une liste de cibles à tenir à jour. */
-.me-card:focus-visible {
-  outline: 2px solid #c3b5ff;
-  outline-offset: 3px;
-}
 
 /* Sous ces seuils le dashboard ne tient plus d'un bloc : il redevient une page
    qui défile plutôt que de se comprimer jusqu'à l'illisible. */

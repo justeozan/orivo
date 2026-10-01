@@ -73,7 +73,9 @@ button, input { font: inherit; }
 
 button { border: 0; cursor: pointer; }
 
-button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 3px; }
+/* Focus paints nothing: the app already shows state where it matters (caret,
+   active tab, selected row) and a ring around every stop was noise. */
+:focus-visible { outline: none; }
 
 .icon { width: 18px; height: 18px; flex: none; }
 
@@ -179,9 +181,22 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   background: linear-gradient(180deg, rgba(9,10,14,.94) 0%, rgba(9,10,14,.88) 72%, rgba(9,10,14,0) 100%);
   -webkit-backdrop-filter: blur(18px) saturate(125%);
   backdrop-filter: blur(18px) saturate(125%);
+  /* The blur is a rectangle, so it used to stop on a straight line right under
+     the bar — invisible on a near-black page, a hard seam across the settings
+     wash. Ramping the whole scrim, blur included, out over its last third puts
+     the edge back inside a gradient. */
+  -webkit-mask-image: linear-gradient(180deg, #000 0%, #000 58%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 0%, #000 58%, transparent 100%);
   transition: opacity 160ms ease;
 }
 .topbar--over-content::before { opacity: 1; }
+/* On Settings the page wash runs all the way to the viewport edge, so the
+   scrim's black would cut it in two. Only the veil goes: the blur and its ramp
+   stay, so scrolling content still goes soft behind the navigation without
+   ever changing the colour under it. */
+.topbar--over-wash::before {
+  background: linear-gradient(180deg, rgba(6,6,10,.16) 0%, rgba(6,6,10,.07) 52%, transparent 100%);
+}
 
 .nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
 
@@ -199,7 +214,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   background: transparent;
   transition: background 160ms ease, transform 160ms ease;
 }
-.brand-mark-button:hover, .brand-mark-button[aria-expanded="true"] { background: rgba(255,255,255,.08); }
+.brand-mark-button:hover, .brand-mark-button[data-nav-focus], .brand-mark-button[aria-expanded="true"] { background: rgba(255,255,255,.08); }
 .brand-mark-button:active { transform: scale(.96); }
 .brand-mark { width: 32px; height: 30px; object-fit: contain; }
 .brand-mark-button:hover .brand-mark { animation: brand-mark-spin 620ms cubic-bezier(.2,.72,.25,1); }
@@ -244,8 +259,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .library-source-action + .library-source-action { border-top: 1px solid rgba(255,255,255,.09); border-radius: 0; }
 .library-source-action + .library-source-action:last-child { border-radius: 0 0 11px 11px; }
-.library-source-action:hover, .library-source-action:focus-visible { color: #fff; background: rgba(255,255,255,.085); }
-.library-source-action:focus-visible { outline-offset: -2px; }
+.library-source-action:hover, .library-source-action:focus-visible, .library-source-action[data-nav-focus] { color: #fff; background: rgba(255,255,255,.085); }
 .library-source-action__icon {
   display: grid;
   width: 32px;
@@ -286,7 +300,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
    link hidden behind a preference would still paint. */
 .nav-link[hidden] { display: none !important; }
 .nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
-.nav-link:hover { color: #fff; background: rgba(255,255,255,.08); }
+.nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
 .nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
 .search-control {
@@ -305,16 +319,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   transition: border-color 160ms ease, background 160ms ease;
 }
 
-/* The whole pill is the focus target, so the ring goes on the pill rather than
-   on the bare input: a 2px ring is the visible indicator, the border tint alone
-   was not one. */
-.search-control:focus-within {
-  border-color: rgba(218,216,255,.86);
-  background: rgba(27,24,31,.5);
-  box-shadow: 0 0 0 2px #c3b5ff, 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
-}
 .search-control .icon { width: 16px; height: 16px; }
-/* The input's own outline is suppressed only because the pill above draws one. */
 .search-control input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
 .search-control input::placeholder { color: #d1c9c5; opacity: .95; }
 .search-shortcut { display: flex; gap: 4px; }
@@ -335,7 +340,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   color: rgba(255,255,255,.72);
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
-.feedback-button:hover { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+.feedback-button:hover, .feedback-button[data-nav-focus] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
 .feedback-button svg { width: 18px; height: 18px; }
 /* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
    Sentry DSN would still paint the button. */
@@ -358,6 +363,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
 .notifications-button:hover,
+.notifications-button[data-nav-focus],
 .notifications-button[aria-expanded="true"] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
 .notifications-button svg { width: 18px; height: 18px; }
 /* The dot is the count. A number on a 36px circle is unreadable, and there are
@@ -449,7 +455,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.notification-card__action:hover { color: #d3c6ff; }
+.notification-card__action:hover, .notification-card__action[data-nav-focus] { color: #d3c6ff; }
 .notification-card__dismiss {
   display: grid;
   width: 26px;
@@ -461,7 +467,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   background: transparent;
   transition: color 160ms ease, background 160ms ease;
 }
-.notification-card__dismiss:hover { color: #f0edf5; background: rgba(255,255,255,.08); }
+.notification-card__dismiss:hover, .notification-card__dismiss[data-nav-focus] { color: #f0edf5; background: rgba(255,255,255,.08); }
 .notification-card__dismiss .icon { width: 14px; height: 14px; }
 
 .scene-arrow {
@@ -482,7 +488,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   backdrop-filter: blur(14px);
   transition: transform 180ms cubic-bezier(.2,.8,.2,1), background 180ms ease;
 }
-.scene-arrow:hover { background: rgba(255,255,255,.12); transform: scale(1.05); }
+.scene-arrow:hover, .scene-arrow[data-nav-focus] { background: rgba(255,255,255,.12); transform: scale(1.05); }
 .scene-arrow .icon { width: 18px; height: 18px; }
 .scene-arrow--previous { left: 24px; }
 .scene-arrow--next { right: 24px; }
@@ -503,7 +509,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   width: var(--hero-width);
   min-height: 0;
   flex-direction: column;
-  overflow: hidden;
+  /* Nothing is clipped here: the box ends flush with Play's left and bottom
+     edges, so a clip would shave the button the moment the keys lift it. The
+     one thing that can outgrow the box, a title too tall for the window, is
+     clipped by `.hero-identity` below. */
+  overflow: visible;
 }
 
 /* Takes every pixel the actions leave and bottom-aligns its contents, so the
@@ -585,7 +595,10 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
 .play-button:active { transform: translateY(1px) scale(.98); }
 .play-button .icon { width: 14px; height: 14px; }
-.play-button:disabled { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
+/* `aria-disabled`, not the property: the greyed button still takes focus so the
+   arrow keys can walk up to it from the rail and read its label, while a press
+   on it stays as quiet as a disabled one. */
+.play-button[aria-disabled='true'] { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
 /* A game with no build for this machine. Grey rather than dimmed-lavender: the
    button is the only place that fact is stated now, so it has to read as a
    deliberate answer and not as a Play button that failed to load. */
@@ -596,79 +609,35 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .play-button { position: relative; overflow: hidden; }
 .play-button > :not(.play-button__fill) { position: relative; }
 .play-button__fill { position: absolute; inset: 0 auto 0 0; background: rgba(26,24,32,.20); transition: width 400ms ease; pointer-events: none; }
-.play-button.is-downloading:disabled { opacity: 1; filter: none; }
+.play-button.is-downloading[aria-disabled='true'] { opacity: 1; filter: none; }
 
 
-/* The Steam import and Steam account surfaces are cards inside
-   Settings › Libraries & Sources. They are no longer floating dialogs, so the
-   card chrome comes from `.settings-card`. */
+/* The Steam account surface is a card inside Settings › Libraries & Sources.
+   It is no longer a floating dialog, so the card chrome comes from
+   `.settings-card`. */
 
-.steam-panel-header {
-  display: flex;
-  min-height: 82px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 17px 15px 18px;
-  border-bottom: 1px solid rgba(255,255,255,.09);
-}
-.steam-panel-title { display: flex; min-width: 0; align-items: center; gap: 12px; }
-.steam-panel-title > span:last-child { display: grid; min-width: 0; gap: 3px; }
-.steam-panel-title strong { overflow: hidden; color: #f7f5fa; font-size: 15px; font-weight: 650; letter-spacing: -.012em; text-overflow: ellipsis; white-space: nowrap; }
-.steam-panel-title small { overflow: hidden; color: #a9a4b1; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.steam-source-mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  flex: none;
-  place-items: center;
-  border: 1px solid rgba(192,180,255,.26);
-  border-radius: 13px;
-  color: #e1dbff;
-  background: linear-gradient(145deg, rgba(125,84,244,.42), rgba(66,44,135,.28));
-  box-shadow: inset 0 1px rgba(255,255,255,.12);
-}
-.steam-source-mark .icon { width: 19px; height: 19px; }
-.steam-panel-actions { display: flex; flex: none; align-items: center; gap: 7px; }
+/* Every action on this page is a line of text, not a chip: no plate, no
+   border, no radius. Hover marks it with an underline and nothing else. */
 .steam-header-button {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  flex: none;
-  padding: 0;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 10px;
-  color: #d9d5de;
-  background: rgba(255,255,255,.055);
-  transition: background 160ms ease, color 160ms ease, transform 160ms ease;
-}
-.steam-header-button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.13); }
-.steam-header-button:active:not(:disabled) { transform: scale(.96); }
-.steam-header-button:disabled { cursor: default; opacity: .45; }
-.steam-header-button .icon { width: 16px; height: 16px; }
-/* The base button is a 34px icon square. One header button carries words
-   instead, and inside that square they wrapped to three lines and spilled out
-   of the card — so a labelled variant sizes to its text and refuses to wrap. */
-.steam-header-button--label {
-  width: auto;
-  padding: 0 13px;
-  font-size: 12.5px;
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 1px;
+  border: 0;
+  border-radius: 4px;
+  color: #ddd7ec;
+  background: none;
+  font-size: 13px;
   font-weight: 560;
   white-space: nowrap;
+  transition: color 140ms ease;
 }
-
-.steam-import-body {
-  min-height: 0;
-  flex: 1;
-  padding: 16px 18px 18px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-color: rgba(210,200,255,.32) transparent;
-  scrollbar-width: thin;
-}
-.steam-import-body::-webkit-scrollbar { width: 8px; }
-.steam-import-body::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgba(210,200,255,.28); background-clip: padding-box; }
+.steam-header-button:hover:not(:disabled), .steam-header-button[data-nav-focus]:not(:disabled) { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+.steam-header-button:active:not(:disabled) { opacity: .7; }
+.steam-header-button:disabled { cursor: default; opacity: .45; }
+.steam-header-button .icon { width: 15px; height: 15px; }
+.steam-header-button--label { padding: 2px 1px; font-weight: 560; }
 
 .steam-account-body {
   display: flex;
@@ -694,10 +663,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 .steam-api-key-form { display: grid; gap: 13px; }
 .steam-api-key-form > label { display: grid; gap: 7px; color: #ccc6d3; font-size: 12px; font-weight: 560; }
 .steam-api-key-form input { width: 100%; height: 39px; padding: 0 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; outline: 0; color: #f3eff7; background: rgba(6,7,11,.34); font-size: 13px; transition: border-color 160ms ease, background 160ms ease; }
-.steam-api-key-form input:focus { border-color: rgba(205,194,255,.55); background: rgba(8,9,14,.5); }
 .steam-api-key-form input::placeholder { color: #817b88; }
 .steam-api-key-help { width: fit-content; color: #cfc4ff; font-size: 12px; text-decoration: none; }
-.steam-api-key-help:hover, .steam-api-key-help:focus-visible { color: #eeeaff; text-decoration: underline; }
+.steam-api-key-help:hover, .steam-api-key-help:focus-visible, .steam-api-key-help[data-nav-focus] { color: #eeeaff; text-decoration: underline; }
 
 .steam-state {
   display: grid;
@@ -708,8 +676,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   color: #afaab6;
 }
 .steam-state--loading { justify-items: center; text-align: center; }
-.steam-state h2, .steam-list-empty h2 { margin: 18px 0 7px; color: #f3f0f6; font-size: 17px; font-weight: 630; letter-spacing: -.018em; line-height: 1.2; }
-.steam-state p, .steam-list-empty p { max-width: 320px; margin: 0; color: #aaa5b0; font-size: 13px; line-height: 1.48; }
+.steam-state h2 { margin: 18px 0 7px; color: #f3f0f6; font-size: 17px; font-weight: 630; letter-spacing: -.018em; line-height: 1.2; }
+.steam-state p { max-width: 320px; margin: 0; color: #aaa5b0; font-size: 13px; line-height: 1.48; }
 .steam-state--unavailable { justify-items: center; text-align: center; }
 .steam-state--unavailable .steam-secondary-button { margin-top: 22px; }
 .steam-state__icon {
@@ -733,177 +701,60 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .steam-secondary-button {
   display: inline-flex;
-  height: 36px;
+  min-height: 30px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 0 13px;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 10px;
-  color: #ede9f1;
-  background: rgba(255,255,255,.07);
-  font-size: 12px;
+  gap: 7px;
+  padding: 2px 1px;
+  border: 0;
+  border-radius: 4px;
+  color: #ddd7ec;
+  background: none;
+  font-size: 13px;
   font-weight: 550;
-  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+  transition: color 140ms ease;
 }
-.steam-secondary-button:hover { border-color: rgba(209,197,255,.38); background: rgba(125,84,244,.18); }
-.steam-secondary-button:active { transform: translateY(1px); }
-.steam-secondary-button .icon { width: 15px; height: 15px; }
+.steam-secondary-button:hover, .steam-secondary-button[data-nav-focus] { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+.steam-secondary-button:active { opacity: .7; }
+.steam-secondary-button .icon { width: 14px; height: 14px; }
 
+/* A notice is a sentence in the tone it earned — no box drawn around it. */
 .steam-notice {
   margin: 0 0 13px;
-  padding: 9px 11px;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 9px;
-  color: #c8c3ce;
-  background: rgba(255,255,255,.045);
-  font-size: 12px;
-  line-height: 1.4;
-}
-.steam-notice--success { border-color: rgba(100,218,145,.22); color: #c9f0d6; background: rgba(67,214,107,.1); }
-.steam-notice--error { border-color: rgba(239,112,116,.3); color: #ffd4d6; background: rgba(201,73,80,.13); }
-
-.steam-list-controls {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-.steam-search-control {
-  display: flex;
-  height: 36px;
-  min-width: 0;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  border: 1px solid rgba(255,255,255,.13);
-  border-radius: 10px;
-  color: #aaa3b3;
-  background: rgba(7,8,12,.27);
-  transition: border-color 160ms ease, background 160ms ease;
-}
-.steam-search-control:focus-within { border-color: rgba(205,194,255,.48); background: rgba(8,9,14,.4); }
-.steam-search-control .icon { width: 15px; height: 15px; }
-.steam-search-control input {
-  width: 100%;
-  min-width: 0;
+  padding: 0;
   border: 0;
-  outline: 0;
-  color: #f2eff5;
-  background: transparent;
-  font-size: 12px;
+  border-radius: 0;
+  color: #c8c3ce;
+  background: none;
+  font-size: 12.5px;
+  line-height: 1.5;
 }
-.steam-search-control input::placeholder { color: #928c99; }
-.steam-select-all {
-  display: inline-flex;
-  height: 36px;
-  flex: none;
-  align-items: center;
-  gap: 7px;
-  padding: 0 9px;
-  border: 1px solid rgba(255,255,255,.11);
-  border-radius: 10px;
-  color: #cec9d3;
-  background: rgba(255,255,255,.045);
-  font-size: 12px;
-  white-space: nowrap;
-}
-.steam-select-all:hover { background: rgba(255,255,255,.09); }
-.steam-select-all input, .steam-game-row input { width: 15px; height: 15px; margin: 0; accent-color: #8c67f7; }
-.steam-select-all input:disabled { opacity: .45; }
-.steam-results-count { margin: 14px 1px 9px; color: #918b99; font-size: 11px; font-variant-numeric: tabular-nums; }
+.steam-notice--success { color: #a9e8c1; }
+.steam-notice--error { color: #ffbcbe; }
+.steam-notice--info { color: #c8c3ce; }
 
-.steam-game-list { display: grid; gap: 6px; }
-.steam-game-row {
-  display: grid;
-  min-height: 64px;
-  grid-template-columns: 16px 47px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 9px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  color: #f2eff5;
-  background: rgba(255,255,255,.025);
-  cursor: pointer;
-  transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
-}
-.steam-game-row:hover { border-color: rgba(255,255,255,.1); background: rgba(255,255,255,.075); }
-.steam-game-row.is-selected { border-color: rgba(155,129,246,.36); background: linear-gradient(90deg, rgba(125,84,244,.18), rgba(255,255,255,.04)); }
-.steam-game-row.is-selected:hover { border-color: rgba(180,160,255,.52); }
-.steam-game-row:focus-within { outline: 2px solid #c3b5ff; outline-offset: 2px; }
-.steam-game-row.is-imported .steam-game-status { color: #bcb5ca; background: rgba(255,255,255,.075); }
-.steam-game-artwork {
-  display: grid;
-  width: 47px;
-  height: 47px;
-  overflow: hidden;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 9px;
-  background: linear-gradient(145deg, #42326f, #191721);
-}
-.steam-game-artwork--fallback::after { width: 13px; height: 13px; border: 2px solid rgba(228,221,255,.55); border-radius: 50%; box-shadow: 8px -7px 0 -4px rgba(228,221,255,.55); content: ""; }
-.steam-game-artwork img { width: 100%; height: 100%; object-fit: cover; }
-.steam-game-copy { display: grid; min-width: 0; gap: 4px; }
-.steam-game-copy strong { overflow: hidden; color: #eeebf2; font-size: 13px; font-weight: 580; letter-spacing: -.008em; text-overflow: ellipsis; white-space: nowrap; }
-.steam-game-metadata { overflow: hidden; color: #96909e; font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-.steam-game-status {
-  padding: 4px 6px;
-  border-radius: 6px;
-  color: #cbbdff;
-  background: rgba(125,84,244,.16);
-  font-size: 10px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-.steam-list-empty {
-  display: grid;
-  min-height: 174px;
-  align-content: center;
-  justify-items: center;
-  padding: 18px;
-  border: 1px dashed rgba(255,255,255,.1);
-  border-radius: 12px;
-  text-align: center;
-}
-.steam-list-empty h2 { margin-top: 0; font-size: 15px; }
-
-.steam-import-footer {
-  display: flex;
-  min-height: 72px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 13px 18px;
-  border-top: 1px solid rgba(255,255,255,.09);
-  background: rgba(8,9,13,.24);
-}
-.steam-import-footer[hidden] { display: none; }
-.steam-import-footer p { min-width: 0; margin: 0; color: #aaa5b0; font-size: 12px; line-height: 1.3; }
+/* The primary action is still only a line of text — it earns emphasis from
+   weight and colour, never from a fill. */
 .steam-import-button {
   display: inline-flex;
-  min-height: 38px;
+  min-height: 30px;
   flex: none;
   align-items: center;
   justify-content: center;
-  /* A filled glyph (the Steam logo) reaches its own edges, so the gap has to be
-     explicit rather than borrowed from an icon's internal padding. */
-  gap: 8px;
-  padding: 0 14px;
-  border: 1px solid rgba(255,255,255,.35);
-  border-radius: 11px;
-  color: #191723;
-  background: linear-gradient(118deg, #f0edff, #b9aff6);
-  box-shadow: inset 0 1px rgba(255,255,255,.48), 0 7px 18px rgba(0,0,0,.18);
-  font-size: 12px;
+  gap: 7px;
+  padding: 2px 1px;
+  border: 0;
+  border-radius: 4px;
+  color: #eae4ff;
+  background: none;
+  font-size: 13.5px;
   font-weight: 680;
-  transition: filter 160ms ease, transform 160ms ease, opacity 160ms ease;
+  transition: color 140ms ease, opacity 140ms ease;
 }
-.steam-import-button:hover:not(:disabled) { filter: brightness(1.05); transform: translateY(-1px); }
-.steam-import-button:active:not(:disabled) { transform: translateY(1px) scale(.98); }
+.steam-import-button:hover:not(:disabled), .steam-import-button[data-nav-focus]:not(:disabled) { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+.steam-import-button:active:not(:disabled) { opacity: .7; }
 .steam-import-button:disabled { cursor: default; opacity: .42; }
+.steam-import-button .icon { width: 15px; height: 15px; }
 
 /* The Wine wizard stays an overlay task; Wine profiles themselves live in
    Settings › Plugins & Runners. */
@@ -1032,7 +883,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-size: 13px;
   transition: border-color 160ms ease, background 160ms ease;
 }
-.wine-profile-form input:focus { border-color: rgba(214,184,255,.58); background: rgba(8,9,14,.5); }
 .wine-profile-form input::placeholder { color: #817b88; }
 .wine-step-actions {
   display: flex;
@@ -1095,7 +945,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-size: 11px;
   font-weight: 600;
 }
-.wine-text-button:hover { color: #f0eaff; background: rgba(188,166,255,.12); }
+.wine-text-button:hover, .wine-text-button[data-nav-focus] { color: #f0eaff; background: rgba(188,166,255,.12); }
 
 .wine-results-count {
   margin: 0 1px 9px;
@@ -1105,9 +955,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
 }
 .wine-list-controls { display: flex; justify-content: flex-end; margin: 0 0 9px; }
 .wine-game-list { margin-bottom: 3px; }
-.wine-game-row .steam-game-artwork { color: #e0d5ff; background: linear-gradient(145deg, #513475, #1d1826); }
-.wine-game-row .steam-game-artwork::after { display: none; }
-.wine-game-row .steam-game-artwork .icon { width: 19px; height: 19px; }
 .wine-load-more { align-self: center; margin: 12px auto 0; }
 
 .wine-settings-heading { margin: 7px 0 11px; font-size: 14px; }
@@ -1228,7 +1075,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-size: 11px;
   font-weight: 650;
 }
-.wine-danger-button:hover { background: rgba(201,73,80,.25); }
+.wine-danger-button:hover, .wine-danger-button[data-nav-focus] { background: rgba(201,73,80,.25); }
 
 /* In flow, above the actions row, and `flex: none` so the identity block above
    absorbs its height rather than the button below being pushed anywhere. */
@@ -1266,7 +1113,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   font-size: 11px;
   font-weight: 650;
 }
-.launch-feedback__retry:hover { background: rgba(255,255,255,.18); }
+.launch-feedback__retry:hover, .launch-feedback__retry[data-nav-focus] { background: rgba(255,255,255,.18); }
 
 @keyframes steam-panel-enter { from { opacity: 0; transform: translateY(-8px) scale(.988); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @keyframes steam-spin { to { transform: rotate(360deg); } }
@@ -1299,6 +1146,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   scrollbar-width: none;
 }
 .game-cards::-webkit-scrollbar { display: none; }
+/* Walked with the keys or a pad, a card scrolled into view brings its
+   neighbour on either side with it, so the next game stays in sight: the shelf
+   starts moving at the card before the edge rather than once the edge is
+   reached. The snap is for the hand — it would pull the shelf back onto a card
+   edge and hide that neighbour again — so it waits until a wheel or a finger
+   scrolls the rail, which is also what clears `data-nav-driven`. */
+.game-cards[data-nav-driven] { scroll-snap-type: none; }
+.game-cards[data-nav-driven] .game-card { scroll-margin-inline: calc(var(--rail-card-width) + 24px); }
 
 .game-card {
   --card-radius: 13px;
@@ -1414,7 +1269,19 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
    it replaced, because that line is exactly where the eye already rests. */
 .browse-bar { position: absolute; z-index: 3; right: var(--edge-right); bottom: var(--edge-bottom); left: var(--edge-left); gap: 28px; color: #c8c4cb; font-size: var(--fs-bar); }
 
-.browse-bar__mood { flex: none; gap: 10px; padding: 0; color: #cfcad6; background: none; font-size: inherit; transition: color 200ms ease; }
+/* The mood switch is parked: the browse bar reads as segments and mode alone.
+   The markup and the handler stay so the easter egg can come back, but nothing
+   draws it and nothing can tab to it. */
+.browse-bar__mood {
+  display: none;
+  flex: none;
+  gap: 10px;
+  padding: 0;
+  color: #cfcad6;
+  background: none;
+  font-size: inherit;
+  transition: color 200ms ease;
+}
 .browse-bar__mood[aria-checked="true"] { color: #f4f2f7; }
 
 /* A real switch: a track the knob travels, not a dash with a dot parked on it.
@@ -1442,7 +1309,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   box-shadow: 0 1px 3px rgba(0,0,0,.45);
   transition: transform 260ms cubic-bezier(.22, .74, .2, 1), background 220ms ease;
 }
-.browse-bar__mood:hover .browse-bar__switch { border-color: rgba(255,255,255,.28); }
+.browse-bar__mood:hover .browse-bar__switch, .browse-bar__mood[data-nav-focus] .browse-bar__switch { border-color: rgba(255,255,255,.28); }
 .browse-bar__mood[aria-checked="true"] .browse-bar__switch {
   border-color: color-mix(in oklab, var(--violet) 55%, transparent);
   background: color-mix(in oklab, var(--violet) 40%, transparent);
@@ -1479,7 +1346,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid #c3b5ff; outline-
   backdrop-filter: blur(18px) saturate(130%);
   transition: background 180ms ease, color 180ms ease, border-color 180ms ease;
 }
-.browse-bar__mode:hover { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(30,28,36,.55); }
+.browse-bar__mode:hover, .browse-bar__mode[data-nav-focus] { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(30,28,36,.55); }
 .browse-bar__mode:active { transform: translateY(1px); }
 
 /* Rage changes nothing about the library and everything about the accent. */
@@ -1551,12 +1418,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   .hero-content h1 { margin: 10px 0 12px; font-size: clamp(40px, 3.9vw, 52px); }
   .hero-meta { display: none; }
   .hero-actions { margin-top: 12px; }
-  .steam-panel-header { min-height: 69px; padding-top: 12px; padding-bottom: 12px; }
-  .steam-import-footer { min-height: 63px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html:not([data-motion="full"]) *, html:not([data-motion="full"]) *::before, html:not([data-motion="full"]) *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  html:not([data-motion="full"]) *, html:not([data-motion="full"]) *::before, html:not([data-motion="full"]) *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-delay: 0ms !important; transition-delay: 0ms !important; animation-iteration-count: 1 !important; }
 }
 
 /* The Appearance preference mirrors the system setting without depending on it. */
@@ -1564,6 +1429,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
   scroll-behavior: auto !important;
   transition-duration: .01ms !important;
   animation-duration: .01ms !important;
+  animation-delay: 0ms !important;
+  transition-delay: 0ms !important;
   animation-iteration-count: 1 !important;
 }
 
@@ -1604,11 +1471,25 @@ body[data-mood="rage"] { --violet: #f2453c; }
 
 /* Settings and not-found paint the same base as the Store and detail pages, so
    no route ever reads as an unfinished, background-less sheet. */
-.app-page--settings, .app-page--not-found {
+.app-page--not-found {
   background:
     radial-gradient(circle at 78% 2%, rgba(84,104,144,.2), transparent 32%),
     radial-gradient(circle at 18% 28%, rgba(87,69,102,.16), transparent 34%),
     #090c12;
+}
+
+/* The settings wash fills the page itself — rose from the top-left, a strong
+   blue down the right edge, violet pooling at the bottom — the palette of the
+   settings mockup painted edge to edge, since there is no panel left to hold
+   it. Longhands below: `padding-top` belongs to `.app-page--scroll`. */
+.app-page--settings {
+  background:
+    radial-gradient(74% 62% at -6% -8%, rgba(255,132,178,.26), transparent 62%),
+    radial-gradient(78% 62% at 106% 2%, rgba(64,108,244,.3), transparent 60%),
+    radial-gradient(104% 72% at 50% 114%, rgba(150,96,220,.22), transparent 70%),
+    linear-gradient(155deg, #2d2840 0%, #232035 45%, #131220 100%);
+  padding-inline: clamp(16px, 3vw, 44px);
+  padding-bottom: 40px;
 }
 
 .library-source-menu__label {
@@ -1671,162 +1552,212 @@ body[data-mood="rage"] { --violet: #f2453c; }
    Settings page (a normal page: no backdrop, no focus trap, no Escape-to-close)
    --------------------------------------------------------------------------- */
 
+/* The settings sit directly on the page's own wash. No panel, no contour, no
+   plate: the only structure is the grid, the column divider, and a hairline
+   between groups. */
 .settings-layout {
   display: grid;
-  width: min(1160px, 100%);
+  width: min(1340px, 100%);
   margin: 0 auto;
-  padding: 6px clamp(22px, 4vw, 56px) 76px;
-  gap: clamp(20px, 3vw, 44px);
-  grid-template-columns: minmax(206px, 246px) minmax(0, 1fr);
+  /* The layout is the host's first child, so this inset is measured against the
+     topbar clearance budget: it stays under the 24px the layout spec allows. */
+  padding: 20px 0 12px;
+  gap: 0;
+  grid-template-columns: minmax(196px, 234px) minmax(0, 1fr);
   align-items: start;
 }
 
-.settings-sidebar { position: sticky; top: 0; align-self: start; min-width: 0; }
-.settings-sidebar__title {
-  margin: 0 0 12px;
-  padding-left: 12px;
-  color: #8f8a99;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .09em;
-  text-transform: uppercase;
+.settings-sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  min-width: 0;
+  padding: 4px clamp(8px, 1vw, 14px) 16px;
 }
-.settings-sidebar__list { display: grid; gap: 2px; }
+.settings-sidebar__list { display: grid; gap: 6px; }
 
+/* The active section is a plate — the one the reference draws: a violet-to-slate
+   wash inside a lighter violet hairline, white glyph, white word. Measured from
+   it: about 48px tall, a corner at roughly a third of that, a 20px glyph, 15px
+   between the glyph and the word, and 15px of type. */
 .settings-section-link {
-  display: grid;
-  gap: 3px;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 12px;
-  color: #cdc8d6;
-  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 14px 17px;
+  border: 0;
+  border-radius: 6px;
+  color: #b7b2c6;
+  background: none;
   text-align: left;
-  transition: background 160ms ease, color 160ms ease;
+  transition: color 160ms ease, background 160ms ease, transform 240ms cubic-bezier(.22,.72,.2,1);
 }
-.settings-section-link strong { font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; }
-.settings-section-link small { color: #8d8895; font-size: 11.5px; line-height: 1.35; }
-.settings-section-link:hover { color: #fff; background: rgba(255,255,255,.06); }
+.settings-section-link__icon { width: 20px; height: 20px; flex: none; }
+.settings-section-link strong { font-size: 15px; font-weight: 540; letter-spacing: -.01em; }
+.settings-section-link:hover,
+.settings-section-link[data-nav-focus] {
+  color: #f2eff7;
+  background: rgba(255,255,255,.05);
+  transform: translateX(3px);
+}
 .settings-section-link.is-active {
-  border-color: rgba(255,255,255,.1);
-  color: #f6f4fa;
-  background: rgba(31,28,36,.74);
-  box-shadow: inset 0 1px rgba(255,255,255,.05);
+  color: #fff;
+  /* The plate's own violet carries it: no hairline, no rim, no second colour
+     drawn around it. */
+  background: linear-gradient(104deg, #4c3776 0%, #453d61 56%, #3e3953 100%);
 }
-.settings-section-link.is-active small { color: #b6afc2; }
+.settings-section-link.is-active:hover, .settings-section-link.is-active[data-nav-focus] { background: linear-gradient(104deg, #56407f 0%, #4b4269 56%, #433d5a 100%); transform: none; }
+.settings-section-link.is-active strong { color: #fff; font-weight: 640; }
 
-.settings-content { min-width: 0; }
-.settings-header { margin: 0 0 20px; }
-.settings-header h1 { margin: 0 0 6px; color: #f5f3f8; font-size: 27px; font-weight: 620; letter-spacing: -.028em; }
-.settings-header p { margin: 0; color: #a29daf; font-size: 13px; }
+/* Entrance — a breath, not a launch: the section on screen lifts a few pixels
+   and settles, and the tabs beside it move only when the page itself is
+   opened. Settings writes each block's own `--enter-delay` as it renders, and
+   the selector below is the list it walks: every kind of block a panel renders
+   is on it, so no control sits frozen while the label beside it settles. The
+   cascade follows the page rather than the document's order, and a block that
+   only lands a moment later — a provider status filling in — still takes the
+   same path because the classes, not a mark set in JS, decide who animates. */
+@keyframes settings-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.settings-layout.is-entering .settings-header h1,
+.settings-layout.is-entering .settings-header p,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-row,
+.settings-layout.is-entering .settings-panel:not([hidden]) .provider-status-row,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-group__label,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-hint,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-card__header,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-choices,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-group__label,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-group__action,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-search,
+.settings-layout.is-entering .settings-panel:not([hidden]) .credentials-form,
+.settings-layout.is-entering .settings-panel:not([hidden]) .settings-attributions,
+.settings-sidebar.is-entering .settings-section-link {
+  animation: settings-enter 620ms cubic-bezier(.32,.72,.36,1) backwards;
+  animation-delay: var(--enter-delay, 0ms);
+}
 
-.settings-panel { display: grid; gap: 16px; }
+.settings-content {
+  min-width: 0;
+  padding: 0 clamp(18px, 2.6vw, 40px) 20px clamp(18px, 2.4vw, 34px);
+  /* The divider belongs to the column, not to the sidebar: the sidebar is
+     sticky and short, so its own border would end half way down the panel. */
+  border-left: 1px solid rgba(255,255,255,.07);
+}
+.settings-header { margin: 0 0 14px; padding-top: 4px; }
+.settings-header h1 { margin: 0 0 5px; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
+.settings-header p { margin: 0; color: #d0cadf; font-size: 13.5px; line-height: 1.5; }
+
+.settings-panel { display: grid; gap: 0; }
 .settings-panel[hidden] { display: none; }
-.settings-panel:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 8px; border-radius: 4px; }
+/* Groups are a hairline apart, not a box apart. */
+.settings-panel > * + * { border-top: 1px solid rgba(255,255,255,.08); }
 
+/* A group of rows, not a card: no plate, no radius, no shadow of its own. */
 .settings-card {
   display: grid;
   min-width: 0;
   margin: 0;
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 16px;
+  border: 0;
+  border-radius: 0;
   color: #f1eff5;
-  background: rgba(23,22,28,.72);
-  box-shadow: inset 0 1px rgba(255,255,255,.05);
+  background: none;
+  box-shadow: none;
 }
 .settings-card[hidden] { display: none; }
 
 .settings-card__header {
   display: flex;
   align-items: center;
-  gap: 13px;
-  padding: 15px 18px;
-  border-bottom: 1px solid rgba(255,255,255,.07);
+  gap: 14px;
+  padding: 20px 0 8px;
 }
-.settings-card__copy { display: grid; min-width: 0; flex: 1; gap: 3px; }
-.settings-card__copy strong { color: #f7f5fa; font-size: 14.5px; font-weight: 640; letter-spacing: -.014em; }
-.settings-card__copy small { color: #a29daf; font-size: 12px; line-height: 1.45; }
-.settings-card__mark {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  place-items: center;
-  border: 1px solid rgba(192,180,255,.26);
-  border-radius: 12px;
-  color: #e1dbff;
-  background: linear-gradient(145deg, rgba(125,84,244,.42), rgba(66,44,135,.28));
-  box-shadow: inset 0 1px rgba(255,255,255,.12);
+/* A header that is only an action: no title to sit beside it, so it sits at
+   the end of the line it belongs to. */
+.settings-card__header--actions { justify-content: flex-end; padding: 14px 0 2px; }
+.settings-card__copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
+.settings-card__copy strong { color: #f7f5fa; font-size: 15px; font-weight: 620; letter-spacing: -.016em; }
+.settings-card__copy small { color: #d0cadf; font-size: 13px; line-height: 1.5; }
+
+/* The quiet uppercase label that names a group inside a panel. */
+.settings-group__label {
+  margin: 0;
+  padding: 20px 0 4px;
+  color: #b3abc6;
+  font-size: 11px;
+  font-weight: 640;
+  letter-spacing: .1em;
+  text-transform: uppercase;
 }
-.settings-card__mark .icon { width: 18px; height: 18px; }
+.settings-group__label:first-child { padding-top: 4px; }
 
 .settings-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 15px 18px;
+  gap: clamp(16px, 2vw, 30px);
+  padding: 15px 0;
 }
-.settings-row + .settings-row { border-top: 1px solid rgba(255,255,255,.06); }
+.settings-row + .settings-row { border-top: 1px solid rgba(255,255,255,.08); }
 .settings-row--actions { flex-wrap: wrap; justify-content: flex-start; gap: 10px; }
-.settings-row__copy { display: grid; min-width: 0; gap: 4px; }
-.settings-row__copy strong { color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
-.settings-row__copy small { color: #98939f; font-size: 12px; line-height: 1.5; }
+.settings-row__copy { display: grid; min-width: 0; gap: 5px; }
+.settings-row__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
+.settings-row__copy small { color: #d0cadf; font-size: 13px; line-height: 1.55; }
 
 /* `appearance: none` is what stops macOS from drawing its own double caret on
-   top of the chevron below. */
+   top of the chevron below. The control is the word plus its caret: one hairline
+   underneath is all the affordance it gets. */
 .settings-select {
-  min-width: 172px;
-  height: 34px;
-  padding: 0 32px 0 12px;
+  min-width: 150px;
+  height: 32px;
+  padding: 0 24px 0 4px;
   -webkit-appearance: none;
   appearance: none;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 10px;
-  color: #f2eff7;
-  background-color: rgba(12,12,17,.62);
+  border: 0;
+  border-bottom: 1px solid rgba(255,255,255,.24);
+  border-radius: 0;
+  color: #f4f2f8;
+  background-color: transparent;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23cdc8d6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 10px center;
+  background-position: right 2px center;
   background-size: 14px 14px;
-  font-size: 13px;
+  font-size: 13.5px;
 }
-.settings-select:hover { border-color: rgba(255,255,255,.24); }
-.settings-select:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 2px; }
+.settings-select:hover, .settings-select[data-nav-focus] { border-bottom-color: rgba(255,255,255,.5); }
 
+/* Buttons are words. No plate, no border, no radius: hover underlines them and
+   that is the whole affordance. */
 .settings-button {
   display: inline-flex;
-  height: 34px;
+  min-height: 30px;
   align-items: center;
-  gap: 8px;
-  padding: 0 14px;
-  border: 1px solid rgba(255,255,255,.16);
-  border-radius: 10px;
-  color: #f2eff7;
-  background: rgba(255,255,255,.07);
-  font-size: 13px;
+  gap: 7px;
+  padding: 2px 1px;
+  border: 0;
+  border-radius: 4px;
+  color: #ddd7ec;
+  background: none;
+  font-size: 13.5px;
   font-weight: 560;
   white-space: nowrap;
-  transition: background 160ms ease, transform 160ms ease, opacity 160ms ease;
+  transition: color 140ms ease, opacity 140ms ease;
 }
-.settings-button:hover:not(:disabled) { background: rgba(255,255,255,.13); }
-.settings-button:active:not(:disabled) { transform: translateY(1px); }
+.settings-button:hover:not(:disabled), .settings-button[data-nav-focus]:not(:disabled) { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+.settings-button:active:not(:disabled) { opacity: .7; }
 .settings-button:disabled { cursor: default; opacity: .45; }
-/* "Quiet" is a low-emphasis neutral action. Reset and Clear are reversible and
-   touch nothing the user cannot recreate, so they must not read as destructive. */
-.settings-button--quiet { color: #cfcad8; border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.035); }
-.settings-button--quiet:hover:not(:disabled) { color: #f2eff7; background: rgba(255,255,255,.09); }
-.settings-button--primary {
-  border-color: rgba(255,255,255,.42);
-  color: #1a1820;
-  background: linear-gradient(118deg, #f0edff, #b9aff6);
-  font-weight: 640;
-}
-.settings-button--primary:hover:not(:disabled) { filter: brightness(1.05); background: linear-gradient(118deg, #f0edff, #b9aff6); }
+.settings-button .icon { width: 15px; height: 15px; }
+/* "Quiet" is the low-emphasis neutral action. Reset and Clear are reversible
+   and touch nothing the user cannot recreate, so they are not destructive. */
+.settings-button--quiet { color: #cec8dd; font-weight: 500; }
+.settings-button--quiet:hover:not(:disabled), .settings-button--quiet[data-nav-focus]:not(:disabled) { color: #fff; }
+.settings-button--primary { color: #e7dfff; font-weight: 640; }
+.settings-button--primary:hover:not(:disabled), .settings-button--primary[data-nav-focus]:not(:disabled) { color: #fff; }
 
-.settings-metric { color: #f2eff7; font-size: 14px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.settings-hint { margin: 0; padding: 0 18px 16px; color: #8f8a99; font-size: 12px; line-height: 1.5; }
+.settings-metric { color: #f4f2f8; font-size: 14.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-hint { margin: 0; padding: 14px 0 4px; color: #b9b2cb; font-size: 12.5px; line-height: 1.55; }
 
 /* Updater status inside the About card: one emphasised line for the state, one
    quiet line for the detail, and a track that only appears while downloading. */
@@ -1874,14 +1805,15 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 
 /* Plugin browser: installed runners up top, a searchable catalogue below. */
-.plugins-group { padding: 13px 18px 6px; }
-.plugins-group + .plugins-group--catalog { border-top: 1px solid rgba(255,255,255,.07); }
+.plugins-group { padding: 16px 0 6px; }
+.plugins-group:first-child { padding-top: 4px; }
+.plugins-group + .plugins-group--catalog { border-top: 1px solid rgba(255,255,255,.08); }
 .plugins-group__label {
-  margin: 0 0 9px;
-  color: #8f8a99;
+  margin: 0 0 8px;
+  color: #b3abc6;
   font-size: 11px;
   font-weight: 640;
-  letter-spacing: .09em;
+  letter-spacing: .1em;
   text-transform: uppercase;
 }
 .plugins-group__list { display: grid; }
@@ -1892,11 +1824,11 @@ body[data-mood="rage"] { --violet: #f2453c; }
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 9px;
+  margin-bottom: 10px;
 }
 .plugins-group__header .plugins-group__label { margin: 0; }
 .plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.plugins-group__action { height: 30px; padding: 0 11px; font-size: 12px; }
+.plugins-group__action { font-size: 12.5px; }
 .plugins-group__action .icon { width: 14px; height: 14px; }
 .plugins-automatic-updates {
   display: flex;
@@ -1910,26 +1842,21 @@ body[data-mood="rage"] { --violet: #f2453c; }
    pull its status label across. */
 .plugin-row {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 13px;
-  padding: 13px 18px;
-}
-.plugin-row__mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 10px;
+  gap: 14px;
+  padding: 14px 0;
 }
 .plugin-row__state {
   flex: none;
   color: #a9e6b3;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 560;
   white-space: nowrap;
 }
 /* A plugin the host refused to load must not read in the same green as one
    that runs. */
-.plugin-row__state--soon { color: #9b96a6; font-weight: 500; }
+.plugin-row__state--soon { color: #b9b2cb; font-weight: 500; }
 .plugin-row--soon { opacity: .84; }
 .plugin-row__state--warn { color: #ecd08a; }
 .plugin-row__state--error { color: #f0a3a3; }
@@ -1959,59 +1886,62 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-row__log ul { margin: 0; padding-left: 18px; }
 .plugin-row__log li + li { margin-top: 4px; }
 .plugin-row__log--error { color: #f0a3a3; }
-.plugin-uninstall-button { height: 30px; padding: 0 11px; font-size: 12px; }
+.plugin-uninstall-button { font-size: 12.5px; }
+/* The row's only control is its caret: a bare glyph that brightens on hover,
+   with nothing drawn around it. */
 .plugin-open-button {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   flex: none;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 9px;
-  color: #cfcad8;
-  background: rgba(255,255,255,.05);
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: #cec8dd;
+  background: none;
   cursor: pointer;
-  transition: background 160ms ease, color 160ms ease;
+  transition: color 140ms ease;
 }
 .plugin-open-button .icon { width: 15px; height: 15px; }
-.plugin-open-button:hover { color: #f2eff7; background: rgba(255,255,255,.12); }
-.plugin-open-button:focus-visible { outline: 2px solid #c3b5ff; outline-offset: 2px; }
+.plugin-open-button:hover, .plugin-open-button[data-nav-focus] { color: #fff; }
 
+/* The search field is a hairline and a caret: no box, no fill. */
 .plugins-search {
   display: flex;
-  height: 36px;
+  height: 34px;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
-  padding: 0 12px;
-  border: 1px solid rgba(255,255,255,.14);
-  border-radius: 10px;
-  color: #8f8a99;
-  background: rgba(12,12,17,.62);
+  margin-bottom: 6px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 1px solid rgba(255,255,255,.24);
+  border-radius: 0;
+  color: #b3abc6;
+  background: none;
 }
-.plugins-search:focus-within { border-color: rgba(195,181,255,.7); }
 .plugins-search .icon { width: 15px; height: 15px; flex: none; }
 .plugins-search__input {
   min-width: 0;
   flex: 1;
   border: 0;
   outline: 0;
-  color: #f2eff7;
+  color: #f4f2f8;
   background: transparent;
-  font-size: 13px;
+  font-size: 13.5px;
 }
-.plugins-search__input::placeholder { color: #8f8a99; }
+.plugins-search__input::placeholder { color: #b3abc6; }
 .plugin-catalog-row { position: relative; }
-.plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.06); }
+.plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.08); }
 .plugin-catalog-row__status { color: #c3b5ff !important; }
 .plugin-catalog-row__status--error { color: #f0a3a3 !important; }
 /* The bar rides the bottom edge of its own row: an install has to be locatable
    at a glance in a list where every other row looks the same. */
 .plugin-progress {
   position: absolute;
-  right: 18px;
+  right: 0;
   bottom: 0;
-  left: 18px;
+  left: 0;
   height: 2px;
   overflow: hidden;
   border-radius: 2px;
@@ -2063,35 +1993,81 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .runner-directory-row__revoked { color: #f0a3a3; }
 .runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 
-.plugin-back-button { height: 30px; padding: 0 11px; }
+.plugin-back-button { height: 32px; padding: 0 12px; }
 .plugin-back-button .icon { width: 14px; height: 14px; }
 
-/* Choices sit in a plain card, not a fieldset: a legend cuts the card's 16px
-   border and types at a different size than every other card title. */
-.settings-choices { display: grid; padding: 6px; }
+/* A choice is a row like any other: copy on the left, its control on the
+   right, a hairline between. No plate behind it. */
+.settings-choices { display: grid; padding: 0; }
 .settings-choice {
   display: flex;
-  align-items: flex-start;
-  gap: 11px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  align-items: center;
+  justify-content: space-between;
+  gap: clamp(16px, 2vw, 30px);
+  padding: 14px 0;
   cursor: pointer;
 }
-.settings-choice:hover { background: rgba(255,255,255,.05); }
-.settings-choice:focus-within { background: rgba(255,255,255,.05); }
-.settings-choice input { margin: 3px 0 0; accent-color: #8f6ef7; }
-.settings-choice span { display: grid; gap: 3px; }
-.settings-choice strong { color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
-.settings-choice small { color: #98939f; font-size: 12px; line-height: 1.45; }
+.settings-choice + .settings-choice { border-top: 1px solid rgba(255,255,255,.08); }
+.settings-choice span { order: 1; display: grid; min-width: 0; gap: 4px; }
+.settings-choice input { order: 2; flex: none; margin: 0; }
+.settings-choice strong { color: #f4f2f8; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
+.settings-choice small { color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.settings-choice input[type="radio"] {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  -webkit-appearance: none;
+  appearance: none;
+  border: 1.5px solid rgba(255,255,255,.55);
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+.settings-choice input[type="radio"]:checked { border-color: #c9b6ff; }
+.settings-choice input[type="radio"]:checked::after {
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: #c9b6ff;
+  content: "";
+}
+/* A switch rather than a tick: on/off has to read from across the row, and
+   the mockup's toggles are the one saturated thing on the page. */
+.settings-choice--toggle input[type="checkbox"] {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  border: 1px solid rgba(255,255,255,.18);
+  border-radius: 999px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255,255,255,.1);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.settings-choice--toggle input[type="checkbox"]::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f6f4fa;
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  content: "";
+  transition: transform 160ms ease;
+}
+.settings-choice--toggle input[type="checkbox"]:checked { border-color: transparent; background: #7f5df0; }
+.settings-choice--toggle input[type="checkbox"]:checked::after { transform: translateX(18px); }
 
 .settings-attributions {
   display: grid;
-  gap: 9px;
+  gap: 10px;
   margin: 0;
-  padding: 14px 18px 18px 34px;
-  color: #a29daf;
-  font-size: 12.5px;
-  line-height: 1.5;
+  padding: 6px 0 8px 18px;
+  color: #d0cadf;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 /* Connected libraries: one row per store, each with its own state and its own
@@ -2101,30 +2077,33 @@ body[data-mood="rage"] { --violet: #f2453c; }
    indented under it, to read as belonging to that row rather than as two more
    stores. */
 .steam-source-block { display: grid; }
-.steam-source-block .source-account-row { border-bottom: 1px solid rgba(255,255,255,.05); }
 .steam-inline-panel {
   display: grid;
   gap: 12px;
-  padding: 16px 18px 18px;
-  border-bottom: 1px solid rgba(255,255,255,.05);
-  background: rgba(255,255,255,.02);
+  padding: 16px 0 18px;
+  border-bottom: 1px solid rgba(255,255,255,.08);
 }
 .steam-inline-panel[hidden] { display: none !important; }
-.steam-inline-panel__header { display: flex; align-items: center; gap: 12px; }
-.steam-inline-panel__header .settings-card__copy { flex: 1; min-width: 0; }
 .steam-inline-panel__title { font-size: 15px; }
 
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
 .source-account-entry { display: grid; }
-.source-account-entry .steam-notice { margin: 0 18px 13px; }
-.source-account-row { align-items: center; gap: 16px; padding: 16px 18px; }
+.source-account-entry .steam-notice { margin: 0 0 14px; }
+/* Every source is one line in the same shape — logo, name, sync, and the
+   decision on the right — so nothing separates them but the line itself. */
+.source-account-row {
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 14px 0;
+}
 .source-account-row + .source-account-row,
 .source-account-entry + .source-account-row,
-.source-account-row + .source-account-entry { border-top: 1px solid rgba(255,255,255,.05); }
+.source-account-row + .source-account-entry { border-top: 0; }
 /* The logo is the logo: no plate, no border, no tint behind it. A brand mark
    carries its own colours and must not inherit the row's. */
 .source-account-row__mark {
+  position: relative;
   display: grid;
   width: 32px;
   height: 32px;
@@ -2132,16 +2111,27 @@ body[data-mood="rage"] { --violet: #f2453c; }
   place-items: center;
   color: #e8e5ee;
 }
-.source-account-row__mark .icon { width: 30px; height: 30px; }
+.source-account-row__mark .icon { width: 28px; height: 28px; }
 .source-account-row__mark .icon--brand { color: inherit; }
-/* Every title starts at the same x. Without this the copy block is sized by
-   its own content and drifts, so each store's name began somewhere different. */
-.source-account-row__copy { flex: 1; gap: 5px; text-align: left; }
-.source-account-row__copy strong { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-.source-account-row__description,
-.source-account-row__summary { color: #8b8794; font-size: 11.5px; line-height: 1.45; }
-.source-account-row__summary { color: #a8a3b2; }
-.source-account-row__confirm { margin: 4px 0 0; color: #e6e2ec; font-size: 12.5px; }
+.source-account-row__logo { width: 26px; height: 26px; object-fit: contain; }
+.source-account-row__name {
+  flex: none;
+  min-width: 0;
+  overflow: hidden;
+  color: #f4f2f8;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.source-account-row__confirm {
+  flex-basis: 100%;
+  margin: 0;
+  color: #e6e2ec;
+  font-size: 13px;
+  text-align: right;
+}
 .source-account-row__actions {
   display: flex;
   flex: none;
@@ -2149,75 +2139,190 @@ body[data-mood="rage"] { --violet: #f2453c; }
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+  margin-left: auto;
 }
-.source-account-row__actions .steam-import-button,
-.source-account-row__actions .steam-secondary-button { min-height: 32px; }
-.source-account-row__connect { min-width: 104px; justify-content: center; }
-.source-account-row__actions .steam-spinner { width: 16px; height: 16px; flex: none; border-width: 1.5px; }
-.source-account-row__waiting { color: #a29daf; font-size: 12px; }
-/* The price-feed state, as a quiet dot beside the name. A red "Unavailable"
-   pill on every row read as an error about the store rather than a note about
-   its optional price data. */
-.source-account-row__dot {
-  width: 6px;
-  height: 6px;
+/* The one picture in the row: re-reading a store is the same gesture on every
+   one of them, and a word per row spent the width the account needs. */
+.source-account-row__sync {
+  display: grid;
+  width: 30px;
+  height: 30px;
   flex: none;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 999px;
+  color: #a49eb6;
+  background: none;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease, transform 320ms cubic-bezier(.22,.72,.2,1);
+}
+.source-account-row__sync .icon { width: 16px; height: 16px; }
+/* A quarter turn: the icon does the thing it is named after, once, under the
+   pointer — no label, no plate, just the gesture. */
+.source-account-row__sync:hover, .source-account-row__sync[data-nav-focus] { color: #fff; background: rgba(255,255,255,.07); transform: rotate(90deg); }
+.source-account-row__sync:active { transform: rotate(180deg) scale(.94); }
+/* The right-hand slot is a control, so it is drawn as one: a white hairline
+   around it at rest, and a red turn under the pointer — the colour of the
+   thing it is about to do. Everything that decides lives on this side. The
+   corners are barely turned; the label is what varies, and it is measured to
+   one width so swapping a persona for a verb never shifts the row. */
+.source-account-row__account,
+.settings-card__header--actions .steam-header-button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 4px 15px;
+  border: 1px solid rgba(255,255,255,.42);
+  border-radius: 6px;
+  color: #e9e6f2;
+  background: rgba(255,255,255,.03);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 520;
+  letter-spacing: -.005em;
+  white-space: nowrap;
+  transition:
+    color 220ms ease,
+    border-color 220ms ease,
+    background-color 220ms ease,
+    transform 220ms cubic-bezier(.22,.72,.2,1);
+}
+.source-account-row__account {
+  width: 116px;
+  justify-content: center;
+  overflow: hidden;
+}
+.source-account-row__account-name,
+.source-account-row__account-hover {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A store already signed in is stated at rest, not on approach: the button
+   carrying an account name wears the blue the platform chips use, so the rows
+   that are connected can be told from the ones still offering to connect
+   without reading a single word. It stays blue until the pointer arrives, and
+   the red below is what it turns into then. */
+.source-account-row__account:has(.source-account-row__account-hover) {
+  color: #dcebfa;
+  border-color: rgba(114,170,232,.78);
+  background: rgba(76,146,222,.14);
+}
+.source-account-row__account:hover,
+.source-account-row__account:focus-visible,
+.source-account-row__account[data-nav-focus],
+.settings-card__header--actions .steam-header-button:hover:not(:disabled),
+.settings-card__header--actions .steam-header-button:focus-visible:not(:disabled),
+.settings-card__header--actions .steam-header-button[data-nav-focus]:not(:disabled) {
+  color: #fff;
+  border-color: rgba(255,255,255,.72);
+  background: rgba(255,255,255,.1);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+/* Red is the colour of what the button is about to do, so it belongs to the one
+   that disconnects — and that is exactly the one which swaps the account's name
+   for a verb under the pointer. Offering to connect a store, or to refresh every
+   library, is not that, and wearing the warning made the page look like it was
+   talking someone out of signing in. */
+.source-account-row__account:has(.source-account-row__account-hover):hover,
+.source-account-row__account:has(.source-account-row__account-hover):focus-visible,
+.source-account-row__account:has(.source-account-row__account-hover)[data-nav-focus] {
+  color: #ffe4e6;
+  border-color: rgba(255,122,132,.92);
+  background: rgba(228,74,88,.16);
+}
+.source-account-row__account:active,
+.settings-card__header--actions .steam-header-button:active:not(:disabled) { transform: translateY(0); }
+/* At rest the row says who you are; under the pointer it says what you can do
+   about it. Only one of the two is ever drawn — and only on the button that has
+   both to draw. A button offering to connect has one label and keeps it, rather
+   than emptying itself the moment the pointer arrives. */
+.source-account-row__account-hover { display: none; }
+.source-account-row__account:has(.source-account-row__account-hover):hover .source-account-row__account-name,
+.source-account-row__account:has(.source-account-row__account-hover):focus-visible .source-account-row__account-name,
+.source-account-row__account:has(.source-account-row__account-hover)[data-nav-focus] .source-account-row__account-name { display: none; }
+.source-account-row__account:hover .source-account-row__account-hover,
+.source-account-row__account:focus-visible .source-account-row__account-hover,
+.source-account-row__account[data-nav-focus] .source-account-row__account-hover { display: inline; }
+/* The two decisions a disconnect asks for wear the same outline as the button
+   that asked them, so the row never changes shape mid-question — the same
+   measure, so the stack lines up with the slot it replaced. */
+.source-account-row__actions .steam-secondary-button {
+  min-width: 116px;
+  min-height: 32px;
+  padding: 4px 14px;
+  border: 1px solid rgba(255,255,255,.42);
+  border-radius: 6px;
+  background: rgba(255,255,255,.03);
+}
+.source-account-row__actions .steam-spinner { width: 16px; height: 16px; flex: none; border-width: 1.5px; }
+.source-account-row__waiting { color: #d0cadf; font-size: 12.5px; }
+/* The pin on the corner of the logo: connected, and — where it has one — the
+   health of the store's price feed. It used to be a second line under the
+   name, and a dot says the same thing without costing a line. */
+.source-account-row__dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 9px;
+  height: 9px;
   border-radius: 999px;
   background: #6a6572;
+  box-shadow: 0 0 0 2.5px rgba(20,18,30,.95);
 }
+.source-account-row__dot--connected,
 .source-account-row__dot--available { background: #58c98a; }
 .source-account-row__dot--degraded { background: #d8b25c; }
 .source-account-row__dot--unavailable { background: #c9636a; }
 .source-account-row__dot--not-configured { background: #56525e; }
-.source-providers { border-top: 1px solid rgba(255,255,255,.06); }
-.source-providers__label {
-  margin: 0;
-  padding: 14px 18px 6px;
-  color: #8b8794;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.source-providers .provider-status-row + .provider-status-row { border-top: 1px solid rgba(255,255,255,.06); }
-/* Aligned with the text column above it, not centred in the card. */
+.source-providers { border-top: 0; }
+/* Aligned with the text column above it, not centred in the panel. */
 .source-account-shared {
   margin: -6px 0 0;
-  padding: 0 18px 14px 66px;
-  color: #7d7986;
-  font-size: 11.5px;
-  line-height: 1.5;
+  padding: 0 0 14px 48px;
+  color: #b9b2cb;
+  font-size: 12.5px;
+  line-height: 1.55;
   text-align: left;
 }
 
 .provider-status-list { display: grid; }
+/* The store-data-only rows, shaped exactly like the rows above them: same
+   logo, same name, same spacing — only the right-hand slot reads as a state
+   rather than as an account, because there is no account to show. */
 .provider-status-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 13px 18px;
+  justify-content: flex-start;
+  gap: 14px;
+  padding: 14px 0;
 }
-.provider-status-row + .provider-status-row { border-top: 1px solid rgba(255,255,255,.06); }
-.provider-status-row strong { display: block; color: #f2f0f6; font-size: 13.5px; font-weight: 600; }
-.provider-status-row p { margin: 3px 0 0; color: #98939f; font-size: 12px; line-height: 1.45; }
+.provider-status-row + .provider-status-row { border-top: 0; }
+.provider-status-row .source-account-row__mark { position: static; }
+.provider-status-row strong { flex: none; color: #f4f2f8; font-size: 14.5px; font-weight: 600; }
+.provider-status-row .provider-health { margin-left: auto; }
 .provider-health {
   flex: none;
-  padding: 4px 10px;
-  border: 1px solid rgba(255,255,255,.12);
-  border-radius: 999px;
-  font-size: 11.5px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 12.5px;
   font-weight: 600;
   text-transform: capitalize;
   white-space: nowrap;
 }
-.provider-health--available { border-color: rgba(116,227,146,.32); color: #b6dfc1; background: rgba(30,81,49,.42); }
-.provider-health--degraded { border-color: rgba(240,206,110,.3); color: #e6d5a8; background: rgba(76,62,36,.42); }
-.provider-health--unavailable { border-color: rgba(240,107,110,.3); color: #e2b3b6; background: rgba(76,36,40,.42); }
-.provider-health--not-configured { color: #b3aebd; background: rgba(255,255,255,.06); }
+.provider-health--available { color: #a6e6b8; }
+.provider-health--degraded { color: #ecd8a0; }
+/* Both of these read "Soon", so both are quiet: red said a store was broken
+   when the only thing missing is a feed Orivo has not wired up yet. */
+.provider-health--unavailable,
+.provider-health--not-configured { color: #b3aebd; }
 
 /* Migrated Steam and Wine surfaces sit inside settings cards. */
-.settings-card > .steam-import-body { max-height: min(48vh, 460px); }
 .settings-card > .steam-account-body,
 .settings-card > .wine-settings-body { max-height: none; overflow: visible; }
 .steam-state--idle { justify-items: start; padding: 4px 0 2px; text-align: left; }
@@ -2236,47 +2341,84 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .not-found__detail { max-width: 440px; margin: 0 0 12px; color: #a29daf; font-size: 13.5px; line-height: 1.5; }
 
 /* Wallpaper Searcher credentials form in the Plugins settings. */
-.credentials-form { display: grid; gap: 12px; padding: 14px 18px 18px; border-top: 1px solid rgba(255,255,255,.06); }
-.credentials-form__field { display: grid; gap: 5px; }
-.credentials-form__field label { color: #cfcad8; font-size: 12.5px; font-weight: 600; }
-.credentials-form__field input { height: 34px; padding: 0 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; color: #f2eff7; background: rgba(0,0,0,.22); font-size: 13px; }
-.credentials-form__field input:focus { outline: none; border-color: rgba(255,255,255,.38); }
-.credentials-form__field input::placeholder { color: #6f6a79; }
-.credentials-form__field small { color: #8f8a99; font-size: 11.5px; line-height: 1.45; }
+.credentials-form { display: grid; gap: 12px; padding: 18px 0 6px; border-top: 1px solid rgba(255,255,255,.08); }
+.credentials-form__field { display: grid; gap: 6px; }
+.credentials-form__field label { color: #d2cddd; font-size: 13px; font-weight: 600; }
+.credentials-form__field input { height: 38px; padding: 0 13px; border: 1px solid rgba(255,255,255,.16); border-radius: 11px; color: #f4f2f8; background: rgba(10,10,15,.42); font-size: 13.5px; }
+.credentials-form__field input::placeholder { color: #7d7789; }
+.credentials-form__field small { color: #9993a7; font-size: 12.5px; line-height: 1.5; }
 .credentials-form__actions { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
-.credentials-form__actions small { color: #8f8a99; font-size: 11.5px; }
+.credentials-form__actions small { color: #9993a7; font-size: 12.5px; }
 
 @media (max-width: 940px) {
   .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-sidebar { position: static; }
+  /* The sidebar sits above the content, so its vertical rule would read as a
+     stray line hanging off the tab strip. */
+  .settings-content { border-left: 0; padding: 4px clamp(14px, 4vw, 28px) 20px; }
   .settings-sidebar__list {
     grid-auto-flow: column;
-    grid-auto-columns: minmax(150px, max-content);
-    gap: 8px;
+    grid-auto-columns: max-content;
+    gap: 6px;
     overflow-x: auto;
     padding-bottom: 6px;
     scrollbar-width: thin;
   }
-  .settings-section-link { border-color: rgba(255,255,255,.08); }
+  /* The strip is the sidebar laid on its side: same pill, less of it. */
+  .settings-section-link { gap: 10px; padding: 10px 14px; }
 }
 
-/* Spatial navigation (keyboard arrows + gamepad) */
-[data-nav-focus] {
-  outline: 2px solid #c3b5ff;
-  outline-offset: 3px;
+/* Spatial navigation (keyboard arrows + gamepad) — it moves focus and scrolls
+   the target into view; it draws no ring. A control the keys or a pad land on
+   takes the look the pointer gives it on hover, which every rule above lists
+   beside its `:hover`. `[data-nav-focus]` is only ever set while the keys or a
+   pad are in use, so none of this shows for the mouse. The few below are the
+   controls whose hover is too quiet to say "you are here" on its own, or that
+   already wear a state the hover look would not change. */
+:where([data-nav-focus]) {
   scroll-margin: 24px;
 }
-/* the page roots are tabindex=-1 landing pads, never show a ring on them */
-.app-page [data-nav-focus].app-page,
-main[data-nav-focus] {
-  outline: none;
+
+/* The current page's link is already a plate; focus lifts the plate. */
+.nav-link.is-active[data-nav-focus] {
+  border-color: rgba(255,255,255,.2);
+  background: rgba(255,255,255,.13);
 }
-.game-card[data-nav-focus] {
-  outline-offset: 5px;
+
+/* The field is the pill around it, not the bare input. */
+.search-control:has(input[data-nav-focus]) {
+  border-color: rgba(255,255,255,.34);
+  background: rgba(22,20,23,.52);
 }
-body[data-input-mode="pointer"] [data-nav-focus] {
-  outline: none;
+
+/* Play is the one control the scene is for: it rises and glows rather than
+   brightening by 6%. A greyed Play still says it was reached. */
+.play-button[data-nav-focus] {
+  filter: brightness(1.06);
+  transform: translateY(-2px) scale(1.04);
+  box-shadow: 0 12px 30px rgba(0,0,0,.26), 0 0 28px rgba(233,228,255,.34);
 }
+.play-button[aria-disabled='true'][data-nav-focus] { opacity: .82; filter: saturate(.35) brightness(1.12); transform: scale(1.04); }
+/* Blocked and downloading wear their own full-strength look; focus keeps it. */
+.play-button.is-blocked[data-nav-focus],
+.play-button.is-downloading[data-nav-focus] { opacity: 1; filter: none; }
+.play-button.is-blocked[data-nav-focus] { border-color: rgba(255,255,255,.34); color: #e4dfea; }
+
+/* A segment is a bare word; focus gives it a pill of light behind it without
+   moving the words beside it. */
+.browse-bar__segment[data-nav-focus] {
+  color: #fff;
+  border-radius: 999px;
+  background: rgba(255,255,255,.1);
+  box-shadow: 0 0 0 7px rgba(255,255,255,.1);
+}
+
+/* The select is a word on a hairline; the keys light the word and the line. */
+.settings-select[data-nav-focus] { border-bottom-color: #fff; background-color: rgba(255,255,255,.06); }
+
+/* A choice is its whole row, and its switch is what the keys stand on. */
+.settings-choice:has(input[data-nav-focus]) strong { color: #fff; text-decoration: underline; text-underline-offset: 4px; }
+.plugins-search:has(input[data-nav-focus]) { border-bottom-color: rgba(255,255,255,.6); }
 
 /* ---------------------------------------------------------------------------
    Compact — a phone held sideways (914x411 on a Pixel 8)
@@ -2387,10 +2529,13 @@ html[data-form-factor="compact"] .notifications-panel {
 /* Settings already reflows to a single column below 940px. What is left is the
    vertical budget: a 27px heading and 76px of tail padding are a quarter of the
    screen spent before the first row. */
-html[data-form-factor="compact"] .settings-layout { padding: 4px var(--edge-left) 16px; gap: 14px; }
-html[data-form-factor="compact"] .settings-header { margin-bottom: 12px; }
+html[data-form-factor="compact"] .app-page--settings { padding-inline: var(--edge-left); padding-bottom: 20px; }
+html[data-form-factor="compact"] .settings-layout { padding: 6px 0 14px; gap: 12px; }
+html[data-form-factor="compact"] .settings-sidebar { padding: 2px 4px 6px; }
+html[data-form-factor="compact"] .settings-content { padding: 0 4px 8px; }
+html[data-form-factor="compact"] .settings-header { margin-bottom: 10px; padding-top: 0; }
 html[data-form-factor="compact"] .settings-header h1 { font-size: 20px; }
-html[data-form-factor="compact"] .settings-sidebar__title { margin-bottom: 8px; }
+html[data-form-factor="compact"] .settings-group__label { padding-top: 14px; }
 
 html[data-form-factor="compact"] .wine-panel {
   top: calc(var(--topbar-height) + 4px);

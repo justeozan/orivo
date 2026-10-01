@@ -9,6 +9,7 @@ import {
   normaliseDataUsage,
   normalisePreferences,
   normaliseProviderStatuses,
+  providerHealthLabel,
   normaliseWallpaperCredentials,
 } from "./settings-model";
 
@@ -28,8 +29,10 @@ describe("settings model", () => {
       motion: "reduced",
       showShowcaseGames: true,
       debugSampleSocial: true,
-      // Absent from the record and so false: a beta surface is opt-in.
+      // Absent from the record and so false: a beta surface is opt-in, and so
+      // is putting the hand-written shelf back in front of the live one.
       betaFeatures: false,
+      showEditorialGames: false,
     });
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -48,6 +51,7 @@ describe("settings model", () => {
       showShowcaseGames: true,
       debugSampleSocial: true,
       betaFeatures: true,
+      showEditorialGames: true,
     } as const;
     expect(applyPreferencesUpdate(current, { reset: true, storeRegion: "de" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -94,6 +98,16 @@ describe("settings model", () => {
       searchTermLogo: "",
     });
     expect(normaliseWallpaperCredentials(null)).toEqual(EMPTY_WALLPAPER_CREDENTIALS);
+  });
+
+  it("says 'Soon' for every feed with no data, whatever the reason", () => {
+    // Two different reasons — no authorised feed configured, and no public feed
+    // to configure — but the same thing to read: not yet. Neither is a fault.
+    expect(providerHealthLabel("unavailable")).toBe("Soon");
+    expect(providerHealthLabel("not-configured")).toBe("Soon");
+    // A feed that does answer still says so.
+    expect(providerHealthLabel("available")).toBe("Available");
+    expect(providerHealthLabel("degraded")).toBe("Degraded");
   });
 
   it("deduplicates and validates provider status records", () => {

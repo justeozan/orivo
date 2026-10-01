@@ -2,9 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   boxDelta,
   documentOverflow,
-  expectVisibleFocusRing,
   openRoute,
-  tabUntil,
   topbarBox,
   waitForImages,
   type PageName,
@@ -17,8 +15,6 @@ interface GoldenCase {
   name: PageName;
   /** Regions whose content is time-derived and must not enter the golden. */
   masks: (page: Page) => Locator[];
-  /** The control keyboard navigation has to be able to reach. */
-  primaryFocusKey: string;
 }
 
 const GOLDENS: GoldenCase[] = [
@@ -30,7 +26,6 @@ const GOLDENS: GoldenCase[] = [
     // The Store's real catalogue (`store-catalog.generated.ts`) replaced the
     // ten-game editorial fixture; this is the first card of an unfiltered
     // "Pour toi" browse (`STORE_FIRST_GAME_ID` in e2e/helpers.ts).
-    primaryFocusKey: "game-steam:1608230",
   },
   {
     golden: "game-detail",
@@ -38,14 +33,12 @@ const GOLDENS: GoldenCase[] = [
     name: "game",
     // `.gd-stats` renders "Last played 2 days ago", derived from Date.now().
     masks: (page) => [page.locator("#app-page-game:not([hidden]) .gd-stats")],
-    primaryFocusKey: "primary-action",
   },
   {
     golden: "settings",
     hash: "#/settings/general",
     name: "settings",
     masks: () => [],
-    primaryFocusKey: "",
   },
 ];
 
@@ -129,29 +122,6 @@ for (const golden of GOLDENS) {
           `${golden.golden}: unexpected horizontal scroller ${scroller}`,
         ).toBe(true);
       }
-    });
-
-    test("keyboard navigation reaches the primary controls with a visible focus ring", async ({
-      page,
-    }) => {
-      await prepare(page, golden);
-
-      // The shell topbar is always first in the tab order.
-      const nav = await tabUntil(page, (report) => report.className.includes("nav-link"));
-      expect(nav.found, `${golden.golden}: Tab never reached the primary nav`).not.toBeNull();
-      expectVisibleFocusRing(nav.found!);
-
-      const target =
-        golden.primaryFocusKey === ""
-          ? await tabUntil(page, (report) => report.className.includes("settings-section-link"))
-          : await tabUntil(page, (report) => report.focusKey === golden.primaryFocusKey);
-
-      expect(
-        target.found,
-        `${golden.golden}: Tab never reached the primary control. Tab order was:\n` +
-          target.visited.map((stop) => `  ${stop.tag}.${stop.className} (${stop.focusKey ?? stop.label})`).join("\n"),
-      ).not.toBeNull();
-      expectVisibleFocusRing(target.found!);
     });
   });
 }

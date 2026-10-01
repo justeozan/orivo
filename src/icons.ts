@@ -63,7 +63,11 @@ export type IconName =
   | "sun"
   | "cover"
   | "landscape"
-  | "background";
+  | "background"
+  | "cog"
+  | "database"
+  | "info"
+  | "sync";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -170,6 +174,15 @@ const paths: Record<IconName, string> = {
   landscape: '<rect x="3" y="5.4" width="18" height="13.2" rx="2" />',
   background:
     '<rect x="3" y="5.4" width="18" height="13.2" rx="2" /><circle cx="8.3" cy="9.9" r="1.4" /><path d="m3.4 16.9 4.3-4 2.9 2.7 3.3-3.4 4.7 4.7" />',
+  // Settings › sidebar glyphs, taken from Lucide (ISC) rather than redrawn:
+  // the cog the mock draws for General, the database cylinder for Data, the
+  // circled "i" for About, and the two-arrow cycle a source row syncs with.
+  cog:
+    '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" />',
+  database: '<ellipse cx="12" cy="5" rx="9" ry="3" /><path d="M3 5V19A9 3 0 0 0 21 19V5" /><path d="M3 12A9 3 0 0 0 21 12" />',
+  info: '<circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />',
+  sync:
+    '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" />',
   // Connected-store marks, drawn as the recognisable brand shapes so a card
   // reads at a glance. These are solid, filled marks rather than the outline
   // style above, because that is what makes a store logo legible at 20px.

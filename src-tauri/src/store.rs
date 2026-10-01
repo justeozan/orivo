@@ -71,6 +71,23 @@ const STEAM_REFRESH_PAUSE: Duration = Duration::from_millis(250);
 /// reachable rather than slow, and the refresh stops instead of spending a
 /// request timeout per remaining game.
 const STEAM_REFRESH_GIVE_UP_AFTER: usize = 5;
+
+/// How many of Steam's new releases are read per refresh. The listing is
+/// ranked, so this is a depth into a queue that is already sorted by how much
+/// of an audience a release found — not a slice of everything published, which
+/// on any given week is mostly asset flips.
+const STEAM_NEW_RELEASES_LIMIT: usize = 24;
+
+/// How old a release may be before the shelf stops calling it new. The listing
+/// is Steam's own and is ordered by release date, so this changes nothing on a
+/// normal week — it is the guarantee that an old game cannot reach the shelf
+/// through this door whatever the storefront decides to rank.
+const STEAM_NEW_RELEASE_MAX_AGE_DAYS: i64 = 90;
+
+/// Steam labels a listing with the descriptors its publisher declared. 1 and 3
+/// are "some nudity or sexual content" and "adult only sexual content"; a shelf
+/// that opens on a recommendation does not surface those unasked.
+const STEAM_ADULT_DESCRIPTORS: [i64; 2] = [1, 3];
 const APPLE_REFRESH_TERM: &str = "game";
 const APPLE_REFRESH_LIMIT: usize = 10;
 
@@ -1494,6 +1511,11 @@ async fn refresh_all(
     apply_outcome(&mut games, steam_outcome);
     statuses.push(steam_status);
 
+    // After the prices, and reading the catalogue as it stands, so a game Orivo
+    // already writes about is never pulled in twice.
+    let new_releases = refresh_steam_new_releases(http, config, &games, now_ms).await;
+    apply_outcome(&mut games, new_releases);
+
     let (apple_outcome, apple_status) = refresh_apple(http, config, now_ms).await;
     apply_outcome(&mut games, apple_outcome);
     statuses.push(apple_status);
@@ -1772,6 +1794,280 @@ fn steam_offer_from_payload(
     })
 }
 
+/// The ranked new-release listing. `filter=popularnew` is Steam's own ordering
+/// of what has just come out by the audience it found, which is the difference
+/// between a shelf and a firehose: the unranked `featuredcategories` feed for
+/// the same week opens on three asset flips.
+fn steam_new_releases_url(region: &str) -> String {
+    format!(
+        "https://store.steampowered.com/search/results/?query&start=0&count=50&sort_by=Released_DESC&filter=popularnew&cc={}&l=french&infinite=1",
+        region.to_lowercase()
+    )
+}
+
+/// The listing answers with its own markup inside a JSON envelope. Only the app
+/// identifiers are read out of it — never the markup itself — so a change to
+/// Steam's HTML costs this an empty list and nothing else.
+fn steam_new_release_ids(payload: &serde_json::Value) -> Vec<String> {
+    let Some(html) = payload.get("results_html").and_then(serde_json::Value::as_str) else {
+        return Vec::new();
+    };
+    const NEEDLE: &str = "data-ds-appid=\"";
+    let mut ids = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find(NEEDLE) {
+        rest = &rest[start + NEEDLE.len()..];
+        let Some(end) = rest.find('"') else { break };
+        let candidate = &rest[..end];
+        // A bundle carries several ids in one attribute; a single game carries
+        // one. Anything else is not an app.
+        if !candidate.is_empty()
+            && candidate.chars().all(|character| character.is_ascii_digit())
+            && !ids.iter().any(|existing| existing == candidate)
+        {
+            ids.push(candidate.to_string());
+        }
+        rest = &rest[end..];
+    }
+    ids
+}
+
+/// Steam publishes the 616x353 capsule the card is cut for at a flat, derivable
+/// path — but only for listings old enough to have one. A release from this week
+/// has its art behind a content hash that nothing derives, so the card is given
+/// the capsule first and the listing's own header second: the picture the card
+/// wants when it exists, and an 18% side crop of the right picture when it does
+/// not. The WebView walks that chain itself when an image 404s.
+fn steam_capsule_url(app_id: &str) -> String {
+    format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/capsule_616x353.jpg")
+}
+
+fn steam_library_hero_url(app_id: &str) -> String {
+    format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/library_hero.jpg")
+}
+
+/// Steam answers in the language it was asked in, so a date comes back as
+/// "29 sept. 2026". Only that form is read, and a date in any other — a year on
+/// its own, a quarter, a season — is no answer rather than a wrong one: the
+/// listing's own ordering then speaks for the game instead of a parse failing
+/// it. Returns days since the epoch, which is what the rest of this file counts
+/// in.
+fn steam_release_days(date: &str) -> Option<i64> {
+    let mut parts = date.split_whitespace();
+    let day: u32 = parts.next()?.trim_end_matches('.').parse().ok()?;
+    let month = match parts
+        .next()?
+        .trim_end_matches('.')
+        .to_lowercase()
+        .as_str()
+    {
+        "janv" => 1,
+        "févr" | "fevr" => 2,
+        "mars" => 3,
+        "avr" => 4,
+        "mai" => 5,
+        "juin" => 6,
+        "juil" => 7,
+        "août" | "aout" => 8,
+        "sept" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "déc" | "dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts.next()?.parse().ok()?;
+    Some(days_from_civil(year, month, day))
+}
+
+/// One released game read out of a storefront listing, with the offer that
+/// prices it. `None` for anything that is not a released game Orivo will show.
+fn steam_new_release_from_payload(
+    app_id: &str,
+    payload: &serde_json::Value,
+    region: &str,
+    now_ms: u64,
+) -> Option<(CachedGame, CachedOffer)> {
+    let entry = payload.get(app_id)?;
+    if !entry.get("success").and_then(serde_json::Value::as_bool)? {
+        return None;
+    }
+    let data = entry.get("data")?;
+    if data.get("type").and_then(serde_json::Value::as_str)? != "game" {
+        return None;
+    }
+    // Announced, not out. The shelf is for what can be played tonight.
+    if data
+        .get("release_date")
+        .and_then(|date| date.get("coming_soon"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    // Out, and out recently. The listing is ranked by release date, so this only
+    // ever catches something the storefront itself has mis-sorted.
+    if let Some(days) = data
+        .get("release_date")
+        .and_then(|date| date.get("date"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(steam_release_days)
+    {
+        if (now_ms / 86_400_000) as i64 - days > STEAM_NEW_RELEASE_MAX_AGE_DAYS {
+            return None;
+        }
+    }
+    if let Some(ids) = data
+        .get("content_descriptors")
+        .and_then(|descriptors| descriptors.get("ids"))
+        .and_then(serde_json::Value::as_array)
+    {
+        if ids
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .any(|id| STEAM_ADULT_DESCRIPTORS.contains(&id))
+        {
+            return None;
+        }
+    }
+
+    let title = data.get("name").and_then(serde_json::Value::as_str)?.trim();
+    if title.is_empty() {
+        return None;
+    }
+
+    let descriptions = |key: &str| -> Vec<String> {
+        data.get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("description").and_then(serde_json::Value::as_str))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut platforms = Vec::new();
+    if let Some(supported) = data.get("platforms") {
+        for (key, platform) in [
+            ("windows", GamePlatform::Windows),
+            ("mac", GamePlatform::Macos),
+            ("linux", GamePlatform::Linux),
+        ] {
+            if supported
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                platforms.push(platform);
+            }
+        }
+    }
+
+    let game_id = format!("steam:{app_id}");
+    let price = data.get("price_overview");
+    let is_free = data
+        .get("is_free")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let offer = CachedOffer {
+        // The catalogue's own shape, so a later price refresh replaces this
+        // offer rather than appearing beside it.
+        id: format!("offer_steam_steam{app_id}"),
+        game_id: game_id.clone(),
+        provider: StoreProviderId::Steam,
+        price_minor: if is_free {
+            Some(0)
+        } else {
+            price
+                .and_then(|price| price.get("final"))
+                .and_then(serde_json::Value::as_i64)
+        },
+        currency: price
+            .and_then(|price| price.get("currency"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        region: region.to_uppercase(),
+        verified_at_epoch_ms: Some(now_ms),
+        availability: OfferAvailability::Available,
+        discount_percent: price
+            .and_then(|price| price.get("discount_percent"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as u32,
+        url: steam_app_url(app_id),
+    };
+
+    let game = CachedGame {
+        id: game_id,
+        title: title.to_string(),
+        short_description: data
+            .get("short_description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        cover_url: data
+            .get("header_image")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        hero_url: steam_library_hero_url(app_id),
+        landscape_url: steam_capsule_url(app_id),
+        genres: descriptions("genres"),
+        // Steam's "categories" are how a game is played — Solo, Multijoueur,
+        // Coop — which is what the card reads to name the mode, and what the
+        // category chips match on beside the genres.
+        tags: descriptions("categories"),
+        supported_platforms: platforms,
+        // Nobody at Orivo has written a word about this game, and the card says
+        // so by leaving those slots empty rather than filling them.
+        editorial_reasons: Vec::new(),
+        offers: vec![offer.clone()],
+        curation: None,
+    };
+    Some((game, offer))
+}
+
+/// What Steam has just released, for the games the catalogue does not already
+/// carry. Curated entries are never touched by this: a game Orivo wrote about
+/// is already on the shelf, and its own copy outranks anything a storefront
+/// says about it.
+async fn refresh_steam_new_releases(
+    http: &dyn StoreHttp,
+    config: &RefreshConfig,
+    known: &[CachedGame],
+    now_ms: u64,
+) -> ProviderOutcome {
+    let mut outcome = ProviderOutcome::default();
+    let Ok(listing) = http.get_json(&steam_new_releases_url(&config.region)).await else {
+        return outcome;
+    };
+
+    let wanted: Vec<String> = steam_new_release_ids(&listing)
+        .into_iter()
+        .filter(|app_id| {
+            let id = format!("steam:{app_id}");
+            !known.iter().any(|game| game.id == id)
+        })
+        .take(STEAM_NEW_RELEASES_LIMIT)
+        .collect();
+
+    for app_id in wanted {
+        http.pause(STEAM_REFRESH_PAUSE).await;
+        let Ok(payload) = http
+            .get_json(&steam_app_details_url(&app_id, &config.region))
+            .await
+        else {
+            continue;
+        };
+        if let Some((game, _)) = steam_new_release_from_payload(&app_id, &payload, &config.region, now_ms)
+        {
+            outcome.games.push(game);
+        }
+    }
+    outcome
+}
+
 /// Apple refresh via the public iTunes Search API.
 async fn refresh_apple(
     http: &dyn StoreHttp,
@@ -1934,26 +2230,27 @@ pub trait UrlOpener: Send + Sync {
     fn open(&self, url: &str) -> Result<(), String>;
 }
 
-/// The opener plugin's Android path needs an `AppHandle`, which
-/// [`UrlOpener::open`] deliberately does not carry. Only Android goes through
-/// the plugin, so the handle is parked here during setup instead of widening
-/// the trait for every platform.
-#[cfg(target_os = "android")]
-static ANDROID_APP: OnceLock<AppHandle> = OnceLock::new();
+/// The opener plugin's mobile path needs an `AppHandle`, which
+/// [`UrlOpener::open`] deliberately does not carry. Only phones go through the
+/// plugin, so the handle is parked here during setup instead of widening the
+/// trait for every platform.
+#[cfg(mobile)]
+static MOBILE_APP: OnceLock<AppHandle> = OnceLock::new();
 
-#[cfg(target_os = "android")]
-pub fn set_android_app(app: AppHandle) {
-    let _ = ANDROID_APP.set(app);
+#[cfg(mobile)]
+pub fn set_mobile_app(app: AppHandle) {
+    let _ = MOBILE_APP.set(app);
 }
 
-/// `webbrowser::open` must not be used here: it reads its context from
-/// `ndk-context`, which this app never initialises, so it panics inside the
-/// JNI thread and aborts the whole process. The opener plugin hands the URL to
-/// its own Kotlin `OpenerPlugin`, which fires the browser intent directly.
-#[cfg(target_os = "android")]
-fn open_url_android(url: &str) -> Result<(), String> {
+/// `webbrowser::open` must not be used here: on Android it reads its context
+/// from `ndk-context`, which this app never initialises, so it panics inside
+/// the JNI thread and aborts the whole process. The opener plugin hands the URL
+/// to its own native code instead — a browser intent on Android, `UIApplication`
+/// on iOS.
+#[cfg(mobile)]
+fn open_url_mobile(url: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let app = ANDROID_APP
+    let app = MOBILE_APP
         .get()
         .ok_or("Orivo is not ready to open a browser yet.")?;
     app.opener()
@@ -1965,11 +2262,11 @@ pub struct SystemUrlOpener;
 
 impl UrlOpener for SystemUrlOpener {
     fn open(&self, url: &str) -> Result<(), String> {
-        #[cfg(target_os = "android")]
+        #[cfg(mobile)]
         {
-            open_url_android(url)
+            open_url_mobile(url)
         }
-        #[cfg(not(target_os = "android"))]
+        #[cfg(desktop)]
         {
             // A fixed absolute binary, one argument, and no shell. The argument is
             // already known to start with `https://`, so it can never be read as a
@@ -2137,7 +2434,7 @@ fn store_home(
     } else {
         document.games
     };
-    let games = without_owned(games, library);
+    let games = without_editorial(without_owned(games, library), app_data_dir);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -2184,7 +2481,7 @@ fn browse(
     } else {
         document.games
     };
-    let games = without_owned(games, library);
+    let games = without_editorial(without_owned(games, library), app_data_dir);
     let statuses = if document.provider_statuses.is_empty() {
         default_provider_statuses()
     } else {
@@ -2222,6 +2519,38 @@ pub fn open_store_offer(app: AppHandle, offer_id: String) -> Result<(), String> 
 
 /// Read the stored region tolerantly. An explicit host override wins; a
 /// missing or automatic preference falls back to the default region.
+/// Whether the shelf still carries the games Orivo wrote by hand.
+///
+/// They are held back once a storefront's own releases are there to take their
+/// place: forty-seven curated entries at the front of every shelf is what kept
+/// what actually came out this week off the screen. With nothing live to show —
+/// a refresh that has not run, or one that never reached Steam — they are the
+/// shelf again, because an empty Store is worse than a dated one.
+fn editorial_games_shown(app_data_dir: &Path) -> bool {
+    #[derive(Deserialize)]
+    struct StoredPreferences {
+        #[serde(default, rename = "showEditorialGames")]
+        show_editorial_games: bool,
+    }
+    fs::read_to_string(app_data_dir.join(PREFERENCES_FILE))
+        .ok()
+        .and_then(|encoded| serde_json::from_str::<StoredPreferences>(&encoded).ok())
+        .map(|preferences| preferences.show_editorial_games)
+        .unwrap_or(false)
+}
+
+fn without_editorial(games: Vec<CachedGame>, app_data_dir: &Path) -> Vec<CachedGame> {
+    if editorial_games_shown(app_data_dir) {
+        return games;
+    }
+    let live: Vec<CachedGame> = games
+        .iter()
+        .filter(|game| game.curation.is_none())
+        .cloned()
+        .collect();
+    if live.is_empty() { games } else { live }
+}
+
 fn resolve_region(app_data_dir: &Path) -> String {
     if let Ok(region) = std::env::var(STORE_REGION_ENV)
         && is_region_code(&region)
@@ -3132,7 +3461,10 @@ mod tests {
         );
         assert!(
             requested.iter().all(|url| url.contains("itunes.apple.com")
-                || url.contains("store.steampowered.com/api/appdetails")),
+                || url.contains("store.steampowered.com/api/appdetails")
+                // The ranked new-release listing is the same public storefront,
+                // and the only other host this refresh may speak to.
+                || url.contains("store.steampowered.com/search/results/")),
             "a provider without a feed performed a request: {requested:?}"
         );
         // Steam was unreachable in this test, so it reports that rather than a
@@ -4294,6 +4626,283 @@ mod tests {
         assert!(outcome.offers.is_empty());
         assert_eq!(status.health, ProviderHealth::Degraded);
         assert!(status.refreshed_at_epoch_ms.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // The hand-written shelf, and when it steps aside.
+    // -----------------------------------------------------------------------
+
+    fn live_game(id: &str) -> CachedGame {
+        let payload = steam_release(id, serde_json::json!({}));
+        steam_new_release_from_payload(id, &payload, "FR", NOW_MS)
+            .expect("a game")
+            .0
+    }
+
+    #[test]
+    fn the_curated_shelf_steps_aside_for_what_just_came_out() {
+        let directory = TestDirectory::new("editorial-hidden");
+        let mut document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        document.games.push(live_game("2900640"));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), 1, "the curated games were still on the shelf");
+        assert_eq!(home.games[0].id, "steam:2900640");
+    }
+
+    #[test]
+    fn an_empty_shelf_is_worse_than_a_dated_one() {
+        // Nothing live: a refresh that never ran, or never reached Steam. The
+        // games Orivo wrote are then the shelf rather than a blank page.
+        let directory = TestDirectory::new("editorial-fallback");
+        let document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE);
+    }
+
+    #[test]
+    fn the_debug_switch_puts_the_curated_shelf_back() {
+        let directory = TestDirectory::new("editorial-shown");
+        fs::write(
+            directory.root.join(PREFERENCES_FILE),
+            br#"{"showEditorialGames":true}"#,
+        )
+        .unwrap();
+        let mut document = block_on(refresh_all(&FakeHttp::default(), &RefreshConfig::default(), NOW_MS));
+        document.games.push(live_game("2900640"));
+        directory.cache().write(&document).unwrap();
+
+        let home = store_home(&directory.cache(), &directory.root, &[], NOW_MS);
+        assert_eq!(home.games.len(), CATALOG_SIZE + 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // What Steam has just released.
+    // -----------------------------------------------------------------------
+
+    /// One listing entry, shaped like the storefront's own answer.
+    fn steam_listing(app_ids: &[&str]) -> serde_json::Value {
+        let html = app_ids
+            .iter()
+            .map(|app_id| {
+                format!(
+                    r#"<a href="https://store.steampowered.com/app/{app_id}/" data-ds-appid="{app_id}"><span class="title">A game</span></a>"#
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("");
+        serde_json::json!({ "results_html": html, "total_count": app_ids.len() })
+    }
+
+    fn steam_release(app_id: &str, overrides: serde_json::Value) -> serde_json::Value {
+        let mut data = serde_json::json!({
+            "type": "game",
+            "name": "TOEM 2",
+            "short_description": "Reprenez votre appareil photo.",
+            "is_free": false,
+            "genres": [{ "description": "Aventure" }, { "description": "Indépendant" }],
+            "categories": [{ "description": "Solo" }, { "description": "Succès Steam" }],
+            "platforms": { "windows": true, "mac": true, "linux": false },
+            "header_image": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2900640/abc/header.jpg?t=1",
+            "price_overview": { "currency": "EUR", "final": 1_614, "discount_percent": 15 },
+            "release_date": { "coming_soon": false, "date": "29 sept. 2026" },
+            "content_descriptors": { "ids": [] }
+        });
+        if let (Some(base), Some(extra)) = (data.as_object_mut(), overrides.as_object()) {
+            for (key, value) in extra {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+        serde_json::json!({ app_id: { "success": true, "data": data } })
+    }
+
+    #[test]
+    fn the_listing_yields_app_ids_and_nothing_else() {
+        let payload = serde_json::json!({
+            "results_html": r#"<a data-ds-appid="2900640"></a><a data-ds-appid="2900640"></a>
+                               <a data-ds-bundleid="77"></a><a data-ds-appid="1488490,1488491"></a>
+                               <a data-ds-appid="3493540"></a>"#
+        });
+        // The duplicate is read once, the bundle's comma-joined pair is not an
+        // app, and the bundle id is not read at all.
+        assert_eq!(
+            steam_new_release_ids(&payload),
+            vec!["2900640".to_string(), "3493540".to_string()]
+        );
+        // Markup Orivo cannot read costs an empty list, never a panic.
+        assert!(steam_new_release_ids(&serde_json::json!({ "results_html": "" })).is_empty());
+        assert!(steam_new_release_ids(&serde_json::json!({ "total_count": 3 })).is_empty());
+    }
+
+    #[test]
+    fn a_new_release_arrives_as_a_card_with_no_editorial_copy() {
+        let payload = steam_release("2900640", serde_json::json!({}));
+        let (game, offer) =
+            steam_new_release_from_payload("2900640", &payload, "FR", NOW_MS).expect("a game");
+
+        assert_eq!(game.id, "steam:2900640");
+        assert_eq!(game.title, "TOEM 2");
+        assert_eq!(game.genres, vec!["Aventure", "Indépendant"]);
+        assert_eq!(game.tags, vec!["Solo", "Succès Steam"]);
+        assert_eq!(
+            game.supported_platforms,
+            vec![GamePlatform::Windows, GamePlatform::Macos]
+        );
+        // The card is handed the capsule it is cut for first and the listing's
+        // own header second, because a release from this week has no capsule.
+        assert_eq!(
+            game.landscape_url,
+            "https://cdn.cloudflare.steamstatic.com/steam/apps/2900640/capsule_616x353.jpg"
+        );
+        assert!(game.cover_url.ends_with("header.jpg?t=1"));
+        assert!(game.hero_url.ends_with("library_hero.jpg"));
+
+        // Nobody wrote about it, and the card says so by staying empty rather
+        // than by inventing scores, a verdict or a reason.
+        assert!(game.curation.is_none());
+        assert!(game.editorial_reasons.is_empty());
+
+        assert_eq!(offer.price_minor, Some(1_614));
+        assert_eq!(offer.currency.as_deref(), Some("EUR"));
+        assert_eq!(offer.discount_percent, 15);
+        assert_eq!(offer.provider, StoreProviderId::Steam);
+        assert_eq!(offer.id, "offer_steam_steam2900640");
+        assert_eq!(offer.verified_at_epoch_ms, Some(NOW_MS));
+    }
+
+    #[test]
+    fn a_game_that_came_out_years_ago_is_not_a_new_release() {
+        // The fixture clock, written back out the way Steam writes a date, so
+        // the test says what it means whatever NOW_MS is set to.
+        const MONTHS: [&str; 12] = [
+            "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.",
+            "nov.", "déc.",
+        ];
+        let (year, month, day) = civil_from_days((NOW_MS / 86_400_000) as i64);
+        let today = format!("{day} {} {year}", MONTHS[month as usize - 1]);
+
+        let fresh = steam_release(
+            "1",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": today } }),
+        );
+        assert!(steam_new_release_from_payload("1", &fresh, "FR", NOW_MS).is_some());
+
+        let old = steam_release(
+            "2",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": "3 juin 2015" } }),
+        );
+        assert!(steam_new_release_from_payload("2", &old, "FR", NOW_MS).is_none());
+
+        // A date Orivo cannot read is no answer rather than a wrong one: the
+        // listing said this game just came out, and that stands.
+        let vague = steam_release(
+            "3",
+            serde_json::json!({ "release_date": { "coming_soon": false, "date": "T4 2026" } }),
+        );
+        assert!(steam_new_release_from_payload("3", &vague, "FR", NOW_MS).is_some());
+    }
+
+    #[test]
+    fn a_free_release_is_priced_at_zero_rather_than_left_blank() {
+        let payload = steam_release(
+            "1",
+            serde_json::json!({ "is_free": true, "price_overview": serde_json::Value::Null }),
+        );
+        let (_, offer) = steam_new_release_from_payload("1", &payload, "FR", NOW_MS).expect("free");
+        assert_eq!(offer.price_minor, Some(0));
+    }
+
+    #[test]
+    fn what_the_shelf_refuses_from_a_listing() {
+        // Announced, not out.
+        let soon = steam_release(
+            "1",
+            serde_json::json!({ "release_date": { "coming_soon": true, "date": "2027" } }),
+        );
+        assert!(steam_new_release_from_payload("1", &soon, "FR", NOW_MS).is_none());
+
+        // Not a game: downloadable content, a soundtrack, a demo.
+        let dlc = steam_release("2", serde_json::json!({ "type": "dlc" }));
+        assert!(steam_new_release_from_payload("2", &dlc, "FR", NOW_MS).is_none());
+
+        // Declared by its own publisher as adult sexual content.
+        let adult = steam_release(
+            "3",
+            serde_json::json!({ "content_descriptors": { "ids": [2, 3] } }),
+        );
+        assert!(steam_new_release_from_payload("3", &adult, "FR", NOW_MS).is_none());
+
+        // A listing the storefront has nothing for.
+        let missing = serde_json::json!({ "4": { "success": false } });
+        assert!(steam_new_release_from_payload("4", &missing, "FR", NOW_MS).is_none());
+    }
+
+    #[test]
+    fn the_new_releases_pass_leaves_curated_games_alone() {
+        // Hades is on the shelf with copy Orivo wrote. The listing offers it
+        // again beside a game nobody has written about.
+        let http = FakeHttp::default()
+            .with("search/results", steam_listing(&["1145360", "2900640"]))
+            .with("api/appdetails", steam_release("2900640", serde_json::json!({})));
+        let outcome = block_on(refresh_steam_new_releases(
+            &http,
+            &RefreshConfig::default(),
+            catalog_games(),
+            NOW_MS,
+        ));
+
+        assert_eq!(outcome.games.len(), 1);
+        assert_eq!(outcome.games[0].id, "steam:2900640");
+        let requested = http.requested.lock().unwrap().clone();
+        assert!(
+            !requested.iter().any(|url| url.contains("appids=1145360")),
+            "a game the catalogue already carries was fetched again: {requested:?}"
+        );
+        for url in &requested {
+            assert!(url.starts_with("https://store.steampowered.com/"));
+            assert!(!url.contains("key="), "a key was sent to a public endpoint");
+        }
+    }
+
+    #[test]
+    fn an_unreachable_listing_costs_the_shelf_nothing() {
+        let http = FakeHttp::default();
+        let outcome = block_on(refresh_steam_new_releases(
+            &http,
+            &RefreshConfig::default(),
+            catalog_games(),
+            NOW_MS,
+        ));
+        assert!(outcome.games.is_empty());
+    }
+
+    #[test]
+    fn a_refresh_grows_the_shelf_by_what_steam_just_released() {
+        let http = FakeHttp::default()
+            .with("search/results", steam_listing(&["2900640"]))
+            .with("api/appdetails", steam_release("2900640", serde_json::json!({})));
+        let document = block_on(refresh_all(&http, &RefreshConfig::default(), NOW_MS));
+
+        assert_eq!(document.games.len(), CATALOG_SIZE + 1);
+        let arrival = document
+            .games
+            .iter()
+            .find(|game| game.id == "steam:2900640")
+            .expect("the new release joined the catalogue");
+        assert_eq!(arrival.title, "TOEM 2");
+        assert!(arrival.curation.is_none());
+        // And every game Orivo wrote about still has its copy.
+        assert_eq!(
+            document
+                .games
+                .iter()
+                .filter(|game| game.curation.is_some())
+                .count(),
+            CATALOG_SIZE
+        );
     }
 
     #[test]

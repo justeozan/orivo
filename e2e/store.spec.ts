@@ -207,7 +207,13 @@ test.describe("Store return state", () => {
     await search.press("Enter");
     await expect.poll(() => currentHash(page)).toBe("#/store?q=hades");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(1);
-    await expect(page.locator(`${storeHost} .store-card__title`)).toHaveText("Hades");
+    // The card carries the store's own capsule, which is the art the game was
+    // sold with and already has its name written across it, so the card prints
+    // no title of its own. Its accessible name is what says which game it is.
+    await expect(page.locator(`${storeHost} .store-card__open`)).toHaveAttribute(
+      "aria-label",
+      "Ouvrir Hades",
+    );
     await expect(host(page, "store")).toBeVisible();
   });
 });

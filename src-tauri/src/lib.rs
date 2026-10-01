@@ -83,7 +83,7 @@ use sha2::{Digest, Sha256};
 use tauri::{
     AppHandle, Emitter, Manager, State, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
     WindowEvent,
-    webview::{NewWindowResponse, PageLoadEvent},
+    webview::{NewWindowFeatures, NewWindowResponse, PageLoadEvent},
 };
 
 const CATALOG_FILE: &str = "catalog.json";
@@ -122,9 +122,6 @@ const WINE_AUTO_APPLY_PAGE_SIZE: usize = 50;
 const MAX_WINE_SETUP_SESSIONS: usize = 12;
 const MAX_WINE_SCAN_JOBS: usize = 12;
 const MAX_WINE_IMPORT_SELECTION: usize = 2_000;
-const MAX_STEAM_IMPORT_SELECTION: usize = 2_000;
-const MAX_STEAM_PREVIEW_MEDIA: usize = 16;
-const STEAM_PREVIEW_SNAPSHOT_TTL: Duration = Duration::from_secs(30);
 // Store copy improves a library entry, but must never make a large first sync
 // wait for every public app-details request. Missing entries are retried on a
 // later sync because only successfully enriched records receive the marker.
@@ -268,9 +265,6 @@ struct AppState {
     /// Serializes catalog mutations without forcing readers (launch and rail
     /// rendering) to wait for an atomic disk write.
     catalog_mutation: Arc<Mutex<()>>,
-    /// A short-lived Rust-only discovery snapshot avoids immediately parsing
-    /// every manifest a second time just to hydrate the first preview images.
-    steam_preview: Mutex<Option<SteamPreviewSnapshot>>,
     /// The active dedicated Steam sign-in window. It only tracks whether the
     /// one-time token extraction was consumed; no credential is held here.
     steam_auth_settled: Mutex<Option<Arc<AtomicBool>>>,
@@ -305,12 +299,6 @@ struct AppState {
     /// view models. Cancelling a job never touches the persistent library.
     wine_scan_jobs: Mutex<BTreeMap<String, Arc<WineScanJob>>>,
     wine_operation_sequence: AtomicU64,
-}
-
-#[derive(Debug, Clone)]
-struct SteamPreviewSnapshot {
-    captured_at: Instant,
-    games: BTreeMap<u32, steam::SteamGame>,
 }
 
 /// Native-picker values that are intentionally short lived. Neither field is
@@ -446,55 +434,6 @@ struct LibraryState {
 struct ImportResponse {
     games: Vec<GameView>,
     imported_id: Option<String>,
-}
-
-/// Presentation-only data for Steam's local discovery. Paths stay in Rust:
-/// users see a source and an installed game, never a private filesystem path.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SteamImportPreview {
-    status: &'static str,
-    libraries: usize,
-    games: Vec<SteamPreviewGame>,
-    message: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SteamPreviewGame {
-    app_id: String,
-    title: String,
-    location_label: &'static str,
-    last_updated: String,
-    selected: bool,
-    already_imported: bool,
-    cover_url: Option<String>,
-    hero_url: Option<String>,
-}
-
-/// Cache paths produced for a small, bounded progressive preview window.
-/// Only catalog references are persisted on a confirmed import; orphaned
-/// cache files remain opaque and harmless to the WebView.
-#[derive(Debug, Clone, Default)]
-struct SteamPreviewMedia {
-    cover_path: Option<PathBuf>,
-    hero_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SteamPreviewMediaView {
-    app_id: String,
-    cover_url: Option<String>,
-    hero_url: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SteamImportResponse {
-    imported_ids: Vec<String>,
-    updated_ids: Vec<String>,
-    skipped_app_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -705,7 +644,6 @@ impl AppState {
             plugin_discovery_in_flight: Arc::new(AtomicBool::new(false)),
             catalog: Arc::new(RwLock::new(catalog)),
             catalog_mutation: Arc::new(Mutex::new(())),
-            steam_preview: Mutex::new(None),
             steam_auth_settled: Mutex::new(None),
             source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),
@@ -931,11 +869,12 @@ pub fn run() {
                     .unwrap_or_else(|_| app_data.clone())
                     .join(plugin_compile_cache::CACHE_DIRECTORY),
             );
-            // Android is the only platform whose URL hand-off runs through a
-            // Tauri plugin, so it needs the handle the `UrlOpener` seam omits.
+            // Phones are the only platforms whose URL hand-off runs through a
+            // Tauri plugin, so they need the handle the `UrlOpener` seam omits.
+            #[cfg(mobile)]
+            store::set_mobile_app(app.handle().clone());
             #[cfg(target_os = "android")]
             {
-                store::set_android_app(app.handle().clone());
                 set_android_credential_store();
                 lock_android_landscape();
             }
@@ -1043,9 +982,6 @@ pub fn run() {
             remove_game,
             set_game_hidden,
             set_home_image,
-            get_steam_import_preview,
-            get_steam_preview_media,
-            import_steam_games,
             get_steam_account_status,
             begin_steam_web_login,
             complete_steam_web_login,
@@ -1907,9 +1843,9 @@ fn choose_wine_game_directory(
     setup_id: String,
     state: State<'_, AppState>,
 ) -> Result<WineSetupView, String> {
-    #[cfg(target_os = "android")]
-    return Err("Wine is not available on Android.".into());
-    #[cfg(not(target_os = "android"))]
+    #[cfg(mobile)]
+    return Err("Wine is not available on this device.".into());
+    #[cfg(desktop)]
     {
         require_wine_runner_platform()?;
         if !valid_wine_opaque_id(&setup_id) {
@@ -2086,9 +2022,9 @@ async fn select_wine_staging(
     setup_id: String,
     state: State<'_, AppState>,
 ) -> Result<WineSetupView, String> {
-    #[cfg(target_os = "android")]
-    return Err("Wine is not available on Android.".into());
-    #[cfg(not(target_os = "android"))]
+    #[cfg(mobile)]
+    return Err("Wine is not available on this device.".into());
+    #[cfg(desktop)]
     {
         require_wine_runner_platform()?;
         if !valid_wine_opaque_id(&setup_id) {
@@ -4633,7 +4569,7 @@ pub(crate) fn register_installed_game(
 
 #[tauri::command]
 fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportResponse, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(mobile)]
     {
         let catalog = state
             .catalog
@@ -4644,7 +4580,7 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             imported_id: None,
         });
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(desktop)]
     {
         let Some(executable) = rfd::FileDialog::new()
             .set_title("Import a local game executable")
@@ -5188,146 +5124,19 @@ fn set_home_image(
     Ok(())
 }
 
-/// Scan Steam outside the Tauri command/UI executor. Discovery does no writes,
-/// which keeps opening the panel inexpensive and preserves the current library
-/// if Steam is mid-update or one manifest happens to be malformed.
-#[tauri::command]
-async fn get_steam_import_preview(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<SteamImportPreview, String> {
-    let imported = {
-        let catalog = state
-            .catalog
-            .read()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        imported_steam_games(&catalog)
-    };
-    let discovery = scan_steam_in_worker().await?;
-    remember_steam_preview(&state, &discovery);
-    Ok(steam_preview(&app, discovery, &imported))
-}
-
-/// Hydrate a small visible slice of artwork only after the import panel has
-/// rendered. IDs are resolved through a short-lived Rust-only discovery
-/// snapshot (or a fresh scan when that snapshot expires), so the WebView still
-/// cannot turn this into arbitrary filesystem access.
-#[tauri::command]
-async fn get_steam_preview_media(
-    app_ids: Vec<String>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Vec<SteamPreviewMediaView>, String> {
-    let requested = requested_steam_preview_app_ids(app_ids)?;
-    let games = match steam_preview_snapshot_games(&state, &requested)? {
-        Some(games) => games,
-        None => scan_steam_in_worker()
-            .await?
-            .games
-            .into_iter()
-            .filter(|game| requested.contains(&game.app_id))
-            .collect(),
-    };
-    let media = cache_steam_preview_media_in_worker(app.clone(), games).await;
-    Ok(steam_preview_media_views(&app, media))
-}
-
-/// Import receives only opaque app ids. It deliberately scans Steam again and
-/// rejects ids not present in that fresh, fully-installed local discovery.
-/// Thus the WebView cannot nominate a path, title, artwork, command, or URL.
-#[tauri::command]
-async fn import_steam_games(
-    app_ids: Vec<String>,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<SteamImportResponse, String> {
-    let requested = requested_steam_app_ids(app_ids)?;
-    let discovery = scan_steam_in_worker().await?;
-    let discovered = discovery
-        .games
-        .into_iter()
-        .map(|game| (game.app_id, game))
-        .collect::<BTreeMap<_, _>>();
-
-    let mut skipped_app_ids = Vec::new();
-    let selected = requested
-        .into_iter()
-        .filter_map(|app_id| match discovered.get(&app_id) {
-            Some(game) => Some(game.clone()),
-            None => {
-                skipped_app_ids.push(app_id.to_string());
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-
-    // Copies are intentionally performed before catalog mutation begins.
-    // A large Steam library may take time to cache, but rail navigation and
-    // reads remain available throughout that work.
-    // Store metadata is public and independent from the local cache copy, so
-    // resolve both together. A bounded request fan-out keeps an import of a
-    // larger selection responsive without needing an Orivo backend.
-    let selected_app_ids = selected
-        .iter()
-        .map(|steam_game| steam_game.app_id)
-        .collect::<Vec<_>>();
-    let metadata_request = fetch_steam_store_metadata_with_budget(selected_app_ids);
-    let staged_request = cache_steam_games_in_worker(app.clone(), selected);
-    let (store_metadata, staged) =
-        futures_util::future::join(metadata_request, staged_request).await;
-    let mut staged = staged?;
-    for (app_id, game) in &mut staged {
-        apply_steam_store_metadata(game, store_metadata.get(app_id));
-    }
-    let mut imported_ids = Vec::new();
-    let mut updated_ids = Vec::new();
-    {
-        let _mutation = state
-            .catalog_mutation
-            .lock()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        let mut next_catalog = state
-            .catalog
-            .read()
-            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
-            .clone();
-        for (app_id, game) in staged {
-            if next_catalog
-                .upsert_steam(game)
-                .map_err(|error| error.to_string())?
-            {
-                imported_ids.push(app_id.to_string());
-            } else {
-                updated_ids.push(app_id.to_string());
-            }
-        }
-        if !imported_ids.is_empty() || !updated_ids.is_empty() {
-            persist_catalog(&next_catalog, &state.catalog_path)
-                .map_err(|error| error.to_string())?;
-            let mut catalog = state
-                .catalog
-                .write()
-                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-            *catalog = next_catalog;
-        }
-    }
-
-    Ok(SteamImportResponse {
-        imported_ids,
-        updated_ids,
-        skipped_app_ids,
-    })
-}
-
 /// Return only the connection metadata safe to show in the main WebView. The
 /// Steam credential itself remains in the system keychain and is never part of
 /// an IPC response.
 #[tauri::command]
 async fn get_steam_account_status() -> Result<steam_account::SteamAccountStatus, String> {
-    tauri::async_runtime::spawn_blocking(steam_account::account_status)
+    let status = tauri::async_runtime::spawn_blocking(steam_account::account_status)
         .await
         .map_err(|error| format!("Steam account status did not finish: {error}"))?
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    // The persona name decorates the report rather than being part of it: it
+    // is fetched from Steam's public profile view, so a lookup that fails
+    // still leaves the account id the frontend already knows how to show.
+    Ok(steam_account::resolve_persona_name(status).await)
 }
 
 /// Open the same local-first Steam sign-in pattern used by desktop launchers:
@@ -5963,6 +5772,30 @@ fn is_allowed_source_auth_navigation(url: &Url) -> bool {
     url.scheme() == "https"
 }
 
+/// How a store's sign-in window answers a page asking to open another.
+///
+/// Signing in with Google, Apple or Facebook happens in a popup the store's own
+/// page opens, so denying every one of them is why those buttons did nothing at
+/// all — the window simply never appeared. A popup here belongs to the identity
+/// provider, not to Orivo: capabilities are granted by window label and none is
+/// granted to any label but `main`, so it can no more reach the app than the
+/// page that opened it can. Anything that is not HTTPS still has no business
+/// opening a window.
+fn may_open_source_auth_window(url: &Url) -> bool {
+    url.scheme() == "https"
+}
+
+fn source_auth_new_window<R: tauri::Runtime>(
+    url: Url,
+    _: NewWindowFeatures,
+) -> NewWindowResponse<R> {
+    if may_open_source_auth_window(&url) {
+        NewWindowResponse::Allow
+    } else {
+        NewWindowResponse::Deny
+    }
+}
+
 #[tauri::command]
 async fn get_source_accounts() -> Result<Vec<sources::SourceAccountStatus>, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -6151,7 +5984,7 @@ async fn connect_token_source(
             }
             is_allowed_source_auth_navigation(url)
         })
-        .on_new_window(|_, _| NewWindowResponse::Deny)
+        .on_new_window(source_auth_new_window)
         .on_page_load(move |window, payload| {
             if payload.event() != PageLoadEvent::Finished {
                 return;
@@ -6625,7 +6458,7 @@ async fn session_sync(
                 // lives in Orivo's WebView data store and is cleared when the
                 // source is disconnected.
                 .on_navigation(is_allowed_source_auth_navigation)
-                .on_new_window(|_, _| NewWindowResponse::Deny)
+                .on_new_window(source_auth_new_window)
                 .build();
             match built {
                 Ok(window) => window,
@@ -6671,6 +6504,13 @@ async fn session_sync(
                         // Waiting out the deadline would only make Orivo look
                         // stuck; say so now so the user can act on it.
                         sources::SessionSyncState::Unsupported => {
+                            // The store's page moved. What was tried is the
+                            // whole diagnosis, and the message on screen has no
+                            // room for it, so it goes to the log.
+                            eprintln!(
+                                "[{}] no order history found: {raw}",
+                                provider.token()
+                            );
                             return Err(sources::SourceError::UnexpectedResponse(provider));
                         }
                         // Not signed in yet. While connecting that is the
@@ -7787,249 +7627,6 @@ fn is_steam_store_page(url: &Url) -> bool {
     url.scheme() == "https" && url.host_str() == Some("store.steampowered.com")
 }
 
-fn remember_steam_preview(state: &AppState, discovery: &steam::SteamDiscovery) {
-    let snapshot = SteamPreviewSnapshot {
-        captured_at: Instant::now(),
-        games: discovery
-            .games
-            .iter()
-            .map(|game| (game.app_id, game.clone()))
-            .collect(),
-    };
-    if let Ok(mut stored) = state.steam_preview.lock() {
-        *stored = Some(snapshot);
-    }
-}
-
-fn steam_preview_snapshot_games(
-    state: &AppState,
-    requested: &BTreeSet<u32>,
-) -> Result<Option<Vec<steam::SteamGame>>, String> {
-    let mut stored = state
-        .steam_preview
-        .lock()
-        .map_err(|_| "Steam preview is temporarily unavailable".to_string())?;
-    let Some(snapshot) = stored.as_ref() else {
-        return Ok(None);
-    };
-    if snapshot.captured_at.elapsed() > STEAM_PREVIEW_SNAPSHOT_TTL {
-        *stored = None;
-        return Ok(None);
-    }
-    Ok(Some(
-        requested
-            .iter()
-            .filter_map(|app_id| snapshot.games.get(app_id).cloned())
-            .collect(),
-    ))
-}
-
-async fn cache_steam_games_in_worker(
-    app: AppHandle,
-    games: Vec<steam::SteamGame>,
-) -> Result<Vec<(u32, Game)>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut budget = MediaCacheBudget::new();
-        games
-            .into_iter()
-            .map(|steam_game| {
-                let app_id = steam_game.app_id;
-                let mut game = steam_game_to_catalog_game(steam_game);
-                // Artwork is an optional enhancement. A permission error or
-                // damaged image must not make the source record unimportable.
-                let _ = cache_game_media_with_budget(&app, &mut game, &mut budget);
-                (app_id, game)
-            })
-            .collect()
-    })
-    .await
-    .map_err(|error| format!("Steam import preparation did not finish: {error}"))
-}
-
-async fn cache_steam_preview_media_in_worker(
-    app: AppHandle,
-    games: Vec<steam::SteamGame>,
-) -> BTreeMap<u32, SteamPreviewMedia> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut budget = MediaCacheBudget::new();
-        games
-            .into_iter()
-            .filter_map(|steam_game| {
-                let app_id = steam_game.app_id;
-                let mut game = steam_game_to_catalog_game(steam_game);
-                cache_game_media_with_budget(&app, &mut game, &mut budget).ok()?;
-                Some((
-                    app_id,
-                    SteamPreviewMedia {
-                        cover_path: game.cover_path,
-                        hero_path: game.artwork_path,
-                    },
-                ))
-            })
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
-}
-
-fn requested_steam_app_ids(app_ids: Vec<String>) -> Result<BTreeSet<u32>, String> {
-    if app_ids.len() > MAX_STEAM_IMPORT_SELECTION {
-        return Err(format!(
-            "Choose at most {MAX_STEAM_IMPORT_SELECTION} Steam games at a time"
-        ));
-    }
-
-    let mut result = BTreeSet::new();
-    for app_id in app_ids {
-        let parsed = app_id
-            .parse::<u32>()
-            .ok()
-            .filter(|app_id| *app_id > 0)
-            .ok_or_else(|| "Steam import received an invalid game id".to_string())?;
-        result.insert(parsed);
-    }
-    if result.is_empty() {
-        return Err("Choose at least one Steam game to import".into());
-    }
-    Ok(result)
-}
-
-fn requested_steam_preview_app_ids(app_ids: Vec<String>) -> Result<BTreeSet<u32>, String> {
-    if app_ids.len() > MAX_STEAM_PREVIEW_MEDIA {
-        return Err(format!(
-            "Preview at most {MAX_STEAM_PREVIEW_MEDIA} Steam games at a time"
-        ));
-    }
-    requested_steam_app_ids(app_ids)
-}
-
-fn imported_steam_games(catalog: &Catalog) -> BTreeMap<u32, Game> {
-    catalog
-        .games
-        .iter()
-        .filter_map(|game| match (&game.source, &game.launch_target) {
-            (GameSource::Steam, LaunchTarget::Steam { app_id }) => Some((*app_id, game.clone())),
-            _ => None,
-        })
-        .collect()
-}
-
-fn steam_preview(
-    app: &AppHandle,
-    discovery: steam::SteamDiscovery,
-    imported: &BTreeMap<u32, Game>,
-) -> SteamImportPreview {
-    if discovery.steam_root.is_none() {
-        return SteamImportPreview {
-            status: "unavailable",
-            libraries: 0,
-            games: Vec::new(),
-            message: "Steam was not found locally. Install Steam or open it once, then scan again."
-                .into(),
-        };
-    }
-
-    let cache_dir = media_cache_dir(app).ok();
-    let games = discovery
-        .games
-        .into_iter()
-        .map(|steam_game| {
-            let app_id = steam_game.app_id;
-            steam_preview_game(steam_game, imported.get(&app_id), cache_dir.as_deref())
-        })
-        .collect();
-
-    let message = if discovery.issues.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "{} Steam item{} could not be read and were skipped.",
-            discovery.issues.len(),
-            if discovery.issues.len() == 1 { "" } else { "s" }
-        )
-    };
-    SteamImportPreview {
-        status: "available",
-        libraries: discovery.libraries.len(),
-        games,
-        message,
-    }
-}
-
-fn steam_preview_game(
-    steam_game: steam::SteamGame,
-    imported_game: Option<&Game>,
-    cache_dir: Option<&Path>,
-) -> SteamPreviewGame {
-    // Preview assets are returned only if they are already inside Orivo's
-    // scoped cache. Source asset paths remain Rust-only, including for games
-    // that have not been imported yet.
-    let cover_url =
-        imported_game.and_then(|game| media_source_url(game.cover_path.as_deref(), cache_dir));
-    let hero_url =
-        imported_game.and_then(|game| media_source_url(game.artwork_path.as_deref(), cache_dir));
-    SteamPreviewGame {
-        app_id: steam_game.app_id.to_string(),
-        title: steam_game.title,
-        location_label: "Installed locally",
-        // Steam's manifest timestamp is an update timestamp, not a play
-        // session. Do not misrepresent it as user activity.
-        last_updated: String::new(),
-        selected: imported_game.is_none(),
-        already_imported: imported_game.is_some(),
-        cover_url,
-        hero_url,
-    }
-}
-
-fn steam_preview_media_views(
-    app: &AppHandle,
-    media: BTreeMap<u32, SteamPreviewMedia>,
-) -> Vec<SteamPreviewMediaView> {
-    let cache_dir = media_cache_dir(app).ok();
-    media
-        .into_iter()
-        .filter_map(|(app_id, media)| {
-            let cover_url = media_source_url(media.cover_path.as_deref(), cache_dir.as_deref());
-            let hero_url = media_source_url(media.hero_path.as_deref(), cache_dir.as_deref());
-            (cover_url.is_some() || hero_url.is_some()).then_some(SteamPreviewMediaView {
-                app_id: app_id.to_string(),
-                cover_url,
-                hero_url,
-            })
-        })
-        .collect()
-}
-
-fn steam_game_to_catalog_game(steam_game: steam::SteamGame) -> Game {
-    let app_id = steam_game.app_id;
-    Game {
-        id: format!("steam:{app_id}"),
-        title: steam_game.title,
-        executable_path: None,
-        source: GameSource::Steam,
-        source_id: Some(app_id.to_string()),
-        launch_target: LaunchTarget::Steam { app_id },
-        installation_path: Some(steam_game.installation_path),
-        working_directory: None,
-        arguments: Vec::new(),
-        description: Some("Installed through Steam. Ready for your next session.".into()),
-        metadata: Some("Steam · Installed".into()),
-        artwork_path: None,
-        artwork_source_path: steam_game.hero_path,
-        cover_path: None,
-        cover_source_path: steam_game.cover_path,
-        home_image_path: None,
-        landscape_image_path: None,
-        logo_path: None,
-        hidden: false,
-        hero_video_path: None,
-        last_played_at: None,
-        play_time_seconds: 0,
-        extra: BTreeMap::new(),
-    }
-}
-
 fn resolved_catalog_path(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
     if let Some(path) = std::env::var_os("ORIVO_CATALOG_PATH") {
         return Ok(PathBuf::from(path));
@@ -9045,6 +8642,19 @@ fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
 pub(crate) mod tests {
     use super::*;
 
+    /// Signing in with Google opens a popup. Refusing every one of them meant
+    /// the button did nothing at all, which is not a safety property: the popup
+    /// carries no Orivo capability either way.
+    #[test]
+    fn a_store_sign_in_may_open_an_identity_provider_popup() {
+        let allow = |url: &str| may_open_source_auth_window(&Url::parse(url).unwrap());
+        assert!(allow("https://accounts.google.com/o/oauth2/v2/auth"));
+        assert!(allow("https://appleid.apple.com/auth/authorize"));
+        // Not every scheme is a sign-in: only HTTPS may open a window at all.
+        assert!(!allow("http://www.instant-gaming.com/en/"));
+        assert!(!allow("file:///etc/passwd"));
+    }
+
     /// A game the launcher has no manifest for must lose any install state a
     /// previous scan wrote, or a game uninstalled in Epic would stay "ready to
     /// play" in Orivo forever.
@@ -9304,19 +8914,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn steam_source_uses_a_typed_target_without_a_fake_executable() {
-        let game = steam_game_fixture();
-        let imported = steam_game_to_catalog_game(game);
-
-        assert_eq!(imported.id, "steam:480");
-        assert_eq!(imported.source, GameSource::Steam);
-        assert_eq!(imported.source_id.as_deref(), Some("480"));
-        assert_eq!(imported.launch_target, LaunchTarget::Steam { app_id: 480 });
-        assert!(imported.executable_path.is_none());
-        assert!(imported.validate().is_ok());
-    }
-
-    #[test]
     fn owned_steam_games_stay_visible_without_an_installation() {
         let game = owned_steam_game_to_catalog_game(owned_game_fixture(), None);
         let view = game_view(&game, &Catalog::default(), None);
@@ -9493,29 +9090,6 @@ pub(crate) mod tests {
         assert!(!is_allowed_steam_auth_navigation(
             &Url::parse("file:///Users/example/private.html").unwrap()
         ));
-    }
-
-    #[test]
-    fn steam_preview_does_not_serialize_source_paths() {
-        let source = steam_game_fixture();
-        let imported = steam_game_to_catalog_game(source.clone());
-        let preview = steam_preview_game(source, Some(&imported), None);
-        let json = serde_json::to_string(&preview).unwrap();
-
-        assert!(!json.contains("/Users/example"));
-        assert!(!json.contains("Steam/steamapps"));
-        assert_eq!(preview.cover_url, None);
-        assert_eq!(preview.hero_url, None);
-        assert!(preview.already_imported);
-    }
-
-    #[test]
-    fn steam_import_ids_are_numeric_nonzero_and_deduplicated() {
-        let ids = requested_steam_app_ids(vec!["480".into(), "480".into(), "570".into()]).unwrap();
-        assert_eq!(ids.into_iter().collect::<Vec<_>>(), vec![480, 570]);
-        assert!(requested_steam_app_ids(vec!["0".into()]).is_err());
-        assert!(requested_steam_app_ids(vec!["not-an-app-id".into()]).is_err());
-        assert!(requested_steam_app_ids(Vec::new()).is_err());
     }
 
     #[test]
@@ -10223,7 +9797,6 @@ pub(crate) mod tests {
             plugin_discovery_in_flight: Arc::new(AtomicBool::new(false)),
             catalog: Arc::new(RwLock::new(Catalog::default())),
             catalog_mutation: Arc::new(Mutex::new(())),
-            steam_preview: Mutex::new(None),
             steam_auth_settled: Mutex::new(None),
             source_logins: Mutex::new(BTreeMap::new()),
             wine_setups: Arc::new(Mutex::new(BTreeMap::new())),

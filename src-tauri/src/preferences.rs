@@ -73,6 +73,12 @@ pub struct PreferencesDto {
     pub debug_sample_social: bool,
     #[serde(default)]
     pub beta_features: bool,
+    /// Debug-only: keep the forty-seven games Orivo wrote by hand on the shelf
+    /// once a storefront's own new releases are there to fill it. Off by
+    /// default — they were written to stand in for a catalogue that did not
+    /// exist yet, and they crowd out what has actually just come out.
+    #[serde(default)]
+    pub show_editorial_games: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -84,6 +90,7 @@ pub struct PreferencesUpdate {
     pub show_showcase_games: Option<bool>,
     pub debug_sample_social: Option<bool>,
     pub beta_features: Option<bool>,
+    pub show_editorial_games: Option<bool>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -150,6 +157,9 @@ impl PreferencesService {
             }
             if let Some(debug_sample_social) = update.debug_sample_social {
                 preferences.debug_sample_social = debug_sample_social;
+            }
+            if let Some(show_editorial_games) = update.show_editorial_games {
+                preferences.show_editorial_games = show_editorial_games;
             }
             if let Some(beta_features) = update.beta_features {
                 preferences.beta_features = beta_features;
@@ -346,11 +356,13 @@ mod tests {
                 show_showcase_games: Some(true),
                 debug_sample_social: Some(true),
                 beta_features: Some(true),
+                show_editorial_games: Some(true),
                 reset: false,
             })
             .unwrap();
         assert_eq!(dirs.service().load().unwrap(), saved);
         assert_eq!(saved.start_page, StartPage::Store);
+        assert!(saved.show_editorial_games);
     }
 
     #[test]

@@ -17,9 +17,15 @@
 //! product links, and scraping it would import the entire catalogue as
 //! purchases.
 
-/// The sign-in form. A signed-in visitor is redirected onwards by the site
-/// itself, so this is also the right entry point for a re-sync.
-pub const LIBRARY_URL: &str = "https://www.instant-gaming.com/en/login/";
+/// The account page, which is also where signing in starts.
+///
+/// There is no sign-in page any more: `/en/login/` returned 404 and the site now
+/// signs people in through a box on whatever page they are on. Asking for the
+/// account is what opens it — signed out, the site redirects here to its own
+/// front page carrying `?showLoginBox=true` and a return address; signed in, it
+/// simply serves the account. So this one address is both the way in and the
+/// right entry point for a re-sync, exactly as the old one was.
+pub const LIBRARY_URL: &str = "https://www.instant-gaming.com/en/my-account/";
 
 pub fn is_library_page(url: &reqwest::Url) -> bool {
     url.scheme() == "https"
@@ -38,17 +44,27 @@ pub const SYNC_START_SCRIPT: &str = r#"
   const finish = (value) => { window.__orivoSourceSync = value; };
 
   const ORIGIN = 'https://www.instant-gaming.com';
-  // Known and historical order-history paths, most specific first.
+  // The order history, then the same page in French, then the addresses it
+  // used to live at. Discovery still comes first: the store has moved this page
+  // more than once, and the account page's own links are the only thing that
+  // keeps up with it on its own.
   const CANDIDATES = [
+    '/en/my-orders/',
+    '/fr/mes-achats/',
     '/en/account/orders/',
-    '/en/myaccount/orders/',
     '/en/orders/',
-    '/en/account/',
-    '/en/myaccount/',
   ];
   // A path is only trusted when it names an order history. The shop front is
   // nothing but product links; reading it would import the whole catalogue.
-  const isOrderPath = (path) => /(^|\/)(orders?|commandes?)(\/|$|\?)/i.test(path);
+  //
+  // The whole segment is matched, not a word inside one: the page is
+  // `/en/my-orders/` today, where `orders` follows a hyphen rather than a
+  // slash, and a guard looking for the bare word threw the real page away. It
+  // is a list of segments rather than an optional prefix so that a product
+  // slug can never talk its way in — `/en/999-my-orders-game/` is not an order
+  // history, and neither is a search for the word.
+  const isOrderPath = (path) =>
+    /(^|\/)(my-orders?|mes-achats?|mes-commandes?|orders?|commandes?)(\/|$|\?)/i.test(path);
   const productLink = /\/(\d{1,9})-([a-z0-9-]{2,180})/i;
 
   const parse = (html) => new DOMParser().parseFromString(html, 'text/html');
@@ -127,7 +143,10 @@ pub const SYNC_START_SCRIPT: &str = r#"
     if (sawSignedOut) { finish({ status: 'signed-out' }); return; }
     // An empty order history and a page Orivo could not recognise look the
     // same from here, so say so rather than claiming the account owns nothing.
-    finish({ status: 'unsupported', sawOrderPage });
+    // The addresses that were tried travel with it: the store moves this page,
+    // and when it does, what was attempted is the whole diagnosis. Rust logs
+    // them; nothing from the account itself is included.
+    finish({ status: 'unsupported', sawOrderPage, tried: paths.slice(0, 8) });
   })();
 
   return 'started';
@@ -140,8 +159,11 @@ mod tests {
 
     #[test]
     fn the_sync_only_runs_on_the_instant_gaming_origin() {
+        assert!(is_library_page(&reqwest::Url::parse(LIBRARY_URL).unwrap()));
+        // Signing in bounces through the front page carrying a return address,
+        // which is still the same origin and still ours to drive.
         assert!(is_library_page(
-            &reqwest::Url::parse("https://www.instant-gaming.com/en/login/").unwrap()
+            &reqwest::Url::parse("https://www.instant-gaming.com/en/?showLoginBox=true").unwrap()
         ));
         assert!(!is_library_page(
             &reqwest::Url::parse("https://www.instant-gaming.com.evil.example/").unwrap()
@@ -161,11 +183,32 @@ mod tests {
 
     #[test]
     fn the_order_page_is_discovered_rather_than_assumed() {
-        // The path that 404'd is still tried, but it is no longer the only one,
-        // and the account link the site renders is preferred over any guess.
+        // Every hardcoded path here has 404'd at some point, so the links the
+        // account page renders are read first and these are only a fallback.
+        assert!(SYNC_START_SCRIPT.contains("'/en/my-orders/'"));
         assert!(SYNC_START_SCRIPT.contains("'/en/account/orders/'"));
-        assert!(SYNC_START_SCRIPT.contains("'/en/myaccount/orders/'"));
         assert!(SYNC_START_SCRIPT.contains("isOrderPath"));
+    }
+
+    #[test]
+    fn the_guard_recognises_the_order_history_where_it_actually_lives() {
+        // `/en/my-orders/` is the page today, and `orders` sits behind a hyphen
+        // there — a guard looking for the bare word between slashes threw the
+        // real page away, which is why a signed-in account synced nothing at
+        // all. Each accepted form is a whole segment, so a product slug that
+        // merely contains the words still cannot talk its way in.
+        assert!(SYNC_START_SCRIPT.contains("my-orders?|mes-achats?|mes-commandes?|orders?"));
+        assert!(SYNC_START_SCRIPT.contains(r"(^|\/)("));
+        assert!(SYNC_START_SCRIPT.contains(r"(\/|$|\?)/i.test(path)"));
+    }
+
+    #[test]
+    fn the_entry_point_is_the_account_rather_than_a_sign_in_page() {
+        // `/en/login/` is gone: it answers 404, which is the whole reason
+        // connecting stopped working. Asking for the account is what opens the
+        // sign-in box now, and it is also where a re-sync wants to land.
+        assert!(LIBRARY_URL.ends_with("/en/my-account/"));
+        assert!(!LIBRARY_URL.contains("/login"));
     }
 
     #[test]

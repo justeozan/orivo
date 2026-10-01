@@ -204,9 +204,8 @@ Chaque erreur doit fournir une cause lisible et l'action la plus utile :
 
 ## Gate 2 — SteamSource local et bibliothèque de compte
 
-Steam a deux chemins complémentaires, tous deux local-first. Ils ne nécessitent pas de backend Orivo hébergé.
+Steam est local-first : la connexion de compte, la synchronisation et la lecture des manifests se font sur la machine, sans backend Orivo hébergé. Le scan local n'a plus qu'un rôle — dire quels jeux possédés sont déjà installés.
 
-- « Importer les jeux installés » dans le menu ancré au logo conserve le scan local et son aperçu de sélection.
 - « Se connecter à une bibliothèque » ouvre une WebView Steam dédiée, non persistante et sans capability IPC. L'utilisateur se connecte directement auprès de Steam ; Orivo ne collecte jamais son mot de passe ni son Steam Guard. Si Steam termine sans rechargement de page, le bouton « I’ve signed in » relance explicitement la vérification au lieu de laisser l'interface attendre.
 - Une fois l'identité et le jeton de bibliothèque obtenus localement, ils restent dans le Trousseau macOS. Ils ne sont ni ajoutés à `catalog.json`, ni renvoyés au WebView principal, ni journalisés. L'IPC ne reçoit que l'état public de connexion et les compteurs de synchronisation.
 - La bibliothèque est récupérée directement auprès de Steam, en arrière-plan. L'alternative « clé API » accepte un SteamID64 et une clé Web API propres à l'utilisateur ; Orivo la vérifie auprès de Steam avant de remplacer une connexion existante, puis la stocke dans le même Trousseau. Elle sert de secours si la connexion web ne répond plus.
@@ -214,11 +213,10 @@ Steam a deux chemins complémentaires, tous deux local-first. Ils ne nécessiten
 - Orivo détecte le système qui exécute l'application côté Rust et compare cette valeur aux plateformes Steam déclarées. Le hero affiche le résultat uniquement lorsqu'il est connu. Il s'agit d'une compatibilité native annoncée par Steam, pas d'une promesse de fonctionnement via Proton, Wine ou une couche de virtualisation.
 - La connexion web s'appuie sur un jeton présent dans la page Steam, pas sur un OAuth public documenté. Elle peut donc expirer ou évoluer : la reconnexion et la voie API-key restent des états produit explicites. Les challenges HTTPS externes de Steam Guard restent isolés dans la WebView sans capability ; seule une page `store.steampowered.com` peut fournir le jeton accepté.
 - Sur macOS, Orivo découvre la racine Steam locale puis les bibliothèques secondaires déclarées dans `libraryfolders.vdf`.
-- Seuls les manifests `appmanifest_<appid>.acf` complets, installés et associés à un dossier de jeu existant sont proposés. Les redistribuables, bandes-son, manifests incohérents et entrées incomplètes sont ignorés sans empêcher le reste du scan.
+- Seuls les manifests `appmanifest_<appid>.acf` complets, installés et associés à un dossier de jeu existant sont pris en compte. Les redistribuables, bandes-son, manifests incohérents et entrées incomplètes sont ignorés sans empêcher le reste du scan.
 - Le panneau Steam reçoit uniquement un `appId`, un titre, un statut et des URLs de cache opaques ou des jaquettes Steam générées depuis un AppID numérique. Les chemins Steam, manifestes, répertoires d'installation et données source restent côté Rust.
-- `import_steam_games(appIds)` relance un scan côté backend avant toute écriture ; il refuse toute entrée qui n'est plus découverte comme installée. Le frontend ne fournit jamais de chemin, commande, artwork ni argument de lancement.
 - L'import est idempotent par `steam_app_id`, écrit le catalogue de façon atomique et préserve les données utilisateur ou les médias déjà mis en cache lors d'un refresh.
-- Le scan et la préparation des médias tournent hors du chemin UI. Une courte photographie Rust-only de la découverte évite un second parcours des manifests lors de l'hydratation ; elle expire rapidement et ne traverse jamais l'IPC. La liste apparaît d'abord ; un maximum de 16 visuels visibles est hydraté ensuite en arrière-plan.
+- Le scan des manifests et la préparation des médias tournent hors du chemin UI, dans un worker ; rien de ce parcours ne traverse l'IPC.
 - Les médias sont optionnels, plafonnés à 20 MiB par fichier et 128 MiB par opération de cache. Une copie temporaire est renommée atomiquement avant d'être exposée ; une image illisible ou trop volumineuse laisse simplement le fallback visuel.
 - Les mutations de catalogue sont sérialisées, mais les lectures de rail et de lancement ne gardent pas le verrou pendant l'écriture atomique sur disque.
 - Un jeu Steam utilise un launch target typé `Steam { app_id }`, non un faux exécutable. Sur macOS, Orivo appelle le bundle Steam avec l'URI fixe `steam://run/<app_id>` sans shell, puis vérifie que macOS a accepté la demande avant de confirmer le lancement.

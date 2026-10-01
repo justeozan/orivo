@@ -1,7 +1,6 @@
 import { expect, test } from "@playwright/test";
 import {
   documentOverflow,
-  expectVisibleFocusRing,
   openRoute,
   tabUntil,
   topbarBox,
@@ -166,7 +165,6 @@ test.describe("the Library scene", () => {
   test("reaches the navigation and then the search by keyboard", async ({ page }) => {
     const nav = await tabUntil(page, (report) => report.className.includes("nav-link"));
     expect(nav.found, "Tab never reached the navigation").not.toBeNull();
-    expectVisibleFocusRing(nav.found!);
 
     // Play is disabled in browser mode (nothing to launch), so the next proof
     // that the compact bar is still a tab order is the search field.

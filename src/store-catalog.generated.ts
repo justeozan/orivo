@@ -347,7 +347,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Dans un monde déchiré entre nature et machines, une fille et son amie ne peuvent compter que sur leur amitié pour survivre et protéger ce qu'elles ont de plus précieux.",
     "coverUrl": "/media/store/planet-of-lana/cover.jpg",
     "heroUrl": "/media/store/planet-of-lana/hero.jpg",
-    "landscapeUrl": "/media/store/planet-of-lana/scene-1.jpg",
+    "landscapeUrl": "/media/store/planet-of-lana/capsule.jpg",
     "genres": [
       "Aventure",
       "Réflexion"
@@ -529,7 +529,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Firewatch est un jeu plein de mystères pour un joueur à la première personne, qui se déroule dans le décor sauvage du Wyoming.",
     "coverUrl": "/media/store/firewatch/cover.jpg",
     "heroUrl": "/media/store/firewatch/hero.jpg",
-    "landscapeUrl": "/media/store/firewatch/scene-0.jpg",
+    "landscapeUrl": "/media/store/firewatch/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -677,7 +677,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Inscryption est une odyssée personnelle qui prend la forme d'un jeu de cartes d'un noir d'encre qui mélange le rogue-like, la création de deck, les énigmes des escape-room et l'horreur…",
     "coverUrl": "/media/store/inscryption/cover.jpg",
     "heroUrl": "/media/store/inscryption/hero.jpg",
-    "landscapeUrl": "/media/store/inscryption/scene-3.jpg",
+    "landscapeUrl": "/media/store/inscryption/capsule.jpg",
     "genres": [
       "Stratégie",
       "Cartes"
@@ -957,7 +957,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Randonnez, escaladez, et planez dans le Parc provincial de Hawk Peak, et découvrez ses paysages paisibles sur le chemin du sommet.",
     "coverUrl": "/media/store/a-short-hike/cover.jpg",
     "heroUrl": "/media/store/a-short-hike/hero.jpg",
-    "landscapeUrl": "/media/store/a-short-hike/scene-2.jpg",
+    "landscapeUrl": "/media/store/a-short-hike/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -1104,7 +1104,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Nommé Game of the Year 2019 par Giant Bomb, Polygon, Eurogamer et The Guardian, acclamé par la critique et récompensé par de nombreux prix, Outer Wilds est un jeu mystérieux en monde…",
     "coverUrl": "/media/store/outer-wilds/cover.jpg",
     "heroUrl": "/media/store/outer-wilds/hero.jpg",
-    "landscapeUrl": "/media/store/outer-wilds/scene-4.jpg",
+    "landscapeUrl": "/media/store/outer-wilds/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -1274,7 +1274,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Jeune fille optimiste, mais hantée par une expérience douloureuse qui a ébranlé sa vie, Gris s'est égarée dans le tréfonds d'un monde qu'elle a créé de toutes pièces.",
     "coverUrl": "/media/store/gris/cover.jpg",
     "heroUrl": "/media/store/gris/hero.jpg",
-    "landscapeUrl": "/media/store/gris/scene-0.jpg",
+    "landscapeUrl": "/media/store/gris/capsule.jpg",
     "genres": [
       "Aventure",
       "Plateforme"
@@ -1432,7 +1432,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Perdu, seul et séparé de sa famille, un chat errant doit résoudre un ancien mystère pour fuir une cyber-cité tombée dans l’oubli et retourner chez lui.",
     "coverUrl": "/media/store/stray/cover.jpg",
     "heroUrl": "/media/store/stray/hero.jpg",
-    "landscapeUrl": "/media/store/stray/scene-0.jpg",
+    "landscapeUrl": "/media/store/stray/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -1612,7 +1612,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Spiritfarer® est un jeu de gestion cosy sur le thème de la mort, dans lequel vous incarnez une passeuse d’âmes.",
     "coverUrl": "/media/store/spiritfarer/cover.jpg",
     "heroUrl": "/media/store/spiritfarer/hero.jpg",
-    "landscapeUrl": "/media/store/spiritfarer/scene-2.jpg",
+    "landscapeUrl": "/media/store/spiritfarer/capsule.jpg",
     "genres": [
       "Gestion",
       "Aventure"
@@ -1773,7 +1773,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Unpacking est un jeu de puzzle zen sur l'expérience familière de sortir ses affaires de cartons et de les placer dans une nouvelle maison.",
     "coverUrl": "/media/store/unpacking/cover.jpg",
     "heroUrl": "/media/store/unpacking/hero.jpg",
-    "landscapeUrl": "/media/store/unpacking/scene-1.jpg",
+    "landscapeUrl": "/media/store/unpacking/capsule.jpg",
     "genres": [
       "Réflexion",
       "Narration"
@@ -1933,7 +1933,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "De Jeppe Carlsen, le principal concepteur de gameplay de LIMBO et INSIDE — COCOON vous emmène dans une aventure à travers des mondes dans des mondes.",
     "coverUrl": "/media/store/cocoon/cover.jpg",
     "heroUrl": "/media/store/cocoon/hero.jpg",
-    "landscapeUrl": "/media/store/cocoon/scene-0.jpg",
+    "landscapeUrl": "/media/store/cocoon/capsule.jpg",
     "genres": [
       "Réflexion",
       "Aventure"
@@ -2112,7 +2112,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Embarquez pour un inoubliable voyage en incarnant Sable au cours de sa quête initiatique, qui la conduira dans des déserts immenses et des paysages fascinants ornés de carcasses de…",
     "coverUrl": "/media/store/sable/cover.jpg",
     "heroUrl": "/media/store/sable/hero.jpg",
-    "landscapeUrl": "/media/store/sable/scene-0.jpg",
+    "landscapeUrl": "/media/store/sable/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -2280,7 +2280,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Perdu en mer, 1803 LE FIER VAISSEAU « OBRA DINN »",
     "coverUrl": "/media/store/return-of-the-obra-dinn/cover.jpg",
     "heroUrl": "/media/store/return-of-the-obra-dinn/hero.jpg",
-    "landscapeUrl": "/media/store/return-of-the-obra-dinn/scene-3.jpg",
+    "landscapeUrl": "/media/store/return-of-the-obra-dinn/capsule.jpg",
     "genres": [
       "Enquête",
       "Réflexion"
@@ -2439,7 +2439,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Baba Is You est un jeu de réflexion dont les règles se présentent sous forme de blocs avec lesquels interagir.",
     "coverUrl": "/media/store/baba-is-you/cover.jpg",
     "heroUrl": "/media/store/baba-is-you/hero.jpg",
-    "landscapeUrl": "/media/store/baba-is-you/scene-3.jpg",
+    "landscapeUrl": "/media/store/baba-is-you/capsule.jpg",
     "genres": [
       "Réflexion",
       "Puzzle"
@@ -2560,7 +2560,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Vous vous réveillez seul, sur une île étrange remplie d'énigmes qui vous mettront à l'épreuve et vous surprendront.",
     "coverUrl": "/media/store/the-witness/cover.jpg",
     "heroUrl": "/media/store/the-witness/hero.jpg",
-    "landscapeUrl": "/media/store/the-witness/scene-0.jpg",
+    "landscapeUrl": "/media/store/the-witness/capsule.jpg",
     "genres": [
       "Réflexion",
       "Exploration"
@@ -2706,7 +2706,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "ISLANDERS est un jeu stratégique et minimaliste qui permet de construire ta propre ville sur différentes îles pleines de couleurs.",
     "coverUrl": "/media/store/islanders/cover.jpg",
     "heroUrl": "/media/store/islanders/hero.jpg",
-    "landscapeUrl": "/media/store/islanders/scene-1.jpg",
+    "landscapeUrl": "/media/store/islanders/capsule.jpg",
     "genres": [
       "Stratégie",
       "Créatif"
@@ -2878,7 +2878,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Mini Motorways est un jeu de stratégie de conception d'une carte routière pour une ville en expansion. Construisez un réseau routier, une route après l'autre, pour créer une métropole en…",
     "coverUrl": "/media/store/mini-motorways/cover.jpg",
     "heroUrl": "/media/store/mini-motorways/hero.jpg",
-    "landscapeUrl": "/media/store/mini-motorways/scene-1.jpg",
+    "landscapeUrl": "/media/store/mini-motorways/capsule.jpg",
     "genres": [
       "Stratégie",
       "Gestion"
@@ -3283,7 +3283,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Dans ce jeu primé d'aventure à énigmes, vous incarnez le voyageur, un personnage cherchant à réunir les Peuples de la Tour.",
     "coverUrl": "/media/store/chants-of-sennaar/cover.jpg",
     "heroUrl": "/media/store/chants-of-sennaar/hero.jpg",
-    "landscapeUrl": "/media/store/chants-of-sennaar/scene-1.jpg",
+    "landscapeUrl": "/media/store/chants-of-sennaar/capsule.jpg",
     "genres": [
       "Réflexion",
       "Aventure"
@@ -3477,7 +3477,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Explore une contrée regorgeant de légendes perdues, de pouvoirs ancestraux et de monstres féroces dans TUNIC, un jeu d'action isométrique qui met en scène un petit renard vivant une grande…",
     "coverUrl": "/media/store/tunic/cover.jpg",
     "heroUrl": "/media/store/tunic/hero.jpg",
-    "landscapeUrl": "/media/store/tunic/scene-3.jpg",
+    "landscapeUrl": "/media/store/tunic/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -3647,7 +3647,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Un éditeur de ville instantané. Déposez des blocs de bâtiments et regardez-les évoluer et se transformer pièce par pièce pour devenir des villages idylliques en bord de mer, des jardins…",
     "coverUrl": "/media/store/townscaper/cover.jpg",
     "heroUrl": "/media/store/townscaper/hero.jpg",
-    "landscapeUrl": "/media/store/townscaper/scene-0.jpg",
+    "landscapeUrl": "/media/store/townscaper/capsule.jpg",
     "genres": [
       "Créatif",
       "Détente"
@@ -3831,7 +3831,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "A new kind of detective game that allows you to think and investigate freely. Discover clues surrounding 12 strange and gruesome deaths and build your own theory.",
     "coverUrl": "/media/store/the-case-of-the-golden-idol/cover.jpg",
     "heroUrl": "/media/store/the-case-of-the-golden-idol/hero.jpg",
-    "landscapeUrl": "/media/store/the-case-of-the-golden-idol/scene-2.jpg",
+    "landscapeUrl": "/media/store/the-case-of-the-golden-idol/capsule.jpg",
     "genres": [
       "Enquête",
       "Réflexion"
@@ -4027,7 +4027,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Mini Metro est un jeu de simulation sur la conception du réseau de métro d’une ville. Dessinez les lignes entre les stations et lancez vos trains.",
     "coverUrl": "/media/store/mini-metro/cover.jpg",
     "heroUrl": "/media/store/mini-metro/hero.jpg",
-    "landscapeUrl": "/media/store/mini-metro/scene-2.jpg",
+    "landscapeUrl": "/media/store/mini-metro/capsule.jpg",
     "genres": [
       "Stratégie",
       "Puzzle"
@@ -4175,7 +4175,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "KENTUCKY ROUTE ZERO est un jeu d'aventure réaliste et magique. Il évoque une autoroute secrète, qui circule dans des galeries enterrées du Kentucky, et le peuple mystérieux qui s'y déplace.",
     "coverUrl": "/media/store/kentucky-route-zero/cover.jpg",
     "heroUrl": "/media/store/kentucky-route-zero/hero.jpg",
-    "landscapeUrl": "/media/store/kentucky-route-zero/scene-2.jpg",
+    "landscapeUrl": "/media/store/kentucky-route-zero/capsule.jpg",
     "genres": [
       "Aventure",
       "Narration"
@@ -4323,7 +4323,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "What Remains of Edith Finch est une collection de contes étranges sur une famille de l’État de Washington.",
     "coverUrl": "/media/store/what-remains-of-edith-finch/cover.jpg",
     "heroUrl": "/media/store/what-remains-of-edith-finch/hero.jpg",
-    "landscapeUrl": "/media/store/what-remains-of-edith-finch/scene-1.jpg",
+    "landscapeUrl": "/media/store/what-remains-of-edith-finch/capsule.jpg",
     "genres": [
       "Aventure",
       "Narration"
@@ -4505,7 +4505,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "NIGHT IN THE WOODS is an adventure game focused on exploration, story, and character, featuring dozens of characters to meet and lots to do across a lush, vibrant world.",
     "coverUrl": "/media/store/night-in-the-woods/cover.jpg",
     "heroUrl": "/media/store/night-in-the-woods/hero.jpg",
-    "landscapeUrl": "/media/store/night-in-the-woods/scene-3.jpg",
+    "landscapeUrl": "/media/store/night-in-the-woods/capsule.jpg",
     "genres": [
       "Aventure",
       "Narration"
@@ -4652,7 +4652,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Oxenfree est un thriller surnaturel mettant en scène un groupe d'amis qui ouvre malencontreusement une faille spectrale.",
     "coverUrl": "/media/store/oxenfree/cover.jpg",
     "heroUrl": "/media/store/oxenfree/hero.jpg",
-    "landscapeUrl": "/media/store/oxenfree/scene-2.jpg",
+    "landscapeUrl": "/media/store/oxenfree/capsule.jpg",
     "genres": [
       "Aventure",
       "Mystère"
@@ -4824,7 +4824,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "L'art imite la mort",
     "coverUrl": "/media/store/pentiment/cover.jpg",
     "heroUrl": "/media/store/pentiment/hero.jpg",
-    "landscapeUrl": "/media/store/pentiment/scene-3.jpg",
+    "landscapeUrl": "/media/store/pentiment/capsule.jpg",
     "genres": [
       "Narration",
       "Enquête"
@@ -5129,7 +5129,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Aidez Madeline à survivre à ses démons intérieurs au mont Celeste, dans ce jeu de plateformes ultra relevé, réalisé par les créateurs du classique TowerFall.",
     "coverUrl": "/media/store/celeste/cover.jpg",
     "heroUrl": "/media/store/celeste/hero.jpg",
-    "landscapeUrl": "/media/store/celeste/scene-1.jpg",
+    "landscapeUrl": "/media/store/celeste/capsule.jpg",
     "genres": [
       "Plateforme",
       "Précision"
@@ -5278,7 +5278,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Défiez le dieu des morts et frayez-vous un chemin hors des Enfers dans ce rogue-like en mode dungeon crawler développé par les créateurs de Bastion, Transistor et Pyre.",
     "coverUrl": "/media/store/hades/cover.jpg",
     "heroUrl": "/media/store/hades/hero.jpg",
-    "landscapeUrl": "/media/store/hades/scene-4.jpg",
+    "landscapeUrl": "/media/store/hades/capsule.jpg",
     "genres": [
       "Action",
       "Rogue-lite"
@@ -5414,7 +5414,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Explorez l’ancien et mystérieux monde de Journey en volant par-dessus les ruines et en glissant sur les terres de sable pour découvrir ses secrets.",
     "coverUrl": "/media/store/journey/cover.jpg",
     "heroUrl": "/media/store/journey/hero.jpg",
-    "landscapeUrl": "/media/store/journey/scene-4.jpg",
+    "landscapeUrl": "/media/store/journey/capsule.jpg",
     "genres": [
       "Aventure",
       "Contemplation"
@@ -5558,7 +5558,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "\"Ori and the Blind Forest\" relate l'histoire d'une jeune créature orpheline à la destinée héroïque, au travers d'un jeu de plateforme et d'action aux graphismes époustouflants, développé…",
     "coverUrl": "/media/store/ori-and-the-blind-forest/cover.jpg",
     "heroUrl": "/media/store/ori-and-the-blind-forest/hero.jpg",
-    "landscapeUrl": "/media/store/ori-and-the-blind-forest/scene-3.jpg",
+    "landscapeUrl": "/media/store/ori-and-the-blind-forest/capsule.jpg",
     "genres": [
       "Plateforme",
       "Aventure"
@@ -5713,7 +5713,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Plongez dans le conte sombre et singulier de Little Nightmares et affrontez les terreurs de votre enfance !",
     "coverUrl": "/media/store/little-nightmares/cover.jpg",
     "heroUrl": "/media/store/little-nightmares/hero.jpg",
-    "landscapeUrl": "/media/store/little-nightmares/scene-2.jpg",
+    "landscapeUrl": "/media/store/little-nightmares/capsule.jpg",
     "genres": [
       "Aventure",
       "Énigmes"
@@ -5883,7 +5883,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Terra Nil est un jeu de stratégie subtil sur le thème de l'environnement, qui consiste à transformer une terre stérile en un écosystème prospère et harmonieux.",
     "coverUrl": "/media/store/terra-nil/cover.jpg",
     "heroUrl": "/media/store/terra-nil/hero.jpg",
-    "landscapeUrl": "/media/store/terra-nil/scene-5.jpg",
+    "landscapeUrl": "/media/store/terra-nil/capsule.jpg",
     "genres": [
       "Stratégie",
       "Réflexion"
@@ -6056,7 +6056,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "You've inherited your grandfather's old farm plot in Stardew Valley. Armed with hand-me-down tools and a few coins, you set out to begin your new life.",
     "coverUrl": "/media/store/stardew-valley/cover.jpg",
     "heroUrl": "/media/store/stardew-valley/hero.jpg",
-    "landscapeUrl": "/media/store/stardew-valley/scene-0.jpg",
+    "landscapeUrl": "/media/store/stardew-valley/capsule.jpg",
     "genres": [
       "Simulation",
       "Aventure"
@@ -6203,7 +6203,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Coffee Talk est un simulateur de barista et de conversations intimes, propose d'écouter les soucis bien modernes de personnages fantasy, et de les aider en leur servant une ou deux boissons…",
     "coverUrl": "/media/store/coffee-talk/cover.jpg",
     "heroUrl": "/media/store/coffee-talk/hero.jpg",
-    "landscapeUrl": "/media/store/coffee-talk/scene-4.jpg",
+    "landscapeUrl": "/media/store/coffee-talk/capsule.jpg",
     "genres": [
       "Narration",
       "Simulation"
@@ -6375,7 +6375,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Embarquez dans une expédition exquise, utilisez vos talents de photographe pour découvrir les secrets et la magie de TOEM dans ce jeu d'aventure dessiné à la main.",
     "coverUrl": "/media/store/toem/cover.jpg",
     "heroUrl": "/media/store/toem/hero.jpg",
-    "landscapeUrl": "/media/store/toem/scene-1.jpg",
+    "landscapeUrl": "/media/store/toem/capsule.jpg",
     "genres": [
       "Aventure",
       "Photographie"
@@ -6536,7 +6536,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Préparez de délicieux mets de l'Inde du Sud et suivez le voyage d'une famille d'immigrants dans Venba !",
     "coverUrl": "/media/store/venba/cover.jpg",
     "heroUrl": "/media/store/venba/hero.jpg",
-    "landscapeUrl": "/media/store/venba/scene-0.jpg",
+    "landscapeUrl": "/media/store/venba/capsule.jpg",
     "genres": [
       "Narration",
       "Cuisine"
@@ -6693,7 +6693,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Guidez le pinceau et résolvez des énigmes pour aider une apprentie artiste à terminer son chef-d'œuvre sous le regard de son voisin brusque et de son chat.",
     "coverUrl": "/media/store/behind-the-frame/cover.jpg",
     "heroUrl": "/media/store/behind-the-frame/hero.jpg",
-    "landscapeUrl": "/media/store/behind-the-frame/scene-1.jpg",
+    "landscapeUrl": "/media/store/behind-the-frame/capsule.jpg",
     "genres": [
       "Aventure",
       "Narration"
@@ -6877,7 +6877,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Embarque pour une aventure incroyable, noue des amitiés et pars à la recherche des trésors cachés sur l'île.",
     "coverUrl": "/media/store/lil-gator-game/cover.jpg",
     "heroUrl": "/media/store/lil-gator-game/hero.jpg",
-    "landscapeUrl": "/media/store/lil-gator-game/scene-2.jpg",
+    "landscapeUrl": "/media/store/lil-gator-game/capsule.jpg",
     "genres": [
       "Aventure",
       "Exploration"
@@ -7022,7 +7022,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Wilmot's Warehouse est un jeu d’énigmes dans lequel il faut organiser au mieux un entrepôt. Mais n’oubliez pas où vous avez rangé les divers produits, parce que quand la trappe de service…",
     "coverUrl": "/media/store/wilmots-warehouse/cover.jpg",
     "heroUrl": "/media/store/wilmots-warehouse/hero.jpg",
-    "landscapeUrl": "/media/store/wilmots-warehouse/scene-5.jpg",
+    "landscapeUrl": "/media/store/wilmots-warehouse/capsule.jpg",
     "genres": [
       "Réflexion",
       "Organisation"
@@ -7156,7 +7156,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Défiez la perception, redéfinissez la réalité et remodelez le monde qui vous entoure avec un appareil photo instantané.",
     "coverUrl": "/media/store/viewfinder/cover.jpg",
     "heroUrl": "/media/store/viewfinder/hero.jpg",
-    "landscapeUrl": "/media/store/viewfinder/scene-5.jpg",
+    "landscapeUrl": "/media/store/viewfinder/capsule.jpg",
     "genres": [
       "Réflexion",
       "Aventure"
@@ -7324,7 +7324,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "La perception est la réalité. Dans ce jeu d'énigme tordu à la première personne, vous devrez vous échapper d'un rêve surréaliste en terminant des énigmes impossibles grâce à l'ambigüité…",
     "coverUrl": "/media/store/superliminal/cover.jpg",
     "heroUrl": "/media/store/superliminal/hero.jpg",
-    "landscapeUrl": "/media/store/superliminal/scene-0.jpg",
+    "landscapeUrl": "/media/store/superliminal/capsule.jpg",
     "genres": [
       "Réflexion",
       "Perspective"
@@ -7508,7 +7508,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Card Shark est un jeu d'aventure où se mêlent intrigues, ruses et autres délicieuses tricheries. Découvrez un monde dans lequel vous devrez manipuler vos adversaires aussi bien que vos…",
     "coverUrl": "/media/store/card-shark/cover.jpg",
     "heroUrl": "/media/store/card-shark/hero.jpg",
-    "landscapeUrl": "/media/store/card-shark/scene-4.jpg",
+    "landscapeUrl": "/media/store/card-shark/capsule.jpg",
     "genres": [
       "Aventure",
       "Cartes"
@@ -7666,7 +7666,7 @@ export const STORE_CATALOG: GameSummary[] = [
     "shortDescription": "Un jeu de poker roguelike. Balatro est un jeu de deckbuilding prenant où vous jouez des combinaisons de poker illégales, découvrez des jokers révolutionnaires et déclenchez des combos aussi…",
     "coverUrl": "/media/store/balatro/cover.jpg",
     "heroUrl": "/media/store/balatro/hero.jpg",
-    "landscapeUrl": "/media/store/balatro/scene-1.jpg",
+    "landscapeUrl": "/media/store/balatro/capsule.jpg",
     "genres": [
       "Stratégie",
       "Cartes"

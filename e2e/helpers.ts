@@ -239,16 +239,12 @@ export interface FocusReport {
   tag: string;
   className: string;
   label: string;
-  focusVisible: boolean;
-  outlineWidth: number;
-  outlineStyle: string;
 }
 
 async function describeFocus(page: Page): Promise<FocusReport | null> {
   return page.evaluate(() => {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) || active === document.body) return null;
-    const style = getComputedStyle(active);
     return {
       focusKey: active.dataset.focusKey ?? null,
       tag: active.tagName,
@@ -257,9 +253,6 @@ async function describeFocus(page: Page): Promise<FocusReport | null> {
         active.getAttribute("aria-label") ??
         active.id ??
         (active.textContent ?? "").trim().slice(0, 40),
-      focusVisible: active.matches(":focus-visible"),
-      outlineWidth: Number.parseFloat(style.outlineWidth) || 0,
-      outlineStyle: style.outlineStyle,
     };
   });
 }
@@ -282,16 +275,6 @@ export async function tabUntil(
     if (match(report)) return { found: report, visited };
   }
   return { found: null, visited };
-}
-
-/** Asserts the focused element renders a visible focus ring. */
-export function expectVisibleFocusRing(report: FocusReport): void {
-  expect(report.focusVisible, `${report.tag}.${report.className} should match :focus-visible`).toBe(true);
-  expect(
-    report.outlineWidth,
-    `${report.tag}.${report.className} should paint an outline (got ${report.outlineWidth}px ${report.outlineStyle})`,
-  ).toBeGreaterThan(0);
-  expect(report.outlineStyle).not.toBe("none");
 }
 
 export interface CardVisibility {

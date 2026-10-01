@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     include: ["src/**/*.test.ts"],
+    setupFiles: ["src/test-setup.ts"],
     restoreMocks: true,
     // Vitest loads `.env` the same way a build does, so a developer with a real
     // DSN ran the whole suite against the live Sentry SDK — initialising it,
