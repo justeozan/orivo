@@ -319,8 +319,16 @@ correspondance est refusée au lieu d’être classée. Une référence ne peut 
 que ce que le host aurait pu montrer : ni nom caché — le sidecar AppleDouble
 `._<nom>` qu’écrit macOS sur une clé exFAT porte le même suffixe que le dump
 qu’il double — ni nom que `valid_entry_name` refuserait. Une page ne lit
-désormais ses dossiers accordés qu’une fois, au lieu d’une fois par candidat. Élargir `runner-profile` ou
-ajouter un mode de lancement reste une décision ouverte, hors de ce palier :
+désormais ses dossiers accordés qu’une fois, au lieu d’une fois par candidat. Élargir `runner-profile` reste
+une décision ouverte, hors de ce palier ; ajouter un mode de lancement a depuis
+été tranché une fois, pour le streaming de jeu : `RunnerLaunchMode::Stream` est
+une permission que l’utilisateur pose sur son profil, que `validate-profile` ne
+voit jamais, et dont la liste d’arguments est construite par l’hôte à partir
+d’un document qu’il a lui-même écrit et revalide
+([`docs/gamestream.md`](gamestream.md)). Un mode reste une décision d’ABI, pas
+celle d’un plugin — c’est pourquoi le `match` est exhaustif et que l’intention
+du plugin doit s’accorder avec la permission du profil dans les deux sens.
+Par ailleurs :
 `docs/ryujinx-runner.md` dit ce que Ryujinx accepte, ce que le contrat v1 ne
 peut pas exprimer (plein écran, dossier de données) et ce que publier ce plugin
 sur le canal officiel demanderait — une clé de release et un index signé, qui

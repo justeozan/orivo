@@ -2,15 +2,32 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>UISupportedInterfaceOrientations</key>
-	<array>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
-	<array>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
+	<!--
+	  Merged into the generated iOS Info.plist by `tauri ios dev` / `tauri ios
+	  build` on every run. The iOS 27 SDK traps at launch for any app without a
+	  static UIApplicationSceneManifest ("UIScene life cycle is required for
+	  apps built with this SDK"); it only inspects this plist, so tao's
+	  programmatic application:configurationForConnectingSceneSession: does not
+	  satisfy it. UISceneDelegateClassName must be exactly TaoSceneDelegate —
+	  tao's Objective-C runtime class name — and UIApplicationSupportsMultipleScenes
+	  must be true, since tao gates its whole scene startup path on that key.
+	-->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>TaoSceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 </dict>
 </plist>

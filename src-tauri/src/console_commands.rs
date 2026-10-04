@@ -137,6 +137,7 @@ pub(crate) fn console_catalog_game(
         executable_path: None,
         source: GameSource::Local,
         source_id: None,
+        alternate_launch_targets: Vec::new(),
         launch_target: LaunchTarget::Runner {
             runner_id: profile.runner_id().into(),
             game_ref: candidate.game_ref.clone(),

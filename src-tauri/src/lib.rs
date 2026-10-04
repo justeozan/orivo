@@ -5,6 +5,7 @@ mod epic_install;
 mod game_artwork;
 mod game_detail;
 mod game_media;
+mod gamestream;
 mod launcher;
 // Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
 // numbers docs/performance.md records. It never runs in the default `cargo test`
@@ -407,6 +408,11 @@ struct GameView {
     last_played_at: String,
     play_time_seconds: u64,
     launchable: bool,
+    /// Every way this game can be started, the card's own first. One entry is
+    /// the ordinary case and the UI launches it without asking; two is a game
+    /// that is both installed here and streamable from another machine, and the
+    /// choice is the player's to make at the moment they press Play.
+    launch_options: Vec<LaunchOptionView>,
     host_platform: String,
     supported_platforms: Vec<String>,
     compatible_with_host: Option<bool>,
@@ -695,6 +701,23 @@ fn set_android_credential_store() {
     });
 }
 
+/// `keyring`'s bootstrap (`v1.rs::set_credential_store`) installs a default
+/// store on macOS, Windows and Linux but deliberately skips iOS, so without
+/// this every `Entry::new` fails with "No default store has been set" — the
+/// same failure Android installs its own store for. Unlike Android the Apple
+/// "protected data" store needs no external context, so it is built directly.
+/// Must run before the first `keyring::Entry::new`.
+#[cfg(target_os = "ios")]
+fn set_ios_credential_store() {
+    match apple_native_keyring_store::protected::Store::new() {
+        Ok(store) => {
+            keyring_core::set_default_store(store);
+            eprintln!("[ios] credential store ready");
+        }
+        Err(error) => eprintln!("[ios] credential store unavailable: {error}"),
+    }
+}
+
 /// Android gives an activity one content view. The sign-in webview is stacked
 /// on top of the main one, so keeping a reference to the webview that was
 /// showing first is what lets Orivo hand control back to it.
@@ -790,6 +813,13 @@ fn lock_android_landscape() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tauri's dev+mobile protocol handler builds its rustls client as soon as the
+    // WebView asks for a dev-server asset, and skips its own provider install
+    // because devUrl is http. Without a provider installed by then reqwest (built
+    // with rustls-no-provider) panics and aborts the app.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // The updater downloads and verifies signed releases; `process` is what
@@ -832,6 +862,16 @@ pub fn run() {
                 app_data.join(game_media::MEDIA_DIRECTORY),
             )?;
 
+            // The feed's address is host-private configuration, and the import
+            // that refreshes `.stream` placeholders reads it through this same
+            // instance, so a saved host is live without a restart. The same
+            // instance is what `get_gamestream_settings` reads, and what the
+            // runner service takes a reference to so a stream profile's import
+            // can refresh its placeholders.
+            let gamestream = Arc::new(gamestream::GameStreamService::load(
+                app_data.join(gamestream::SETTINGS_FILE),
+            ));
+            app.manage(Arc::clone(&gamestream));
             // Two live services would let one instance answer the WebView while
             // catalog writes refresh the other, so a second setup is a hard
             // startup failure rather than a silently divergent projection.
@@ -841,15 +881,18 @@ pub fn run() {
             // Third-party runners write through the same catalog lease the rest
             // of the backend takes, so the service is handed the live catalog
             // rather than a second one it would have to keep in step.
-            let runners = Arc::new(runner_commands::ThirdPartyRunnerService::new(
-                runner_host::CatalogStore::new(
-                    Arc::clone(&state.catalog),
-                    state.catalog_path.clone(),
-                    Arc::clone(&state.catalog_mutation),
-                ),
-                state.plugin_root.clone(),
-                HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
-            ));
+            let runners = Arc::new(
+                runner_commands::ThirdPartyRunnerService::new(
+                    runner_host::CatalogStore::new(
+                        Arc::clone(&state.catalog),
+                        state.catalog_path.clone(),
+                        Arc::clone(&state.catalog_mutation),
+                    ),
+                    state.plugin_root.clone(),
+                    HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+                )
+                .with_gamestream(gamestream),
+            );
             app.manage(Arc::clone(&runners));
             app.manage(state);
             app.manage(detail);
@@ -878,6 +921,8 @@ pub fn run() {
                 set_android_credential_store();
                 lock_android_landscape();
             }
+            #[cfg(target_os = "ios")]
+            set_ios_credential_store();
             // The same credential store backs both the Settings commands and
             // the wallpaper search, so a saved key is used without a restart.
             let wallpaper_credentials =
@@ -1000,6 +1045,8 @@ pub fn run() {
             sync_source_library,
             disconnect_source_account,
             get_runner_plugins,
+            gamestream::get_gamestream_settings,
+            gamestream::update_gamestream_settings,
             purge_plugin_compile_cache,
             get_wine_runner_status,
             begin_wine_profile_setup,
@@ -1068,6 +1115,10 @@ pub fn run() {
             runner_commands::create_runner_profile,
             runner_commands::rename_runner_profile,
             runner_commands::set_runner_profile_enabled,
+            runner_commands::set_runner_profile_launch_mode,
+            runner_commands::begin_gamestream_pairing,
+            runner_commands::find_stream_clients,
+            fetch_runner_profile_artwork,
             runner_commands::delete_runner_profile,
             runner_commands::grant_runner_profile_directory,
             runner_commands::revoke_runner_profile_directory,
@@ -2453,6 +2504,7 @@ fn wine_catalog_game(profile_id: &str, candidate: &wine_runner::ScannedWineGame)
         executable_path: None,
         source: GameSource::Local,
         source_id: None,
+        alternate_launch_targets: Vec::new(),
         launch_target: LaunchTarget::Runner {
             runner_id: WINE_STAGING_RUNNER_ID.into(),
             game_ref: candidate.game_ref.clone(),
@@ -2972,6 +3024,7 @@ fn winlator_catalog_game(
         executable_path: None,
         source: GameSource::Local,
         source_id: None,
+        alternate_launch_targets: Vec::new(),
         launch_target: LaunchTarget::Runner {
             runner_id: WINLATOR_RUNNER_ID.into(),
             game_ref: candidate.game_ref.clone(),
@@ -4773,14 +4826,99 @@ async fn reset_game_artwork(
             .ok_or_else(|| "This game is no longer in your library.".to_string())?
     };
 
+    apply_resolved_artwork(&app, &state, &credentials, &game_id, title).await
+}
+
+/// How many cards one call will try to fill. An import can bring in a library,
+/// and each card is a lookup and up to four downloads; the caller is told what
+/// is left so it can come back rather than being held for an unbounded run.
+const MAX_ARTWORK_FILLS_PER_CALL: usize = 40;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArtworkFillResult {
+    filled: usize,
+    /// Cards still without artwork once this call stopped. Non-zero means the
+    /// ceiling was reached, not that anything failed.
+    remaining: usize,
+}
+
+/// Find artwork for the games a runner profile imported that have none.
+///
+/// A game that arrived by being folded into a card the library already had is
+/// deliberately not here: that card has its own artwork, its own play time and
+/// its own history, and a runner import is not a reason to overwrite any of it.
+/// This is only about the cards the import actually created, which arrive with
+/// nothing to show at all.
+///
+/// Failing on one game is not failing: a title no source has art for is a
+/// normal answer, and it must not stop the next card from getting its own.
+#[tauri::command]
+async fn fetch_runner_profile_artwork(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    credentials: State<'_, Arc<wallpaper_credentials::WallpaperCredentialsService>>,
+    profile_id: String,
+) -> Result<ArtworkFillResult, String> {
+    let artless: Vec<(String, String)> = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        catalog
+            .games
+            .iter()
+            .filter(|game| {
+                matches!(
+                    &game.launch_target,
+                    LaunchTarget::Runner { profile_id: owner, .. } if owner == &profile_id
+                )
+            })
+            // Nothing to show: no cover, no background, no wallpaper the user
+            // picked. A card with any of those is one somebody already answered
+            // for, by hand or by another import.
+            .filter(|game| {
+                game.cover_path.is_none()
+                    && game.artwork_path.is_none()
+                    && game.home_image_path.is_none()
+            })
+            .map(|game| (game.id.clone(), game.title.clone()))
+            .collect()
+    };
+    let remaining = artless.len().saturating_sub(MAX_ARTWORK_FILLS_PER_CALL);
+    let mut filled = 0;
+    for (game_id, title) in artless.into_iter().take(MAX_ARTWORK_FILLS_PER_CALL) {
+        if apply_resolved_artwork(&app, &state, &credentials, &game_id, title)
+            .await
+            .is_ok()
+        {
+            filled += 1;
+        }
+    }
+    Ok(ArtworkFillResult { filled, remaining })
+}
+
+/// Find artwork for one game and write it into its card.
+///
+/// Split out of the command so the same work can be done for a game the user
+/// never asked about by name: a library import brings in cards with no artwork
+/// at all, and filling them is the same four roles, the same trusted hosts and
+/// the same cache.
+async fn apply_resolved_artwork(
+    app: &AppHandle,
+    state: &AppState,
+    credentials: &wallpaper_credentials::WallpaperCredentialsService,
+    game_id: &str,
+    title: String,
+) -> Result<ArtworkResetResponse, String> {
     let artwork = game_artwork::resolve(&title, credentials.steamgriddb_api_key().as_deref()).await;
     if artwork.is_empty() {
         return Err(format!("No artwork was found for \u{201c}{title}\u{201d}."));
     }
 
-    let cache_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
+    let cache_dir = media_cache_dir(app).map_err(|error| error.to_string())?;
     fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
-    let stem = cache_stem(&game_id);
+    let stem = cache_stem(game_id);
     let mut downloaded = Vec::new();
     for role in game_artwork::ArtworkRole::all() {
         // Candidates are ordered best-first; the first one that actually
@@ -5183,10 +5321,18 @@ async fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Re
         &app,
         STEAM_AUTH_WINDOW_LABEL,
         WebviewUrl::External(initial_url),
-    )
-    .title("Connect Steam to Orivo")
-    .inner_size(640.0, 760.0)
-    .min_inner_size(460.0, 580.0)
+    );
+    // tao pins an iOS window to the screen origin with exactly the size
+    // requested here and never resizes it: a 640x760 sign-in window sits
+    // offset and clipped on the 402x874 iPhone screen. Without these hints
+    // tao takes the whole screen bounds instead, and UIKit keeps that in
+    // sync across rotation.
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder
+        .inner_size(640.0, 760.0)
+        .min_inner_size(460.0, 580.0);
+    let builder = builder
+        .title("Connect Steam to Orivo")
     // The credential lives in Keychain instead. A non-persistent WebView
     // avoids leaving a browser session behind in Orivo's app data.
     .incognito(true)
@@ -5251,10 +5397,22 @@ async fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Re
 
     let settled_for_close = Arc::clone(&settled);
     let app_for_close = app.clone();
+    #[cfg(target_os = "android")]
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
-            close_login_window(&window_for_close);
+            // Never call `close_login_window()` (i.e. `window.close()`) from
+            // this arm: `close()` posts `WindowMessage::Close`, which the
+            // runtime turns straight back into `CloseRequested` for this very
+            // handler. The queue ping-pongs without ever waiting, the main
+            // thread pegs a core inside the event loop, UIKit stops servicing
+            // touch and the whole app looks frozen (it is — see the sample in
+            // on_close_requested → this closure → close()). Not preventing the
+            // event is all it takes: the runtime destroys the window itself
+            // once the listeners returned, so the arm only owes the
+            // platform-side cleanup.
+            #[cfg(target_os = "android")]
+            restore_android_main_webview();
             return;
         }
         if matches!(event, WindowEvent::Destroyed)
@@ -5931,10 +6089,16 @@ async fn connect_token_source(
     #[cfg(target_os = "android")]
     remember_android_main_webview();
 
-    let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url))
-        .title(format!("Connect {} to Orivo", provider.label()))
+    let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url));
+    // Same as the Steam sign-in window: tao would pin this to the screen
+    // origin at a fixed size instead of filling the screen, so the size
+    // hints are desktop-only.
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder
         .inner_size(640.0, 760.0)
-        .min_inner_size(460.0, 580.0)
+        .min_inner_size(460.0, 580.0);
+    let builder = builder
+        .title(format!("Connect {} to Orivo", provider.label()))
         // A token-style sign-in leaves nothing behind: the credential belongs in
         // the keychain, not in a browser session inside Orivo's app data.
         .incognito(true)
@@ -6042,10 +6206,15 @@ async fn connect_token_source(
 
     let session_for_close = Arc::clone(&session);
     let app_for_close = app.clone();
+    #[cfg(target_os = "android")]
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
-            close_login_window(&window_for_close);
+            // Same rule as the Steam sign-in window above: re-issuing the
+            // close from inside `CloseRequested` loops the runtime's close
+            // message forever and freezes the app.
+            #[cfg(target_os = "android")]
+            restore_android_main_webview();
             return;
         }
         if matches!(event, WindowEvent::Destroyed)
@@ -6449,10 +6618,16 @@ async fn session_sync(
             );
             let url =
                 Url::parse(library_url).map_err(|_| sources::SourceError::Unsupported(provider))?;
-            let built = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
-                .title(format!("Connect {} to Orivo", provider.label()))
+            let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url));
+            // Desktop-only size hints — see the Steam sign-in window: on iOS
+            // they would leave the window offset and clipped instead of
+            // filling the screen.
+            #[cfg(not(target_os = "ios"))]
+            let builder = builder
                 .inner_size(900.0, 820.0)
-                .min_inner_size(560.0, 620.0)
+                .min_inner_size(560.0, 620.0);
+            let built = builder
+                .title(format!("Connect {} to Orivo", provider.label()))
                 // Deliberately *not* incognito: this store has no token to
                 // keep, so its own signed-in session is the connection. It
                 // lives in Orivo's WebView data store and is cleared when the
@@ -6770,6 +6945,7 @@ fn source_library_game_to_catalog_game(
         executable_path: None,
         source: provider.catalog_source(),
         source_id: Some(game.source_id),
+        alternate_launch_targets: Vec::new(),
         launch_target: LaunchTarget::Provider {
             provider: provider.token().to_string(),
             app_ref: game.launch_ref,
@@ -6905,6 +7081,9 @@ fn monitor_wine_startup(
 async fn launch_game(
     app: AppHandle,
     game_id: String,
+    // Which of the game's own ways of starting to use, as offered by its view.
+    // Absent means the card's own, which is every game with only one.
+    launch_option: Option<String>,
     state: State<'_, AppState>,
     runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
 ) -> Result<LaunchResult, String> {
@@ -6913,7 +7092,7 @@ async fn launch_game(
             .catalog
             .read()
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-        let game = catalog
+        let mut game = catalog
             .games
             .iter()
             .find(|game| game.id == game_id)
@@ -6921,6 +7100,16 @@ async fn launch_game(
             .ok_or_else(|| {
                 "This is a visual showcase. Import a local game to launch it.".to_string()
             })?;
+        // The choice is substituted here, once, so every branch below reads the
+        // launch the player asked for exactly as it reads a card's only one.
+        // The handle is resolved against this game's own list and nothing else,
+        // so it can only ever name a way of starting *this* game.
+        if let Some(option) = launch_option.as_deref() {
+            game.launch_target = launch_target_for_option(&game, option).ok_or_else(|| {
+                "That way of starting this game is no longer available.".to_string()
+            })?;
+        }
+        let game = game;
         let wine_launch = match &game.launch_target {
             LaunchTarget::Runner {
                 runner_id,
@@ -7513,6 +7702,7 @@ fn owned_steam_game_to_catalog_game(
         source: GameSource::Steam,
         source_id: Some(app_id.to_string()),
         launch_target: LaunchTarget::Steam { app_id },
+        alternate_launch_targets: Vec::new(),
         installation_path,
         working_directory: None,
         arguments: Vec::new(),
@@ -7984,6 +8174,180 @@ fn store_artwork_url(game: &Game, key: &str) -> Option<String> {
     (value.starts_with('/') && !value.starts_with("//")).then(|| value.to_string())
 }
 
+/// Whether one way of starting this game could work right now.
+///
+/// Each arm asks the cheapest authoritative question for its kind, and none of
+/// them stats the filesystem: this runs once per way of starting per rendered
+/// tile, and a library is thousands of tiles.
+fn target_launchable(target: &LaunchTarget, game: &Game, catalog: &Catalog) -> bool {
+    match target {
+        // A Steam URI can still be launched after an uninstall, but that
+        // would hand users a dead-end client error. The source refresh is
+        // the cheap, authoritative state boundary; no filesystem stat per
+        // rendered card is needed here.
+        LaunchTarget::Steam { .. } => game.installation_path.is_some(),
+        LaunchTarget::Direct => !game.id.starts_with("showcase-"),
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if runner_id == WINE_STAGING_RUNNER_ID => {
+            catalog
+                .wine_profile(profile_id)
+                .is_some_and(|profile| profile.enabled)
+                && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
+                && cfg!(target_os = "macos")
+        }
+        // Winlator is the Android answer to the same question Wine answers
+        // on macOS, and the same two host-private records have to be there.
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if runner_id == WINLATOR_RUNNER_ID => {
+            cfg!(target_os = "android")
+                && game_detail::winlator_game_launchable(catalog, profile_id, game_ref)
+        }
+        // A console emulator answers the same two questions: is its profile
+        // still here and enabled, and does its private ROM record exist.
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } if is_console_runner_id(runner_id) => {
+            cfg!(target_os = "android")
+                && game_detail::console_game_launchable(catalog, profile_id, game_ref)
+        }
+        // A third-party runner answers the same two questions as the native
+        // ones: is the profile that owns this game still here and enabled,
+        // and does its host-private inventory record exist. The profile also
+        // has to belong to the plugin the card names, so a card left behind
+        // by one runner cannot be launched through another's profile.
+        //
+        // This used to be a flat `false`, from before the WIT host could
+        // resolve a typed intent and its grants. It can
+        // (`runner_host::prepare_runner_launch`), and `launch_game` has
+        // routed to it for a while — so the card was saying "no" about a
+        // path that works, which both killed Play and dropped every
+        // third-party runner game out of the "Play Next" shelf.
+        //
+        // Deliberately *not* checked here: that the plugin is installed and
+        // its component still compiles. The launch re-resolves the package
+        // and refuses if it cannot, while asking per rendered card would
+        // put a component probe behind every tile in the library.
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            game_ref,
+        } => {
+            catalog
+                .runner_profile(profile_id)
+                .is_some_and(|profile| profile.enabled && profile.plugin_id == *runner_id)
+                && catalog
+                    .runner_inventory_entry(profile_id, game_ref)
+                    .is_some()
+        }
+        // A connected-store game is launchable only where that store's own
+        // client is installed. Xbox and Instant Gaming have no client to
+        // hand a launch to at all, so they are never launchable.
+        // Same rule the detail page applies, through the same helper: the
+        // client has to be here *and* not be telling us the game is still
+        // missing.
+        LaunchTarget::Provider { provider, .. } => {
+            game_detail::provider_game_launchable(game, provider)
+        }
+    }
+}
+
+/// One way to start a game, as the WebView is told about it.
+///
+/// `id` is opaque and derived from the launch target's own content, never an
+/// index: the list is rebuilt on every render, and an index would quietly mean
+/// something else if a profile were removed between the card being drawn and
+/// Play being pressed. The target itself never crosses the boundary — it is
+/// launch data, and the host resolves the id back against its own catalog.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchOptionView {
+    id: String,
+    label: String,
+    launchable: bool,
+    /// Whether the game runs on another machine rather than this one.
+    ///
+    /// This is what lets a card say "Play" for a game that ships no build for
+    /// this OS: the build runs where it is supported, and this machine is only
+    /// the screen. It is deliberately narrower than "launchable" — a store
+    /// game can be launchable because its client is installed, which says
+    /// nothing about whether a build exists for this platform.
+    remote: bool,
+}
+
+/// Whether this way of starting a game runs it somewhere else. Only a profile
+/// the user set to launch streams does, and the mode is read from the profile
+/// rather than the target, because the target is the same shape either way.
+fn launch_target_is_remote(target: &LaunchTarget, catalog: &Catalog) -> bool {
+    match target {
+        LaunchTarget::Runner { profile_id, .. } => {
+            catalog.runner_profile(profile_id).is_some_and(|profile| {
+                profile.settings.launch_mode == catalog::RunnerLaunchMode::Stream
+            })
+        }
+        LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => false,
+    }
+}
+
+/// Every way to start a game, the card's own first.
+fn launch_targets_of(game: &Game) -> impl Iterator<Item = &LaunchTarget> {
+    std::iter::once(&game.launch_target).chain(game.alternate_launch_targets.iter())
+}
+
+fn launch_option_id(target: &LaunchTarget) -> String {
+    let encoded = serde_json::to_string(target).unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(encoded.as_bytes());
+    format!("launch-{}", &format!("{:x}", digest.finalize())[..16])
+}
+
+/// Resolve the handle a WebView sent back to the launch it names, or nothing.
+/// Only this game's own ways of starting are ever considered, so a handle
+/// copied from another card names nothing here.
+fn launch_target_for_option(game: &Game, option_id: &str) -> Option<LaunchTarget> {
+    launch_targets_of(game)
+        .find(|target| launch_option_id(target) == option_id)
+        .cloned()
+}
+
+/// What to call one way of starting a game, in the player's terms: where it
+/// runs, not how. A runner's own profile name is the best answer it has —
+/// "Moonlight" says more than "third-party runner".
+fn launch_option_label(target: &LaunchTarget, catalog: &Catalog) -> String {
+    match target {
+        LaunchTarget::Direct => "This computer".into(),
+        LaunchTarget::Steam { .. } => "Steam".into(),
+        LaunchTarget::Provider { provider, .. } => sources::SourceProvider::from_token(provider)
+            .map(|provider| provider.label().to_owned())
+            .unwrap_or_else(|| "Its store".into()),
+        LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            ..
+        } => {
+            if runner_id == WINE_STAGING_RUNNER_ID {
+                return "Wine-Staging".into();
+            }
+            catalog
+                .runner_profile(profile_id)
+                .map(|profile| profile.display_name.clone())
+                .or_else(|| {
+                    catalog
+                        .wine_profile(profile_id)
+                        .map(|profile| profile.display_name.clone())
+                })
+                .unwrap_or_else(|| "Another runner".into())
+        }
+    }
+}
+
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {
     // Wallpapers the user deliberately chose on the detail page. Each role is
     // independent: the background never overrides a card cover and vice versa.
@@ -8080,57 +8444,15 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             .or(steam_cover),
         last_played_at: game.last_played_at.clone().unwrap_or_default(),
         play_time_seconds: game.play_time_seconds,
-        launchable: match &game.launch_target {
-            // A Steam URI can still be launched after an uninstall, but that
-            // would hand users a dead-end client error. The source refresh is
-            // the cheap, authoritative state boundary; no filesystem stat per
-            // rendered card is needed here.
-            LaunchTarget::Steam { .. } => game.installation_path.is_some(),
-            LaunchTarget::Direct => !game.id.starts_with("showcase-"),
-            LaunchTarget::Runner {
-                runner_id,
-                profile_id,
-                game_ref,
-            } if runner_id == WINE_STAGING_RUNNER_ID => {
-                catalog
-                    .wine_profile(profile_id)
-                    .is_some_and(|profile| profile.enabled)
-                    && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
-                    && cfg!(target_os = "macos")
-            }
-            // Winlator is the Android answer to the same question Wine answers
-            // on macOS, and the same two host-private records have to be there.
-            LaunchTarget::Runner {
-                runner_id,
-                profile_id,
-                game_ref,
-            } if runner_id == WINLATOR_RUNNER_ID => {
-                cfg!(target_os = "android")
-                    && game_detail::winlator_game_launchable(catalog, profile_id, game_ref)
-            }
-            // A console emulator answers the same two questions: is its profile
-            // still here and enabled, and does its private ROM record exist.
-            LaunchTarget::Runner {
-                runner_id,
-                profile_id,
-                game_ref,
-            } if is_console_runner_id(runner_id) => {
-                cfg!(target_os = "android")
-                    && game_detail::console_game_launchable(catalog, profile_id, game_ref)
-            }
-            // Third-party runner execution is still deliberately unavailable
-            // until its WIT host can resolve a typed intent and grants.
-            LaunchTarget::Runner { .. } => false,
-            // A connected-store game is launchable only where that store's own
-            // client is installed. Xbox and Instant Gaming have no client to
-            // hand a launch to at all, so they are never launchable.
-            // Same rule the detail page applies, through the same helper: the
-            // client has to be here *and* not be telling us the game is still
-            // missing.
-            LaunchTarget::Provider { provider, .. } => {
-                game_detail::provider_game_launchable(game, provider)
-            }
-        },
+        launchable: launch_targets_of(game).any(|target| target_launchable(target, game, catalog)),
+        launch_options: launch_targets_of(game)
+            .map(|target| LaunchOptionView {
+                id: launch_option_id(target),
+                label: launch_option_label(target, catalog),
+                launchable: target_launchable(target, game, catalog),
+                remote: launch_target_is_remote(target, catalog),
+            })
+            .collect(),
         host_platform: host_platform.into(),
         supported_platforms,
         compatible_with_host,
@@ -8288,6 +8610,14 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
     presentation.winlator_inventory = stored_catalog.winlator_inventory.clone();
     presentation.console_profiles = stored_catalog.console_profiles.clone();
     presentation.console_inventory = stored_catalog.console_inventory.clone();
+    // Third-party runners answer the same question from the same two records,
+    // and they were missing here: their cards used to report a hardcoded "not
+    // launchable", so nothing needed them. Once that became a real question,
+    // every third-party runner game in the library answered it with "no" —
+    // the profile and the record exist, just not in the catalog the view was
+    // being built against.
+    presentation.runner_profiles = stored_catalog.runner_profiles.clone();
+    presentation.runner_inventory = stored_catalog.runner_inventory.clone();
 
     // An explicit Direct → Wine association keeps the original local record
     // for a reversible fallback, but the library should surface one card.
@@ -8533,6 +8863,7 @@ fn showcase_game(
         source: GameSource::Local,
         source_id: None,
         launch_target: LaunchTarget::Direct,
+        alternate_launch_targets: Vec::new(),
         installation_path: None,
         working_directory: None,
         arguments: Vec::new(),
@@ -8955,6 +9286,134 @@ pub(crate) mod tests {
         assert_eq!(game.metadata.as_deref(), Some("Installed"));
         assert!(view.launchable);
         assert_eq!(game.launch_target, LaunchTarget::Steam { app_id: 480 });
+    }
+
+    /// The bug this covers: a third-party runner's games were reported
+    /// unlaunchable no matter what, from before the WIT host could resolve a
+    /// typed intent. `launch_game` had routed through
+    /// `prepare_runner_launch` for a while by then, so every imported game of
+    /// every third-party runner had a dead Play button and fell out of the
+    /// "Play Next" shelf, which keeps only what the library says can start.
+    #[test]
+    fn a_third_party_runner_game_is_launchable_once_its_profile_and_record_are_there() {
+        use catalog::{
+            RunnerGameInventoryEntry, RunnerProfile, RunnerProfileSettings, RunnerProfileStatus,
+        };
+
+        let entry = RunnerGameInventoryEntry {
+            profile_id: "profile-1".into(),
+            game_ref: "x:4120".into(),
+            title: "A Way Out".into(),
+            provider_id: "com.orivo.gamestream".into(),
+            external_id: "x:4120".into(),
+            game_path: std::path::PathBuf::from("/Users/someone/Games/A Way Out.stream"),
+            directory_grant_id: "games".into(),
+            platform: None,
+            imported_at: None,
+        };
+        // Built by the same function the import writes with, so the card under
+        // test is the card an import actually produces.
+        let game = runner_host::runner_catalog_game("com.orivo.gamestream", "profile-1", &entry);
+        let profile = RunnerProfile {
+            id: "profile-1".into(),
+            plugin_id: "com.orivo.gamestream".into(),
+            display_name: "Moonlight".into(),
+            application: std::path::PathBuf::from("/Applications/Moonlight.app"),
+            game_directories: Vec::new(),
+            settings: RunnerProfileSettings::default(),
+            status: RunnerProfileStatus::Valid,
+            status_message: None,
+            enabled: true,
+            import_cursor: None,
+            import_complete: true,
+            last_imported_at: None,
+            package_fingerprint: None,
+        };
+
+        // Nothing recorded yet: a card with no profile behind it cannot start.
+        assert!(!game_view(&game, &Catalog::default(), None).launchable);
+
+        let mut catalog = Catalog::default();
+        catalog.runner_profiles.push(profile.clone());
+        assert!(
+            !game_view(&game, &catalog, None).launchable,
+            "a profile without the game's own record is not enough"
+        );
+
+        catalog.runner_inventory.push(entry);
+        assert!(game_view(&game, &catalog, None).launchable);
+
+        // A disabled profile keeps its games visible and stops them starting.
+        catalog.runner_profiles[0].enabled = false;
+        assert!(!game_view(&game, &catalog, None).launchable);
+        catalog.runner_profiles[0].enabled = true;
+
+        // And the profile has to belong to the plugin the card names, so a card
+        // left behind by one runner cannot start through another's profile.
+        catalog.runner_profiles[0].plugin_id = "com.orivo.some-other-runner".into();
+        assert!(!game_view(&game, &catalog, None).launchable);
+    }
+
+    /// The bug this covers: the library is projected from a *presentation*
+    /// catalog, which copies the profiles and private records a runner card
+    /// needs in order to say whether it can start. Every runner had its pair
+    /// copied except third-party ones — nobody had needed them, because their
+    /// cards used to answer with a hardcoded "no". Once that became a real
+    /// question, the answer was computed against a catalog where the profile
+    /// and the record did not exist, so every third-party runner game in the
+    /// library read as unavailable while the catalog behind it was perfectly
+    /// in order.
+    #[test]
+    fn a_third_party_runner_game_is_still_launchable_through_the_presentation_catalog() {
+        use catalog::{
+            RunnerGameInventoryEntry, RunnerProfile, RunnerProfileSettings, RunnerProfileStatus,
+        };
+
+        let entry = RunnerGameInventoryEntry {
+            profile_id: "profile-1".into(),
+            game_ref: "x:4120".into(),
+            title: "A Way Out".into(),
+            provider_id: "com.orivo.gamestream".into(),
+            external_id: "x:4120".into(),
+            game_path: std::path::PathBuf::from("/Users/someone/Games/A Way Out.stream"),
+            directory_grant_id: "games".into(),
+            platform: None,
+            imported_at: None,
+        };
+        let game = runner_host::runner_catalog_game("com.orivo.gamestream", "profile-1", &entry);
+        let mut stored = Catalog::default();
+        stored.games.push(game.clone());
+        stored.runner_profiles.push(RunnerProfile {
+            id: "profile-1".into(),
+            plugin_id: "com.orivo.gamestream".into(),
+            display_name: "Moonlight".into(),
+            application: std::path::PathBuf::from("/Applications/Moonlight.app"),
+            game_directories: Vec::new(),
+            settings: RunnerProfileSettings::default(),
+            status: RunnerProfileStatus::Valid,
+            status_message: None,
+            enabled: true,
+            import_cursor: None,
+            import_complete: true,
+            last_imported_at: None,
+            package_fingerprint: None,
+        });
+        stored.runner_inventory.push(entry);
+
+        // Asserted through the projection the library actually uses, not
+        // against the stored catalog: the stored one was always right.
+        let presentation = presentation_catalog(&stored, false);
+        let view = game_view(&game, &presentation, None);
+        assert!(view.launchable);
+        // And the profile's own name reaches the choice, rather than the
+        // fallback a missing profile would have produced.
+        assert_eq!(
+            view.launch_options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Moonlight"]
+        );
     }
 
     #[test]
@@ -9512,6 +9971,7 @@ pub(crate) mod tests {
             source: GameSource::Local,
             source_id: None,
             launch_target: LaunchTarget::Direct,
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: None,
             arguments: Vec::new(),
@@ -9559,6 +10019,7 @@ pub(crate) mod tests {
             source: GameSource::Local,
             source_id: None,
             launch_target: LaunchTarget::Direct,
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: None,
             arguments: Vec::new(),

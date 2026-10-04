@@ -95,12 +95,17 @@ if [ ! -d "${ROOT}/src-tauri/gen/apple" ]; then
   pnpm tauri ios init --ci
 fi
 
-# Self-heal the deployment target, in both places it lives.
+# Self-heal the deployment target, in both places it lives. The perl programs
+# are single-quoted so bash cannot eat `$1`: with double quotes bash expands it
+# to the first script argument, perl then sees `$115.0`, parses that as capture
+# group 115 (empty) and deletes the whole setting — leaving a bare `.0;`.
 if [ -f "$PROJECT_YML" ]; then
-  perl -pi -e "s/^(    iOS: )14\\.0\$/\$1${MIN_IOS}/" "$PROJECT_YML"
+  perl -pi -e 's/^(    iOS: )14\.0$/${1}'"$MIN_IOS"'/' "$PROJECT_YML"
 fi
 if [ -f "$PBXPROJ" ]; then
-  perl -pi -e "s/(\bIPHONEOS_DEPLOYMENT_TARGET = )14\\.0;/\$1${MIN_IOS};/g" "$PBXPROJ"
+  perl -pi -e 's/(\bIPHONEOS_DEPLOYMENT_TARGET = )14\.0;/${1}'"$MIN_IOS"';/g' "$PBXPROJ"
+  # Heal the bare `.0;` lines the broken double-quoted version left behind.
+  perl -pi -e 's/(?<=\t)\.0;$/IPHONEOS_DEPLOYMENT_TARGET = '"$MIN_IOS"';/' "$PBXPROJ"
 fi
 
 # Pick the simulator. xcrun's JSON is the only list that separates runtimes;

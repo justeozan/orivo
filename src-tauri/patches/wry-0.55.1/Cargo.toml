@@ -291,6 +291,7 @@ features = [
     "NSWindow",
     "NSView",
     "NSPasteboard",
+    "NSPasteboardItem",
     "NSPanel",
     "NSResponder",
     "NSOpenPanel",

@@ -1,5 +1,18 @@
 import type { ConnectedSource } from "./contracts";
 
+/** One way to start a game. `id` is opaque and resolved by the host. */
+export interface LaunchOption {
+  id: string;
+  label: string;
+  launchable: boolean;
+  /**
+   * Whether the game runs on another machine rather than this one. A card with
+   * one of these is playable even when the store published no build for this
+   * OS: the build runs where it is supported.
+   */
+  remote: boolean;
+}
+
 export interface LibraryGame {
   id: string;
   title: string;
@@ -18,6 +31,12 @@ export interface LibraryGame {
   lastPlayedAt: string;
   playTimeSeconds: number;
   launchable: boolean;
+  /**
+   * Every way this game can be started, the card's own first. A game that is
+   * both installed here and streamable from another machine carries two, and
+   * Play asks which one. Absent on a fixture, which means "the one way".
+   */
+  launchOptions?: LaunchOption[];
   /** Native platform support declared by Steam Store, not compatibility-layer support. */
   hostPlatform?: "windows" | "macos" | "linux" | "other";
   supportedPlatforms?: Array<"windows" | "macos" | "linux">;

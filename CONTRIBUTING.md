@@ -43,6 +43,76 @@ show it.
 Requires Node 22, pnpm 11 and a stable Rust toolchain. On Linux you also need
 `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`.
 
+## Working in a git worktree
+
+A second worktree is cheap here because nothing that can be shared is copied:
+the pnpm store, the Cargo registry, the Playwright browsers and the sccache
+compilation cache all live outside every worktree, and `git worktree add` shares
+the object store with the main checkout. What a new worktree actually costs is
+its checkout (~123 MB) and its own `target/` directory.
+
+```sh
+# from the main checkout
+git worktree add ../orivo-<name> -b <branch>
+
+cd ../orivo-<name>
+pnpm install            # ~1 s: files are linked from the shared store
+pnpm exec vite build    # cargo needs ../dist — tauri::generate_context! reads it
+```
+
+Everything expensive is shared:
+
+| What | Where it lives | Why it is not per-worktree |
+| --- | --- | --- |
+| JS packages | `pnpm store path` — global, linked into each `node_modules` | pnpm's default; an install is metadata only, `node_modules` adds no real disk |
+| Cargo registry, git deps, toolchains | `$CARGO_HOME` (`~/.cargo`), `~/.rustup` | set by rustup; never override `CARGO_HOME` per worktree |
+| Compilation cache | sccache, `~/Library/Caches/Mozilla.sccache` | wired by `$CARGO_HOME/config.toml`, machine-local and not versioned anywhere |
+| Playwright browsers | `~/Library/Caches/ms-playwright` | Playwright's default, shared by every project on the machine |
+| Gradle (Android) | `~/.gradle` | Gradle's default |
+| Rust build directory | **per worktree**, `target/` at the repo root | deliberate — see below |
+
+Two rules that make this hold:
+
+- **Never point `CARGO_TARGET_DIR` at a directory shared between worktrees.**
+  Cargo takes a lock on it, so two worktrees building at once would queue up
+  behind each other, and alternating between branches would invalidate the
+  fingerprints every time. `target/` stays private; sccache is what makes
+  rebuilding it cheap.
+- **Never copy the store into a worktree.** If `pnpm install` reports downloaded
+  files instead of reused ones, the store is not being found — check
+  `pnpm store path` rather than committing anything to fix it.
+
+sccache cannot cache an incremental compilation, which is why `[profile.dev]` in
+the workspace `Cargo.toml` sets `incremental = false`. The cost is that editing a
+Rust file recompiles its crate instead of patching it — a few extra seconds per
+edit — and it buys two things: a build directory without a session directory in
+it, and compilations that travel between worktrees, so a worktree that has never
+been built reuses the cache instead of recompiling the dependency graph.
+
+Set it back to `true` in that same file if edit latency matters more to you than
+either of those; the cache then covers only the crates outside this workspace,
+and every worktree carries its own session directory again.
+
+To build one thing without the cache, set the wrapper to the empty string:
+
+```sh
+RUSTC_WRAPPER="" cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+Cleaning up: `git worktree remove ../orivo-<name>` (add `--force` if it is
+dirty), then `git worktree prune`.
+
+### Repository settings
+
+These are local to a clone and are not committed, so run them once per clone if
+you want the same behaviour:
+
+```sh
+git config feature.manyFiles true   # fsmonitor + untracked cache, faster `git status`
+git config index.version 4          # smaller index; applied on the next index rebuild
+git maintenance start               # scheduled background gc/prefetch/repack
+```
+
 ## House style
 
 - **Behaviour comes with a test.** A fix without a failing-then-passing test is

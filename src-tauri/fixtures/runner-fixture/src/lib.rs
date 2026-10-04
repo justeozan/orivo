@@ -14,6 +14,7 @@
 //! | `fixture:shadow-stack`| fills Rust's own stack inside linear memory        |
 //! | `fixture:trap`        | executes `unreachable`                            |
 //! | `fixture:bad-mode`    | returns a launch mode the host does not recognise  |
+//! | `fixture:stream`      | returns the closed `stream` launch mode            |
 //! | `fixture:bad-target`  | answers about a different profile and game         |
 //! | `fixture:bad-runner`  | claims to be preparing another runner's launch     |
 //! | `fixture:chatty`      | floods the host journal after earning a refusal    |
@@ -156,6 +157,13 @@ impl RunnerGuest for Fixture {
             ),
             "fixture:bad-id" => (PLUGIN_ID, profile_id, "../../etc/passwd".into(), "default"),
             "fixture:bad-mode" => (PLUGIN_ID, profile_id, game_reference, "shell"),
+            // Any reference under the `fixture:stream` prefix returns the
+            // closed second mode, so a test can vary the placeholder file
+            // without a new selector. The host still reads the placeholder
+            // itself — nothing this arm says becomes an argument.
+            reference if reference.starts_with("fixture:stream") => {
+                (PLUGIN_ID, profile_id, reference.to_owned(), "stream")
+            }
             // Names a runner it is not. The host owns which plugin it called.
             "fixture:bad-runner" => (
                 "com.orivo.some-other-runner",

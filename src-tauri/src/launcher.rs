@@ -527,6 +527,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Steam,
             source_id: Some("480".into()),
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Steam { app_id: 480 },
             installation_path: Some(PathBuf::from("/definitely/not/a/Steam/game")),
             working_directory: None,
@@ -561,6 +562,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Local,
             source_id: None,
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Runner {
                 runner_id: "com.orivo.ryujinx".into(),
                 game_ref: "rom:sha256:abc123".into(),
@@ -650,6 +652,7 @@ mod tests {
             executable_path: None,
             source: GameSource::InstantGaming,
             source_id: Some("1234".into()),
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Provider {
                 provider: "instant-gaming".into(),
                 app_ref: "1234".into(),

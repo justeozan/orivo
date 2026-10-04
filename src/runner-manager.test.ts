@@ -4,6 +4,7 @@ import {
   createRunnerManagerController,
   isRunnerImportRunning,
   readInstalledRunners,
+  readPairing,
   runnerErrorMessage,
   runnerImportSummary,
   runnerProfileStatusLabel,
@@ -24,6 +25,7 @@ function profile(overrides: Partial<RunnerProfileView> = {}): RunnerProfileView 
     statusMessage: null,
     enabled: true,
     applicationLabel: "Dolphin.app",
+    launchMode: "default",
     directories: [{ id: "games", label: "My ROMs", granted: true }],
     gameCount: 3,
     importComplete: true,
@@ -73,10 +75,10 @@ function createFakeRunnerManager(overrides: Partial<RunnerManagerClient> = {}): 
       calls.push("getInstalledRunners");
       return overrides.getInstalledRunners ? overrides.getInstalledRunners(signal) : [runner()];
     },
-    async createProfile(pluginId, displayName, signal) {
-      calls.push(`createProfile:${pluginId}:${displayName}`);
+    async createProfile(pluginId, displayName, clientId, signal) {
+      calls.push(`createProfile:${pluginId}:${displayName}:${clientId ?? "picker"}`);
       return overrides.createProfile
-        ? overrides.createProfile(pluginId, displayName, signal)
+        ? overrides.createProfile(pluginId, displayName, clientId, signal)
         : profile({ pluginId, displayName });
     },
     async renameProfile(profileId, displayName, signal) {
@@ -90,6 +92,29 @@ function createFakeRunnerManager(overrides: Partial<RunnerManagerClient> = {}): 
       return overrides.setProfileEnabled
         ? overrides.setProfileEnabled(profileId, enabled, signal)
         : profile({ id: profileId, enabled });
+    },
+    async beginPairing(profileId, signal) {
+      calls.push(`beginPairing:${profileId}`);
+      return overrides.beginPairing
+        ? overrides.beginPairing(profileId, signal)
+        : { state: "started" as const, pin: "0417", host: "astra.local" };
+    },
+    async fetchProfileArtwork(profileId, signal) {
+      calls.push(`fetchProfileArtwork:${profileId}`);
+      return overrides.fetchProfileArtwork
+        ? overrides.fetchProfileArtwork(profileId, signal)
+        : 0;
+    },
+
+    async findStreamClients(signal) {
+      calls.push("findStreamClients");
+      return overrides.findStreamClients ? overrides.findStreamClients(signal) : [];
+    },
+    async setProfileLaunchMode(profileId, launchMode, signal) {
+      calls.push(`setProfileLaunchMode:${profileId}:${launchMode}`);
+      return overrides.setProfileLaunchMode
+        ? overrides.setProfileLaunchMode(profileId, launchMode, signal)
+        : profile({ id: profileId, launchMode });
     },
     async deleteProfile(profileId, signal) {
       calls.push(`deleteProfile:${profileId}`);
@@ -155,6 +180,27 @@ describe("readInstalledRunners", () => {
     expect(rows[0]?.profiles).toEqual([]);
   });
 
+  // A host that answers with a launch shape this build does not implement is
+  // shown as the ordinary kind it behaves like, rather than as a shape the
+  // panel has no control for.
+  it("reads the launch shape and falls back an unknown one to default", () => {
+    const rows = readInstalledRunners([
+      {
+        ...runner(),
+        profiles: [
+          { id: "a", pluginId: "com.orivo.dolphin", launchMode: "stream" },
+          { id: "b", pluginId: "com.orivo.dolphin", launchMode: "telepathy" },
+          { id: "c", pluginId: "com.orivo.dolphin" },
+        ],
+      },
+    ]);
+    expect(rows[0]?.profiles.map((entry) => entry.launchMode)).toEqual([
+      "stream",
+      "default",
+      "default",
+    ]);
+  });
+
   it("defaults enabled to true and a missing game count to zero", () => {
     const rows = readInstalledRunners([
       { ...runner(), profiles: [{ id: "runner-1", pluginId: "com.orivo.dolphin" }] },
@@ -166,6 +212,35 @@ describe("readInstalledRunners", () => {
 // ---------------------------------------------------------------------------
 // Copy
 // ---------------------------------------------------------------------------
+
+describe("readPairing", () => {
+  it("reads the two shapes the host produces", () => {
+    expect(readPairing({ state: "alreadyPaired", host: "astra.local" })).toEqual({
+      state: "alreadyPaired",
+      host: "astra.local",
+    });
+    expect(readPairing({ state: "started", host: "astra.local", pin: "0417" })).toEqual({
+      state: "started",
+      host: "astra.local",
+      pin: "0417",
+    });
+  });
+
+  // Anything else would be four characters the user types on another machine
+  // for nothing, so it is a rejection rather than a box to read.
+  it("refuses anything that is not one of them", () => {
+    for (const bad of [
+      {},
+      null,
+      { state: "started", host: "astra.local" },
+      { state: "started", host: "astra.local", pin: "41" },
+      { state: "started", host: "astra.local", pin: "abcd" },
+      { state: "whatever", host: "astra.local", pin: "0417" },
+    ]) {
+      expect(() => readPairing(bad)).toThrow("Pairing did not start");
+    }
+  });
+});
 
 describe("runnerProfileStatusLabel", () => {
   it("names every status a profile can carry", () => {
@@ -268,6 +343,9 @@ describe("createRunnerManagerController", () => {
 
     expect(fake.calls).toEqual([
       "getInstalledRunners",
+      // Read alongside the runners on every visit, so a client installed since
+      // the last one is offered without a restart.
+      "findStreamClients",
       "renameProfile:runner-1:New name",
       "getInstalledRunners",
       "setProfileEnabled:runner-1:false",
@@ -294,6 +372,87 @@ describe("createRunnerManagerController", () => {
     // The job's poll must not still be ticking after the profile is gone.
     await vi.advanceTimersByTimeAsync(5_000);
     expect(fake.calls.filter((call) => call.startsWith("getImportStatus"))).toHaveLength(0);
+  });
+
+  // The host drops the import cursor when the shape changes, so a poll still
+  // describing the folder's old reading has nothing left to report.
+  it("changing the launch shape forgets the import job and reloads", async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunnerManager();
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    await controller.startImport("runner-1");
+    expect(controller.importFor("runner-1")?.phase).toBe("running");
+
+    const updated = await controller.setLaunchMode("runner-1", "stream");
+    expect(updated.launchMode).toBe("stream");
+    expect(controller.importFor("runner-1")).toBeNull();
+    expect(fake.calls).toContain("setProfileLaunchMode:runner-1:stream");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fake.calls.filter((call) => call.startsWith("getImportStatus"))).toHaveLength(0);
+  });
+
+  // The cards an import creates arrive with nothing to show, so art is looked
+  // for once the games are in — never before, because an import that has not
+  // finished does not yet know which cards exist.
+  it("looks for artwork once an import has finished, and repaints only if it found some", async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => job({ jobId, phase: "ready", imported: 2 }),
+      fetchProfileArtwork: async () => 2,
+    });
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    await controller.startImport("runner-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const order = fake.calls.filter(
+      (call) => call.startsWith("fetchProfileArtwork") || call === "getInstalledRunners",
+    );
+    // Asked after the list was re-read, and the list is re-read again because
+    // two cards changed.
+    expect(order.slice(-3)).toEqual([
+      "getInstalledRunners",
+      "fetchProfileArtwork:runner-1",
+      "getInstalledRunners",
+    ]);
+  });
+
+  it("reports that it is looking for artwork while it is, and stops when it is done", async () => {
+    vi.useFakeTimers();
+    let release: (filled: number) => void = () => {};
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => job({ jobId, phase: "ready", imported: 2 }),
+      fetchProfileArtwork: () => new Promise<number>((resolve) => (release = resolve)),
+    });
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    expect(controller.isFindingArtwork("runner-1")).toBe(false);
+    await controller.startImport("runner-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(controller.isFindingArtwork("runner-1")).toBe(true);
+
+    release(2);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controller.isFindingArtwork("runner-1")).toBe(false);
+  });
+
+  it("does not look for artwork when an import was cancelled or failed", async () => {
+    vi.useFakeTimers();
+    const fake = createFakeRunnerManager({
+      getImportStatus: async (jobId) => job({ jobId, phase: "cancelled" }),
+    });
+    const controller = createRunnerManagerController(fake.client);
+    await controller.load(liveSignal());
+
+    await controller.startImport("runner-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(fake.calls.some((call) => call.startsWith("fetchProfileArtwork"))).toBe(false);
   });
 
   it("polls a running import to completion and then reloads the list", async () => {
@@ -452,8 +611,11 @@ describe("createRunnerManagerController", () => {
     expect(changes).toBe(2);
 
     await vi.advanceTimersByTimeAsync(500);
-    // One tick for the poll result, one for the reload it triggers on completion.
-    expect(changes).toBe(4);
+    // One tick for the poll result, one for the reload it triggers on
+    // completion, then one as the artwork pass starts and one as it ends —
+    // which is what keeps "Finding artwork…" on screen for exactly as long as
+    // it is true.
+    expect(changes).toBe(6);
   });
 });
 
@@ -469,9 +631,9 @@ describe("the default client outside the desktop shell", () => {
 
   it("says every mutation needs the desktop app", async () => {
     const client = createDefaultRunnerManagerClient();
-    await expect(client.createProfile("com.orivo.dolphin", "Dolphin", liveSignal())).rejects.toThrow(
-      "Orivo desktop app",
-    );
+    await expect(
+      client.createProfile("com.orivo.dolphin", "Dolphin", null, liveSignal()),
+    ).rejects.toThrow("Orivo desktop app");
     await expect(client.grantDirectory("runner-1", null, liveSignal())).rejects.toThrow(
       "Orivo desktop app",
     );

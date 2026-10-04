@@ -29,8 +29,8 @@
 
 use crate::catalog::{
     Catalog, CatalogError, Game, GameSource, LaunchTarget, PluginPackageIdentity,
-    RunnerGameInventoryEntry, RunnerProfile, RunnerProfileStatus, directory_grant_key,
-    directory_grant_slot,
+    RunnerGameInventoryEntry, RunnerLaunchMode, RunnerProfile, RunnerProfileStatus,
+    directory_grant_key, directory_grant_slot,
 };
 use crate::plugin_manifest::{
     CapabilityGrant, CapabilityScope, CompatibleVersionInfo, HostCompatibility,
@@ -43,6 +43,7 @@ use crate::plugin_runtime::{
     PluginRuntimeError, PreparedComponent, RunnerCheck,
 };
 use crate::plugin_scheduler::{JobError, JobHandle, SubmitError};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -142,6 +143,18 @@ pub enum RunnerHostError {
     GameOutsideScope,
     /// The library entry needs importing again before it can start.
     InventoryMissing,
+    /// The profile authorises one launch shape and the plugin's intent named
+    /// the other: a stream profile offered a game-file launch, or a game-file
+    /// profile offered a stream. The mode is a permission the user set on the
+    /// profile, so the host checks it rather than trusting either side alone.
+    LaunchModeMismatch,
+    /// A stream placeholder is missing its bytes, is not JSON, or is not the
+    /// host's own `{"host","client","app"}` document for `moonlight`.
+    StreamPlaceholder,
+    /// The GameStream feed could not be reached, was refused, or could not be
+    /// written. Propagated to the import as a failed profile so the message the
+    /// `GameStreamFeedError` carries reaches the user.
+    StreamFeed(crate::gamestream::GameStreamFeedError),
     /// The user cancelled, or the host cancelled on their behalf.
     Cancelled,
     /// The plugin's own refusal, or a ceiling it ran into.
@@ -226,6 +239,15 @@ impl std::fmt::Display for RunnerHostError {
                 formatter,
                 "This game needs to be imported again before it can start."
             ),
+            Self::LaunchModeMismatch => write!(
+                formatter,
+                "This profile and its plugin disagree about how this game launches. Update the plugin, or set the profile up again."
+            ),
+            Self::StreamPlaceholder => write!(
+                formatter,
+                "This game's stream description is missing or unreadable. Import this profile again to refresh it."
+            ),
+            Self::StreamFeed(error) => write!(formatter, "{error}"),
             Self::Cancelled => write!(formatter, "The runner operation was cancelled."),
             Self::Plugin(error) => write!(formatter, "{error}"),
             Self::Busy => write!(
@@ -1079,6 +1101,74 @@ fn is_executable(path: &Path) -> bool {
 // Launch
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Stream placeholders
+// ---------------------------------------------------------------------------
+
+/// The bytes a stream placeholder may occupy. It is a host-authored document
+/// of three short strings; anything larger is not the document the feed
+/// writes, and reading it as one keeps a hostile file from costing anything.
+const MAX_STREAM_PLACEHOLDER_BYTES: usize = 4 * 1024;
+/// Bounds on what can reach the stream argument list: a host is a DNS name,
+/// an IPv4 literal or an IPv6 literal with an optional port; an application
+/// name is one Sunshine label. Both are also held back from a leading `-` and
+/// from control characters — there is no shell anywhere in this path, but an
+/// argument that looks like an option is still an argument worth refusing.
+const MAX_STREAM_HOST_LENGTH: usize = 256;
+const MAX_STREAM_APP_LENGTH: usize = 256;
+
+/// The placeholder document `{"host", "client", "app"}` the GameStream feed
+/// writes, one file per streamable game. The host is the only writer: a
+/// plugin or a user can put bytes on disk, but those bytes still have to be
+/// this document before they can start anything.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamPlaceholder {
+    host: String,
+    client: String,
+    app: String,
+}
+
+/// Whether one value can be an argument on its own: present, bounded, not an
+/// option in disguise, and free of the control characters no argv should carry.
+fn argument_safe(value: &str, max: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max
+        && !value.starts_with('-')
+        && !value.chars().any(char::is_control)
+}
+
+/// A stream host additionally stays inside the characters a host name is made
+/// of. This is not about quoting — there is no shell — but about refusing
+/// anything the host would have to second-guess later.
+fn stream_host_valid(host: &str) -> bool {
+    argument_safe(host, MAX_STREAM_HOST_LENGTH)
+        && host.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '-' | '_' | ':' | '[' | ']')
+        })
+}
+
+/// Read one resolved placeholder and return the two strings the stream
+/// argument list is built from. Every failure is the same refusal: the file
+/// exists and is inside the granted folder (the launch checks that first), so
+/// what is wrong is its content, and the user's remedy is one re-import.
+fn read_stream_placeholder(path: &Path) -> Result<(String, String), RunnerHostError> {
+    let bytes = read_bounded_file(path, MAX_STREAM_PLACEHOLDER_BYTES as u64)
+        .map_err(|_| RunnerHostError::StreamPlaceholder)?;
+    let placeholder: StreamPlaceholder =
+        serde_json::from_slice(&bytes).map_err(|_| RunnerHostError::StreamPlaceholder)?;
+    if placeholder.client != "moonlight" {
+        return Err(RunnerHostError::StreamPlaceholder);
+    }
+    if !stream_host_valid(&placeholder.host)
+        || !argument_safe(&placeholder.app, MAX_STREAM_APP_LENGTH)
+    {
+        return Err(RunnerHostError::StreamPlaceholder);
+    }
+    Ok((placeholder.host, placeholder.app))
+}
+
 /// A third-party runner launch the host has fully resolved: a program, a fixed
 /// argument list and a working directory. Nothing in it came from the plugin —
 /// the intent only said *which* profile and *which* game reference, and both had
@@ -1181,17 +1271,43 @@ pub fn prepare_runner_launch(
         )));
     }
 
+    // The launch shape is a permission the user set on the profile, not a
+    // preference the plugin may exercise: the intent has to name the shape the
+    // profile authorises, whichever way round the disagreement goes.
+    let authorised = match profile.settings.launch_mode {
+        RunnerLaunchMode::Default => PluginLaunchMode::Default,
+        RunnerLaunchMode::Stream => PluginLaunchMode::Stream,
+    };
+    if intent.mode() != authorised {
+        return Err(RunnerHostError::LaunchModeMismatch);
+    }
+
     match intent.mode() {
-        // The one mode the v1 contract declares: the application is started in
-        // its own directory with the resolved game file as its single argument.
-        // A second mode is an ABI decision, not a plugin's, which is why this
-        // match is exhaustive rather than defaulted.
+        // The v1 contract's shape: the application is started in its own
+        // directory with the resolved game file as its single argument.
         PluginLaunchMode::Default => Ok(PreparedRunnerLaunch {
             working_directory: application.parent().map(Path::to_path_buf),
             program: application,
             arguments: vec![game_file],
             title: entry.title.clone(),
         }),
+        // A stream: the resolved file is the host's own placeholder document,
+        // read and validated here, and the closed argument list is
+        // `stream <host> <app>`. Nothing the plugin said reaches this list —
+        // which is what makes a mode an ABI decision rather than a template.
+        PluginLaunchMode::Stream => {
+            let (host, app) = read_stream_placeholder(&game_file)?;
+            Ok(PreparedRunnerLaunch {
+                working_directory: application.parent().map(Path::to_path_buf),
+                program: application,
+                arguments: vec![
+                    PathBuf::from("stream"),
+                    PathBuf::from(host),
+                    PathBuf::from(app),
+                ],
+                title: entry.title.clone(),
+            })
+        }
     }
 }
 
@@ -1520,7 +1636,29 @@ pub fn commit_resolved_page(
                 committed.skipped += 1;
                 continue;
             };
-            if catalog.upsert_runner(game).is_err() {
+            // One game, one card. A game this library already holds — installed
+            // here, or owned on a store — is the same game to the person
+            // playing it, so what an import of a second way to start it adds is
+            // that way, not a second entry with its own artwork, its own play
+            // time and its own place in every shelf. A standalone card this
+            // runner wrote under that name before is folded in at the same
+            // time, so a library that already has the duplicate heals on the
+            // next import rather than needing anything removed by hand.
+            let host = catalog.host_game_for_title(&entry.title, &game.id);
+            let written = match &host {
+                Some(host_id) => {
+                    let target = game.launch_target.clone();
+                    let standalone = game.id.clone();
+                    catalog
+                        .attach_alternate_launch(host_id, target)
+                        .map(|_| {
+                            catalog.games.retain(|held| held.id != standalone);
+                        })
+                        .is_ok()
+                }
+                None => catalog.upsert_runner(game).is_ok(),
+            };
+            if !written {
                 match previous {
                     Some(previous) => {
                         let _ = catalog.upsert_runner_inventory(previous);
@@ -1561,6 +1699,7 @@ pub fn runner_catalog_game(
         executable_path: None,
         source: GameSource::Local,
         source_id: None,
+        alternate_launch_targets: Vec::new(),
         launch_target: LaunchTarget::Runner {
             runner_id: plugin_id.to_owned(),
             game_ref: entry.game_ref.clone(),

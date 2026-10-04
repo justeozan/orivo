@@ -18,7 +18,35 @@ import { invoke } from "@tauri-apps/api/core";
 import type { PluginState } from "./plugin-manager";
 
 export type RunnerProfileStatus = "unvalidated" | "valid" | "rejected";
+/**
+ * The launch shape a profile authorises. `default` starts the emulator with
+ * the game file as its one argument; `stream` means the folder holds stream
+ * descriptions Orivo itself wrote and the host starts the client on the
+ * remote machine's game instead. It is the user's own permission on their own
+ * profile — the plugin is never asked about it (`runner_commands.rs`).
+ */
+export type RunnerLaunchMode = "default" | "stream";
 export type RunnerImportPhase = "running" | "ready" | "cancelled" | "failed";
+
+/**
+ * What asking to pair produced.
+ *
+ * `alreadyPaired` is an answer rather than an error: it is the state the user
+ * wants to be in, and it is not success either — a client that is already
+ * paired refuses to start a handshake, so a PIN shown for one could only be
+ * rejected by the other machine.
+ *
+ * Neither arm carries a credential, because pairing does not use one.
+ */
+export type GameStreamPairing =
+  | { state: "alreadyPaired"; host: string }
+  | { state: "started"; host: string; pin: string };
+
+/** A streaming client Orivo found on this machine. A handle and a name — never a path. */
+export interface DetectedClientView {
+  id: string;
+  label: string;
+}
 
 export interface RunnerDirectoryView {
   id: string;
@@ -34,6 +62,7 @@ export interface RunnerProfileView {
   statusMessage: string | null;
   enabled: boolean;
   applicationLabel: string;
+  launchMode: RunnerLaunchMode;
   directories: RunnerDirectoryView[];
   gameCount: number;
   importComplete: boolean;
@@ -69,6 +98,7 @@ const PROFILE_STATUSES: ReadonlySet<string> = new Set<RunnerProfileStatus>([
   "valid",
   "rejected",
 ]);
+const LAUNCH_MODES: ReadonlySet<string> = new Set<RunnerLaunchMode>(["default", "stream"]);
 const IMPORT_PHASES: ReadonlySet<string> = new Set<RunnerImportPhase>([
   "running",
   "ready",
@@ -82,9 +112,27 @@ const IMPORT_PHASES: ReadonlySet<string> = new Set<RunnerImportPhase>([
  */
 export interface RunnerManagerClient {
   getInstalledRunners(signal: AbortSignal): Promise<InstalledRunnerView[]>;
-  createProfile(pluginId: string, displayName: string, signal: AbortSignal): Promise<RunnerProfileView>;
+  createProfile(
+    pluginId: string,
+    displayName: string,
+    /** A handle from `findStreamClients`, or null to open the native picker. */
+    clientId: string | null,
+    signal: AbortSignal,
+  ): Promise<RunnerProfileView>;
   renameProfile(profileId: string, displayName: string, signal: AbortSignal): Promise<RunnerProfileView>;
   setProfileEnabled(profileId: string, enabled: boolean, signal: AbortSignal): Promise<RunnerProfileView>;
+  setProfileLaunchMode(
+    profileId: string,
+    launchMode: RunnerLaunchMode,
+    signal: AbortSignal,
+  ): Promise<RunnerProfileView>;
+  beginPairing(profileId: string, signal: AbortSignal): Promise<GameStreamPairing>;
+  findStreamClients(signal: AbortSignal): Promise<DetectedClientView[]>;
+  /**
+   * Fill in artwork for the cards an import of this profile created. Answers
+   * how many were filled, so a run that found nothing costs no repaint.
+   */
+  fetchProfileArtwork(profileId: string, signal: AbortSignal): Promise<number>;
   deleteProfile(profileId: string, signal: AbortSignal): Promise<boolean>;
   /** Opens a native folder picker. `slot` is the grant id; omit it for the default. */
   grantDirectory(
@@ -104,9 +152,23 @@ export interface RunnerManagerController {
   runners(): InstalledRunnerView[];
   /** The most recent import job for a profile, or null if none ran this session. */
   importFor(profileId: string): RunnerImportJobView | null;
-  createProfile(pluginId: string, displayName: string): Promise<RunnerProfileView>;
+  /**
+   * Whether artwork is being looked for right now. It runs after an import and
+   * takes a request and up to four downloads per card, so a library's worth of
+   * cards is minutes of silence unless the panel says so.
+   */
+  isFindingArtwork(profileId: string): boolean;
+  createProfile(
+    pluginId: string,
+    displayName: string,
+    clientId?: string,
+  ): Promise<RunnerProfileView>;
   renameProfile(profileId: string, displayName: string): Promise<RunnerProfileView>;
   setEnabled(profileId: string, enabled: boolean): Promise<RunnerProfileView>;
+  setLaunchMode(profileId: string, launchMode: RunnerLaunchMode): Promise<RunnerProfileView>;
+  beginPairing(profileId: string): Promise<GameStreamPairing>;
+  /** The streaming clients Orivo can see, so a profile can skip the file picker. */
+  streamClients(): DetectedClientView[];
   deleteProfile(profileId: string): Promise<boolean>;
   grantDirectory(profileId: string, slot?: string): Promise<RunnerProfileView>;
   revokeDirectory(profileId: string, directoryId: string): Promise<RunnerProfileView>;
@@ -147,6 +209,32 @@ function readDirectory(value: unknown): RunnerDirectoryView[] {
   ];
 }
 
+/**
+ * An answer is only worth showing if it is one of the two shapes the host
+ * produces, and a started pairing is only worth showing if its PIN is one the
+ * machine can accept — otherwise it is four characters the user would type for
+ * nothing.
+ */
+export function readPairing(value: unknown): GameStreamPairing {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const host = typeof raw.host === "string" ? raw.host : "";
+  if (raw.state === "alreadyPaired") return { state: "alreadyPaired", host };
+  const pin = typeof raw.pin === "string" ? raw.pin : "";
+  if (raw.state !== "started" || !/^[0-9]{4}$/.test(pin)) {
+    throw new Error("Pairing did not start. Try again.");
+  }
+  return { state: "started", host, pin };
+}
+
+function readDetectedClients(value: unknown): DetectedClientView[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const raw = (entry ?? {}) as Partial<DetectedClientView>;
+    if (typeof raw.id !== "string" || !raw.id) return [];
+    return [{ id: raw.id, label: typeof raw.label === "string" && raw.label ? raw.label : raw.id }];
+  });
+}
+
 function readProfile(value: unknown): RunnerProfileView[] {
   if (!value || typeof value !== "object") return [];
   const raw = value as Partial<RunnerProfileView>;
@@ -165,6 +253,13 @@ function readProfile(value: unknown): RunnerProfileView[] {
         typeof raw.statusMessage === "string" && raw.statusMessage ? raw.statusMessage : null,
       enabled: raw.enabled !== false,
       applicationLabel: typeof raw.applicationLabel === "string" ? raw.applicationLabel : "",
+      // A mode this build does not implement reads as the default one: a
+      // profile is then shown as the ordinary kind it behaves like, rather
+      // than as a shape the panel has no control for.
+      launchMode:
+        typeof raw.launchMode === "string" && LAUNCH_MODES.has(raw.launchMode)
+          ? (raw.launchMode as RunnerLaunchMode)
+          : "default",
       directories: Array.isArray(raw.directories) ? raw.directories.flatMap(readDirectory) : [],
       gameCount:
         typeof raw.gameCount === "number" && Number.isFinite(raw.gameCount) && raw.gameCount >= 0
@@ -247,12 +342,14 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
       }
     },
 
-    async createProfile(pluginId, displayName, signal) {
+    async createProfile(pluginId, displayName, clientId, signal) {
       if (!isTauriRuntime()) {
         throw new Error("Adding an emulator is only available in the Orivo desktop app.");
       }
       assertActive(signal);
-      return readOneProfile(await invoke("create_runner_profile", { pluginId, displayName }));
+      return readOneProfile(
+        await invoke("create_runner_profile", { pluginId, displayName, clientId }),
+      );
     },
 
     async renameProfile(profileId, displayName, signal) {
@@ -265,6 +362,41 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
       if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
       assertActive(signal);
       return readOneProfile(await invoke("set_runner_profile_enabled", { profileId, enabled }));
+    },
+
+    async setProfileLaunchMode(profileId, launchMode, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readOneProfile(
+        await invoke("set_runner_profile_launch_mode", { profileId, launchMode }),
+      );
+    },
+
+    async beginPairing(profileId, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readPairing(await invoke("begin_gamestream_pairing", { profileId }));
+    },
+
+    async fetchProfileArtwork(profileId, signal) {
+      if (!isTauriRuntime()) return 0;
+      assertActive(signal);
+      const result = await invoke<unknown>("fetch_runner_profile_artwork", { profileId });
+      const filled = (result as { filled?: unknown } | null)?.filled;
+      return typeof filled === "number" && Number.isFinite(filled) ? filled : 0;
+    },
+
+    async findStreamClients(signal) {
+      try {
+        if (!isTauriRuntime()) return [];
+        assertActive(signal);
+        const found = await invoke<unknown>("find_stream_clients");
+        assertActive(signal);
+        return readDetectedClients(found);
+      } catch {
+        // Not finding one is not a failure: the picker is still there.
+        return [];
+      }
     },
 
     async deleteProfile(profileId, signal) {
@@ -382,6 +514,10 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
   // is handed, so they run on the controller's own lifetime.
   const lifetime = new AbortController();
   let runners: InstalledRunnerView[] = [];
+  // What is installed on this machine, read once per visit beside the runners.
+  // Finding nothing is a normal answer: the native picker is still there.
+  let streamClients: DetectedClientView[] = [];
+  const findingArtwork = new Set<string>();
   let disposed = false;
 
   const notify = (): void => {
@@ -445,6 +581,23 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
         } else {
           timers.delete(profileId);
           await refresh();
+          // The cards an import just created arrive with nothing to show. Art
+          // is looked for once the games are in, never before: it is slow, it
+          // is per card, and an import that has not finished does not yet know
+          // which cards exist. It never fails the import either — a title no
+          // source has art for is a normal answer.
+          if (view.phase === "ready") {
+            findingArtwork.add(profileId);
+            notify();
+            const filled = await client
+              .fetchProfileArtwork(profileId, lifetime.signal)
+              .catch(() => 0);
+            findingArtwork.delete(profileId);
+            // A run that found nothing changed nothing, so it costs no repaint
+            // beyond the one that takes the message back down.
+            if (filled > 0 && !disposed) await refresh();
+            else notify();
+          }
         }
       })();
     }, IMPORT_POLL_INTERVAL_MS);
@@ -460,8 +613,12 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       } catch {
         next = [];
       }
+      // Asked alongside, and never allowed to fail the load: a machine with no
+      // streaming client installed still has runners worth showing.
+      const found = await client.findStreamClients(signal).catch(() => []);
       if (disposed || signal.aborted) return;
       runners = next;
+      streamClients = found;
       notify();
     },
 
@@ -469,12 +626,25 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       return runners;
     },
 
+    streamClients() {
+      return streamClients;
+    },
+
+    isFindingArtwork(profileId) {
+      return findingArtwork.has(profileId);
+    },
+
     importFor(profileId) {
       return jobs.get(profileId) ?? null;
     },
 
-    async createProfile(pluginId, displayName) {
-      const created = await client.createProfile(pluginId, displayName, lifetime.signal);
+    async createProfile(pluginId, displayName, clientId) {
+      const created = await client.createProfile(
+        pluginId,
+        displayName,
+        clientId ?? null,
+        lifetime.signal,
+      );
       if (!disposed) await refresh();
       return created;
     },
@@ -491,9 +661,27 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       return updated;
     },
 
+    async beginPairing(profileId) {
+      // Nothing to reload: pairing changes no catalog state. The host state it
+      // does change lives on the other machine.
+      return client.beginPairing(profileId, lifetime.signal);
+    },
+
+    async setLaunchMode(profileId, launchMode) {
+      // The host drops the import cursor when the mode changes, so a poll
+      // still describing the old reading of this folder has nothing left to
+      // report: it is dropped here rather than allowed to land on the card.
+      invalidatePoll(profileId);
+      jobs.delete(profileId);
+      const updated = await client.setProfileLaunchMode(profileId, launchMode, lifetime.signal);
+      if (!disposed) await refresh();
+      return updated;
+    },
+
     async deleteProfile(profileId) {
       invalidatePoll(profileId);
       jobs.delete(profileId);
+      findingArtwork.delete(profileId);
       const removed = await client.deleteProfile(profileId, lifetime.signal);
       if (!disposed) await refresh();
       return removed;

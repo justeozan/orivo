@@ -12,8 +12,8 @@
 //! the code the commands run rather than an approximation of it.
 
 use crate::catalog::{
-    Catalog, CatalogError, RunnerGrantedDirectory, RunnerProfile, RunnerProfileSettings,
-    RunnerProfileStatus,
+    Catalog, CatalogError, RunnerGrantedDirectory, RunnerLaunchMode, RunnerProfile,
+    RunnerProfileSettings, RunnerProfileStatus,
 };
 use crate::plugin_manifest::{HostCompatibility, PluginCapability, valid_opaque_id};
 use crate::plugin_registry::{PluginRegistry, PluginState};
@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -81,11 +82,29 @@ pub struct RunnerProfileView {
     pub enabled: bool,
     /// The application's own name, never where it lives.
     pub application_label: String,
+    /// Which launch shape this profile authorises. It is the user's own
+    /// permission, so the panel both shows it and sets it; the plugin is never
+    /// asked about it and can never widen it.
+    pub launch_mode: RunnerLaunchMode,
     pub directories: Vec<RunnerDirectoryView>,
     pub game_count: usize,
     pub import_complete: bool,
     pub import_resumable: bool,
     pub last_imported_at: Option<u64>,
+}
+
+/// What asking to pair produced. No credential is in either arm, because
+/// pairing does not use one.
+///
+/// `AlreadyPaired` is an answer, not an error: it is the state the user wants
+/// to be in, and the previous version of this call could not tell it apart from
+/// success — it showed a PIN for a handshake the client had refused to start,
+/// which is a PIN that can only fail on the other machine.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum GameStreamPairing {
+    AlreadyPaired { host: String },
+    Started { host: String, pin: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -158,6 +177,10 @@ pub struct ThirdPartyRunnerService {
     /// ceiling and the compilation cache global. A test sets its own so its
     /// invocations do not share a bounded queue with every other test.
     runtime: Option<PluginRuntime>,
+    /// The GameStream host settings, for the import that refreshes `.stream`
+    /// placeholders into a stream profile's granted folder. Present in
+    /// production; absent in tests that do not touch stream profiles.
+    gamestream: Option<Arc<crate::gamestream::GameStreamService>>,
 }
 
 impl ThirdPartyRunnerService {
@@ -174,7 +197,18 @@ impl ThirdPartyRunnerService {
             sequence: AtomicU64::new(0),
             import_limits: RunnerImportLimits::default(),
             runtime: None,
+            gamestream: None,
         }
+    }
+
+    /// Attach the GameStream service. Called by `setup` in production; by tests
+    /// that exercise a stream-profile import path.
+    pub fn with_gamestream(
+        mut self,
+        gamestream: Arc<crate::gamestream::GameStreamService>,
+    ) -> Self {
+        self.gamestream = Some(gamestream);
+        self
     }
 
     /// Shrink the pages an import walks. A test that wants to cancel between two
@@ -347,6 +381,42 @@ impl ThirdPartyRunnerService {
             .ok_or(RunnerHostError::UnknownProfile)?;
         self.commit_profile(RunnerProfile {
             enabled,
+            ..profile.clone()
+        })?;
+        self.profile_view(profile_id)
+    }
+
+    /// Set which launch shape this profile authorises.
+    ///
+    /// The plugin is deliberately not asked again: the mode is the user's own
+    /// permission over their own machine, it is not part of the WIT
+    /// `runner-profile` record `validate-profile` sees, and a plugin that
+    /// could influence it would be choosing its own argument list. The import
+    /// cursor is reset instead, because the folder's meaning changed — a
+    /// stream profile's folder is a feed Orivo refreshes, a default one's is
+    /// games the user put there — and the next import should walk it whole
+    /// rather than resume a cursor earned under the other reading.
+    ///
+    /// Games already imported keep their cards. One whose launch shape no
+    /// longer matches refuses with [`RunnerHostError::LaunchModeMismatch`],
+    /// which says so and names the remedy, rather than being deleted here
+    /// behind the user's back.
+    pub fn set_profile_launch_mode(
+        &self,
+        profile_id: &str,
+        launch_mode: RunnerLaunchMode,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        let catalog = self.store.snapshot()?;
+        let profile = catalog
+            .runner_profile(profile_id)
+            .ok_or(RunnerHostError::UnknownProfile)?;
+        if profile.settings.launch_mode == launch_mode {
+            return self.profile_view(profile_id);
+        }
+        self.commit_profile(RunnerProfile {
+            settings: RunnerProfileSettings { launch_mode },
+            import_cursor: None,
+            import_complete: false,
             ..profile.clone()
         })?;
         self.profile_view(profile_id)
@@ -548,6 +618,40 @@ impl ThirdPartyRunnerService {
             .runner_profile(profile_id)
             .ok_or(RunnerHostError::UnknownProfile)?;
         let package = self.package(&profile.plugin_id)?;
+        // A stream profile's games are fetched by the host and written as
+        // `.stream` placeholders before the plugin walks them. The refresh is
+        // skipped when no host is configured — that is the manual mode the
+        // plugin documents — and surfaces any other feed error as a failed
+        // import so the message the feed carries reaches the user.
+        if profile.settings.launch_mode == RunnerLaunchMode::Stream {
+            // The *first* folder the profile still has access to, and only it.
+            // One host's library written into two folders would be the same
+            // game twice, so a second folder on a stream profile is somewhere
+            // the user maintains themselves rather than a second feed.
+            let destination = profile
+                .game_directories
+                .iter()
+                .find(|directory| {
+                    directory_grant_is_active(
+                        &catalog,
+                        &profile.plugin_id,
+                        profile_id,
+                        &directory.id,
+                    )
+                })
+                .map(|directory| directory.path.clone());
+            // The client that answers is the profile's own application, and it
+            // is re-resolved and re-checked here exactly as a launch would:
+            // asking it is as much "running it" as starting a game is.
+            let client = resolve_application(profile)?;
+            if let (Some(destination), Some(service)) = (destination, self.gamestream.as_ref()) {
+                match service.refresh_placeholders(&client, &destination) {
+                    // Manual placeholders remain and are imported as-is.
+                    Err(crate::gamestream::GameStreamFeedError::NotConfigured) | Ok(_) => {}
+                    Err(error) => return Err(RunnerHostError::StreamFeed(error)),
+                }
+            }
+        }
         import_runner_games(
             &package,
             &self.store,
@@ -671,6 +775,66 @@ impl ThirdPartyRunnerService {
         Ok(prepared.title().to_owned())
     }
 
+    /// Start pairing this profile's client with the configured machine, and
+    /// return the PIN the user has to type on the machine's own side.
+    ///
+    /// Pairing is not the feed's business: it is the client's own handshake
+    /// with the machine, on the machine's own ports, and it is what has to
+    /// happen once before anything can be listed or streamed. Nothing on this
+    /// path reads a credential, because there is none to read.
+    ///
+    /// **The client chooses the PIN**, which is why Orivo can show it: the
+    /// handshake has the client commit to a PIN and the machine's operator
+    /// confirm the same one. Orivo draws it, hands it to the client as an
+    /// argument, and the user types it into Sunshine or Apollo.
+    ///
+    /// The state is checked first, and that check is the whole point of this
+    /// shape: a client that is already paired *refuses to start a handshake*,
+    /// so starting one anyway and showing its PIN would hand the user four
+    /// digits that the other machine can only reject. Already paired is
+    /// therefore an answer, not an attempt.
+    ///
+    /// Once started, the process is left running on purpose. `pair` blocks
+    /// until the machine confirms or the attempt times out, so returning as
+    /// soon as it has started is the only way to show the PIN while it is
+    /// still worth typing; a thread reaps the child so repeated attempts do
+    /// not pile up.
+    pub fn begin_pairing(&self, profile_id: &str) -> Result<GameStreamPairing, RunnerHostError> {
+        let catalog = self.store.snapshot()?;
+        let profile = catalog
+            .runner_profile(profile_id)
+            .ok_or(RunnerHostError::UnknownProfile)?;
+        // Pairing a profile that does not launch streams would be pairing on
+        // behalf of a permission the user never gave.
+        if profile.settings.launch_mode != RunnerLaunchMode::Stream {
+            return Err(RunnerHostError::LaunchModeMismatch);
+        }
+        // Re-resolved and re-checked here, exactly as a launch would: storing a
+        // path was never an authorisation to run it.
+        let application = resolve_application(profile)?;
+        let gamestream = self.gamestream.as_ref().ok_or(RunnerHostError::StreamFeed(
+            crate::gamestream::GameStreamFeedError::NotConfigured,
+        ))?;
+        let host = gamestream
+            .stream_host()
+            .map_err(RunnerHostError::StreamFeed)?;
+        if gamestream
+            .is_paired(&application)
+            .map_err(RunnerHostError::StreamFeed)?
+        {
+            return Ok(GameStreamPairing::AlreadyPaired { host });
+        }
+        let pin = pairing_pin()?;
+        let child = pairing_command(&application, &host, &pin)
+            .spawn()
+            .map_err(|_| RunnerHostError::ApplicationUnavailable)?;
+        thread::spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+        Ok(GameStreamPairing::Started { host, pin })
+    }
+
     /// The transactional writer, for tests that have to set up a catalog state
     /// no command produces — a planted inventory entry a hostile plugin would
     /// have produced, for one.
@@ -784,6 +948,7 @@ fn profile_view(catalog: &Catalog, profile: &RunnerProfile) -> RunnerProfileView
         status_message: profile.status_message.clone(),
         enabled: profile.enabled,
         application_label: safe_label(&profile.application, "Emulator"),
+        launch_mode: profile.settings.launch_mode,
         directories: profile
             .game_directories
             .iter()
@@ -856,20 +1021,47 @@ pub async fn get_installed_runners(
 pub async fn create_runner_profile(
     plugin_id: String,
     display_name: String,
+    client_id: Option<String>,
     service: Service<'_>,
 ) -> Result<RunnerProfileView, String> {
     if !opaque(&plugin_id) {
         return Err("That runner plugin is not installed.".into());
     }
+    if client_id.as_deref().is_some_and(|id| !opaque(id)) {
+        return Err("That application is no longer available.".into());
+    }
     let service = Arc::clone(&service);
     tauri::async_runtime::spawn_blocking(move || {
-        let application = pick_application()?;
+        // A handle for something Orivo found itself, or the native picker. The
+        // WebView never names a path either way: an id is only honoured if it
+        // still matches a client detection finds on this machine now, so the
+        // set of programs it can choose from is the set Orivo looks for.
+        let application = match client_id {
+            Some(id) => crate::gamestream::client_for_id(&id)
+                .ok_or_else(|| "That application is no longer available.".to_string())?,
+            None => pick_application()?,
+        };
         service
             .create_profile(&plugin_id, &display_name, &application)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(|_| "Setting up this runner did not finish. Try again.".to_string())?
+}
+
+/// The streaming clients Orivo can see on this machine, so a stream profile can
+/// be set up in one click instead of a file picker. Labels and handles only.
+#[tauri::command]
+pub async fn find_stream_clients() -> Result<Vec<crate::gamestream::DetectedClientView>, String> {
+    // Touching the filesystem, so not on the command executor.
+    tauri::async_runtime::spawn_blocking(|| {
+        crate::gamestream::detect_clients()
+            .iter()
+            .map(crate::gamestream::DetectedClient::view)
+            .collect()
+    })
+    .await
+    .map_err(|_| "Orivo could not look for a streaming client.".to_string())
 }
 
 #[tauri::command]
@@ -902,6 +1094,28 @@ pub fn set_runner_profile_enabled(
         .map_err(|error| error.to_string())
 }
 
+/// Switch a profile between the launch shapes the host implements. The value
+/// is matched against a closed set here: an unknown mode is refused rather
+/// than defaulted, so a WebView cannot name a shape this host does not build.
+#[tauri::command]
+pub fn set_runner_profile_launch_mode(
+    profile_id: String,
+    launch_mode: String,
+    service: Service<'_>,
+) -> Result<RunnerProfileView, String> {
+    if !opaque(&profile_id) {
+        return Err("This runner profile is no longer available.".into());
+    }
+    let launch_mode = match launch_mode.as_str() {
+        "default" => RunnerLaunchMode::Default,
+        "stream" => RunnerLaunchMode::Stream,
+        _ => return Err("Orivo does not know that way of launching a game.".into()),
+    };
+    service
+        .set_profile_launch_mode(&profile_id, launch_mode)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn delete_runner_profile(profile_id: String, service: Service<'_>) -> Result<bool, String> {
     if !opaque(&profile_id) {
@@ -909,6 +1123,62 @@ pub fn delete_runner_profile(profile_id: String, service: Service<'_>) -> Result
     }
     service
         .delete_profile(&profile_id)
+        .map_err(|error| error.to_string())
+}
+
+/// The pairing process, built the way every other process in this host is: no
+/// shell, one argument each, and every value one Orivo produced itself — the
+/// program is a canonical path it resolved, the address passed the feed's own
+/// host grammar, and the PIN is four digits it drew. Nothing a plugin said is
+/// anywhere in it, because a plugin is not involved in pairing at all.
+fn pairing_command(application: &Path, host: &str, pin: &str) -> Command {
+    let mut command = Command::new(application);
+    command
+        .arg("pair")
+        .arg(host)
+        .arg("--pin")
+        .arg(pin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// A uniform four-digit pairing PIN.
+///
+/// Rejection-sampled rather than reduced modulo 10000: 65536 is not a multiple
+/// of it, so a plain `%` would make the first 5536 PINs slightly likelier than
+/// the rest. A pairing PIN is a short-lived shared secret for a handshake that
+/// authorises a client against a machine, and skewing it costs nothing to
+/// avoid.
+fn pairing_pin() -> Result<String, RunnerHostError> {
+    loop {
+        let mut bytes = [0u8; 2];
+        getrandom::fill(&mut bytes).map_err(|_| RunnerHostError::ApplicationUnavailable)?;
+        let sample = u16::from_le_bytes(bytes);
+        if sample < 60_000 {
+            return Ok(format!("{:04}", sample % 10_000));
+        }
+    }
+}
+
+/// Start pairing a stream profile's client with the configured host. The PIN
+/// that comes back is for the user to type on the host's own side; Orivo never
+/// sends it anywhere itself.
+#[tauri::command]
+pub async fn begin_gamestream_pairing(
+    profile_id: String,
+    service: Service<'_>,
+) -> Result<GameStreamPairing, String> {
+    if !opaque(&profile_id) {
+        return Err("This runner profile is no longer available.".into());
+    }
+    let service = Arc::clone(&service);
+    // Resolving and starting the client is blocking work, so it belongs on a
+    // worker rather than the command executor.
+    tauri::async_runtime::spawn_blocking(move || service.begin_pairing(&profile_id))
+        .await
+        .map_err(|_| "Pairing did not start. Try again.".to_string())?
         .map_err(|error| error.to_string())
 }
 
@@ -1021,7 +1291,7 @@ fn pick_directory() -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::LaunchTarget;
+    use crate::catalog::{LaunchTarget, RunnerLaunchMode};
     use crate::plugin_manifest::{
         ArtifactDescriptor, ArtifactKind, PLUGIN_SDK_V1, PluginCapability, PluginExtension,
         PluginManifest,
@@ -1547,6 +1817,736 @@ mod tests {
         // starts from the file the host resolved.
         let mut child = prepared.spawn().unwrap();
         assert!(child.wait().unwrap().success());
+    }
+
+    // -----------------------------------------------------------------------
+    // Streams
+    // -----------------------------------------------------------------------
+
+    /// Turn the configured profile into one that authorises game streams,
+    /// through the same call the panel makes. The mode is the user's own
+    /// permission on the profile, so it changes without asking the plugin
+    /// again — `validate-profile` never sees it, which is exactly why the
+    /// launch checks the intent against it later.
+    fn make_stream_profile(harness: &Harness) {
+        harness
+            .service
+            .set_profile_launch_mode(ACCEPTED_PROFILE_ID, RunnerLaunchMode::Stream)
+            .expect("the mode is the user's to set");
+    }
+
+    fn write_placeholder(harness: &Harness, file: &str, body: &str) {
+        fs::write(harness.games.join(file), body).unwrap();
+    }
+
+    /// The mode is on the view so the panel can show it, and it round-trips
+    /// through the same call the panel makes. Changing it drops the import
+    /// cursor: the folder now means something else — a feed Orivo refreshes
+    /// rather than games the user put there — so the next import walks it
+    /// whole instead of resuming a cursor earned under the other reading.
+    #[test]
+    fn the_launch_mode_is_the_users_to_set_and_a_change_drops_the_import_cursor() {
+        let harness = Harness::new("launch-mode", THREE_ROMS);
+        harness.configured_profile();
+        assert_eq!(
+            harness
+                .service
+                .profile_view(ACCEPTED_PROFILE_ID)
+                .unwrap()
+                .launch_mode,
+            RunnerLaunchMode::Default
+        );
+
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let mut profile = catalog
+                    .runner_profile(ACCEPTED_PROFILE_ID)
+                    .expect("the configured profile")
+                    .clone();
+                profile.import_cursor = Some("page-2".into());
+                catalog.upsert_runner_profile(profile)
+            })
+            .unwrap();
+        assert!(
+            harness
+                .service
+                .profile_view(ACCEPTED_PROFILE_ID)
+                .unwrap()
+                .import_resumable
+        );
+
+        let view = harness
+            .service
+            .set_profile_launch_mode(ACCEPTED_PROFILE_ID, RunnerLaunchMode::Stream)
+            .unwrap();
+        assert_eq!(view.launch_mode, RunnerLaunchMode::Stream);
+        assert!(
+            !view.import_resumable,
+            "the cursor was earned the other way"
+        );
+        // And it is still the user's to take back.
+        assert_eq!(
+            harness
+                .service
+                .set_profile_launch_mode(ACCEPTED_PROFILE_ID, RunnerLaunchMode::Default)
+                .unwrap()
+                .launch_mode,
+            RunnerLaunchMode::Default
+        );
+    }
+
+    /// Setting the mode a profile already has changes nothing — not the mode,
+    /// and in particular not a cursor an import is going to resume from.
+    #[test]
+    fn setting_the_mode_a_profile_already_has_keeps_its_import_cursor() {
+        let harness = Harness::new("launch-mode-same", THREE_ROMS);
+        harness.configured_profile();
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let mut profile = catalog
+                    .runner_profile(ACCEPTED_PROFILE_ID)
+                    .expect("the configured profile")
+                    .clone();
+                profile.import_cursor = Some("page-2".into());
+                catalog.upsert_runner_profile(profile)
+            })
+            .unwrap();
+
+        let view = harness
+            .service
+            .set_profile_launch_mode(ACCEPTED_PROFILE_ID, RunnerLaunchMode::Default)
+            .unwrap();
+        assert_eq!(view.launch_mode, RunnerLaunchMode::Default);
+        assert!(
+            view.import_resumable,
+            "nothing changed, so nothing was lost"
+        );
+    }
+
+    #[test]
+    fn the_launch_mode_of_an_unknown_profile_cannot_be_set() {
+        let harness = Harness::new("launch-mode-unknown", THREE_ROMS);
+        harness.configured_profile();
+        assert_eq!(
+            harness
+                .service
+                .set_profile_launch_mode("runner:nope", RunnerLaunchMode::Stream)
+                .unwrap_err(),
+            RunnerHostError::UnknownProfile
+        );
+    }
+
+    /// The stream launch end to end: the profile authorises streams, the
+    /// placeholder beside the game is the host's own document, and the process
+    /// that comes out is the closed `stream <host> <app>` argument list —
+    /// every element of which the host read and validated itself.
+    #[test]
+    fn a_stream_profile_launches_with_the_closed_stream_argument_list() {
+        let harness = Harness::new("stream", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        write_placeholder(
+            &harness,
+            "Modulus.stream",
+            r#"{ "host": "astra.local", "client": "moonlight", "app": "Modulus" }"#,
+        );
+        plant_entry(&harness, "fixture:stream", "Modulus.stream");
+
+        let package = harness.service.package(FIXTURE_PLUGIN_ID).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let prepared = crate::runner_host::prepare_runner_launch(
+            &package,
+            &harness.catalog(),
+            ACCEPTED_PROFILE_ID,
+            "fixture:stream",
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.command().get_program(),
+            fs::canonicalize(&harness.emulator).unwrap().as_os_str()
+        );
+        assert_eq!(
+            prepared
+                .command()
+                .get_args()
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|argument| argument.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["stream", "astra.local", "Modulus"]
+        );
+        assert_eq!(prepared.title(), "Planted Game");
+    }
+
+    /// The mode on the profile is a permission, and the intent has to match it
+    /// in both directions: a stream offer from a profile that only ever
+    /// authorises game files is as refused as the other way round.
+    #[test]
+    fn a_stream_intent_on_a_game_file_profile_is_refused() {
+        let harness = Harness::new("stream-mismatch", THREE_ROMS);
+        harness.configured_profile();
+        write_placeholder(
+            &harness,
+            "Modulus.stream",
+            r#"{ "host": "astra.local", "client": "moonlight", "app": "Modulus" }"#,
+        );
+        plant_entry(&harness, "fixture:stream", "Modulus.stream");
+
+        assert_eq!(
+            launch_error(&harness.service, "fixture:stream"),
+            RunnerHostError::LaunchModeMismatch
+        );
+    }
+
+    #[test]
+    fn a_game_file_intent_on_a_stream_profile_is_refused() {
+        let harness = Harness::new("file-mismatch", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        plant_entry(&harness, "fixture:ok", "alpha.rom");
+
+        assert_eq!(
+            launch_error(&harness.service, "fixture:ok"),
+            RunnerHostError::LaunchModeMismatch
+        );
+    }
+
+    /// The placeholder exists and is inside the granted folder; what it may
+    /// not be is anything but the host's own document — bytes that are not
+    /// JSON, a client the host does not drive, or a host that looks like an
+    /// option. None of them reach an argument list.
+    #[test]
+    fn a_stream_placeholder_that_is_not_the_documents_word_is_refused() {
+        let harness = Harness::new("stream-placeholder", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        write_placeholder(&harness, "Broken.stream", "not json at all");
+        write_placeholder(
+            &harness,
+            "Alien.stream",
+            r#"{ "host": "astra.local", "client": "steamlink", "app": "Modulus" }"#,
+        );
+        write_placeholder(
+            &harness,
+            "Optioned.stream",
+            r#"{ "host": "-astra.local", "client": "moonlight", "app": "Modulus" }"#,
+        );
+        plant_entry(&harness, "fixture:stream-broken", "Broken.stream");
+        plant_entry(&harness, "fixture:stream-alien", "Alien.stream");
+        plant_entry(&harness, "fixture:stream-optioned", "Optioned.stream");
+
+        for game_ref in [
+            "fixture:stream-broken",
+            "fixture:stream-alien",
+            "fixture:stream-optioned",
+        ] {
+            assert_eq!(
+                launch_error(&harness.service, game_ref),
+                RunnerHostError::StreamPlaceholder,
+                "{game_ref}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pairing
+    // -----------------------------------------------------------------------
+
+    /// The PIN is a short-lived shared secret for a handshake that authorises a
+    /// client against a machine, so its shape is worth asserting: four digits,
+    /// always, including the leading zeros a plain integer would have dropped.
+    #[test]
+    fn a_pairing_pin_is_always_four_digits() {
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2_000 {
+            let pin = pairing_pin().unwrap();
+            assert_eq!(pin.len(), 4, "{pin}");
+            assert!(pin.chars().all(|digit| digit.is_ascii_digit()), "{pin}");
+            seen.insert(pin);
+        }
+        // Not a statistical test — just that it is drawn rather than fixed.
+        assert!(seen.len() > 100, "{} distinct pins", seen.len());
+    }
+
+    /// Pairing is Moonlight's own handshake, so the argument list is the
+    /// client's — `pair <host> --pin <pin>` — and every element of it is one
+    /// Orivo produced. No plugin is consulted anywhere in this path.
+    #[test]
+    fn the_pairing_process_is_the_clients_own_closed_argument_list() {
+        let command = pairing_command(Path::new("/Applications/Moonlight"), "astra.local", "0417");
+        assert_eq!(command.get_program(), "/Applications/Moonlight");
+        assert_eq!(
+            command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["pair", "astra.local", "--pin", "0417"]
+        );
+    }
+
+    /// A profile that does not launch streams is not a profile to pair: doing
+    /// it would be acting on a permission the user never gave.
+    #[test]
+    fn a_profile_that_does_not_stream_cannot_be_paired() {
+        let harness = Harness::new("pair-mode", THREE_ROMS);
+        harness.configured_profile();
+        assert_eq!(
+            harness
+                .service
+                .begin_pairing(ACCEPTED_PROFILE_ID)
+                .unwrap_err(),
+            RunnerHostError::LaunchModeMismatch
+        );
+    }
+
+    /// Pairing needs the address and nothing else — so with no address it is
+    /// the feed's "not configured" refusal, which already names the remedy.
+    #[test]
+    fn pairing_without_a_configured_host_says_what_is_missing() {
+        let harness = Harness::new("pair-nohost", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        assert_eq!(
+            harness
+                .service
+                .begin_pairing(ACCEPTED_PROFILE_ID)
+                .unwrap_err(),
+            RunnerHostError::StreamFeed(crate::gamestream::GameStreamFeedError::NotConfigured)
+        );
+    }
+
+    /// The happy path. The address the answer carries is the machine's, not
+    /// Sunshine's web interface: pairing is the machine's own protocol on its
+    /// own ports, so an API port the user typed is deliberately not in it.
+    ///
+    /// No credential is read on this path either, which is the point — pairing
+    /// is offered precisely when nothing else about the machine works yet.
+    #[cfg(unix)]
+    #[test]
+    fn pairing_starts_the_client_against_the_machine_not_the_web_api() {
+        let harness = Harness::new("pair-ok", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        // Refuses to list, which is what "not paired yet" looks like.
+        use_stream_client(&harness, "", 1);
+        let service = stream_service(&harness, "https://astra.local:47990");
+
+        let answer = service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap();
+
+        let GameStreamPairing::Started { host, pin } = answer else {
+            panic!("a client that cannot list has not been paired: {answer:?}");
+        };
+        assert_eq!(host, "astra.local");
+        assert_eq!(pin.len(), 4);
+        assert!(pin.chars().all(|digit| digit.is_ascii_digit()));
+        // The state was read first, and only then was the handshake started.
+        assert_eq!(
+            client_invocations(&harness, 6),
+            vec!["list", "astra.local", "pair", "astra.local", "--pin", &pin]
+        );
+    }
+
+    /// The defect this shape exists to prevent: a client that is already paired
+    /// *refuses to start a handshake*, so showing its PIN would hand the user
+    /// four digits the other machine can only reject. Already paired is an
+    /// answer, and no PIN is drawn at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_that_is_already_paired_is_told_so_instead_of_given_a_pin() {
+        let harness = Harness::new("pair-already", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        use_stream_client(&harness, "Modulus\n", 0);
+        let service = stream_service(&harness, "astra.local");
+
+        assert_eq!(
+            service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap(),
+            GameStreamPairing::AlreadyPaired {
+                host: "astra.local".into()
+            }
+        );
+        // Asked once, and never told to pair.
+        assert_eq!(client_invocations(&harness, 2), vec!["list", "astra.local"]);
+    }
+
+    /// A stand-in for the streaming client: a script that answers `list` the
+    /// way Moonlight does and records the arguments it was given.
+    ///
+    /// The harness's own application cannot stand in here. It is a copy of the
+    /// test binary — which is exactly right for a launch, where libtest reads
+    /// the one path argument as a filter, matches nothing and exits — but run
+    /// with `list` or `pair` it would read *those* as filters and run this
+    /// suite again, inside itself.
+    #[cfg(unix)]
+    fn use_stream_client(harness: &Harness, stdout: &str, code: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = harness.root.join("Fixture Client");
+        let log = harness.root.join("client.args");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nprintf '%s' '{}'\nexit {code}\n",
+                log.display(),
+                stdout.replace('\'', "'\\''"),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let application = fs::canonicalize(&path).unwrap();
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let mut profile = catalog
+                    .runner_profile(ACCEPTED_PROFILE_ID)
+                    .expect("the configured profile")
+                    .clone();
+                profile.application = application.clone();
+                catalog.upsert_runner_profile(profile)
+            })
+            .unwrap();
+        application
+    }
+
+    /// The arguments the stand-in client was called with, once there are
+    /// `expected` of them.
+    ///
+    /// Polled rather than read once: pairing returns as soon as the child has
+    /// *started*, which is the whole point of it — the PIN has to be on screen
+    /// while the handshake is still open — so the child may not have written
+    /// its line yet when the call comes back.
+    #[cfg(unix)]
+    fn client_invocations(harness: &Harness, expected: usize) -> Vec<String> {
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        loop {
+            let lines: Vec<String> = fs::read_to_string(harness.root.join("client.args"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            if lines.len() >= expected || SystemTime::now() >= deadline {
+                return lines;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Build a service for `harness` with a GameStream service bolted on, so the
+    /// stream-refresh path runs. The harness keeps its own service; this one is
+    /// only for tests that need the feed.
+    fn stream_service(harness: &Harness, host: &str) -> Arc<ThirdPartyRunnerService> {
+        let catalog = harness.catalog();
+        let store = crate::runner_host::CatalogStore::new(
+            Arc::new(RwLock::new(catalog)),
+            harness.catalog_path.clone(),
+            Arc::new(Mutex::new(())),
+        );
+        let gamestream = Arc::new(crate::gamestream::GameStreamService::load(
+            harness.root.join(crate::gamestream::SETTINGS_FILE),
+        ));
+        gamestream
+            .update(crate::gamestream::GameStreamSettingsUpdate {
+                host: Some(host.to_owned()),
+            })
+            .unwrap();
+        Arc::new(
+            ThirdPartyRunnerService::new(
+                store,
+                harness.plugin_root.clone(),
+                HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+            )
+            .with_runtime(
+                PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Threaded).unwrap(),
+            )
+            .with_gamestream(gamestream),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Stream import refreshes the host's feed into the granted folder
+    // -----------------------------------------------------------------------
+
+    /// A stream profile's import asks the client which games the machine can
+    /// stream and writes one `.stream` placeholder per game into the granted
+    /// folder before the plugin walks it. The import itself still has to
+    /// succeed.
+    #[cfg(unix)]
+    #[test]
+    fn a_stream_profile_import_refreshes_placeholders_before_discovery() {
+        let harness = Harness::new("stream-import", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        use_stream_client(&harness, "Modulus\nDesktop\n", 0);
+        let service = stream_service(&harness, "https://astra.local:47990");
+
+        let cancelled = AtomicBool::new(false);
+        service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .expect("the import succeeds after the refresh");
+
+        // The client was asked, with the closed argument list and no credential.
+        assert_eq!(client_invocations(&harness, 2), vec!["list", "astra.local"]);
+        // And the placeholder the host wrote is exactly the closed-shape
+        // document, naming the machine rather than its web interface.
+        let placeholder: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(harness.games.join("Modulus.stream")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(placeholder["host"], "astra.local");
+        assert_eq!(placeholder["client"], "moonlight");
+        assert_eq!(placeholder["app"], "Modulus");
+    }
+
+    /// No host configured is the manual mode the plugin documents, not an
+    /// import failure: the refresh is a no-op and the existing folder is
+    /// walked as-is.
+    #[test]
+    fn a_stream_profile_with_no_host_configured_keeps_the_manual_folder() {
+        let harness = Harness::new("stream-manual", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        // A hand-maintained placeholder the user wrote themselves survives the
+        // unconfigured refresh, because the feed is simply not consulted.
+        write_placeholder(
+            &harness,
+            "Modulus.stream",
+            r#"{ "host": "astra.local", "client": "moonlight", "app": "Modulus" }"#,
+        );
+        fs::write(harness.root.join(crate::gamestream::SETTINGS_FILE), b"{}").unwrap();
+        let gamestream = Arc::new(crate::gamestream::GameStreamService::load(
+            harness.root.join(crate::gamestream::SETTINGS_FILE),
+        ));
+        let catalog = harness.catalog();
+        let store = crate::runner_host::CatalogStore::new(
+            Arc::new(RwLock::new(catalog)),
+            harness.catalog_path.clone(),
+            Arc::new(Mutex::new(())),
+        );
+        let service = Arc::new(
+            ThirdPartyRunnerService::new(
+                store,
+                harness.plugin_root.clone(),
+                HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+            )
+            .with_runtime(
+                PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Threaded).unwrap(),
+            )
+            .with_gamestream(gamestream),
+        );
+
+        let cancelled = AtomicBool::new(false);
+        let outcome = service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .expect("manual mode is not a failure");
+        // The import ran to the end of the folder rather than stopping at the
+        // unconsulted feed, and the folder it walked is the one on disk.
+        assert!(outcome.complete, "{outcome:?}");
+        assert!(!outcome.cancelled, "{outcome:?}");
+        assert!(outcome.progress.imported > 0, "{outcome:?}");
+
+        let kept = fs::read_to_string(harness.games.join("Modulus.stream")).unwrap();
+        assert!(kept.contains("astra.local"), "{kept}");
+    }
+
+    /// A machine that refuses surfaces as a failed import carrying the feed's
+    /// own message, not as a generic catalog error. Overwhelmingly that means
+    /// the client is not paired with it yet, which is the one thing the user
+    /// can act on — so that is what the message names.
+    #[cfg(unix)]
+    #[test]
+    fn a_machine_that_refuses_fails_the_stream_import() {
+        let harness = Harness::new("stream-refused", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        use_stream_client(&harness, "", 1);
+        let service = stream_service(&harness, "astra.local");
+
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            service
+                .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+                .unwrap_err(),
+            RunnerHostError::StreamFeed(crate::gamestream::GameStreamFeedError::NotPaired(
+                "astra.local".into()
+            )),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // One game, one card
+    // -----------------------------------------------------------------------
+
+    /// Put a game in the library that is not this runner's, under `title`.
+    fn plant_library_game(harness: &Harness, id: &str, title: &str) {
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                catalog.games.push(crate::catalog::Game {
+                    id: id.to_owned(),
+                    title: title.to_owned(),
+                    executable_path: None,
+                    source: crate::catalog::GameSource::Steam,
+                    source_id: Some("42".into()),
+                    launch_target: LaunchTarget::Steam { app_id: 42 },
+                    alternate_launch_targets: Vec::new(),
+                    installation_path: Some(std::path::PathBuf::from("/tmp")),
+                    working_directory: None,
+                    arguments: Vec::new(),
+                    description: None,
+                    metadata: None,
+                    artwork_path: None,
+                    artwork_source_path: None,
+                    cover_path: None,
+                    cover_source_path: None,
+                    home_image_path: None,
+                    landscape_image_path: None,
+                    logo_path: None,
+                    hidden: false,
+                    hero_video_path: None,
+                    last_played_at: None,
+                    play_time_seconds: 0,
+                    extra: Default::default(),
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn game_titled<'a>(catalog: &'a Catalog, title: &str) -> Vec<&'a crate::catalog::Game> {
+        catalog
+            .games
+            .iter()
+            .filter(|game| game.title == title)
+            .collect()
+    }
+
+    /// A game the library already holds is one game to the person playing it,
+    /// so importing a second way to start it adds that way to the card that is
+    /// already there — with its artwork, its play time and its place in every
+    /// shelf — rather than a second entry beside it.
+    ///
+    /// The punctuation matters: the same game is spelled differently by every
+    /// store that sells it, and `Alpha: Quest!` has to find `Alpha Quest`.
+    #[test]
+    fn importing_a_game_the_library_already_holds_adds_a_way_to_start_it() {
+        let harness = Harness::new("dedupe-existing", THREE_ROMS);
+        harness.configured_profile();
+        plant_library_game(&harness, "steam:42", "Alpha: Quest!");
+
+        let cancelled = AtomicBool::new(false);
+        harness
+            .service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .unwrap();
+
+        let catalog = harness.catalog();
+        // One card for that game, and it is still the one that was there.
+        assert_eq!(game_titled(&catalog, "Alpha: Quest!").len(), 1);
+        assert!(game_titled(&catalog, "Alpha Quest").is_empty());
+        let host = catalog
+            .games
+            .iter()
+            .find(|game| game.id == "steam:42")
+            .unwrap();
+        assert_eq!(host.alternate_launch_targets.len(), 1);
+        assert!(matches!(
+            &host.alternate_launch_targets[0],
+            LaunchTarget::Runner { runner_id, profile_id, .. }
+                if runner_id == FIXTURE_PLUGIN_ID && profile_id == ACCEPTED_PROFILE_ID
+        ));
+        // The two games the library did not have are cards of their own.
+        assert_eq!(game_titled(&catalog, "Beta Racer").len(), 1);
+        assert_eq!(game_titled(&catalog, "Gamma Tactics").len(), 1);
+        // And the private record exists either way — it is what a launch reads.
+        assert_eq!(catalog.runner_inventory.len(), 3);
+    }
+
+    /// An import runs again every time a library is refreshed, so the same way
+    /// of starting the same game must not stack up.
+    #[test]
+    fn importing_twice_does_not_stack_up_ways_to_start_the_same_game() {
+        let harness = Harness::new("dedupe-twice", THREE_ROMS);
+        harness.configured_profile();
+        plant_library_game(&harness, "steam:42", "Alpha Quest");
+
+        let cancelled = AtomicBool::new(false);
+        for _ in 0..2 {
+            harness
+                .service
+                .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+                .unwrap();
+        }
+
+        let catalog = harness.catalog();
+        let host = catalog
+            .games
+            .iter()
+            .find(|game| game.id == "steam:42")
+            .unwrap();
+        assert_eq!(host.alternate_launch_targets.len(), 1);
+        assert_eq!(game_titled(&catalog, "Alpha Quest").len(), 1);
+    }
+
+    /// A library that already carries the duplicate heals on the next import,
+    /// rather than needing the stray card removed by hand.
+    #[test]
+    fn a_standalone_card_this_runner_wrote_before_is_folded_in() {
+        let harness = Harness::new("dedupe-heal", THREE_ROMS);
+        harness.configured_profile();
+
+        let cancelled = AtomicBool::new(false);
+        harness
+            .service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .unwrap();
+        assert_eq!(game_titled(&harness.catalog(), "Alpha Quest").len(), 1);
+
+        // The game arrives in the library by another route afterwards.
+        plant_library_game(&harness, "steam:42", "Alpha Quest");
+        assert_eq!(game_titled(&harness.catalog(), "Alpha Quest").len(), 2);
+
+        harness
+            .service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .unwrap();
+
+        let catalog = harness.catalog();
+        let cards = game_titled(&catalog, "Alpha Quest");
+        assert_eq!(cards.len(), 1, "the stray card is gone");
+        assert_eq!(cards[0].id, "steam:42");
+        assert_eq!(cards[0].alternate_launch_targets.len(), 1);
+    }
+
+    /// Removing the profile takes away the way of starting it offered, and
+    /// leaves the card that was never its own alone.
+    #[test]
+    fn removing_the_profile_takes_back_the_way_to_start_it_offered() {
+        let harness = Harness::new("dedupe-remove", THREE_ROMS);
+        harness.configured_profile();
+        plant_library_game(&harness, "steam:42", "Alpha Quest");
+
+        let cancelled = AtomicBool::new(false);
+        harness
+            .service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .unwrap();
+        harness.service.delete_profile(ACCEPTED_PROFILE_ID).unwrap();
+
+        let catalog = harness.catalog();
+        let host = catalog
+            .games
+            .iter()
+            .find(|game| game.id == "steam:42")
+            .expect("the card was never this runner's to remove");
+        assert!(host.alternate_launch_targets.is_empty());
+        // And the runner's own cards went with it.
+        assert!(game_titled(&catalog, "Beta Racer").is_empty());
     }
 
     // -----------------------------------------------------------------------

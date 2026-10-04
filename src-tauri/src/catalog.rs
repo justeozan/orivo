@@ -14,7 +14,7 @@ use std::{
 /// an opaque game reference to a file inside a granted folder, and the grant
 /// ledger the plugin host resolves before every invocation. All three are
 /// additive, so a v7 document is read as one with all three empty.
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 const SCHEMA_VERSION_V1: u32 = 1;
 const SCHEMA_VERSION_V2: u32 = 2;
 const SCHEMA_VERSION_V3: u32 = 3;
@@ -22,6 +22,7 @@ const SCHEMA_VERSION_V4: u32 = 4;
 const SCHEMA_VERSION_V5: u32 = 5;
 const SCHEMA_VERSION_V6: u32 = 6;
 const SCHEMA_VERSION_V7: u32 = 7;
+const SCHEMA_VERSION_V8: u32 = 8;
 
 /// The stable identity for Orivo's first official Wine runner. It is an
 /// opaque runner identifier, never a Wine executable path or command.
@@ -1006,6 +1007,13 @@ pub enum RunnerLaunchMode {
     /// single argument, in the application's own directory.
     #[default]
     Default,
+    /// The application is a streaming client (Moonlight). The resolved file is
+    /// a stream placeholder the host itself wrote — `{"host", "client",
+    /// "app"}` — and the host reads it and starts the application with the
+    /// closed argument list `stream <host> <app>`. The host still owns every
+    /// argument: the placeholder is a host-authored document, parsed and
+    /// validated here, never a command line handed across a boundary.
+    Stream,
 }
 
 /// The settings half of a profile — everything a `validate-profile` round trip
@@ -1185,6 +1193,16 @@ pub struct Game {
     pub source_id: Option<String>,
     #[serde(default)]
     pub launch_target: LaunchTarget,
+    /// Other ways this same game can be started.
+    ///
+    /// One game, one card. A game that is installed here *and* streamable from
+    /// another machine is the same game to the person playing it, so the second
+    /// way to start it is recorded here rather than as a second library entry
+    /// with its own artwork, its own play time and its own place in every
+    /// shelf. The order is the order they were added; `launch_target` is always
+    /// the first offered and is never repeated in this list.
+    #[serde(default)]
+    pub alternate_launch_targets: Vec<LaunchTarget>,
     #[serde(default)]
     pub installation_path: Option<PathBuf>,
     #[serde(default)]
@@ -1304,19 +1322,26 @@ impl Catalog {
         let mut rewritten_game_ids = BTreeMap::new();
         let migrated_from = match catalog.schema_version {
             CURRENT_SCHEMA_VERSION => None,
+            SCHEMA_VERSION_V8 => {
+                migrate_v8_to_v9(&mut catalog);
+                Some(SCHEMA_VERSION_V8)
+            }
             SCHEMA_VERSION_V7 => {
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V7)
             }
             SCHEMA_VERSION_V6 => {
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V6)
             }
             SCHEMA_VERSION_V5 => {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V5)
             }
             SCHEMA_VERSION_V4 => {
@@ -1324,6 +1349,7 @@ impl Catalog {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V4)
             }
             SCHEMA_VERSION_V3 => {
@@ -1332,6 +1358,7 @@ impl Catalog {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V3)
             }
             SCHEMA_VERSION_V2 => {
@@ -1341,6 +1368,7 @@ impl Catalog {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V2)
             }
             SCHEMA_VERSION_V1 => {
@@ -1351,6 +1379,7 @@ impl Catalog {
                 migrate_v5_to_v6(&mut catalog);
                 rewritten_game_ids = migrate_v6_to_v7(&mut catalog)?;
                 migrate_v7_to_v8(&mut catalog);
+                migrate_v8_to_v9(&mut catalog);
                 Some(SCHEMA_VERSION_V1)
             }
             found => {
@@ -1604,6 +1633,103 @@ impl Catalog {
     /// Returns `true` when a card is first imported and `false` when a scan
     /// refreshes an existing card. Playback state and any opaque metadata that
     /// the scanner did not replace are retained across refreshes.
+    /// The form two titles are compared by when deciding whether they name the
+    /// same game.
+    ///
+    /// Case and punctuation are dropped and runs of anything else collapse to
+    /// one space, because the same game is spelled differently by every store
+    /// that sells it — `Assassin's Creed - Unity` on one machine is
+    /// `Assassin's Creed Unity` on another. Nothing more is stripped: edition
+    /// suffixes stay, so `Cyberpunk 2077` and `Cyberpunk 2077: Ultimate
+    /// Edition` remain two games. Guessing that they are one is a merge the
+    /// user cannot see and cannot undo, and the cost of being wrong is a game
+    /// that disappears into another's card.
+    pub fn normalised_title(title: &str) -> String {
+        let mut normalised = String::with_capacity(title.len());
+        let mut pending_space = false;
+        for character in title.chars() {
+            if character.is_alphanumeric() {
+                if pending_space && !normalised.is_empty() {
+                    normalised.push(' ');
+                }
+                pending_space = false;
+                normalised.extend(character.to_lowercase());
+            } else {
+                pending_space = true;
+            }
+        }
+        normalised
+    }
+
+    /// The game already in the library that `title` names, if there is one, for
+    /// a runner card that would otherwise be filed as `candidate_id`.
+    ///
+    /// A game installed here and streamable from another machine is one game to
+    /// the person playing it, so the second way to start it belongs on the card
+    /// that is already there. A card that is not a runner's is preferred as the
+    /// host: it is the one with the artwork, the play time and the history, and
+    /// it is the one that survives a runner profile being removed.
+    pub fn host_game_for_title(&self, title: &str, candidate_id: &str) -> Option<String> {
+        let wanted = Self::normalised_title(title);
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut matches = self
+            .games
+            .iter()
+            .filter(|game| game.id != candidate_id)
+            .filter(|game| Self::normalised_title(&game.title) == wanted);
+        let first = matches.next()?;
+        if !matches!(first.launch_target, LaunchTarget::Runner { .. }) {
+            return Some(first.id.clone());
+        }
+        // The first is a runner's own card, so keep looking for a card that is
+        // not — and settle for the runner one only if there is nothing else.
+        let better = matches
+            .find(|game| !matches!(game.launch_target, LaunchTarget::Runner { .. }))
+            .map(|game| game.id.clone());
+        better.or_else(|| Some(first.id.clone()))
+    }
+
+    /// Record another way to start a game. Answers whether anything changed.
+    ///
+    /// Idempotent on purpose: an import runs again every time a library is
+    /// refreshed, and the same way of starting the same game must not stack up.
+    pub fn attach_alternate_launch(
+        &mut self,
+        game_id: &str,
+        target: LaunchTarget,
+    ) -> Result<bool, CatalogError> {
+        let game = self
+            .games
+            .iter_mut()
+            .find(|game| game.id == game_id)
+            .ok_or_else(|| CatalogError::Invalid("unknown game".into()))?;
+        if game.launch_target == target || game.alternate_launch_targets.contains(&target) {
+            return Ok(false);
+        }
+        game.alternate_launch_targets.push(target);
+        Ok(true)
+    }
+
+    /// Forget every alternate way to start anything that named this runner
+    /// profile. Called where that profile's own cards are removed, because an
+    /// alternate pointing at a profile that is gone is a Play that cannot work.
+    pub fn detach_alternate_launches_for_profile(&mut self, plugin_id: &str, profile_id: &str) {
+        for game in &mut self.games {
+            game.alternate_launch_targets.retain(|target| {
+                !matches!(
+                    target,
+                    LaunchTarget::Runner {
+                        runner_id,
+                        profile_id: held,
+                        ..
+                    } if runner_id == plugin_id && held == profile_id
+                )
+            });
+        }
+    }
+
     pub fn upsert_runner(&mut self, mut game: Game) -> Result<bool, CatalogError> {
         game.validate()?;
         let (runner_id, profile_id, game_ref) = runner_target_key(&game).ok_or_else(|| {
@@ -2022,6 +2148,9 @@ impl Catalog {
         candidate
             .runner_inventory
             .retain(|entry| entry.profile_id != profile_id);
+        // A game of another card that this profile only *also* knew how to start
+        // keeps its card and loses that way of starting.
+        candidate.detach_alternate_launches_for_profile(&profile.plugin_id, profile_id);
         candidate.games.retain(|game| {
             !matches!(
                 &game.launch_target,
@@ -3508,6 +3637,12 @@ fn migrate_v6_to_v7(catalog: &mut Catalog) -> Result<BTreeMap<String, String>, C
 /// byte-for-byte, and a v7 card pointing at a third-party runner stays a card
 /// whose profile has yet to be created.
 fn migrate_v7_to_v8(catalog: &mut Catalog) {
+    catalog.schema_version = SCHEMA_VERSION_V8;
+}
+
+/// v9 adds `alternate_launch_targets` to a game. Nothing has to be rewritten:
+/// an absent list reads as an empty one, which is what every v8 game means.
+fn migrate_v8_to_v9(catalog: &mut Catalog) {
     catalog.schema_version = CURRENT_SCHEMA_VERSION;
 }
 
@@ -3633,6 +3768,7 @@ impl Game {
             source: GameSource::Local,
             source_id: None,
             launch_target: LaunchTarget::Direct,
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             arguments: Vec::new(),
             description: None,
@@ -3661,6 +3797,29 @@ impl Game {
                 "game {} has no title",
                 self.id
             )));
+        }
+        // Other ways to start this same game. They are launch configuration
+        // like the first one, so they are held to the same shape — and to two
+        // rules of their own, because a list can say things one target cannot:
+        // a way of starting that is already offered is not a second way, and
+        // the card's own is already offered.
+        for (index, alternate) in self.alternate_launch_targets.iter().enumerate() {
+            if *alternate == self.launch_target
+                || self.alternate_launch_targets[..index].contains(alternate)
+            {
+                return Err(CatalogError::Invalid(format!(
+                    "game {} offers the same way to start it twice",
+                    self.id
+                )));
+            }
+            if let LaunchTarget::Runner {
+                runner_id,
+                game_ref,
+                profile_id,
+            } = alternate
+            {
+                validate_runner_target(runner_id, game_ref, profile_id)?;
+            }
         }
         match (&self.source, &self.source_id, &self.launch_target) {
             (GameSource::Local, _, LaunchTarget::Direct)
@@ -4653,6 +4812,7 @@ mod tests {
             source: GameSource::Steam,
             source_id: Some("480".into()),
             launch_target: LaunchTarget::Steam { app_id: 480 },
+            alternate_launch_targets: Vec::new(),
             installation_path: Some(PathBuf::from("/Games/Spacewar")),
             working_directory: None,
             arguments: Vec::new(),
@@ -4725,6 +4885,7 @@ mod tests {
             source: GameSource::Steam,
             source_id: Some("481".into()),
             launch_target: LaunchTarget::Steam { app_id: 480 },
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: None,
             arguments: Vec::new(),
@@ -4756,6 +4917,7 @@ mod tests {
             source: GameSource::Local,
             source_id: None,
             launch_target: LaunchTarget::Steam { app_id: 480 },
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: None,
             arguments: Vec::new(),
@@ -5067,6 +5229,7 @@ mod tests {
             source: GameSource::Steam,
             source_id: Some("480".into()),
             launch_target: LaunchTarget::Steam { app_id: 480 },
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: None,
             arguments: Vec::new(),
@@ -5095,6 +5258,7 @@ mod tests {
             executable_path: None,
             source,
             source_id: Some(source_id.into()),
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Provider {
                 provider: provider.into(),
                 app_ref: source_id.into(),
@@ -5248,6 +5412,7 @@ mod tests {
             source: GameSource::Local,
             source_id: None,
             launch_target: LaunchTarget::Direct,
+            alternate_launch_targets: Vec::new(),
             installation_path: None,
             working_directory: Some(PathBuf::from("/Games/Windows/Blue Prince")),
             arguments: vec!["--legacy-direct-option".into()],
@@ -5275,6 +5440,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Local,
             source_id: None,
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Runner {
                 runner_id: "com.orivo.ryujinx".into(),
                 game_ref: "rom:sha256:abc123".into(),
@@ -5336,6 +5502,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Local,
             source_id: None,
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Runner {
                 runner_id: WINLATOR_RUNNER_ID.into(),
                 game_ref: game_ref.into(),
@@ -5541,6 +5708,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Local,
             source_id: None,
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Runner {
                 runner_id: WINE_STAGING_RUNNER_ID.into(),
                 game_ref: game_ref.into(),
@@ -5651,6 +5819,7 @@ mod tests {
             executable_path: None,
             source: GameSource::Local,
             source_id: None,
+            alternate_launch_targets: Vec::new(),
             launch_target: LaunchTarget::Runner {
                 runner_id: FIXTURE_PLUGIN.into(),
                 game_ref: game_ref.into(),
