@@ -5,7 +5,7 @@ resolver = "2"
 [profile.dev]
 opt-level = 0
 debug = 1
-incremental = true
+incremental = false
 split-debuginfo = "unpacked"
 
 [profile.dev.package."*"]

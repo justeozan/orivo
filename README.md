@@ -55,6 +55,10 @@ pnpm tauri dev
 
 Node 22, pnpm 11, stable Rust. Linux also needs `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`.
 
+Running more than one branch at a time? A second
+[git worktree](CONTRIBUTING.md#working-in-a-git-worktree) shares the package
+store, the Rust registry and the compilation cache with this one.
+
 ## Licence
 
 Source-available, [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0/) — free for any noncommercial use, no commercial use. Commercial licences: contact@oneiby.com. © 2026 Ozan Sahin.
