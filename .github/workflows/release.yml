@@ -148,24 +148,19 @@ jobs:
           args: ${{ matrix.args }}
 
   android:
-    name: Build Android (universal APK + AAB)
+    name: Build Android (arm64 APK + AAB)
     runs-on: ubuntu-latest
-    # Not a release gate, and not a passing job either: this repository has no
-    # Android Tauri project and no Android signing configuration, which is what
-    # `docs/RELEASING.md` has said all along. The job fails at
-    # `tauri android build` with "project directory src-tauri/gen/android
-    # doesn't exist".
-    #
-    # It was added after 0.3.6 and so first ran for 0.3.7, where it took the
-    # whole release down with it: `verify-updater-manifest` listed it in
-    # `needs`, so the verification and the publication were skipped and four
-    # finished desktop builds sat in a draft nobody could ship. A platform this
-    # repository does not build must not be able to do that.
-    #
-    # Make it a gate again the day `tauri android init` has been run and the
-    # signing keys exist: put `android` back in that `needs` list and drop this
-    # `continue-on-error`.
-    continue-on-error: true
+    env:
+      # One place: the SDK package to install, and the path Tauri is pointed at.
+      NDK_VERSION: 27.0.12077973
+    # A release gate, and the APK is a deliverable. It was briefly neither: the
+    # job was added after 0.3.6 with no Android project and no signing key behind
+    # it, so it failed on contact, and because `verify-updater-manifest` listed it
+    # in `needs` it took the whole release with it — four finished desktop builds
+    # sat in a draft nobody could ship. With the project and the key in place, a
+    # missing one must fail loudly; what must never happen again is the *other*
+    # failure mode, a platform silently dropping out of a published release.
+    # `verify-updater-manifest` therefore also counts the .apk asset itself.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -210,7 +205,18 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: true
-          packages: ndk;27.0.12077973
+          packages: ndk;${{ env.NDK_VERSION }}
+
+      # cargo-mobile2 locates the toolchain through NDK_HOME and nothing else.
+      # `setup-android` installs the NDK but exports no such variable, so
+      # without this step the build fails looking for a linker.
+      - name: Point Tauri at the NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ndk="$ANDROID_HOME/ndk/$NDK_VERSION"
+          [ -d "$ndk" ] || { echo "::error::No NDK at $ndk."; ls "$ANDROID_HOME/ndk" || true; exit 1; }
+          echo "NDK_HOME=$ndk" >> "$GITHUB_ENV"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -223,13 +229,48 @@ jobs:
           workspaces: '. -> target'
           key: android
 
+      # `src-tauri/gen/android` is committed, but Tauri's own nested .gitignore
+      # excludes the files it generates — `tauri.build.gradle.kts`,
+      # `proguard-tauri.pro`, `tauri.properties`. Only `tauri.properties` is
+      # rewritten by `android build`; the other two come from `project::gen`,
+      # which runs on `init` alone. A fresh checkout would therefore reach
+      # `apply(from = "tauri.build.gradle.kts")` on a missing file and Gradle
+      # would fail. `init` is safe to re-run: it creates a file only when one is
+      # absent, so nothing committed here — the signing config above all — is
+      # touched.
+      - name: Restore Tauri's generated Gradle files
+        shell: bash
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+        run: pnpm tauri android init --ci --skip-targets-install
+
+      # The keystore is the app's identity: the same key must sign every
+      # version, or Android refuses the update as a different app. It lives only
+      # in repository secrets, and `key.properties` is gitignored.
+      - name: Write the release signing keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::Android signing secrets are missing (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS). Without them Gradle produces an unsigned APK that no device will install, so this job stops here instead."
+            exit 1
+          fi
+          project=src-tauri/gen/android
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$project/release.jks"
+          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEYSTORE_PASSWORD" > "$project/key.properties"
+
       - name: Build Android APK + AAB
         shell: bash
         env:
           JAVA_HOME: ${{ env.JAVA_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
-        run: pnpm tauri android build --target aarch64
+        run: pnpm tauri android build --target aarch64 --apk --aab
 
       - name: Upload APK to release
         env:
@@ -245,15 +286,27 @@ jobs:
           else
             tag="v$(node -p "require('./package.json').version")"
           fi
-          gh release upload "$tag" \
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk \
-            src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab \
-            --clobber
+          version="${tag#v}"
+          outputs=src-tauri/gen/android/app/build/outputs
+
+          # Gradle drops the `-unsigned` suffix once a signingConfig applies, so
+          # the presence of this name is itself the proof that signing ran.
+          apk="$outputs/apk/universal/release/app-universal-release.apk"
+          aab="$outputs/bundle/universalRelease/app-universal-release.aab"
+          if [ ! -f "$apk" ]; then
+            echo "::error::No signed APK at $apk. Gradle writes app-universal-release-unsigned.apk when it finds no signing config, and an unsigned APK cannot be installed."
+            ls -R "$outputs/apk" || true
+            exit 1
+          fi
+
+          # Match the desktop assets, which carry the product name and version.
+          staged="$RUNNER_TEMP/Orivo_${version}_android.apk"
+          cp "$apk" "$staged"
+          gh release upload "$tag" "$staged" "$aab" --clobber
 
   verify-updater-manifest:
     name: Verify staged release
-    # Deliberately not `android` — see the note on that job.
-    needs: [release]
+    needs: [release, android]
     runs-on: ubuntu-latest
     # This job only reads, but it cannot use `contents: read`. The release it
     # checks is still a draft, GitHub lists draft releases only for tokens with
@@ -339,6 +392,7 @@ jobs:
           require_count "Linux AppImage" '\.AppImage$' 1
           require_count "Linux Debian package" '\.deb$' 1
           require_count "Linux RPM package" '\.rpm$' 1
+          require_count "Android APK" '\.apk$' 1
 
           manifest="$RUNNER_TEMP/latest.json"
           gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
