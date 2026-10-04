@@ -701,6 +701,23 @@ fn set_android_credential_store() {
     });
 }
 
+/// `keyring`'s bootstrap (`v1.rs::set_credential_store`) installs a default
+/// store on macOS, Windows and Linux but deliberately skips iOS, so without
+/// this every `Entry::new` fails with "No default store has been set" — the
+/// same failure Android installs its own store for. Unlike Android the Apple
+/// "protected data" store needs no external context, so it is built directly.
+/// Must run before the first `keyring::Entry::new`.
+#[cfg(target_os = "ios")]
+fn set_ios_credential_store() {
+    match apple_native_keyring_store::protected::Store::new() {
+        Ok(store) => {
+            keyring_core::set_default_store(store);
+            eprintln!("[ios] credential store ready");
+        }
+        Err(error) => eprintln!("[ios] credential store unavailable: {error}"),
+    }
+}
+
 /// Android gives an activity one content view. The sign-in webview is stacked
 /// on top of the main one, so keeping a reference to the webview that was
 /// showing first is what lets Orivo hand control back to it.
@@ -796,6 +813,13 @@ fn lock_android_landscape() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tauri's dev+mobile protocol handler builds its rustls client as soon as the
+    // WebView asks for a dev-server asset, and skips its own provider install
+    // because devUrl is http. Without a provider installed by then reqwest (built
+    // with rustls-no-provider) panics and aborts the app.
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // The updater downloads and verifies signed releases; `process` is what
@@ -897,6 +921,8 @@ pub fn run() {
                 set_android_credential_store();
                 lock_android_landscape();
             }
+            #[cfg(target_os = "ios")]
+            set_ios_credential_store();
             // The same credential store backs both the Settings commands and
             // the wallpaper search, so a saved key is used without a restart.
             let wallpaper_credentials =
@@ -5295,10 +5321,18 @@ async fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Re
         &app,
         STEAM_AUTH_WINDOW_LABEL,
         WebviewUrl::External(initial_url),
-    )
-    .title("Connect Steam to Orivo")
-    .inner_size(640.0, 760.0)
-    .min_inner_size(460.0, 580.0)
+    );
+    // tao pins an iOS window to the screen origin with exactly the size
+    // requested here and never resizes it: a 640x760 sign-in window sits
+    // offset and clipped on the 402x874 iPhone screen. Without these hints
+    // tao takes the whole screen bounds instead, and UIKit keeps that in
+    // sync across rotation.
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder
+        .inner_size(640.0, 760.0)
+        .min_inner_size(460.0, 580.0);
+    let builder = builder
+        .title("Connect Steam to Orivo")
     // The credential lives in Keychain instead. A non-persistent WebView
     // avoids leaving a browser session behind in Orivo's app data.
     .incognito(true)
@@ -5363,10 +5397,22 @@ async fn begin_steam_web_login(app: AppHandle, state: State<'_, AppState>) -> Re
 
     let settled_for_close = Arc::clone(&settled);
     let app_for_close = app.clone();
+    #[cfg(target_os = "android")]
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
-            close_login_window(&window_for_close);
+            // Never call `close_login_window()` (i.e. `window.close()`) from
+            // this arm: `close()` posts `WindowMessage::Close`, which the
+            // runtime turns straight back into `CloseRequested` for this very
+            // handler. The queue ping-pongs without ever waiting, the main
+            // thread pegs a core inside the event loop, UIKit stops servicing
+            // touch and the whole app looks frozen (it is — see the sample in
+            // on_close_requested → this closure → close()). Not preventing the
+            // event is all it takes: the runtime destroys the window itself
+            // once the listeners returned, so the arm only owes the
+            // platform-side cleanup.
+            #[cfg(target_os = "android")]
+            restore_android_main_webview();
             return;
         }
         if matches!(event, WindowEvent::Destroyed)
@@ -6043,10 +6089,16 @@ async fn connect_token_source(
     #[cfg(target_os = "android")]
     remember_android_main_webview();
 
-    let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url))
-        .title(format!("Connect {} to Orivo", provider.label()))
+    let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(initial_url));
+    // Same as the Steam sign-in window: tao would pin this to the screen
+    // origin at a fixed size instead of filling the screen, so the size
+    // hints are desktop-only.
+    #[cfg(not(target_os = "ios"))]
+    let builder = builder
         .inner_size(640.0, 760.0)
-        .min_inner_size(460.0, 580.0)
+        .min_inner_size(460.0, 580.0);
+    let builder = builder
+        .title(format!("Connect {} to Orivo", provider.label()))
         // A token-style sign-in leaves nothing behind: the credential belongs in
         // the keychain, not in a browser session inside Orivo's app data.
         .incognito(true)
@@ -6154,10 +6206,15 @@ async fn connect_token_source(
 
     let session_for_close = Arc::clone(&session);
     let app_for_close = app.clone();
+    #[cfg(target_os = "android")]
     let window_for_close = window.clone();
     window.on_window_event(move |event| {
         if matches!(event, WindowEvent::CloseRequested { .. }) {
-            close_login_window(&window_for_close);
+            // Same rule as the Steam sign-in window above: re-issuing the
+            // close from inside `CloseRequested` loops the runtime's close
+            // message forever and freezes the app.
+            #[cfg(target_os = "android")]
+            restore_android_main_webview();
             return;
         }
         if matches!(event, WindowEvent::Destroyed)
@@ -6561,10 +6618,16 @@ async fn session_sync(
             );
             let url =
                 Url::parse(library_url).map_err(|_| sources::SourceError::Unsupported(provider))?;
-            let built = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url))
-                .title(format!("Connect {} to Orivo", provider.label()))
+            let builder = WebviewWindowBuilder::new(app, label.clone(), WebviewUrl::External(url));
+            // Desktop-only size hints — see the Steam sign-in window: on iOS
+            // they would leave the window offset and clipped instead of
+            // filling the screen.
+            #[cfg(not(target_os = "ios"))]
+            let builder = builder
                 .inner_size(900.0, 820.0)
-                .min_inner_size(560.0, 620.0)
+                .min_inner_size(560.0, 620.0);
+            let built = builder
+                .title(format!("Connect {} to Orivo", provider.label()))
                 // Deliberately *not* incognito: this store has no token to
                 // keep, so its own signed-in session is the connection. It
                 // lives in Orivo's WebView data store and is cleared when the

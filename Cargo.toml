@@ -19,3 +19,4 @@ strip = "symbols"
 
 [patch.crates-io]
 wry = { path = "src-tauri/patches/wry-0.55.1" }
+tauri-runtime-wry = { path = "src-tauri/patches/tauri-runtime-wry-2.11.4" }
