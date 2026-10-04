@@ -153,11 +153,11 @@ jobs:
     env:
       # One place: the SDK package to install, and the path Tauri is pointed at.
       NDK_VERSION: 27.0.12077973
-    # A release gate again, as of 0.3.8. It was not one for 0.3.7: the job was
-    # added after 0.3.6 with no Android project and no signing key behind it, so
-    # it failed on contact, and because `verify-updater-manifest` listed it in
-    # `needs` it took the whole release with it — four finished desktop builds
-    # sat in a draft nobody could ship. The APK is a deliverable now, so a
+    # A release gate, and the APK is a deliverable. It was briefly neither: the
+    # job was added after 0.3.6 with no Android project and no signing key behind
+    # it, so it failed on contact, and because `verify-updater-manifest` listed it
+    # in `needs` it took the whole release with it — four finished desktop builds
+    # sat in a draft nobody could ship. With the project and the key in place, a
     # missing one must fail loudly; what must never happen again is the *other*
     # failure mode, a platform silently dropping out of a published release.
     # `verify-updater-manifest` therefore also counts the .apk asset itself.
