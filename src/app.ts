@@ -64,7 +64,7 @@ import {
 } from "./console-source";
 import type { SourceReviewEntry } from "./source-review";
 
-import { fallbackLibrary, type LibraryGame } from "./mock-library";
+import { fallbackLibrary, type LaunchOption, type LibraryGame } from "./mock-library";
 import {
   NOTIFICATIONS,
   defaultNotificationStorage,
@@ -153,6 +153,7 @@ import {
 } from "./plugin-health";
 import { createDefaultRunnerManagerClient, createRunnerManagerController } from "./runner-manager";
 import { mountRunnerPanel } from "./runner-view";
+import { createGameStreamClient, mountGameStreamPanel } from "./gamestream-settings";
 import { createDefaultQuikyClient } from "./quiky-install";
 import {
   NAV_STEP_EVENT,
@@ -238,7 +239,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher" | "runners";
+type PluginId = "wine" | "wallpaper-searcher";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
@@ -570,11 +571,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     sourceAccountsPanel: get<HTMLElement>("#source-accounts-panel"),
     sourceAccountsBody: get<HTMLElement>("#source-accounts-body"),
     playButton: get<HTMLButtonElement>("#play-button"),
+    playLaunchMenu: get<HTMLElement>("#play-launch-menu"),
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
     runnersPanel: get<HTMLElement>("#runners-panel"),
     runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
+    gamestreamPanel: get<HTMLElement>("#gamestream-panel"),
+    gamestreamPanelBody: get<HTMLElement>("#gamestream-panel-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
@@ -1373,6 +1377,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       });
   };
 
+  /** Close the "how to start this" list, if it is open. */
+  const closeLaunchMenu = (): void => {
+    refs.playLaunchMenu.hidden = true;
+    refs.playLaunchMenu.replaceChildren();
+  };
+
   const renderSelection = (immediateHero = false): void => {
     renderLibraryOnboarding();
     // With no games there is no selection to render. Everything below reads
@@ -1496,6 +1506,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
 
     state.selectedId = id;
+    // The list was about *that* game. Left and right on Play change the game
+    // under it, so an open list would be answering a question nobody asked.
+    closeLaunchMenu();
     renderSelection();
 
     if (scroll) {
@@ -2081,6 +2094,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
   // file does with them beyond toggling the panel's `hidden` attribute.
   const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
   mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
+  // The streaming host is that panel's companion: it owns its own subtree the
+  // same way, and this file only decides whether the card is there at all.
+  const gamestreamPanel = mountGameStreamPanel(
+    refs.gamestreamPanelBody,
+    createGameStreamClient(),
+    { showToast },
+  );
 
   const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
@@ -2399,8 +2419,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
    * than either of them alone.
    */
   // Third-party plugins are discovered on disk, so the Installed group is the
-  // two native runners plus whatever the registry found. Nothing extra renders
-  // when the registry is empty: the panel then looks exactly as it did before.
+  // two built-ins (Wine, Wallpaper Searcher) plus whatever the registry found.
+  // Nothing extra renders when the registry is empty: the panel then looks
+  // exactly as it did before.
   const renderDiscoveredPlugins = (): void => {
     for (const stale of refs.pluginsInstalledList.querySelectorAll("[data-plugin-managed]")) {
       stale.remove();
@@ -2417,35 +2438,84 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
 
   /**
    * What Orivo is being built towards, named rather than promised in a
-   * changelog. These are not installable and say so: a row marked "Soon" is an
-   * honest roadmap entry, an install button that fails is not.
+   * changelog. A row marked "Soon" is an honest roadmap entry — honest right
+   * up until the registry can offer the real thing: the day a version is
+   * downloadable, its own catalogue row takes the rail with a working Install
+   * button, and this entry steps aside rather than showing the same plugin
+   * twice (`ids` names the ones whose registry id is already decided).
    */
-  const COMING_SOON_PLUGINS: ReadonlyArray<{ name: string; summary: string }> = [
+  const COMING_SOON_PLUGINS: ReadonlyArray<{
+    name: string;
+    summary: string;
+    ids?: readonly string[];
+  }> = [
     { name: "Spotify", summary: "What you are listening to, beside what you are playing." },
-    { name: "Moonlight / Sunshine", summary: "Stream a game from another machine on your network." },
+    {
+      name: "Moonlight / Sunshine",
+      summary: "Stream a game from another machine on your network.",
+      ids: ["com.orivo.gamestream"],
+    },
     { name: "Playnite", summary: "Import a Playnite library, its metadata and its categories." },
     { name: "Ludusavi", summary: "Back up and restore your save games." },
   ];
 
-  const renderComingSoonPlugins = (term: string): HTMLElement[] =>
-    COMING_SOON_PLUGINS.filter(
-      (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
-    ).map((entry) => {
-      const row = document.createElement("div");
-      row.className = "settings-row plugin-row plugin-row--soon";
-      const copy = document.createElement("div");
-      copy.className = "settings-row__copy";
-      const name = document.createElement("strong");
-      name.textContent = entry.name;
-      const summary = document.createElement("small");
-      summary.textContent = entry.summary;
-      copy.append(name, summary);
-      const state = document.createElement("span");
-      state.className = "plugin-row__state plugin-row__state--soon";
-      state.textContent = "Soon";
-      row.append(copy, state);
-      return row;
-    });
+  const renderComingSoonPlugins = (term: string): HTMLElement[] => {
+    // The registry is the present tense of these promises: whatever it
+    // already offers — by id, or simply by carrying the same name — renders
+    // as a real catalogue row elsewhere in this list, so the teaser goes.
+    const offered = pluginManager.catalog();
+    const knownIds = new Set(
+      [...offered.available, ...offered.installed].map((plugin) => plugin.id.toLocaleLowerCase()),
+    );
+    const knownNames = new Set(
+      [...offered.available, ...offered.installed].map((plugin) =>
+        plugin.name.toLocaleLowerCase(),
+      ),
+    );
+    return COMING_SOON_PLUGINS.filter(
+      (entry) =>
+        !(entry.ids ?? []).some((id) => knownIds.has(id)) &&
+        !knownNames.has(entry.name.toLocaleLowerCase()),
+    )
+      .filter(
+        (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
+      )
+      .map((entry) => {
+        const row = document.createElement("div");
+        row.className = "settings-row plugin-row plugin-row--soon";
+        const copy = document.createElement("div");
+        copy.className = "settings-row__copy";
+        const name = document.createElement("strong");
+        name.textContent = entry.name;
+        const summary = document.createElement("small");
+        summary.textContent = entry.summary;
+        copy.append(name, summary);
+        const state = document.createElement("span");
+        state.className = "plugin-row__state plugin-row__state--soon";
+        state.textContent = "Soon";
+        row.append(copy, state);
+        return row;
+      });
+  };
+
+  /**
+   * The streaming host card is the runners panel's companion and appears with
+   * it, but only once a profile actually launches streams: an address for a
+   * machine nothing streams from is a box with no question behind it.
+   *
+   * Its own function because it is also what the runner controller's change
+   * events need — flipping a profile to streams has to make the card appear
+   * without a re-render of the whole plugin browser behind it, which an import
+   * poll would then repeat every tick.
+   */
+  const syncGameStreamCard = (): void => {
+    refs.gamestreamPanel.hidden =
+      state.pluginView !== "list" ||
+      !runnerManager
+        .runners()
+        .some((runner) => runner.profiles.some((profile) => profile.launchMode === "stream"));
+  };
+  runnerManager.onChange(syncGameStreamCard);
 
   const renderPluginList = (): void => {
     const showList = state.pluginView === "list";
@@ -2453,7 +2523,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
-    refs.runnersPanel.hidden = state.pluginView !== "runners";
+    // The runners panel is not a plugin's detail view: it belongs to the
+    // section by name, so it sits inline with the browser and is replaced by
+    // whichever detail view opens, exactly like the browser itself.
+    refs.runnersPanel.hidden = !showList;
+    syncGameStreamCard();
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
     refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
@@ -2515,9 +2589,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
-    // Cheap and always fresh: a background import or a plugin update can
-    // change a profile's status between visits, so every open re-reads it.
-    if (id === "runners") void runnerManager.load(new AbortController().signal);
   };
 
   const renderWineSettingsPanel = (): void => {
@@ -4369,7 +4440,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     renderWineSettingsPanel();
   };
 
-  const launchGame = async (requestedGameId?: string): Promise<void> => {
+  /**
+   * The ways a game can be started that are worth offering. A game installed
+   * here and streamable from another machine has two; everything else has one,
+   * and one is never a question.
+   */
+  const launchChoicesFor = (game: LibraryGame): LaunchOption[] =>
+    (game.launchOptions ?? []).filter((option) => option.launchable);
+
+  const launchGame = async (requestedGameId?: string, launchOption?: string): Promise<void> => {
     const requested = requestedGameId
       ? state.games.find((candidate) => candidate.id === requestedGameId)
       : undefined;
@@ -4424,7 +4503,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         renderLaunchFeedback();
       }
       showToast(game.source === "wine" ? "Preparing Wine for " + game.title + "…" : "Launching " + game.title + "…");
-      await invoke("launch_game", { gameId: game.id });
+      await invoke("launch_game", { gameId: game.id, launchOption: launchOption ?? null });
     } catch (error) {
       const message = messageFromError(error, "Could not launch " + game.title + ".");
       if (game.source === "wine") {
@@ -5014,7 +5093,38 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     // it from the rail below; pressing it stays as quiet as the `disabled`
     // attribute used to make it.
     if (refs.playButton.getAttribute("aria-disabled") === "true") return;
-    void launchGame();
+    if (!refs.playLaunchMenu.hidden) {
+      closeLaunchMenu();
+      return;
+    }
+    const choices = launchChoicesFor(selectedGame());
+    // One way to start it is not a question. Two is the player's to answer,
+    // and the answer belongs beside the button that asked rather than over the
+    // page: a game installed here and streamable from another machine is not
+    // the same thing twice, and guessing which one they meant is the one thing
+    // that cannot be undone once it has started.
+    if (choices.length < 2) {
+      // Named even when it is the only one: the card's own way of starting may
+      // be a different, unusable one — a Windows-only game you stream has a
+      // dead Steam launch first in its list — and saying nothing would pick it.
+      void launchGame(undefined, choices[0]?.id);
+      return;
+    }
+    for (const choice of choices) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "play-launch-option";
+      option.role = "menuitem";
+      option.dataset.launchOption = choice.id;
+      option.textContent = choice.label;
+      option.addEventListener("click", () => {
+        closeLaunchMenu();
+        void launchGame(undefined, choice.id);
+      });
+      refs.playLaunchMenu.append(option);
+    }
+    refs.playLaunchMenu.hidden = false;
+    refs.playLaunchMenu.querySelector<HTMLButtonElement>("button")?.focus();
   });
   refs.launchFeedback.addEventListener("click", (event) => {
     const retry = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-launch-action='retry']");
@@ -5054,6 +5164,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       // Settings › Libraries page auto-expands the Steam account connect card.
       closeLibraryMenu();
       navigate({ page: "settings", section: "libraries", attachGameId: null });
+    } else if (action === "plugins") {
+      // A shortcut, not a flow: the menu is the hub for extending Orivo, and
+      // this is one hop to where the extensions are managed.
+      closeLibraryMenu();
+      navigate({ page: "settings", section: "plugins", attachGameId: null });
     } else if (action === "local") {
       void importGame();
     } else if (action === "winlator-folder") {
@@ -5580,6 +5695,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         setSteamAccountPanelOpen(false);
       }
       if (route.section === "plugins") void refreshWineRunnerSettings();
+      // The runners panel sits inline with the browser now, so its data is as
+      // much a part of arriving here as the catalogue's: a profile that went
+      // stale while Settings was closed must not render that way.
+      if (route.section === "plugins") {
+        // Cheap and always fresh: a background import or a plugin update can
+        // change a profile's status between visits, so every visit re-reads it.
+        void runnerManager.load(activation.signal);
+        // Host-private configuration another window could have changed, so it
+        // is re-read on arrival rather than kept from the last visit.
+        void gamestreamPanel.load(activation.signal).catch(() => {
+          // A host with no such command renders the empty card it already has.
+        });
+      }
       // The catalogue is re-read on every visit: a plugin installed from the
       // file picker in a previous session has to show up without a restart.
       if (route.section === "plugins") {
@@ -5587,7 +5715,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
         // background import, say — so its health is worth a fresh read on
         // every visit too, not only when the installed id set has changed.
         pluginHealthIdsKey = "";
-        void pluginManager.load(activation.signal);
+        void pluginManager.load(activation.signal).then(() => {
+          // The panel renders from the cached catalogue; this second step is
+          // what notices a newly downloadable plugin on its own — Moonlight /
+          // Sunshine the day its version is published — without the user
+          // pressing "Check for updates". It never rejects: an unreachable
+          // registry keeps the cache it already had.
+          void pluginManager.refreshCatalog();
+        });
       }
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
@@ -5726,7 +5861,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "runners") {
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
       openPluginDetail(pluginId);
       return;
     }
@@ -6061,6 +6196,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (state.notifications.open && !refs.notificationsControl.contains(target)) {
       setNotificationsOpen(false);
     }
+    if (
+      !refs.playLaunchMenu.hidden &&
+      !refs.playLaunchMenu.contains(target) &&
+      !refs.playButton.contains(target)
+    ) {
+      closeLaunchMenu();
+    }
   });
 
   window.addEventListener("keydown", (event) => {
@@ -6081,6 +6223,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     if (state.libraryMenuOpen && event.key === "Escape") {
       event.preventDefault();
       setLibraryMenuOpen(false, undefined, true);
+      return;
+    }
+
+    if (!refs.playLaunchMenu.hidden && event.key === "Escape") {
+      event.preventDefault();
+      closeLaunchMenu();
+      refs.playButton.focus();
       return;
     }
 
@@ -6424,6 +6573,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       logoUrl: immediateMediaUrl(logoToken),
       playTimeSeconds: readNumber(record, "playTimeSeconds", "play_time_seconds") ?? fallback.playTimeSeconds,
       launchable: readBoolean(record, "launchable") ?? fallback.launchable,
+      launchOptions: readLaunchOptions(record),
       hostPlatform,
       supportedPlatforms,
       compatibleWithHost: readBoolean(record, "compatibleWithHost", "compatible_with_host"),
@@ -6711,6 +6861,29 @@ function readBoolean(record: BackendRecord, ...keys: string[]): boolean | undefi
   return undefined;
 }
 
+/**
+ * The ways this game can be started, as the host listed them. An entry with no
+ * usable handle is dropped rather than offered: a choice that cannot be sent
+ * back is a button that does nothing.
+ */
+function readLaunchOptions(record: BackendRecord): LaunchOption[] | undefined {
+  const raw = (record as Record<string, unknown>)["launchOptions"] ?? (record as Record<string, unknown>)["launch_options"];
+  if (!Array.isArray(raw)) return undefined;
+  const options: LaunchOption[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const option = entry as Partial<LaunchOption>;
+    if (typeof option.id !== "string" || !option.id) continue;
+    options.push({
+      id: option.id,
+      label: typeof option.label === "string" && option.label ? option.label : "Play",
+      launchable: option.launchable === true,
+      remote: option.remote === true,
+    });
+  }
+  return options;
+}
+
 function readInstallState(record: BackendRecord): LibraryGame["installState"] {
   const value = readString(record, "installState", "install_state");
   return value === "installed" ||
@@ -6806,6 +6979,13 @@ function shell(): string {
                     ).join("")
                   : ""
               }
+              <!-- Not a source: the menu is where Orivo gets extended, and
+                   Settings › Plugins is where the extensions live. -->
+              <button type="button" class="library-source-action" role="menuitem" data-library-action="plugins">
+                <span class="library-source-action__icon" aria-hidden="true">${icon("puzzle")}</span>
+                <span class="library-source-action__copy"><strong>Plugins</strong><small>Browse and install plugins</small></span>
+                ${icon("chevron-right", "library-source-action__chevron")}
+              </button>
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
@@ -6914,8 +7094,14 @@ function shell(): string {
              affordance too many for the one thing this scene is for. -->
         <!-- Left and right on Play change the game it would start, and focus
              stays on Play: the rail below is the same choice, one row down. -->
+        <!-- Nothing in Orivo is modal, so a game that can be started more than
+             one way answers where it was asked: a short list anchored to Play,
+             not a dialog over the page. -->
         <div class="hero-actions" data-nav-steps>
-          <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
+          <div class="play-control">
+            <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
+            <div id="play-launch-menu" class="play-launch-menu" role="menu" aria-label="How to start this game" hidden></div>
+          </div>
         </div>
       </section>
 
@@ -7116,15 +7302,10 @@ function shell(): string {
                       <span class="plugin-row__state">Installed</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
-                    <div class="settings-row plugin-row">
-                      <span class="settings-card__mark plugin-row__mark" aria-hidden="true">${icon("gamepad")}</span>
-                      <div class="settings-row__copy">
-                        <strong>Third-party runners</strong>
-                        <small>Emulator plugins, and the profiles you build for them</small>
-                      </div>
-                      <span class="plugin-row__state">Installed</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="runners" aria-label="Open third-party runner settings">${icon("chevron-right")}</button>
-                    </div>
+                    <!-- Third-party runners has no row here on purpose: it is
+                         not a plugin but part of Orivo itself, and the section
+                         it belongs to is already named after it — the panel
+                         below renders inline with the browser. -->
                   </div>
                 </div>
 
@@ -7214,9 +7395,8 @@ function shell(): string {
                 </div>
               </section>
 
-              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" hidden>
+              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" data-settings-searchable hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back aria-label="Back to plugins">${icon("chevron-left")}<span>Plugins</span></button>
                   <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
                   <div class="settings-card__copy">
                     <strong id="runners-panel-title">Third-party runners</strong>
@@ -7224,6 +7404,20 @@ function shell(): string {
                   </div>
                 </header>
                 <div id="runners-panel-body"></div>
+              </section>
+
+              <!-- Shown only once a profile launches streams: one remote
+                   machine's address is configuration for that profile's
+                   import, so it has nothing to say until there is one. -->
+              <section id="gamestream-panel" class="settings-card" aria-labelledby="gamestream-panel-title" data-settings-searchable hidden>
+                <header class="settings-card__header">
+                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
+                  <div class="settings-card__copy">
+                    <strong id="gamestream-panel-title">Game streaming host</strong>
+                    <small>The machine your games run on, and what Orivo needs to ask it for its library</small>
+                  </div>
+                </header>
+                <div id="gamestream-panel-body"></div>
               </section>
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>

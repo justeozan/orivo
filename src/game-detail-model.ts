@@ -772,6 +772,11 @@ interface HostFitInput {
   hostPlatform?: string;
   supportedPlatforms?: readonly string[];
   macCompatibility?: "native" | "not-native" | "unknown";
+  /**
+   * The ways to start this game, as the host listed them. Only the ones that
+   * run somewhere else have any say here — see below.
+   */
+  launchOptions?: readonly { launchable: boolean; remote?: boolean }[];
 }
 
 /**
@@ -781,9 +786,17 @@ interface HostFitInput {
  * An unknown host, an empty answer, and a Wine entry never block: absence of
  * an answer is not an answer, and running Windows builds is exactly what
  * Wine is for.
+ *
+ * A game that can be started on *another* machine is never blocked either,
+ * whatever the matrix says: the build runs where it is supported and this
+ * machine is only the screen. Deliberately not "launchable": a store game is
+ * launchable when its client is installed, which says nothing about whether a
+ * build exists for this platform, so that would unblock games this machine
+ * really cannot run.
  */
 export function isBlockedForHost(game: HostFitInput): boolean {
   if (game.source === "wine") return false;
+  if (game.launchOptions?.some((option) => option.remote && option.launchable)) return false;
   const host = game.hostPlatform;
   if (host !== "windows" && host !== "macos" && host !== "linux") return false;
   const platforms = desktopPlatformsOf(game.supportedPlatforms ?? []);

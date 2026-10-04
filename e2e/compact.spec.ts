@@ -192,9 +192,9 @@ test.describe("every route", () => {
     });
   }
 
-  test("the Third-party runners panel opens and stays inside the screen", async ({ page }) => {
+  test("the Third-party runners panel stays inside the screen", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
-    await page.locator("[data-plugin-open='runners']").click();
+    // Reached with no click at all: the panel is inline with the browser.
     await expect(page.locator("#runners-panel")).toBeVisible();
     await expect(page.locator("#runners-panel-body")).toContainText(
       "Install a runner plugin to add an emulator",

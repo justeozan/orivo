@@ -322,6 +322,19 @@ describe("application shell", () => {
     expect(menu.textContent).not.toContain("RetroArch");
     expect(menu.textContent).not.toContain("PPSSPP");
   });
+
+  // The menu is where Orivo gets extended; the plugins shortcut is the one
+  // hop from there to where the extensions are managed.
+  it("offers a plugins shortcut that lands on Settings › Plugins", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    const trigger = menu.querySelector<HTMLButtonElement>("[data-library-action='plugins']");
+    expect(trigger).not.toBeNull();
+    trigger!.click();
+    await settle();
+    expect(window.location.hash).toBe("#/settings/plugins");
+    expect(menu.hidden).toBe(true);
+  });
 });
 
 /**
@@ -355,6 +368,8 @@ describe("application shell against the desktop backend", () => {
       string,
       unknown
     >,
+    /** What `get_installed_runners` reports: the runners panel renders from it. */
+    runners: [] as Record<string, unknown>[],
   };
 
   const mount = (): void => {
@@ -403,6 +418,12 @@ describe("application shell against the desktop backend", () => {
           };
         case "get_source_accounts":
           return backend.sources;
+        case "get_installed_runners":
+          return backend.runners;
+        case "get_gamestream_settings":
+          return { host: "" };
+        case "find_stream_clients":
+          return [];
         case "get_store_home":
           return { providerStatuses: backend.providers };
         case "sync_source_library":
@@ -437,6 +458,135 @@ describe("application shell against the desktop backend", () => {
     detail.play(alpha.id);
     await settle();
     expect(launchedGameIds()).toEqual([alpha.id]);
+  });
+
+  // The streaming host card is the runners panel's companion: an address for a
+  // machine nothing streams from is a box with no question behind it, so it
+  // waits for a profile that actually launches streams.
+  const runnerWithProfile = (launchMode: string) => ({
+    id: "com.orivo.gamestream",
+    name: "Moonlight",
+    version: "0.1.0",
+    state: "ready",
+    message: "",
+    profiles: [
+      {
+        id: "runner-1",
+        pluginId: "com.orivo.gamestream",
+        displayName: "Moonlight",
+        status: "valid",
+        statusMessage: null,
+        enabled: true,
+        applicationLabel: "Moonlight.app",
+        launchMode,
+        directories: [],
+        gameCount: 0,
+        importComplete: false,
+        importResumable: false,
+        lastImportedAt: null,
+      },
+    ],
+  });
+
+  it("keeps the game streaming host out of Settings until a profile streams", async () => {
+    backend.runners = [runnerWithProfile("default")];
+    mount();
+    await goto("#/settings/plugins");
+
+    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+  });
+
+  it("shows the game streaming host once a profile launches streams", async () => {
+    backend.runners = [runnerWithProfile("stream")];
+    mount();
+    await goto("#/settings/plugins");
+
+    const card = root.querySelector<HTMLElement>("#gamestream-panel")!;
+    expect(card.hidden).toBe(false);
+    expect(card.textContent).toContain("Host address");
+    // And the address was read on arrival rather than kept from a last visit.
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "get_gamestream_settings"),
+    ).not.toHaveLength(0);
+  });
+
+  // A game installed here and streamable from another machine is one game with
+  // two ways to start it. Nothing in Orivo is modal, so the question is asked
+  // beside the button that raised it.
+  const twoWayGame = {
+    id: "local:a-way-out",
+    title: "A Way Out",
+    source: "local",
+    launchable: true,
+    launchOptions: [
+      { id: "launch-local", label: "This computer", launchable: true, remote: false },
+      { id: "launch-stream", label: "Moonlight", launchable: true, remote: true },
+    ],
+  };
+
+  it("asks which way to start a game that can be started two ways", async () => {
+    backend.library = [twoWayGame];
+    mount();
+    await settle();
+    // This describe keeps one mock across its tests, so a launch recorded by an
+    // earlier one would be counted here.
+    tauri.invoke.mockClear();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    const menu = root.querySelector<HTMLElement>("#play-launch-menu")!;
+    expect(menu.hidden).toBe(false);
+    expect(
+      [...menu.querySelectorAll<HTMLButtonElement>("button")].map((button) => button.textContent),
+    ).toEqual(["This computer", "Moonlight"]);
+    // Nothing starts until the question is answered.
+    expect(launchedGameIds()).toEqual([]);
+
+    menu.querySelector<HTMLButtonElement>("[data-launch-option='launch-stream']")!.click();
+    await settle();
+
+    expect(menu.hidden).toBe(true);
+    expect(
+      tauri.invoke.mock.calls
+        .filter(([command]) => command === "launch_game")
+        .map(([, args]) => args?.launchOption),
+    ).toEqual(["launch-stream"]);
+  });
+
+  it("never asks when there is only one way to start a game", async () => {
+    backend.library = [{ ...twoWayGame, launchOptions: [twoWayGame.launchOptions[0]] }];
+    mount();
+    await settle();
+    tauri.invoke.mockClear();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("#play-launch-menu")!.hidden).toBe(true);
+    expect(launchedGameIds()).toEqual(["local:a-way-out"]);
+  });
+
+  // A way of starting that the host says cannot work right now is not a choice.
+  it("does not offer a way to start that the host reported as unusable", async () => {
+    backend.library = [
+      {
+        ...twoWayGame,
+        launchOptions: [
+          twoWayGame.launchOptions[0],
+          { ...twoWayGame.launchOptions[1], launchable: false },
+        ],
+      },
+    ];
+    mount();
+    await settle();
+    tauri.invoke.mockClear();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(root.querySelector<HTMLElement>("#play-launch-menu")!.hidden).toBe(true);
+    expect(launchedGameIds()).toEqual(["local:a-way-out"]);
   });
 
   it("lists every connectable store and signs into the one that was clicked", async () => {
@@ -878,6 +1028,67 @@ describe("application shell against the desktop backend", () => {
     expect(play?.hasAttribute("aria-disabled")).toBe(true);
     expect(play?.classList.contains("is-blocked")).toBe(true);
     expect(play?.getAttribute("aria-label")).toBe("Fall Guys has no macOS version");
+  });
+
+  // The platform matrix and the host's answer are about different things: one
+  // is builds of this game for this OS, the other is ways to start it from
+  // this machine. Streaming is the case where they disagree, and the second
+  // one wins — "Windows only" printed over a working Play would be the wrong
+  // fact about the right game.
+  it("plays a game with no build for this machine when something here can still start it", async () => {
+    backend.library = [
+      {
+        id: "steam:2698940",
+        title: "The Crew Motorfest",
+        source: "steam",
+        launchable: true,
+        hostPlatform: "macos",
+        supportedPlatforms: ["windows"],
+        launchOptions: [
+          { id: "launch-steam", label: "Steam", launchable: false, remote: false },
+          { id: "launch-stream", label: "Moonlight", launchable: true, remote: true },
+        ],
+      },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.textContent).toContain("Play");
+    expect(play.textContent).not.toContain("Windows only");
+    expect(play.hasAttribute("aria-disabled")).toBe(false);
+    expect(play.classList.contains("is-blocked")).toBe(false);
+
+    // And the way that cannot work here is not offered, so the one that can
+    // starts without a question.
+    tauri.invoke.mockClear();
+    play.click();
+    await settle();
+    expect(root.querySelector<HTMLElement>("#play-launch-menu")!.hidden).toBe(true);
+    expect(
+      tauri.invoke.mock.calls
+        .filter(([command]) => command === "launch_game")
+        .map(([, args]) => args?.launchOption),
+    ).toEqual(["launch-stream"]);
+  });
+
+  it("still says Windows only when nothing here can start it", async () => {
+    backend.library = [
+      {
+        id: "steam:1",
+        title: "Fall Guys",
+        source: "steam",
+        launchable: false,
+        hostPlatform: "macos",
+        supportedPlatforms: ["windows"],
+      },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.textContent).toContain("Windows only");
+    expect(play.hasAttribute("aria-disabled")).toBe(true);
   });
 
   it("names what a blocked game does run on instead of assuming Windows", async () => {

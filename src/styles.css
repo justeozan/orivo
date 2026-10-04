@@ -243,6 +243,45 @@ button { border: 0; cursor: pointer; }
   animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
 }
 .library-source-menu[hidden] { display: none; }
+.play-control { position: relative; display: inline-flex; }
+/* The same glass as the sources menu, anchored above Play rather than below a
+   topbar button: the hero sits low enough that opening downwards would leave
+   the list off screen. */
+.play-launch-menu {
+  position: absolute;
+  z-index: 22;
+  bottom: calc(100% + 11px);
+  left: 0;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 40px));
+  display: grid;
+  gap: 2px;
+  padding: 5px 6px;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 16px;
+  color: #f4f2f7;
+  background: rgba(22,20,23,.48);
+  box-shadow: 0 10px 30px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.055);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  backdrop-filter: blur(22px) saturate(130%);
+  animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
+}
+.play-launch-menu[hidden] { display: none; }
+.play-launch-option {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 11px;
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: #f4f2f7;
+  background: transparent;
+  cursor: pointer;
+}
+.play-launch-option:hover:not(:disabled), .play-launch-option[data-nav-focus] { background: rgba(255,255,255,.08); }
+.play-launch-option:disabled { color: #8d8995; cursor: default; }
 .library-source-action {
   display: grid;
   width: 100%;
@@ -1979,6 +2018,19 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .runner-profile-card__status--error { color: #f0a3a3; }
 .runner-profile-card__status--pending { color: #9b96a6; }
 .runner-profile-card__toggle { display: flex; align-items: center; gap: 7px; color: #b7b2c1; font-size: 12px; }
+.runner-profile-card__mode { display: flex; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
+.runner-group__adders { display: flex; flex-wrap: wrap; gap: 8px; }
+.runner-pairing { display: grid; gap: 6px; justify-items: start; }
+/* The PIN is the one thing in this card the user has to read off a screen and
+   type on another machine, so it is set at a size that survives that walk. */
+.runner-pairing__pin {
+  font-size: 28px;
+  letter-spacing: .22em;
+  font-variant-numeric: tabular-nums;
+  color: #f2eff7;
+  user-select: all;
+}
+.runner-profile-card__mode .settings-select { flex: 1; min-width: 0; }
 .runner-directory-list { display: grid; gap: 4px; }
 .runner-directory-row {
   display: flex;
