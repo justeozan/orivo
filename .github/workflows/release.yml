@@ -150,6 +150,22 @@ jobs:
   android:
     name: Build Android (universal APK + AAB)
     runs-on: ubuntu-latest
+    # Not a release gate, and not a passing job either: this repository has no
+    # Android Tauri project and no Android signing configuration, which is what
+    # `docs/RELEASING.md` has said all along. The job fails at
+    # `tauri android build` with "project directory src-tauri/gen/android
+    # doesn't exist".
+    #
+    # It was added after 0.3.6 and so first ran for 0.3.7, where it took the
+    # whole release down with it: `verify-updater-manifest` listed it in
+    # `needs`, so the verification and the publication were skipped and four
+    # finished desktop builds sat in a draft nobody could ship. A platform this
+    # repository does not build must not be able to do that.
+    #
+    # Make it a gate again the day `tauri android init` has been run and the
+    # signing keys exist: put `android` back in that `needs` list and drop this
+    # `continue-on-error`.
+    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -236,7 +252,8 @@ jobs:
 
   verify-updater-manifest:
     name: Verify staged release
-    needs: [release, android]
+    # Deliberately not `android` — see the note on that job.
+    needs: [release]
     runs-on: ubuntu-latest
     # This job only reads, but it cannot use `contents: read`. The release it
     # checks is still a draft, GitHub lists draft releases only for tokens with
