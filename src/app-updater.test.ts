@@ -103,6 +103,22 @@ function pendingDownload(overrides: Partial<UpdateHandleStub> = {}): {
   };
 }
 
+/**
+ * The teardown of the shell the current test mounted.
+ *
+ * Mounting leaves listeners on `window` and `document` and a route listener on
+ * the router, which is a module singleton. Dropping the DOM does not detach
+ * any of them, so without this every shell a file ever mounted re-rendered on
+ * every navigation — by the fortieth test a single one cost half a second, and
+ * the slowest cases timed out in CI.
+ */
+let detachShell: (() => void) | null = null;
+
+afterEach(() => {
+  detachShell?.();
+  detachShell = null;
+});
+
 describe("About panel updater wiring", () => {
   let root: HTMLElement;
 
@@ -141,7 +157,7 @@ describe("About panel updater wiring", () => {
     document.body.replaceChildren();
     root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
+    detachShell = mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
     window.location.hash = "#/settings/about";
     await settle();
   });
@@ -316,7 +332,7 @@ describe("About panel updater outside the desktop app", () => {
     document.body.replaceChildren();
     const root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
+    detachShell = mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
     window.location.hash = "#/settings/about";
     await settle();
 
@@ -351,7 +367,7 @@ describe("About panel updater after the shell is torn down", () => {
       document.body.replaceChildren();
       const root = document.createElement("div");
       document.body.append(root);
-      mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
+      detachShell = mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
 
       // The shell goes away before the deferred check comes due.
       document.body.replaceChildren();

@@ -108,6 +108,22 @@ function currentNavLabels(root: HTMLElement): string[] {
   );
 }
 
+/**
+ * The teardown of the shell the current test mounted.
+ *
+ * Mounting leaves listeners on `window` and `document` and a route listener on
+ * the router, which is a module singleton. Dropping the DOM does not detach
+ * any of them, so without this every shell a file ever mounted re-rendered on
+ * every navigation — by the fortieth test a single one cost half a second, and
+ * the slowest cases timed out in CI.
+ */
+let detachShell: (() => void) | null = null;
+
+afterEach(() => {
+  detachShell?.();
+  detachShell = null;
+});
+
 describe("application shell", () => {
   let root: HTMLElement;
   let store: StubPage;
@@ -122,7 +138,7 @@ describe("application shell", () => {
     document.body.append(root);
     store = stubPage("Store");
     detail = stubPage("Game");
-    mountApp(root, { storePage: store, gameDetailPage: detail });
+    detachShell = mountApp(root, { storePage: store, gameDetailPage: detail });
     await settle();
   });
 
@@ -375,7 +391,7 @@ describe("application shell against the desktop backend", () => {
   const mount = (): void => {
     root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage("Store") });
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
   };
 
   const launchedGameIds = (): unknown[] =>
@@ -1384,7 +1400,7 @@ describe("the Android source confirmations", () => {
     });
     root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage("Store") });
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
     await settle();
   });
 
@@ -1503,7 +1519,7 @@ describe("the library welcome screen", () => {
   const mount = (): void => {
     root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage("Store") });
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
   };
 
   const onboarding = (): HTMLElement => root.querySelector<HTMLElement>("#library-onboarding")!;
@@ -1672,7 +1688,7 @@ describe("application shell notifications", () => {
   const mount = (): void => {
     root = document.createElement("div");
     document.body.append(root);
-    mountApp(root, { storePage: stubPage("Store") });
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
   };
 
   const bell = (): HTMLButtonElement =>

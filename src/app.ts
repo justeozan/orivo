@@ -461,7 +461,14 @@ const STORE_LOGO_FILES: Readonly<Record<string, string>> = {
   "google-play": "google-play.svg",
 };
 
-export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void {
+/**
+ * Mount the application shell into `root`. The returned function detaches it:
+ * it stops the shell answering the router and releases the listeners it put on
+ * `window` and `document`. The app itself mounts once and never calls it; a
+ * test that mounts per case has to, or every shell it ever mounted keeps
+ * re-rendering on every navigation.
+ */
+export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () => void {
   const notificationStorage = defaultNotificationStorage();
   /**
    * Whether the first library load has answered.
@@ -6184,6 +6191,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     }
   });
 
+  /**
+   * Everything this shell attaches outside its own root, so that tearing it
+   * down actually detaches it.
+   *
+   * Without this a mounted shell outlived its DOM: its listeners stayed on
+   * `window` and `document`, and the router — a module-level singleton — kept
+   * the route listener below for ever, so every navigation re-rendered every
+   * shell ever mounted. In the app that is invisible, because it mounts once.
+   * In `app-shell.test.ts` it is quadratic: one mount per test, and by the
+   * fortieth a single navigation costs half a second.
+   */
+  const attached = new AbortController();
+
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Node;
     if (
@@ -6203,7 +6223,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     ) {
       closeLaunchMenu();
     }
-  });
+  }, { signal: attached.signal });
 
   window.addEventListener("keydown", (event) => {
     // `composedTarget` rather than `event.target`: a listener on `window` sees
@@ -6310,7 +6330,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       default:
         break;
     }
-  });
+  }, { signal: attached.signal });
 
   // Arrow keys, then the same verbs on a controller. The engine reads the live
   // DOM, so pages only have to stay focusable — they never register anything.
@@ -6379,7 +6399,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
     });
   }
 
-  router.start((route) => {
+  const stopRouting = router.start((route) => {
     dispatchRoute(route);
     spatialNav.enterPage();
   });
@@ -6446,6 +6466,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): void
       } else void checkForUpdates();
     }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   }
+
+  return () => {
+    stopRouting();
+    attached.abort();
+    runnerManager.dispose();
+  };
 }
 
 /**
