@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Orivo installs on an Android phone or tablet. A release now carries a signed `.apk` you can sideload, built for arm64 — every Android device sold in years — alongside the `.aab` a Play Store listing would need. What it is for is the machine in the other room: nothing on a phone scans a Steam folder or starts a Wine prefix, but a game running on your PC and streamed to the screen in your hand is the whole point of the feature that landed in 0.3.7, and that is the shape Orivo takes here. The build is a release gate like the four desktop ones, which it was explicitly not for 0.3.7 — an Android job was added with no Android project and no signing key behind it, failed on contact, and because the verification step waited on it, took four finished desktop builds down into a draft nobody could ship. Both halves of that are now fixed rather than one: a missing `.apk` fails the release loudly, and the staged-release check counts the file itself, so no platform can quietly drop out of something already published.
+
 ## [0.3.7] - 2026-10-04
 
 ### Added

@@ -130,14 +130,29 @@ retarget the run at `v<version>`.
 | macOS (Apple Silicon + Intel, built separately) | `.dmg` | `.app.tar.gz` + `.sig` |
 | Windows | NSIS `.exe`, `.msi` | NSIS `.exe` + `.sig` |
 | Linux | `.AppImage`, `.deb`, `.rpm` | `.AppImage.tar.gz` + `.sig` |
+| Android (arm64) | `Orivo_<version>_android.apk`, `.aab` | — |
 
-Plus one `latest.json` shared by all four builds.
+Plus one `latest.json` shared by the four desktop builds.
 
 The macOS `.app` is a directory, so GitHub cannot attach it as a standalone
 file. The `.dmg` is the user-facing macOS installer; the `.app.tar.gz` is the
-signed updater archive, not a manual download. Orivo does not currently ship
-an Android `.apk`: this repository has no Android Tauri project or Android
-signing configuration.
+signed updater archive, not a manual download.
+
+The Android `.apk` is a sideload download and is deliberately absent from
+`latest.json`: Tauri's updater has no Android target, and Android installs
+updates by comparing signatures, not by asking a manifest. That makes the
+signing key the app's identity — the same key must sign every version or a
+device refuses the update as a different app. It lives in three repository
+secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS`) and nowhere else; losing it means every user has to
+uninstall before they can install again. The `.aab` is uploaded for a possible
+Play Store listing and is not installable directly.
+
+`src-tauri/gen/android` is committed, unlike `gen/apple`, because the release
+build needs it and because the signing configuration lives in its
+`app/build.gradle.kts`. The files Tauri itself generates are still excluded by
+its own nested `.gitignore`; the release job runs `tauri android init` to
+restore them, which only ever creates files that are missing.
 
 ---
 
