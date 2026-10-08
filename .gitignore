@@ -2,7 +2,15 @@
 /node_modules/
 /dist/
 /downloads/
-/src-tauri/gen/
+# Tauri's generated mobile projects. `gen/android` is the exception and is
+# committed: the files Tauri regenerates on its own are excluded by its own
+# nested .gitignore, and CI needs the rest to exist before it can build an APK.
+# See the note on the `android` job in .github/workflows/release.yml.
+/src-tauri/gen/*
+!/src-tauri/gen/android/
+# Android Studio's own state. Tauri's nested .gitignore drops only part of it,
+# and none of it is a build input.
+/src-tauri/gen/android/.idea/
 .DS_Store
 .gstack/
 .context/
@@ -14,6 +22,10 @@ e2e/__screenshots__/
 .env.local
 # The Android debug signing key: local to each machine, and a key regardless.
 debug.keystore
+# The release keystore CI reconstructs from secrets, and the descriptor that
+# names its passwords. Neither belongs in a public repository.
+*.jks
+key.properties
 # sccache and other machine-specific cargo wrappers: committing this breaks the
 # build for anyone who does not have the same tools installed.
 /src-tauri/.cargo/
