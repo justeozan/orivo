@@ -1617,7 +1617,7 @@ fn steam_batch_url(app_ids: &str, region: &str) -> String {
     )
 }
 
-fn steam_app_details_url(app_id: &str, region: &str) -> String {
+pub(crate) fn steam_app_details_url(app_id: &str, region: &str) -> String {
     format!(
         "https://store.steampowered.com/api/appdetails?appids={app_id}&cc={}&l=french",
         region.to_lowercase()
@@ -2394,6 +2394,12 @@ fn open_offer_with(
     opener.open(&validated)
 }
 
+/// Open a store page the host built itself, through the same allowlist every
+/// offer goes through. For callers outside the Store, `store_choices` first.
+pub(crate) fn open_store_url(url: &str, opener: &dyn UrlOpener) -> Result<(), String> {
+    opener.open(&validate_store_url(url)?)
+}
+
 // ---------------------------------------------------------------------------
 // Commands. Registered by the shell in `lib.rs`.
 // ---------------------------------------------------------------------------
@@ -2402,6 +2408,12 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|error| format!("Orivo could not resolve its data directory: {error}"))
+}
+
+/// The region the Store shows prices for, so a lookup made elsewhere asks the
+/// same storefronts.
+pub(crate) fn store_region(app: &AppHandle) -> Result<String, String> {
+    Ok(resolve_region(&app_data_dir(app)?))
 }
 
 /// Serve immediately from the embedded catalogue plus whatever the cache

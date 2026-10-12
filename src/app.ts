@@ -155,6 +155,8 @@ import { createDefaultRunnerManagerClient, createRunnerManagerController } from 
 import { mountRunnerPanel } from "./runner-view";
 import { createGameStreamClient, mountGameStreamPanel } from "./gamestream-settings";
 import { createDefaultQuikyClient } from "./quiky-install";
+import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
+import { createStoreChoicesClient, fillStoreChoiceMenu, type StoreChoice } from "./store-choices";
 import {
   NAV_STEP_EVENT,
   composedTarget,
@@ -479,6 +481,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    * someone whose library is about to arrive.
    */
   let libraryLoaded = false;
+  /**
+   * What this build can do here (`platform-features.ts`). It starts as the
+   * desktop answer, which a browser and an older host keep, and is corrected
+   * the moment the host has said — on iOS, long before Settings or Install.
+   */
+  let platformFeatures: PlatformFeatures = { ...DESKTOP_FEATURES };
+  const storeChoices = createStoreChoicesClient();
   const state: State = {
     // Deliberately empty until the first load answers. Seeding the showcase
     // games here meant a real library flashed ten games it does not own, and
@@ -1388,6 +1397,43 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const closeLaunchMenu = (): void => {
     refs.playLaunchMenu.hidden = true;
     refs.playLaunchMenu.replaceChildren();
+  };
+
+  /**
+   * "Install" on a device that installs nothing: the host says where the game
+   * can be got instead (`store-choices.ts`). One answer opens straight away;
+   * several are offered in the menu beside the button that asked, the way Play
+   * offers two ways to start a game.
+   */
+  const offerStoreChoices = async (
+    gameId: string,
+    menu: HTMLElement,
+    closeMenu: () => void,
+  ): Promise<void> => {
+    let choices: StoreChoice[];
+    try {
+      choices = await storeChoices.list(gameId);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not look this game up."));
+      return;
+    }
+    const open = (choice: StoreChoice): void => {
+      closeMenu();
+      void storeChoices.open(gameId, choice.id).catch((error) => {
+        showToast(messageFromError(error, "That page could not be opened."));
+      });
+    };
+    if (choices.length === 0) {
+      showToast("There is nowhere to get this game on this device.");
+      return;
+    }
+    if (choices.length === 1) {
+      open(choices[0]);
+      return;
+    }
+    fillStoreChoiceMenu(menu, choices, open);
+    menu.hidden = false;
+    menu.querySelector<HTMLButtonElement>("button")?.focus();
   };
 
   const renderSelection = (immediateHero = false): void => {
@@ -2517,6 +2563,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const syncGameStreamCard = (): void => {
     refs.gamestreamPanel.hidden =
+      !platformFeatures.localRunners ||
       state.pluginView !== "list" ||
       !runnerManager
         .runners()
@@ -2530,10 +2577,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    // An iOS build downloads no code and starts no game itself, so what is left
+    // of the section there is what is built in and works: the wallpaper search.
+    const catalogGroup = refs.pluginsCatalogPanel.querySelector<HTMLElement>(".plugins-group--catalog");
+    if (catalogGroup) catalogGroup.hidden = !platformFeatures.downloadablePlugins;
+    const wineRow = refs.pluginsCatalogPanel
+      .querySelector<HTMLElement>("[data-plugin-open='wine']")
+      ?.closest<HTMLElement>(".plugin-row");
+    if (wineRow) wineRow.hidden = !platformFeatures.localRunners;
     // The runners panel is not a plugin's detail view: it belongs to the
     // section by name, so it sits inline with the browser and is replaced by
     // whichever detail view opens, exactly like the browser itself.
-    refs.runnersPanel.hidden = !showList;
+    refs.runnersPanel.hidden = !showList || !platformFeatures.localRunners;
     syncGameStreamCard();
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
@@ -4475,7 +4530,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
     try {
       if (!game.launchable) {
-        if (game.source === "steam") {
+        if (game.source === "steam" && platformFeatures.storeChoices) {
+          await offerStoreChoices(game.id, refs.playLaunchMenu, closeLaunchMenu);
+        } else if (game.source === "steam") {
           showToast("Opening Steam to install " + game.title + "…");
           await invoke("install_steam_game", { gameId: game.id });
         } else if (game.source === "epic" && game.installState === "installing") {
@@ -5799,6 +5856,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // Debug overlay: when the Settings toggle is on, the detail page fills in
         // sample achievements, friends and activity for games that ship none.
         sampleSocialEnabled: () => state.preferences.debugSampleSocial,
+        // On iOS, Install asks where the game can be got rather than starting a
+        // download; the page offers the answer beside its own button.
+        storeChoices: () => (platformFeatures.storeChoices ? storeChoices : null),
       });
     });
 
@@ -6419,6 +6479,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   if (idleWarmUp) idleWarmUp(warmDeferredPages, { timeout: WARM_UP_DEADLINE_MS });
   else window.setTimeout(warmDeferredPages, WARM_UP_DEADLINE_MS);
   void refreshLibrary();
+  void loadPlatformFeatures().then((features) => {
+    platformFeatures = features;
+    renderPluginList();
+  });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
   void loadWallpaperCredentials(settingsRequest, true);

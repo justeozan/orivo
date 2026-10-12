@@ -36,13 +36,35 @@ itself (ITMS-90717); `src/ios-app-store.test.ts` fails if one comes back.
 ## Listing
 
 - **Subtitle**: All your games in one place
-- **Categories**: Games, then Entertainment
+- **Categories**: Entertainment, then Utilities. Not Games: Orivo is not a
+  game, and guideline 2.3.5 lets Apple move an app that says otherwise.
 - **Keywords**: no store or game names. Third-party brands in keywords are
   rejected under guideline 2.3.7; the description names the stores instead.
 - **Content rights**: the app shows third-party content (store artwork,
   descriptions and logos from the stores' public catalogs).
 - **Price**: free. **Availability**: every territory except mainland China,
-  where a game needs a licence and an approval number before it can be listed.
+  where an app needs an ICP filing number before it can be listed.
+
+## On iPhone and iPad
+
+An iOS build runs no PC game and may download no code, and two things follow
+(`src-tauri/src/platform.rs` states them for the WebView):
+
+- **Plugins.** Nothing comes from the registry: `entry_runs_here` offers no
+  entry, so the catalogue, Install, Update and the background updater have
+  nothing to fetch, and the file picker was already off on mobile. Settings ›
+  Plugins keeps only what is built in and works there, the wallpaper search.
+  Guideline 2.5.2 refuses an app that downloads code, and Cranelift could not
+  compile a component on iOS anyway.
+- **Install.** Steam cannot be asked to install anything (`steam://` has no
+  handler on iOS). The button asks the host where the game can be got instead
+  (`src-tauri/src/store_choices.rs`): its own iOS version when the App Store
+  sells one by a studio Steam names, then its Steam page, which is always
+  there. One answer opens directly; two are offered beside the button.
+
+Streaming from a computer and emulation are not offered on iOS. The Moonlight
+app for iOS registers no URL scheme, so no other app can start a stream in it,
+and Orivo has no source of ROMs there.
 
 ## Age rating: 12+
 

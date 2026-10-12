@@ -227,7 +227,7 @@ export interface PrimaryActionDescriptor {
    */
   progress?: number | null;
   icon: IconName;
-  intent: "play" | "navigate" | "open-offer" | "install-epic" | "none";
+  intent: "play" | "navigate" | "open-offer" | "install-epic" | "store-choices" | "none";
   route: AppRoute | null;
   offerId: string | null;
   disabled: boolean;
@@ -829,6 +829,13 @@ export function resolvePrimaryAction(
   detail: GameDetailView | null,
   gameId: GameId | null,
   liveInstallPercent: number | null = null,
+  options: {
+    /**
+     * Whether this device asks where a game can be got instead of installing
+     * it (`platform-features.ts`): iOS, which can run no PC game.
+     */
+    storeChoices?: boolean;
+  } = {},
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
     kind: "unavailable",
@@ -863,6 +870,19 @@ export function resolvePrimaryAction(
         hint: `Start ${detail.title}`,
       };
     case "install-steam": {
+      // Steam cannot install anything on an iPhone. The same word the Library
+      // hero uses opens where this device can get the game instead.
+      if (options.storeChoices) {
+        return {
+          ...base,
+          kind: "install-steam",
+          label: "Install",
+          icon: "download",
+          intent: "store-choices",
+          disabled: false,
+          hint: `Shows where you can get ${detail.title} on this device.`,
+        };
+      }
       const offer = selectActionOffer(detail, "steam");
       return {
         ...base,

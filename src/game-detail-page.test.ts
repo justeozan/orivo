@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   GameSummary,
   WallpaperCandidateView,
@@ -638,5 +638,64 @@ describe("resetting the covers", () => {
     // A game whose publisher never uploaded a wide capsule keeps the landscape
     // image it had, and the page says so rather than claiming a clean result.
     expect(container.textContent).toContain("no landscape cover was found");
+  });
+});
+
+describe("game detail page on a device that cannot install", () => {
+  const appStore = { id: "app-store", label: "iPhone & iPad version", detail: "App Store · FromSoftware" };
+  const steamPage = { id: "steam-page", label: "View on Steam", detail: "Its page on the Steam store" };
+
+  async function mountSteamGame(choices: { id: string; label: string; detail: string }[]) {
+    const detail = createFallbackGameDetail(GAME_ID);
+    detail.primaryAction = "install-steam";
+    detail.launchable = false;
+    detail.offers = [];
+    const storeChoices = {
+      list: vi.fn(async () => choices),
+      open: vi.fn(async () => {}),
+    };
+    const page = createGameDetailPage({
+      navigate: () => {},
+      back: () => {},
+      play: () => {},
+      client: clientWithDetail(detail),
+      storeChoices: () => storeChoices,
+    });
+    host = new PageLifecycleHost(container, page);
+    await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await flush();
+    return storeChoices;
+  }
+
+  const primary = (): HTMLButtonElement =>
+    container.querySelector<HTMLButtonElement>(".gd-primary-action")!;
+
+  it("turns the quiet Install via Steam into an Install that offers where to get it", async () => {
+    const storeChoices = await mountSteamGame([appStore, steamPage]);
+    expect(primary().disabled).toBe(false);
+    expect(primary().textContent).toBe("Install");
+
+    primary().click();
+    await flush();
+
+    const menu = container.querySelector<HTMLElement>(".gd-store-choices .play-launch-menu")!;
+    expect(menu.hidden).toBe(false);
+    expect([...menu.querySelectorAll("[data-store-choice]")].map((row) => row.getAttribute("data-store-choice"))).toEqual([
+      "app-store",
+      "steam-page",
+    ]);
+
+    menu.querySelector<HTMLButtonElement>("[data-store-choice='steam-page']")!.click();
+    await flush();
+    expect(menu.hidden).toBe(true);
+    expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "steam-page");
+  });
+
+  it("opens the only place there is straight away", async () => {
+    const storeChoices = await mountSteamGame([steamPage]);
+    primary().click();
+    await flush();
+    expect(container.querySelector<HTMLElement>(".gd-store-choices .play-launch-menu")!.hidden).toBe(true);
+    expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "steam-page");
   });
 });
