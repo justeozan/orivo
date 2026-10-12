@@ -5,6 +5,7 @@ import type {
   AppRoute,
   EpicInstallStatus,
   GameDetailView,
+  GameId,
   GameMediaKind,
   GameMediaView,
   GameSummary,
@@ -43,6 +44,7 @@ import {
   type GameDetailViewModel,
 } from "./game-detail-model";
 import { hostDeviceLabel } from "./host-device";
+import { fillStoreChoiceMenu, type StoreChoice, type StoreChoicesClient } from "./store-choices";
 
 export interface GameDetailPageClient {
   getDetail(gameId: string, signal: AbortSignal): Promise<GameDetailView>;
@@ -202,6 +204,12 @@ export interface GameDetailPageOptions {
    * the Settings "Sample social data" toggle.
    */
   sampleSocialEnabled?(): boolean;
+  /**
+   * Where this device can get a game it cannot install, or null where Install
+   * installs (`store-choices.ts`). Asked each time, not once, so the page
+   * follows the shell as soon as it has learned what the platform is.
+   */
+  storeChoices?(): StoreChoicesClient | null;
   client?: GameDetailPageClient;
 }
 
@@ -546,12 +554,64 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
   };
 
-  const handlePrimaryAction = async (): Promise<void> => {
+  const storeChoicesClient = (): StoreChoicesClient | null => options.storeChoices?.() ?? null;
+
+  /**
+   * Install on a device that installs nothing: open the one place the host
+   * found for the game, or offer them all beside the button.
+   */
+  const offerStoreChoices = async (
+    choicesClient: StoreChoicesClient,
+    context: PageActivation | null,
+    gameId: GameId,
+    button: HTMLElement,
+    menu: HTMLElement,
+  ): Promise<void> => {
+    let choices: StoreChoice[];
+    try {
+      choices = await choicesClient.list(gameId);
+    } catch (error) {
+      if (isFresh(context, gameId)) {
+        showTransientStatus(requestErrorMessage(error, "Orivo could not look this game up."));
+      }
+      return;
+    }
+    if (!isFresh(context, gameId)) return;
+    const open = (choice: StoreChoice): void => {
+      closeMoreMenu(button, menu);
+      void choicesClient.open(gameId, choice.id).catch((error) => {
+        if (isFresh(context, gameId)) {
+          showTransientStatus(requestErrorMessage(error, "That page could not be opened."));
+        }
+      });
+    };
+    if (choices.length === 0) {
+      showTransientStatus("There is nowhere to get this game on this device.");
+      return;
+    }
+    if (choices.length === 1) {
+      open(choices[0]);
+      return;
+    }
+    fillStoreChoiceMenu(menu, choices, open);
+    openMoreMenu(button, menu);
+  };
+
+  const handlePrimaryAction = async (button?: HTMLElement, menu?: HTMLElement): Promise<void> => {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId) return;
-    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent);
+    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent, {
+      storeChoices: storeChoicesClient() !== null,
+    });
     if (action.disabled) return;
+    if (action.intent === "store-choices") {
+      const choicesClient = storeChoicesClient();
+      if (choicesClient && button && menu) {
+        await offerStoreChoices(choicesClient, context, gameId, button, menu);
+      }
+      return;
+    }
     if (action.intent === "play") {
       options.play(gameId);
       return;
@@ -1033,6 +1093,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       detail,
       state.gameId,
       epicProgressPercent,
+      { storeChoices: storeChoicesClient() !== null },
     );
     const button = element(
       "button",
@@ -1065,8 +1126,27 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       iconElement(descriptor.icon),
       element("span", "gd-button__label", descriptor.label),
     );
-    button.addEventListener("click", () => void handlePrimaryAction());
-    return button;
+    if (descriptor.intent !== "store-choices") {
+      button.addEventListener("click", () => void handlePrimaryAction());
+      return button;
+    }
+    // The answer opens beside the button, in the menu Play uses in the Library.
+    const control = element("span", "play-control gd-store-choices");
+    const menu = element("div", "play-launch-menu");
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Where to get this game");
+    menu.hidden = true;
+    button.setAttribute("aria-haspopup", "menu");
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => {
+      if (!menu.hidden) {
+        closeMoreMenu(button, menu);
+        return;
+      }
+      void handlePrimaryAction(button, menu);
+    });
+    control.append(button, menu);
+    return control;
   };
 
   /** The primary action is a single pill — the old split "Play ▾" chevron is gone. */

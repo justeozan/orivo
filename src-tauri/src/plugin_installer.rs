@@ -208,14 +208,8 @@ impl PluginInstallerService {
         entries
     }
 
-    /// A release that needs a newer Orivo is not an update, it is a reason to
-    /// update Orivo. Hiding it is better than offering an install that the
-    /// manifest check would refuse after the download.
     fn host_can_run(&self, entry: &IndexEntry) -> bool {
-        entry
-            .min_orivo_version
-            .as_deref()
-            .is_none_or(|minimum| !is_upgrade(minimum, self.host_version))
+        entry_runs_here(entry, self.host_version, crate::platform::CURRENT)
     }
 
     fn installed(&self) -> Vec<InstalledPluginView> {
@@ -517,7 +511,8 @@ pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstaller
         let _ =
             tauri::async_runtime::spawn_blocking(move || recovering.recover_interrupted_updates())
                 .await;
-        if !service.policy().automatic {
+        // A build that may install nothing has no release to look for either.
+        if !service.policy().automatic || !crate::platform::CURRENT.downloadable_plugins {
             return;
         }
         service.begin_network_operation();
@@ -848,6 +843,26 @@ fn verify_until_conclusive(ask: impl Fn() -> Result<(), PackageRefusal>) -> Resu
     ))
 }
 
+/// Whether a registry entry may be offered, installed or updated here. This is
+/// the gate every download goes through: the catalogue, install, update and the
+/// background updater all read `available_entries`, which applies it.
+///
+/// A release that needs a newer Orivo is not an update, it is a reason to
+/// update Orivo; hiding it is better than offering an install the manifest
+/// check would refuse after the download. A build that may download no code at
+/// all — iOS, see `PlatformFeatures::downloadable_plugins` — offers nothing.
+fn entry_runs_here(
+    entry: &IndexEntry,
+    host_version: &str,
+    features: crate::platform::PlatformFeatures,
+) -> bool {
+    features.downloadable_plugins
+        && entry
+            .min_orivo_version
+            .as_deref()
+            .is_none_or(|minimum| !is_upgrade(minimum, host_version))
+}
+
 /// Refuse a package the registry offers that is not newer than what is
 /// installed.
 ///
@@ -1039,6 +1054,34 @@ mod tests {
     /// Must be the identity the fixture component reports.
     const RUNNER_ID: &str = "com.orivo.fixture-runner";
     const RUNNER_VERSION: &str = "1.0.0";
+
+    fn registry_entry(min_orivo_version: Option<&str>) -> IndexEntry {
+        IndexEntry {
+            id: "com.orivo.gamestream".into(),
+            name: "Moonlight / Sunshine".into(),
+            version: "0.1.0".into(),
+            summary: String::new(),
+            url: "https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.1.0/x.orivo-plugin".into(),
+            sha256: "0".repeat(64),
+            size_bytes: 1,
+            min_orivo_version: min_orivo_version.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_ios_build_is_offered_no_registry_plugin_at_all() {
+        let ios = crate::platform::for_target(true);
+        assert!(!entry_runs_here(&registry_entry(None), "0.3.7", ios));
+        assert!(!entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", ios));
+    }
+
+    #[test]
+    fn other_builds_are_offered_what_their_version_can_run() {
+        let desktop = crate::platform::for_target(false);
+        assert!(entry_runs_here(&registry_entry(None), "0.3.7", desktop));
+        assert!(entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", desktop));
+        assert!(!entry_runs_here(&registry_entry(Some("0.4.0")), "0.3.7", desktop));
+    }
 
     /// A root no other test can land in. These run in parallel and write the
     /// same plugin directory names, so the clock alone is not enough.

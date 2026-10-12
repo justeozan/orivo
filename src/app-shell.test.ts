@@ -1775,3 +1775,123 @@ describe("application shell notifications", () => {
     expect(stored.visitedLibrarySources).toBe(true);
   });
 });
+
+describe("the application shell on iOS", () => {
+  let root: HTMLElement;
+  const backend = {
+    features: { downloadablePlugins: false, localRunners: false, storeChoices: true } as
+      | Record<string, boolean>
+      | undefined,
+    choices: [] as Record<string, unknown>[],
+  };
+  const stardew = { id: "steam:413150", title: "Stardew Valley", source: "steam", launchable: false };
+  const appStore = { id: "app-store", label: "iPhone & iPad version", detail: "App Store · ConcernedApe LLC" };
+  const steamPage = { id: "steam-page", label: "View on Steam", detail: "Its page on the Steam store" };
+
+  const mount = (): void => {
+    root = document.createElement("div");
+    document.body.append(root);
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
+  };
+  const commandArgs = (command: string): unknown[] =>
+    tauri.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
+  const menu = (): HTMLElement => root.querySelector<HTMLElement>("#play-launch-menu")!;
+
+  beforeEach(() => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    backend.features = { downloadablePlugins: false, localRunners: false, storeChoices: true };
+    backend.choices = [appStore, steamPage];
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.invoke.mockReset();
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_platform_features":
+          return backend.features;
+        case "get_library":
+          return [stardew];
+        case "get_store_choices":
+          return backend.choices;
+        case "get_preferences":
+          return {};
+        case "get_steam_account_status":
+          return { connected: true, steamId: "1", method: "api-key" };
+        case "get_wine_runner_settings":
+          return { runner: { state: "ready", available: true, version: "9.0", message: "" }, profiles: [] };
+        case "get_gamestream_settings":
+          return { host: "" };
+        default:
+          return undefined;
+      }
+    });
+  });
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  it("keeps only the built-in wallpaper search in Plugins", async () => {
+    mount();
+    await settle();
+    await goto("#/settings/plugins");
+    await settle();
+
+    const catalog = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
+    const row = (plugin: string) =>
+      catalog.querySelector<HTMLElement>(`[data-plugin-open='${plugin}']`)!.closest<HTMLElement>(".plugin-row")!;
+    // Nothing to download, so no catalogue, no updates and no file picker.
+    expect(catalog.querySelector<HTMLElement>(".plugins-group--catalog")!.hidden).toBe(true);
+    // Wine starts nothing on an iPhone, and neither does any other runner.
+    expect(row("wine").hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+    expect(row("wallpaper-searcher").hidden).toBe(false);
+  });
+
+  it("offers the iPhone version and the Steam page beside Install", async () => {
+    mount();
+    await settle();
+    expect(root.querySelector("#play-button")?.textContent).toContain("Install");
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(menu().hidden).toBe(false);
+    expect(
+      [...menu().querySelectorAll<HTMLElement>(".play-launch-option__label")].map((label) => label.textContent),
+    ).toEqual(["iPhone & iPad version", "View on Steam"]);
+    // Steam has no handler on iOS: asking it to install is what used to fail.
+    expect(commandArgs("install_steam_game")).toEqual([]);
+
+    menu().querySelector<HTMLButtonElement>("[data-store-choice='app-store']")!.click();
+    await settle();
+
+    expect(menu().hidden).toBe(true);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "steam:413150", choiceId: "app-store" }]);
+  });
+
+  it("opens the only choice there is without asking", async () => {
+    backend.choices = [steamPage];
+    mount();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(menu().hidden).toBe(true);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "steam:413150", choiceId: "steam-page" }]);
+  });
+
+  it("still asks Steam to install where the host answers for a computer", async () => {
+    backend.features = undefined;
+    mount();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(commandArgs("install_steam_game")).toEqual([{ gameId: "steam:413150" }]);
+    expect(commandArgs("get_store_choices")).toEqual([]);
+  });
+});

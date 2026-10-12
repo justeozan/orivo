@@ -183,6 +183,27 @@ describe("primary action resolution", () => {
     expect(resolvePrimaryAction(null, "game_1").disabled).toBe(true);
     expect(resolvePrimaryAction(detailWith(), null).disabled).toBe(true);
   });
+
+  it("asks where to get a Steam game on a device that cannot install it", () => {
+    // No offer: on a computer that is a quiet "Install via Steam". On iOS the
+    // button is live and opens the host's answer instead.
+    const steamGame = detailWith({ primaryAction: "install-steam" });
+    expect(resolvePrimaryAction(steamGame, "game_1")).toMatchObject({
+      label: "Install via Steam",
+      disabled: true,
+    });
+    expect(resolvePrimaryAction(steamGame, "game_1", null, { storeChoices: true })).toMatchObject({
+      kind: "install-steam",
+      label: "Install",
+      icon: "download",
+      intent: "store-choices",
+      disabled: false,
+    });
+    // Only a Steam install changes: Play stays Play on any device.
+    expect(
+      resolvePrimaryAction(detailWith({ primaryAction: "play" }), "game_1", null, { storeChoices: true }),
+    ).toMatchObject({ label: "Play", intent: "play" });
+  });
 });
 
 describe("media grouping and preview", () => {

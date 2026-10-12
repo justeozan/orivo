@@ -25,6 +25,7 @@ mod console_commands;
 pub mod plugin_manifest;
 mod plugin_registry;
 pub mod plugin_runtime;
+mod platform;
 mod plugin_scheduler;
 mod plugin_update;
 mod preferences;
@@ -47,6 +48,7 @@ mod sources;
 mod steam;
 mod steam_account;
 mod store;
+mod store_choices;
 mod wallpaper_credentials;
 mod wallpaper_search;
 mod wine_runner;
@@ -1075,6 +1077,9 @@ pub fn run() {
             console_commands::import_console_roms,
             launch_game,
             install_steam_game,
+            get_store_choices,
+            open_store_choice,
+            platform::get_platform_features,
             install_epic_game,
             uninstall_epic_game,
             get_epic_install_status,
@@ -7507,6 +7512,48 @@ async fn install_steam_game(
     Ok(LaunchResult {
         status: format!("Opening Steam to install {title}"),
     })
+}
+
+/// Where an iPhone or an iPad can get a game it cannot run: its iOS version
+/// when the App Store has one, its Steam page always. See `store_choices`.
+///
+/// Only Steam games have choices for now: they are the ones whose store page
+/// the catalog can name, and the ones whose button said Install and failed.
+#[tauri::command]
+async fn get_store_choices(
+    game_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<store_choices::StoreChoiceView>, String> {
+    let (title, launch_target) = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let game = catalog
+            .games
+            .iter()
+            .find(|game| game.id == game_id)
+            .ok_or_else(|| "This game is no longer in your library.".to_string())?;
+        (game.title.clone(), game.launch_target.clone())
+    };
+    let LaunchTarget::Steam { app_id } = launch_target else {
+        return Ok(Vec::new());
+    };
+    let region = store::store_region(&app)?;
+    let http = store::ReqwestStoreHttp::new()?;
+    let choices = store_choices::choices_for_steam_game(&http, &title, app_id, &region).await;
+    store_choices::remember(&game_id, &choices);
+    Ok(choices.iter().map(store_choices::StoreChoice::view).collect())
+}
+
+/// Open the choice the menu offered. The WebView names a game and a row; the
+/// destination is the one the host built when it offered that row.
+#[tauri::command]
+fn open_store_choice(game_id: String, choice_id: String) -> Result<(), String> {
+    let choice = store_choices::recall(&game_id, &choice_id)
+        .ok_or_else(|| "That choice is no longer available. Press Install again.".to_string())?;
+    store::open_store_url(&choice.url(), &store::SystemUrlOpener)
 }
 
 /// Ask the locally installed Epic Games Launcher to begin a download for one
