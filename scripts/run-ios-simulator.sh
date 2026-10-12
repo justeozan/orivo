@@ -108,6 +108,10 @@ if [ -f "$PBXPROJ" ]; then
   perl -pi -e 's/(?<=\t)\.0;$/IPHONEOS_DEPLOYMENT_TARGET = '"$MIN_IOS"';/' "$PBXPROJ"
 fi
 
+# The bundle identifier and the app icon live in the generated project too, and
+# init gets both wrong for Orivo: see sync-ios-project.sh.
+"${ROOT}/scripts/sync-ios-project.sh"
+
 # Pick the simulator. xcrun's JSON is the only list that separates runtimes;
 # the plain-text form omits them, so "iPhone 17" cannot be told apart by name.
 if [ -z "$DEVICE" ]; then

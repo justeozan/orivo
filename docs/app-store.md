@@ -15,6 +15,24 @@ together.
 | Support | <https://github.com/justeozan/orivo/issues> |
 | Release | manual, after approval |
 
+## Building for the record
+
+iOS builds are `run.evey.orivo`: `src-tauri/tauri.ios.conf.json` overrides the
+identifier for iOS only. Desktop and Android stay `io.orivo.desktop`, which
+names the data directory and the Android package existing installs live
+under.
+
+`src-tauri/gen/apple` is generated and gitignored, and `tauri ios init` gives
+it Tauri's logo as the app icon. After an init, before any iOS build:
+
+```sh
+scripts/sync-ios-project.sh   # identifier + Orivo's icon (run-ios-simulator.sh runs it)
+```
+
+The icon set in `src-tauri/icons/ios` is RGB on purpose. `tauri icon` writes
+RGBA even from an opaque source, and App Store Connect rejects the channel
+itself (ITMS-90717); `src/ios-app-store.test.ts` fails if one comes back.
+
 ## Listing
 
 - **Subtitle**: All your games in one place
