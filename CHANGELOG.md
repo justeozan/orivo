@@ -16,6 +16,7 @@
 - On a phone, the welcome screen keeps the panel to connect a library beside the greeting instead of stacking it under, below the fold.
 - An iPad held upright had no navigation at all: below 860 pixels of width the Library, Store and Settings pills were hidden to make room for a search field that had already moved to a row of its own, so Settings, once opened, had no way back. The pills stay, the bar starts under the status bar instead of behind it, the Store's panel of reasons sits under its headline instead of across it, the game page's title no longer climbs into its back pill, and the scene's arrows pair up under the bar instead of sitting on Play.
 - The Store's list of price sources printed each source's message one word per line, in the 8-pixel column meant for its status dot, and grew past the top of the window — on every screen.
+- Holding an arrow key along a shelf no longer outruns it where frames come slowly. The shelf's camera only moved on animation frames, so on a busy machine — a CI runner's virtual Mac, a modest phone — every press left it another card behind, until the selection ran off the screen. A press that lands while the shelf is still catching up now takes up the slack at once, keeping the new card at least three quarters in view; a single press is still eased all the way.
 
 ## [0.3.7] - 2026-10-04
 
