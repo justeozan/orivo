@@ -547,11 +547,15 @@
    fine and the height is not, so what shrinks is the masthead: a 60px wordmark
    and a 40px greeting push the two things worth tapping off the screen.
    --------------------------------------------------------------------------- */
+/* Two columns even below 880px: a phone held sideways is that narrow (874px
+   on an iPhone 18 Pro, 667 on an SE), and stacked, the panel this screen is
+   asking for starts below its fold. The copy column is what gives way. */
 html[data-form-factor="compact"] .onboarding {
   top: var(--topbar-height);
   right: var(--edge-right);
   bottom: var(--edge-bottom);
   left: var(--edge-left);
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
   gap: 14px;
   align-items: start;
   align-content: start;

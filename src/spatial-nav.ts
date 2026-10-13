@@ -429,6 +429,22 @@ export function createSpatialNav(hooks: SpatialNavHooks): SpatialNav {
     box.scrollTo({ left: box.scrollLeft + x, top: box.scrollTop + y, behavior: "instant" });
   };
 
+  /**
+   * Scrolls the box just far enough that no more than a quarter of the
+   * element is out of view, and leaves the rest of the way to the loop.
+   */
+  const takeUpSlack = (box: HTMLElement, element: HTMLElement): void => {
+    const gap = showingGap(box, element);
+    const rect = element.getBoundingClientRect();
+    const slack = (distance: number, size: number): number => {
+      const allowed = size / 4;
+      return Math.abs(distance) <= allowed ? 0 : distance - Math.sign(distance) * allowed;
+    };
+    const x = slack(gap.x, rect.width);
+    const y = slack(gap.y, rect.height);
+    if (x !== 0 || y !== 0) scrollBoxTo(box, x, y);
+  };
+
   const follow = (box: HTMLElement, element: HTMLElement): void => {
     if (reducedMotion()) {
       const gap = showingGap(box, element);
@@ -440,6 +456,13 @@ export function createSpatialNav(hooks: SpatialNavHooks): SpatialNav {
     const following = followed.get(box);
     if (following) {
       following.element = element;
+      // A move that lands while the box is still easing towards the last one
+      // is a key held down, or a quick thumb. The loop only moves on animation
+      // frames, so wherever frames come slower than the key repeats — a busy
+      // compositor, a modest phone — the box fell another card behind with
+      // every press until the selection ran off it. The slack is taken up at
+      // once instead; a single move is still eased all the way.
+      takeUpSlack(box, element);
       return;
     }
 

@@ -1045,8 +1045,13 @@
   display: grid;
   grid-template-columns: 8px minmax(0, 1fr);
   align-items: start;
-  gap: 10px;
+  gap: 2px 10px;
 }
+
+/* Three children in two columns: left to auto-placement, the message wraps
+   into the dot's 8px column, one word per line, and the panel grows taller
+   than the window. */
+.store-more-panel__message { grid-column: 2; }
 
 .store-more-panel__dot {
   width: 7px;
@@ -1112,7 +1117,9 @@
 @media (max-width: 940px) {
   .store-page { --pad: 24px; }
   .store-hero { flex-direction: column; gap: clamp(10px, 1.95svh, 20px); }
-  .store-highlights { width: 100%; max-width: 520px; margin-top: 0; }
+  /* Under the copy, in flow: pinned to the corner as on a wide window, a panel
+     this wide lay across the headline. */
+  .store-highlights { position: static; width: 100%; max-width: 520px; margin-top: 0; }
   .store-highlights__list { gap: clamp(7px, 1.17svh, 12px); }
   .store-filters { flex-wrap: nowrap; }
   .store-chipbar { min-width: 0; overflow-x: auto; scrollbar-width: none; }
@@ -1150,9 +1157,12 @@ html[data-form-factor="compact"] .store-page {
   min-height: 100%;
   overflow: visible;
 }
+/* The shell's edges rather than the page's own `--pad`, so the copy and the
+   first card clear a camera cutout and the iPhone's landscape insets. */
 html[data-form-factor="compact"] .store-page__body {
   height: auto;
   overflow: visible;
+  padding-inline: var(--edge-left) var(--edge-right);
 }
 html[data-form-factor="compact"] .store-rail { min-height: var(--card-max-h); }
 /* `min(100%, …)` resolves against an auto track once the page scrolls, so the
@@ -1160,7 +1170,6 @@ html[data-form-factor="compact"] .store-rail { min-height: var(--card-max-h); }
 html[data-form-factor="compact"] .store-card { height: var(--card-max-h); max-height: none; }
 
 html[data-form-factor="compact"] .store-page {
-  --pad: 16px;
   --pad-top: calc(var(--topbar-height) + 8px);
   --pad-bottom: 8px;
   /* Same cut, one screen down: wide enough that the capsule still reads at a
@@ -1175,7 +1184,10 @@ html[data-form-factor="compact"] .store-page {
   --seam-blur: 8px;
   --size-title: clamp(20px, 5.4svh, 26px);
   --lh-title: clamp(22px, 5.8svh, 28px);
-  --gap-shelf: 10px;
+  /* The previewed card's price hangs out of flow under the action, in this
+     gap: its 4px margin and 16px line need 20, and at 10 the shelf covered
+     it. The 16px it costs comes out of the foot of the cards, which is empty. */
+  --gap-shelf: 26px;
   --gap-action: 8px;
   --h-action: 40px;
   --h-chipbar: 40px;
@@ -1183,3 +1195,15 @@ html[data-form-factor="compact"] .store-page {
 /* A three-row panel pinned to the right edge has nowhere to go on a short
    screen, and it is the one piece of the hero the shelf can do without. */
 html[data-form-factor="compact"] .store-highlights { display: none; }
+/* The chips scroll inside their bars below 940px. A phone held sideways can be
+   wider than that — 956px on an iPhone Pro Max — and still too narrow for both
+   bars, which then pushed the whole page sideways. */
+html[data-form-factor="compact"] .store-filters { flex-wrap: nowrap; }
+html[data-form-factor="compact"] .store-chipbar { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+html[data-form-factor="compact"] .store-chipbar::-webkit-scrollbar { display: none; }
+/* The panel opens upwards from the chip bar, which sits at the foot of the
+   screen once the page is scrolled to it: what is above it is the room. */
+html[data-form-factor="compact"] .store-more-panel {
+  max-height: calc(100svh - var(--topbar-height) - var(--h-chipbar) - 40px);
+  overflow-y: auto;
+}

@@ -129,11 +129,20 @@ export function boxDelta(a: Box, b: Box): number {
   );
 }
 
-/** `--topbar-height` as resolved on `.selector`. */
+/**
+ * `--topbar-height` as resolved on `.selector`, in pixels. The token is a
+ * `calc()` over the safe area wherever the bar has to clear one, and a custom
+ * property reads back as the text it was declared with, so it is measured off
+ * a probe that is that tall rather than parsed.
+ */
 export async function topbarHeightVar(page: Page): Promise<number> {
   return page.evaluate(() => {
-    const shell = document.querySelector(".selector")!;
-    return Number.parseFloat(getComputedStyle(shell).getPropertyValue("--topbar-height")) || 0;
+    const probe = document.createElement("div");
+    probe.style.cssText = "position: absolute; visibility: hidden; height: var(--topbar-height)";
+    document.querySelector(".selector")!.append(probe);
+    const height = probe.getBoundingClientRect().height;
+    probe.remove();
+    return height;
   });
 }
 
@@ -172,6 +181,12 @@ export async function measureTopPadding(page: Page): Promise<PaddingProbe> {
       ".store-hero, .gd-topline, .settings-layout, .not-found",
     );
     const topbar = document.querySelector("header.topbar")!.getBoundingClientRect();
+    // Measured, not parsed: see `topbarHeightVar`.
+    const probe = document.createElement("div");
+    probe.style.cssText = "position: absolute; visibility: hidden; height: var(--topbar-height)";
+    shell.append(probe);
+    const topbarHeight = probe.getBoundingClientRect().height;
+    probe.remove();
     return {
       hostId: activePage.id,
       hostPaddingTop: Number.parseFloat(getComputedStyle(activePage).paddingTop) || 0,
@@ -181,7 +196,7 @@ export async function measureTopPadding(page: Page): Promise<PaddingProbe> {
       innerPaddingTop: innerStyle ? Number.parseFloat(innerStyle.paddingTop) || 0 : 0,
       innerOverflowY: innerStyle ? innerStyle.overflowY : "",
       contentTop: content ? Math.round(content.getBoundingClientRect().top * 100) / 100 : Number.NaN,
-      topbarHeight: Number.parseFloat(getComputedStyle(shell).getPropertyValue("--topbar-height")) || 0,
+      topbarHeight,
       topbarBottom: Math.round(topbar.bottom * 100) / 100,
       hostScrollHeight: activePage.scrollHeight,
       hostClientHeight: activePage.clientHeight,

@@ -112,6 +112,24 @@ test.describe("Store price honesty", () => {
   });
 });
 
+test.describe("Store price sources", () => {
+  test("each source's message sits beside its dot, and the panel stays on screen", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    await page.click(`${storeHost} .store-chip--more`);
+    const layout = await page.evaluate(() => {
+      const panel = document.querySelector(".store-more-panel")!.getBoundingClientRect();
+      const item = document.querySelector(".store-more-panel__item")!;
+      const name = item.querySelector(".store-more-panel__name")!.getBoundingClientRect();
+      const message = item.querySelector(".store-more-panel__message")!.getBoundingClientRect();
+      return { panelTop: panel.top, nameLeft: name.left, messageLeft: message.left };
+    });
+    // Auto-placed, the message fell into the dot's 8px column, one word per
+    // line, and the panel grew up past the top of the window.
+    expect(Math.abs(layout.messageLeft - layout.nameLeft)).toBeLessThanOrEqual(1);
+    expect(layout.panelTop).toBeGreaterThanOrEqual(0);
+  });
+});
+
 test.describe("Store never mutates the Library", () => {
   test("browsing and wishlisting do not add a game to the Library", async ({ page }) => {
     await openRoute(page, "#/library", "library");
