@@ -43,5 +43,15 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!--
+	  Export compliance, answered once for every build instead of in App Store
+	  Connect each time. The only encryption Orivo uses is TLS: the WebView's
+	  for pages, rustls's for the host's own HTTPS requests to the stores, and
+	  the system keychain for credentials. Nothing proprietary, nothing that
+	  encrypts user data of its own, and information security is not what the
+	  app is for, which is the exemption. Revisit if that ever stops being true.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

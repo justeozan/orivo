@@ -8,7 +8,7 @@ together.
 | | |
 | --- | --- |
 | Record | **Orivo Games**, Apple ID `6813145265`, bundle ID `run.evey.orivo` |
-| Versions | iOS 1.0 and macOS 1.0 |
+| Versions | iOS 0.3.7 — the app's own version, which a build has to match — and macOS 1.0 (not submitted) |
 | Devices | iPhone and iPad (`TARGETED_DEVICE_FAMILY = "1,2"`) |
 | Listing language | English (U.S.) |
 | Privacy policy | <https://github.com/justeozan/orivo/blob/main/PRIVACY.md> |
@@ -32,6 +32,46 @@ scripts/sync-ios-project.sh   # identifier + Orivo's icon (run-ios-simulator.sh 
 The icon set in `src-tauri/icons/ios` is RGB on purpose. `tauri icon` writes
 RGBA even from an opaque source, and App Store Connect rejects the channel
 itself (ITMS-90717); `src/ios-app-store.test.ts` fails if one comes back.
+
+### Building and uploading
+
+Signing is automatic: an App Store Connect API key lets Xcode create the
+`run.evey.orivo` App Store profile itself, against the team's Apple
+Distribution certificate, which has to be in an unlocked keychain —
+`errSecInternalComponent` from the export step means codesign could not reach
+its key.
+
+```sh
+rustup component add llvm-tools          # once, see below
+scripts/sync-ios-project.sh
+APPLE_DEVELOPMENT_TEAM=<team id> APPLE_API_KEY=<key id> APPLE_API_ISSUER=<issuer id> \
+APPLE_API_KEY_PATH=<path to AuthKey_<key id>.p8> \
+  pnpm tauri ios build --export-method app-store-connect
+xcrun altool --upload-package <the exported .ipa> --type ios \
+  --api-key <key id> --api-issuer <issuer id>
+```
+
+Export compliance is answered in `src-tauri/Info.ios.plist`
+(`ITSAppUsesNonExemptEncryption`), so a build needs no questionnaire.
+
+**Xcode 27 and swift-rs.** A release Swift build under Xcode 27 makes every
+`@_cdecl` function local, and the Rust side can no longer link to Tauri's
+Swift half. swift-rs 1.0.8 promotes the archive's own functions back to
+global with `llvm-objcopy` (hence `llvm-tools`), but not the three of its own
+runtime that every archive embeds a copy of — `release_object`,
+`retain_object`, `string_from_bytes` — so the first release build stops on
+"Undefined symbols" for those three. Promote them in exactly one archive,
+Tauri's (a second global copy is a duplicate symbol), make Cargo bundle the
+`tauri` crate again without re-running its build script, and build again:
+
+```sh
+T=target/aarch64-apple-ios/release
+A=$(ls $T/build/tauri-*/out/swift-rs/Tauri/release/libTauri.a)
+"$(rustc --print sysroot)/lib/rustlib/aarch64-apple-darwin/bin/llvm-objcopy" \
+  --globalize-symbol=_release_object --globalize-symbol=_retain_object \
+  --globalize-symbol=_string_from_bytes "$A"
+rm -rf $(dirname $T/.fingerprint/tauri-*/lib-tauri)   # the lib unit only, not its build script
+```
 
 ## Listing
 
