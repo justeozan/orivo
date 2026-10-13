@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- On an iPhone, Orivo runs in landscape only, as it already did on Android. Held upright, the phone handed the app a 402-pixel-wide window and got the desktop layout squeezed into it: the navigation gone, the topbar under the clock, the arrows over the Install button. The library is a set of horizontal rails, and portrait leaves every one of them too narrow to read, so the phone turns the app sideways whichever way it is held. An iPad keeps all four orientations: upright, it is a tablet-width window, not a phone.
+
+### Fixed
+
+- A phone narrower than 861 pixels held sideways — an iPhone SE, a 16e, a good share of Android phones — got the layout drawn for a desktop window dragged thin on top of its own: no navigation at all, the search field on a second row over the game's title, and a scene 760 pixels tall in a 375-pixel screen, scrolled to reach the shelf. That layout now only applies to windows that are narrow *and* tall.
+- On the shortest phones the game's title above Play was clipped to a sliver — six pixels of it at 360 pixels tall. The shelf's cards give up the difference instead, down to 96 pixels, and a title too long for one line ends in an ellipsis rather than losing its first line off the top.
+- Nothing lands under an iPhone's Dynamic Island or on its home indicator any more: the Library shelf rose 21 pixels with the browse bar it was sitting on, and the Store and the game page start their copy inside the screen's safe area like every other page.
+- On a phone, the game page's back pill no longer covers the title, and its "…" menu drops below the button instead of climbing over the search field.
+- On a phone, the Store's price line is no longer hidden under the shelf, its chips scroll inside their bars on an iPhone Pro Max instead of pushing the page sideways, and the Store, the game page and Me darken the topbar once their content scrolls under it, so it never reads through the navigation.
+- On a phone, the welcome screen keeps the panel to connect a library beside the greeting instead of stacking it under, below the fold.
+- An iPad held upright had no navigation at all: below 860 pixels of width the Library, Store and Settings pills were hidden to make room for a search field that had already moved to a row of its own, so Settings, once opened, had no way back. The pills stay, the bar starts under the status bar instead of behind it, the Store's panel of reasons sits under its headline instead of across it, the game page's title no longer climbs into its back pill, and the scene's arrows pair up under the bar instead of sitting on Play.
+- The Store's list of price sources printed each source's message one word per line, in the 8-pixel column meant for its status dot, and grew past the top of the window — on every screen.
+
 ## [0.3.7] - 2026-10-04
 
 ### Added

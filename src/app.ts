@@ -5633,6 +5633,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!beta && currentRoute.page === "me") navigate({ page: "library" }, { replace: true });
   };
 
+  /**
+   * The Store, the game page and Me float the topbar over their own art with
+   * no scrim. On a desktop window the Store and the game page fit their frame,
+   * so nothing passes under it; the compact layout gives that frame up for a
+   * scroll, and their copy then ran straight through the navigation. The bar
+   * says when its page has content under it, and the compact block in
+   * styles.css brings the scrim back for exactly that; at rest the art still
+   * reaches the top edge.
+   */
+  const scrollHostFor = (page: AppRoute["page"]): HTMLElement | null => {
+    if (page === "store") return refs.storePage;
+    if (page === "game") return refs.gamePage;
+    if (page === "me") return refs.mePage;
+    return null;
+  };
+
+  const syncTopbarScrolled = (route: AppRoute = currentRoute): void => {
+    const host = scrollHostFor(route.page);
+    refs.topbar.classList.toggle("topbar--scrolled", host !== null && host.scrollTop > 0);
+  };
+
+  for (const host of [refs.storePage, refs.gamePage, refs.mePage]) {
+    host.addEventListener("scroll", () => syncTopbarScrolled(), { passive: true });
+  }
+
   const syncTopbar = (route: AppRoute): void => {
     const current = navPageForRoute(route);
     // The Library and the Store are full-bleed heroes with their own top
@@ -5654,6 +5679,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // scrim there would draw a line the wash does not have, so that page drops
     // the veil and keeps only the blur.
     refs.topbar.classList.toggle("topbar--over-wash", route.page === "settings");
+    syncTopbarScrolled(route);
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
       link.classList.toggle("is-active", active);

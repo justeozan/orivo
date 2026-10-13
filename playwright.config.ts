@@ -64,6 +64,36 @@ export default defineConfig({
         hasTouch: true,
       },
     },
+    // An iPhone 18 Pro held sideways, the only way iOS shows Orivo
+    // (src-tauri/Info.ios.plist). Landscape gives it 62px of safe area on
+    // both sides and 21px over the home indicator; no Chromium descriptor
+    // carries that, so compact.spec.ts applies `safeAreaInsets` itself.
+    {
+      name: "iphone-874",
+      testMatch: /compact\.spec\.ts$/,
+      metadata: { safeAreaInsets: { top: 0, right: 62, bottom: 21, left: 62 } },
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 874, height: 402 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+      },
+    },
+    // The smallest phone Orivo runs on, an iPhone SE held sideways: shorter
+    // than the Pixel, and narrower than the 860px breakpoint drawn for desktop
+    // windows dragged thin, which must never reach a phone.
+    {
+      name: "iphone-667",
+      testMatch: /compact\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 667, height: 375 },
+        deviceScaleFactor: 2,
+        isMobile: true,
+        hasTouch: true,
+      },
+    },
   ],
   webServer: {
     command: "pnpm dev --host 127.0.0.1 --port 5173",

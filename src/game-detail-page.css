@@ -2284,8 +2284,13 @@
   .gd-body {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
+  /* The topbar is two rows here, and the band's top padding grows with it to
+     136px: a fixed height left the copy less than it needs and the title
+     climbed into the back pill. The band takes its content's height, the clamp
+     as its floor; the panels share what is left, as before. */
   .gd-hero {
-    height: clamp(240px, 52svh, 420px);
+    height: auto;
+    min-height: clamp(240px, 52svh, 420px);
   }
 }
 
@@ -2347,9 +2352,11 @@
    their own content inside a page that cannot scroll is. The page becomes one
    column and one scroller, which is the only shape a thumb can read.
    --------------------------------------------------------------------------- */
+/* The shell's edges, so the copy clears a camera cutout and the iPhone's
+   landscape insets; the hero art still bleeds to the screen edge behind it. */
 html[data-form-factor="compact"] .gd-page {
-  --gd-mg-left: 16px;
-  --gd-mg-right: 16px;
+  --gd-mg-left: var(--edge-left);
+  --gd-mg-right: var(--edge-right);
 }
 html[data-form-factor="compact"] .app-page--fit { overflow-y: auto; overflow-x: hidden; }
 html[data-form-factor="compact"] .gd-page--fit {
@@ -2360,12 +2367,23 @@ html[data-form-factor="compact"] .gd-page--fit {
 }
 /* The band has to hold the back pill, the title, the facts row and the actions
    without any of them sliding under another: the copy is bottom-aligned, so a
-   band that is too short makes the title climb into the pill. */
+   band that is too short makes the title climb into the pill. Those four need
+   ~240px and a phone's 52svh is 195 to 229, so the band takes its content's
+   height and keeps the clamp as a floor — the page scrolls here, nothing is
+   owed to the panels under it. */
 html[data-form-factor="compact"] .gd-hero {
-  height: clamp(200px, 52svh, 240px);
+  height: auto;
+  min-height: clamp(200px, 52svh, 240px);
   padding-top: calc(var(--topbar-height) + 4px);
   padding-bottom: 12px;
 }
+/* The menu drops down here. Above the button there is only the back pill and
+   then the topbar, so the upward menu climbed over the search field. Below,
+   nothing is clipped any more: the band is as tall as its content, and it is
+   raised over the panels so the menu is not painted under them — the two no
+   longer overlap, so nothing else changes order. */
+html[data-form-factor="compact"] .gd-hero { overflow: visible; z-index: 2; }
+html[data-form-factor="compact"] .gd-menu { top: calc(100% + 8px); bottom: auto; }
 html[data-form-factor="compact"] .gd-hero__title { font-size: clamp(22px, 6svh, 30px); }
 html[data-form-factor="compact"] .gd-hero__actions { gap: 10px; }
 html[data-form-factor="compact"] .gd-hero__actions .gd-button {

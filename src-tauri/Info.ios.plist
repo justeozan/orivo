@@ -29,5 +29,19 @@
 			</array>
 		</dict>
 	</dict>
+	<!--
+	  Landscape only on iPhone, as on Android (`lock_android_landscape` in
+	  src/lib.rs): portrait leaves every row of the rail-based library too
+	  narrow to read, and the compact layout is drawn for a phone held
+	  sideways. iPad keeps the four orientations of the generated
+	  `UISupportedInterfaceOrientations~ipad` — its portrait is a tablet-width
+	  window, not a phone. Both sides are listed so the phone can be held
+	  either way round.
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 </dict>
 </plist>

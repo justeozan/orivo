@@ -184,3 +184,36 @@ test.describe("the library browse bar", () => {
     await expect(page.locator("#rage-toggle")).toBeHidden();
   });
 });
+
+test.describe("an iPad held upright", () => {
+  // 820x1180, an iPad Air: narrower than the 860px at which the search takes a
+  // row of its own, and tall, so it is not the phone's compact layout either.
+  test.use({ viewport: { width: 820, height: 1180 } });
+
+  test("keeps the navigation on every page", async ({ page }) => {
+    // Hidden here, it left Settings with no way back to the Library at all.
+    for (const route of ROUTES.filter((candidate) => candidate.name !== "not-found")) {
+      await openRoute(page, route.hash, route.name);
+      for (const name of ["Library", "Store", "Settings"]) {
+        await expect(page.getByRole("button", { name, exact: true }), `${route.label}: ${name}`).toBeVisible();
+      }
+    }
+  });
+
+  test("keeps the Store's panel of reasons off its headline", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    const [title, panel] = await Promise.all(
+      [".store-hero__title", ".store-highlights"].map((selector) =>
+        page.locator(`#app-page-store ${selector}`).boundingBox(),
+      ),
+    );
+    expect(panel!.y).toBeGreaterThanOrEqual(title!.y + title!.height);
+  });
+
+  test("keeps the game page's back pill above the title", async ({ page }) => {
+    await openRoute(page, "#/games/steam%3A1245620?from=store", "game");
+    const back = await page.locator(".gd-hero .gd-back").boundingBox();
+    const title = await page.locator(".gd-hero__title").boundingBox();
+    expect(back!.y + back!.height).toBeLessThanOrEqual(title!.y + 1);
+  });
+});

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type TestInfo } from "@playwright/test";
 import {
   documentOverflow,
   openRoute,
@@ -9,14 +9,43 @@ import {
 
 /**
  * The scene on a phone held sideways — 914x411, the viewport an Android build
- * reports on a Pixel 8.
+ * reports on a Pixel 8; 874x402, an iPhone 18 Pro with its landscape safe
+ * area; 667x375, an iPhone SE.
  *
- * This file runs under the `android-914` project and nowhere else
- * (playwright.config.ts), which is what keeps the desktop goldens out of it.
- * Everything here asks the same question in different places: can you still
- * reach it? A desktop-shaped scene does not shrink on a short screen, it
- * resolves to a negative height and silently drops what was inside.
+ * This file runs under the `android-914`, `iphone-874` and `iphone-667`
+ * projects and nowhere else (playwright.config.ts), which is what keeps the
+ * desktop goldens out of it. Everything here asks the same question in
+ * different places: can you still reach it? A desktop-shaped scene does not
+ * shrink on a short screen, it resolves to a negative height and silently
+ * drops what was inside.
  */
+
+interface SafeArea {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+const NO_SAFE_AREA: SafeArea = { top: 0, right: 0, bottom: 0, left: 0 };
+
+/** The insets a project stands for — an iPhone's — or none. */
+function safeAreaOf(testInfo: TestInfo): SafeArea {
+  return (testInfo.project.metadata.safeAreaInsets as SafeArea | undefined) ?? NO_SAFE_AREA;
+}
+
+/**
+ * Chromium has no device descriptor that carries a safe area, so a project
+ * that stands for an iPhone names its insets and they are applied here, before
+ * any page loads. `env(safe-area-inset-*)` then resolves as it does in
+ * WKWebView, and the Pixel and the SE keep the zeros they really have.
+ */
+test.beforeEach(async ({ page }, testInfo) => {
+  const insets = safeAreaOf(testInfo);
+  if (insets === NO_SAFE_AREA) return;
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setSafeAreaInsetsOverride", { insets });
+});
 
 interface Rect {
   top: number;
@@ -63,7 +92,7 @@ test.describe("the compact form factor", () => {
 
     // Back to the phone: Android hands the app a new viewport on rotation, and
     // an attribute set once at boot would be stale by now.
-    await page.setViewportSize({ width: 914, height: 411 });
+    await page.setViewportSize(test.info().project.use.viewport!);
     await expect
       .poll(() => page.evaluate(() => document.documentElement.dataset.formFactor))
       .toBe("compact");
@@ -98,15 +127,49 @@ test.describe("the Library scene", () => {
     expect(hit).toBe(true);
   });
 
-  test("reads top to bottom with no two bands overlapping", async ({ page }) => {
+  test("reads top to bottom with no two bands overlapping", async ({ page }, testInfo) => {
     const topbar = await topbarBox(page);
     const rail = await rectOf(page, ".recently-played");
     const bar = await rectOf(page, ".browse-bar");
     const { height } = await viewport(page);
 
     expect(topbar.y + topbar.height).toBeLessThanOrEqual(rail!.top);
+    // On an iPhone the bar stands on the home indicator, 21px up, and the
+    // rail has to rise with it rather than keep a fixed 40px.
     expect(rail!.bottom).toBeLessThanOrEqual(bar!.top);
-    expect(bar!.bottom).toBeLessThanOrEqual(height);
+    expect(bar!.bottom).toBeLessThanOrEqual(height - safeAreaOf(testInfo).bottom);
+  });
+
+  test("keeps the scene inside the safe area", async ({ page }, testInfo) => {
+    const insets = safeAreaOf(testInfo);
+    const { width, height } = await viewport(page);
+    for (const selector of [".topbar", ".hero-content", ".scene-arrow--next", ".browse-bar"]) {
+      const rect = await rectOf(page, selector);
+      expect(rect!.left, selector).toBeGreaterThanOrEqual(insets.left);
+      expect(rect!.right, selector).toBeLessThanOrEqual(width - insets.right);
+      expect(rect!.bottom, selector).toBeLessThanOrEqual(height - insets.bottom);
+    }
+    // The rail runs off the right edge on purpose; it starts inside the left.
+    expect((await rectOf(page, ".recently-played"))!.left).toBeGreaterThanOrEqual(insets.left);
+  });
+
+  test("shows the whole title, on the shortest screen too", async ({ page }) => {
+    const titleFits = () =>
+      page.evaluate(() => {
+        const title = document.querySelector("#hero-title")!;
+        const fontSize = Number.parseFloat(getComputedStyle(title).fontSize);
+        return title.getBoundingClientRect().height >= fontSize * 0.9;
+      });
+    expect(await titleFits()).toBe(true);
+
+    // A small Android phone. A 128px rail left its hero 74px for a title and
+    // Play, and `.hero-identity` clipped the title to a 6px sliver: the cards
+    // are what give way now.
+    await page.setViewportSize({ width: 800, height: 360 });
+    await expect.poll(titleFits).toBe(true);
+    const rail = await rectOf(page, ".recently-played");
+    const bar = await rectOf(page, ".browse-bar");
+    expect(rail!.bottom).toBeLessThanOrEqual(bar!.top);
   });
 
   test("keeps every part of the scene above the fold", async ({ page }) => {
@@ -243,5 +306,93 @@ test.describe("the other pages", () => {
       return rect.bottom <= window.innerHeight + 1 && rect.top >= 0;
     });
     expect(reachable).toBe(true);
+  });
+
+  test("the welcome screen offers its first step without a scroll", async ({ page }) => {
+    await page.goto("/?library=empty#/library", { waitUntil: "domcontentloaded" });
+    await page.waitForSelector("#onboarding-panel", { state: "visible" });
+    // The arrival slides the panel in; measure where it lands, not mid-flight.
+    await page.evaluate(() =>
+      Promise.all(
+        document
+          .getAnimations()
+          .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+          .map((animation) => animation.finished.catch(() => undefined)),
+      ),
+    );
+    // Stacked under the copy below 880px of width, the panel started below
+    // the fold of every phone narrower than that.
+    const cta = await rectOf(page, "#onboarding-panel .onboarding__rows button");
+    const { height } = await viewport(page);
+    expect(cta!.bottom).toBeLessThanOrEqual(height);
+  });
+
+  test("the Store and the game page keep their copy off the screen's edges", async ({ page }, testInfo) => {
+    const insets = safeAreaOf(testInfo);
+    await openRoute(page, "#/store", "store");
+    for (const selector of [".store-hero__title", ".store-card"]) {
+      expect((await rectOf(page, selector))!.left, selector).toBeGreaterThanOrEqual(insets.left);
+    }
+    await openRoute(page, "#/games/steam%3A1245620", "game");
+    expect((await rectOf(page, ".gd-hero__title"))!.left).toBeGreaterThanOrEqual(insets.left);
+  });
+
+  test("the Store's price line stays clear of the shelf", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    // Any card that carries a real price previews it under the hero's action.
+    const priced = page.locator(".store-card:has(.store-card__price)").first();
+    test.skip((await priced.count()) === 0, "the catalogue carries no price to preview");
+    await priced.hover();
+    await expect(page.locator(".store-hero__offer")).not.toHaveAttribute("hidden", "");
+    const offer = await rectOf(page, ".store-hero__offer");
+    const shelf = await rectOf(page, ".store-shelf");
+    expect(offer!.bottom).toBeLessThanOrEqual(shelf!.top);
+  });
+
+  test("the Store's chips scroll inside their bars, on the widest phone too", async ({ page }) => {
+    // An iPhone Pro Max: wider than the 940px at which the bars start
+    // scrolling, still too narrow for both of them, and the page was pushed
+    // sideways instead.
+    await page.setViewportSize({ width: 956, height: 440 });
+    await openRoute(page, "#/store", "store");
+    const overflow = await page.evaluate(() => {
+      const host = document.querySelector<HTMLElement>("#app-page-store")!;
+      return { scrollWidth: host.scrollWidth, clientWidth: host.clientWidth };
+    });
+    expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+  });
+
+  test("game detail keeps its back pill above the title", async ({ page }) => {
+    await openRoute(page, "#/games/steam%3A1245620", "game");
+    const back = await rectOf(page, ".gd-hero .gd-back");
+    const title = await rectOf(page, ".gd-hero__title");
+    expect(back!.bottom).toBeLessThanOrEqual(title!.top + 1);
+  });
+
+  test("game detail opens its menu below the button, clear of the topbar", async ({ page }) => {
+    await openRoute(page, "#/games/steam%3A1245620", "game");
+    await page.click(".gd-more");
+    const menu = await rectOf(page, ".gd-menu");
+    const more = await rectOf(page, ".gd-more");
+    const topbar = await topbarBox(page);
+    expect(menu!.top).toBeGreaterThanOrEqual(more!.bottom);
+    expect(menu!.top).toBeGreaterThanOrEqual(topbar.y + topbar.height);
+  });
+
+  test("the Store and the game page put a scrim under the topbar once they scroll", async ({ page }) => {
+    const scrim = () =>
+      page.evaluate(() => getComputedStyle(document.querySelector("header.topbar")!, "::before").opacity);
+    const pages = [
+      { hash: "#/store", name: "store", host: "#app-page-store" },
+      { hash: "#/games/steam%3A1245620", name: "game", host: "#app-page-game" },
+    ] as const;
+    for (const { hash, name, host } of pages) {
+      await openRoute(page, hash, name);
+      // At rest the art still reaches the top edge. Polled: arriving from a
+      // scrolled Store, the scrim is still fading out over its 160ms.
+      await expect.poll(scrim, { message: name }).toBe("0");
+      await page.evaluate((selector) => document.querySelector(selector)!.scrollBy(0, 160), host);
+      await expect.poll(scrim, { message: name }).toBe("1");
+    }
   });
 });

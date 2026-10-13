@@ -259,6 +259,27 @@ describe("application shell", () => {
     }
   });
 
+  it("says when the Store has content under the topbar, and forgets it on the way out", async () => {
+    const topbar = root.querySelector<HTMLElement>(".topbar")!;
+    const storeHost = root.querySelector<HTMLElement>("#app-page-store")!;
+
+    await goto("#/store");
+    expect(topbar.classList.contains("topbar--scrolled")).toBe(false);
+
+    // jsdom lays nothing out, so the scroll is written rather than performed.
+    Object.defineProperty(storeHost, "scrollTop", { value: 120, configurable: true });
+    storeHost.dispatchEvent(new Event("scroll"));
+    expect(topbar.classList.contains("topbar--scrolled")).toBe(true);
+
+    // The Library never scrolls: its bar is clear whatever the Store left.
+    await goto("#/library");
+    expect(topbar.classList.contains("topbar--scrolled")).toBe(false);
+
+    // Back on a Store that is still scrolled, the scrim is owed at once.
+    await goto("#/store");
+    expect(topbar.classList.contains("topbar--scrolled")).toBe(true);
+  });
+
   it("gives the settings tablist a single Tab stop", async () => {
     await goto("#/settings/plugins");
     const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>("[role='tab']"));

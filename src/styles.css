@@ -1404,18 +1404,31 @@ body[data-mood="rage"] { --violet: #f2453c; }
   .browse-bar__segments { gap: 18px; }
 }
 
-@media (max-width: 860px) {
+/* Narrow and tall: a desktop window dragged thin, a tablet held upright. A
+   phone held sideways is narrow too — an iPhone SE reads 667x375, a 16e
+   844x390 — but it belongs to the compact block at the end of this file, and
+   this one's 760px canvas and second search row are exactly what a 375px-tall
+   screen cannot afford. 561px is where `COMPACT_QUERY` (src/form-factor.ts)
+   stops matching. */
+@media (max-width: 860px) and (min-height: 561px) {
   body { overflow: auto; }
   /* The search drops to its own row below the bar, so the clearance the page
-     hosts owe the topbar grows with it: 18 + 54 + 40 + 12 of breathing room. */
-  :root { --topbar-inset-top: 18px; --topbar-inset-left: 20px; --topbar-inset-right: 20px; --topbar-height: 124px; }
+     hosts owe the topbar grows with it: 18 + 54 + 40 + 12 of breathing room.
+     An iPad held upright keeps its status bar, so the bar starts under it. */
+  :root {
+    --topbar-inset-top: max(18px, env(safe-area-inset-top));
+    --topbar-inset-left: 20px;
+    --topbar-inset-right: 20px;
+    --topbar-height: calc(var(--topbar-inset-top) + 106px);
+  }
   /* Keep the narrow-width floor, but never cap the canvas below the viewport:
      the page hosts are inset: 0 of this box, so a fixed height would strand
      the rest of a taller window and shorten every internal scroll container. */
   .selector { min-height: max(760px, 100svh); }
   .topbar { grid-template-columns: 1fr auto; }
-  .primary-nav, .top-divider { display: none; }
-  .nav-cluster { gap: 0; }
+  /* The navigation stays: with the search on a row of its own, the first row
+     has room for the three pills, and without them an iPad held upright had
+     no way off whichever page it was on. */
   .profile-cluster { gap: 0; }
   .library-source-menu { top: calc(100% + 65px); left: -5px; width: min(330px, calc(100vw - 40px)); }
   .search-control { position: absolute; top: 54px; left: 0; right: 0; }
@@ -1425,7 +1438,11 @@ body[data-mood="rage"] { --violet: #f2453c; }
      nothing; here the stack is content-sized and reads from the top. */
   .hero-identity { flex: none; overflow: visible; }
   .hero-content h1 { font-size: clamp(48px, 9vw, 66px); }
-  .scene-arrow { top: 360px; }
+  /* Paired under the topbar, as on a phone: at mid-height the left one sat on
+     Play, which starts 40px from the edge here. */
+  .scene-arrow { top: calc(var(--topbar-height) + 8px); }
+  .scene-arrow--previous { right: calc(20px + var(--arrow-size) + 8px); left: auto; }
+  .scene-arrow--next { right: 20px; }
   .recently-played { right: 0; bottom: 82px; left: 32px; }
   .rail-header { padding-right: 24px; }
   /* The bar stays: it is the only way to change what the rail holds, so a
@@ -2508,7 +2525,10 @@ html[data-form-factor="compact"] {
   --tap-icon: 20px;
   --brand-mark-size: 44px;
   --hero-top: calc(var(--topbar-height) + 6px);
-  --hero-bottom: 224px;
+  /* Play clears the rail by 16px wherever the rail ends up: the rail moves
+     with the home indicator and shrinks on a short screen, so a literal here
+     would land the button on the cards. 224px on a Pixel 8, as before. */
+  --hero-bottom: calc(var(--rail-bottom) + var(--rail-header-h) + 8px + var(--rail-card-height) + var(--rail-focus-bleed) + 16px);
   --hero-left: max(20px, calc(env(safe-area-inset-left) + 8px));
   --hero-width: min(430px, calc(100vw - 40px));
   --fs-hero-title: clamp(22px, 7.5svh, 34px);
@@ -2516,13 +2536,19 @@ html[data-form-factor="compact"] {
   --play-h: 44px;
   --fs-play: 14px;
   --arrow-size: 44px;
-  --rail-card-height: 128px;
-  --rail-card-width: 86px;
+  /* A one-line title and Play need 104px of hero. Below ~400px a 128px rail
+     leaves less than that, and the title is what `.hero-identity` clips — to
+     nothing at 360px. The cards give up the difference instead, down to 96px.
+     198 = 6 under the topbar + 104 of hero + 16 of gap + 24 of rail header +
+     16 of focus room around the cards + 32 of browse bar. */
+  --rail-card-height: clamp(96px, calc(100svh - var(--topbar-height) - 198px - var(--edge-bottom)), 128px);
+  --rail-card-width: calc(var(--rail-card-height) * .672);
   --rail-focus-bleed: 8px;
   --rail-header-h: 24px;
   /* The desktop gutter reserves room for rail arrows this layout drops. */
   --rail-header-gutter: 12px;
-  --rail-bottom: 40px;
+  /* Above the browse bar, which itself stands on the home indicator. */
+  --rail-bottom: calc(var(--edge-bottom) + 32px);
   --fs-rail-title: 12px;
   --edge-left: max(16px, env(safe-area-inset-left));
   --edge-right: max(16px, env(safe-area-inset-right));
@@ -2542,6 +2568,11 @@ html[data-form-factor="compact"] .nav-link {
 html[data-form-factor="compact"] .nav-link span { display: none; }
 /* There is no ⌘K on a phone. */
 html[data-form-factor="compact"] .search-shortcut { display: none; }
+/* The Store, the game page and Me scroll here, under a bar that floats over
+   their art with no scrim. It takes one the moment anything is under it
+   (`syncTopbarScrolled` in app.ts), so their copy stops reading through the
+   navigation while the art still reaches the top edge at rest. */
+html[data-form-factor="compact"] .topbar--scrolled::before { opacity: 1; }
 html[data-form-factor="compact"] .nav-cluster { gap: 8px; }
 html[data-form-factor="compact"] .profile-cluster { gap: 8px; }
 
@@ -2556,10 +2587,14 @@ html[data-form-factor="compact"] .hero-content {
   width: var(--hero-width);
 }
 html[data-form-factor="compact"] .hero-meta { display: none; }
-html[data-form-factor="compact"] .hero-content h1 { margin: 6px 0 8px; font-size: var(--fs-hero-title); }
+/* One line: the hero is budgeted for it, and a second line would only be
+   clipped off the top by `.hero-identity`. A long title ends in an ellipsis. */
+html[data-form-factor="compact"] .hero-content h1 { margin: 6px 0 8px; font-size: var(--fs-hero-title); -webkit-line-clamp: 1; }
 html[data-form-factor="compact"] .hero-actions { margin-top: 10px; gap: 10px; }
 html[data-form-factor="compact"] .hero-logo { height: clamp(52px, 18svh, 86px); }
 html[data-form-factor="compact"] .recently-played { bottom: var(--rail-bottom); left: calc(var(--edge-left) + 5px); }
+/* The landscape card keeps the desktop's 2.5:1 as the rail shrinks. */
+html[data-form-factor="compact"] .game-card.is-selected { flex-basis: calc(var(--rail-card-height) * 2.5); }
 html[data-form-factor="compact"] .rail-header { padding-right: var(--rail-header-gutter); }
 html[data-form-factor="compact"] .browse-bar { right: var(--edge-right); bottom: var(--edge-bottom); left: var(--edge-left); }
 
