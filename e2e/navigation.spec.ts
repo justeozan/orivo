@@ -397,16 +397,26 @@ test.describe("a controller walks the same rows", () => {
     await openRoute(page, "#/library", "library");
     await blurEverything(page);
 
-    const tap = async (button: number): Promise<void> => {
-      await page.evaluate((index) => {
-        (window as unknown as { __pad: { buttons: { pressed: boolean }[] } }).__pad.buttons[index]!.pressed = true;
-      }, button);
-      await page.waitForTimeout(80);
-      await page.evaluate((index) => {
-        (window as unknown as { __pad: { buttons: { pressed: boolean }[] } }).__pad.buttons[index]!.pressed = false;
-      }, button);
-      await page.waitForTimeout(80);
-    };
+    // A tap is one frame long, timed inside the page. The bridge reads the pad
+    // once per animation frame and turns a direction held past 420ms into a
+    // repeat; a press timed from the test, 80ms plus two round trips, could
+    // outlast that on a loaded machine and climb two rows instead of one. The
+    // bridge's poll for the next frame is already queued when this runs, and
+    // frame callbacks run in the order they were asked for, so it sees the
+    // press before the release, and the release before the promise settles.
+    const tap = (button: number): Promise<void> =>
+      page.evaluate(
+        (index) =>
+          new Promise<void>((resolve) => {
+            const pad = (window as unknown as { __pad: { buttons: { pressed: boolean }[] } }).__pad;
+            pad.buttons[index]!.pressed = true;
+            requestAnimationFrame(() => {
+              pad.buttons[index]!.pressed = false;
+              requestAnimationFrame(() => resolve());
+            });
+          }),
+        button,
+      );
     const [UP, RIGHT] = [12, 15];
 
     await tap(UP);
