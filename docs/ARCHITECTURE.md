@@ -316,6 +316,20 @@ Ctrl + Space
   -> Session monitor -> progression / stats / timeline
 ```
 
+### Lancer un jeu et s'effacer devant lui
+
+```text
+Play
+  -> ecran de lancement (WebView): artwork et wordmark du jeu, shell inerte
+  -> Command launch_game(game_id) -> { status, handoff: "process" | "client" }
+  -> le jeu prend l'ecran: page masquee (Orivo recouvert), ou perte du
+     premier plan pour un jeu qu'Orivo a demarre lui-meme ("process")
+  -> Command step_aside_for_game: macOS masque l'app (comme Cmd+H),
+     Windows et Linux reduisent la fenetre; rien sur mobile
+```
+
+Le WebView decide *quand* (il sait si le lancement a ete accepte et ce qui a pris le premier plan depuis), Rust fait *ce que* le WebView n'a pas le droit de faire. `handoff` vient du lanceur: un client de boutique (Steam, Epic, GOG...) est active des qu'on le sollicite, bien avant que son jeu existe, donc la perte du premier plan ne prouve rien pour lui. Le detail est dans `src/launch-splash.ts` et `docs/DESIGN.md` (§4.3).
+
 ### Synchroniser une source
 
 ```text
@@ -443,7 +457,7 @@ Cette arborescence est une proposition de decoupage. Elle ne doit etre creee qu'
 ## 13. Decisions encore ouvertes
 
 - Valider le rendu CSS du verre, le frame pacing et l'accessibilite sur les WebViews macOS et Windows cibles.
-- Choisir la strategie de fenetre sans bordure et d'integration de la barre de titre par OS.
+- Choisir la strategie de fenetre sans bordure et d'integration de la barre de titre par OS. *Tranche pour macOS:* le plein ecran natif donnait a Orivo un bureau (Space) a lui, et chaque jeu lance faisait glisser l'ecran vers un autre bureau. La fenetre y est donc creee fenetree (`tauri.macos.conf.json`) puis passee en plein ecran simple au demarrage (`set_simple_fullscreen`): elle couvre l'ecran depuis le bureau courant, Dock et barre des menus masques, et le jeu s'ouvre sur ce meme bureau. Windows et Linux gardent le plein ecran de la configuration commune.
 - Definir le contrat IPC type entre le frontend, les commandes Rust et les evenements de rafraichissement.
 - Fixer les scopes media et filesystem les plus etroits compatibles avec les imports utilisateur.
 - Definir le premier fournisseur importe et son niveau de lancement/synchronisation.

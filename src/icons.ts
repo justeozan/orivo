@@ -67,7 +67,8 @@ export type IconName =
   | "cog"
   | "database"
   | "info"
-  | "sync";
+  | "sync"
+  | "android";
 
 const paths: Record<IconName, string> = {
   orivo:
@@ -121,6 +122,9 @@ const paths: Record<IconName, string> = {
     '<circle cx="9" cy="8" r="3.2" /><path d="M3.4 19.5a5.6 5.6 0 0 1 11.2 0" /><path d="M15.5 5.1a3.2 3.2 0 0 1 0 6.1M17.4 19.5a5.6 5.6 0 0 0-2.6-4.7" />',
   gamepad:
     '<rect x="2.5" y="7.5" width="19" height="10" rx="5" /><path d="M7.5 11v3M6 12.5h3M15.5 11.5h.01M18 13.5h.01" />',
+  // A game installed on the phone as an app of its own: Android's head.
+  android:
+    '<path d="M4.5 17a7.5 7.5 0 0 1 15 0z" /><path d="M7.5 7.5 6 5M16.5 7.5 18 5" /><path d="M9.25 13.25h.01M14.75 13.25h.01" />',
   cloud:
     '<path d="M7.2 18.5h9.6a4.3 4.3 0 0 0 .5-8.57 5.8 5.8 0 0 0-11.2-1.2A4 4 0 0 0 7.2 18.5z" />',
   windows:

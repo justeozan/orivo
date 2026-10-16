@@ -69,6 +69,18 @@ async function viewport(page: import("@playwright/test").Page): Promise<{ width:
   return page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
 }
 
+/** Waits out every transition in flight, so a box is measured where it lands. */
+async function settle(page: import("@playwright/test").Page): Promise<void> {
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
+}
+
 test.describe("the compact form factor", () => {
   test("is decided by height, and follows the device through a rotation", async ({ page }) => {
     await openRoute(page, "#/library", "library");
@@ -143,7 +155,7 @@ test.describe("the Library scene", () => {
   test("keeps the scene inside the safe area", async ({ page }, testInfo) => {
     const insets = safeAreaOf(testInfo);
     const { width, height } = await viewport(page);
-    for (const selector of [".topbar", ".hero-content", ".scene-arrow--next", ".browse-bar"]) {
+    for (const selector of [".topbar", ".hero-content", ".browse-bar"]) {
       const rect = await rectOf(page, selector);
       expect(rect!.left, selector).toBeGreaterThanOrEqual(insets.left);
       expect(rect!.right, selector).toBeLessThanOrEqual(width - insets.right);
@@ -193,28 +205,74 @@ test.describe("the Library scene", () => {
     expect(card!.height).toBeGreaterThan(card!.width);
   });
 
+  test("brings the cards down a size without changing their shape", async ({ page }) => {
+    const card = await rectOf(page, "#game-cards .game-card:not(.is-selected)");
+    expect(card!.height).toBeLessThanOrEqual(100);
+    // The desktop card's proportions: .672 upright, 2.5:1 once selected.
+    expect(card!.width / card!.height).toBeCloseTo(0.672, 2);
+    await expect
+      .poll(async () => (await rectOf(page, "#game-cards .game-card.is-selected"))!.width)
+      .toBeCloseTo(card!.height * 2.5, 0);
+  });
+
   test("offers finger-sized targets", async ({ page }) => {
-    // `me` is behind the beta flag and hidden here, so it has no box to measure.
+    // The navigation waits behind the Orivo mark on a phone, so it is measured
+    // once the mark has brought it out. `me` is behind the beta flag and hidden
+    // here, so it has no box to measure.
+    await page.click("#library-menu-button");
+    await settle(page);
     const targets = [
+      "#library-menu-button",
       "[data-nav-page='library']",
       "[data-nav-page='store']",
       "[data-nav-page='settings']",
       "#notifications-button",
-      "#library-menu-button",
-      "#play-button",
-      ".scene-arrow--next",
     ];
     for (const selector of targets) {
       const rect = await rectOf(page, selector);
       expect(rect, selector).not.toBeNull();
       expect(Math.min(rect!.width, rect!.height), selector).toBeGreaterThanOrEqual(44);
     }
+    // Play comes down a size on a phone and stays a wide pill for a thumb.
+    const play = await rectOf(page, "#play-button");
+    expect(play!.height).toBeGreaterThanOrEqual(36);
+    expect(play!.width).toBeGreaterThanOrEqual(play!.height * 2);
   });
 
   test("still names the navigation once the labels are icons", async ({ page }) => {
+    await page.click("#library-menu-button");
     for (const name of ["Library", "Store", "Settings"]) {
       await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
     }
+  });
+
+  test("keeps the navigation behind the Orivo mark, and drops the search and the arrows", async ({ page }) => {
+    expect(await page.evaluate(() => document.documentElement.dataset.device)).toBe("phone");
+    const pills = ["Library", "Store", "Settings"].map((name) =>
+      page.getByRole("button", { name, exact: true }),
+    );
+    for (const pill of pills) await expect(pill).toBeHidden();
+    await expect(page.locator("#topbar-search-control")).toBeHidden();
+    await expect(page.locator("#previous-game")).toBeHidden();
+    await expect(page.locator("#next-game")).toBeHidden();
+
+    // The mark brings them out with its menu, and a press on the wallpaper
+    // puts them all away again.
+    await page.click("#library-menu-button");
+    await expect(page.locator("#library-source-menu")).toBeVisible();
+    for (const pill of pills) await expect(pill).toBeVisible();
+    const { width, height } = await viewport(page);
+    await page.mouse.click(width * 0.75, height * 0.3);
+    await expect(page.locator("#library-source-menu")).toBeHidden();
+    for (const pill of pills) await expect(pill).toBeHidden();
+
+    // A pill is pressed like any other: the finger landing on it does not
+    // close the menu out from under it, and the page it opens starts clean.
+    await page.click("#library-menu-button");
+    await pills[1].click();
+    await expect(page).toHaveURL(/#\/store/);
+    await expect(page.locator("#library-source-menu")).toBeHidden();
+    for (const pill of pills) await expect(pill).toBeHidden();
   });
 
   test("keeps the notification panel inside the window", async ({ page }) => {
@@ -224,15 +282,41 @@ test.describe("the Library scene", () => {
     expect(panel!.bottom).toBeLessThanOrEqual(height);
     expect(panel!.right).toBeLessThanOrEqual(width);
   });
+});
 
-  test("reaches the navigation and then the search by keyboard", async ({ page }) => {
-    const nav = await tabUntil(page, (report) => report.className.includes("nav-link"));
-    expect(nav.found, "Tab never reached the navigation").not.toBeNull();
+test.describe("a desktop window dragged as short", () => {
+  // The same height with a mouse in hand: compact, but not a phone. It keeps
+  // the bar a keyboard walks, the search and the scene arrows.
+  test("keeps its navigation, its search and its arrows, in tab order", async ({ browser }, testInfo) => {
+    // A context made here inherits the project's phone emulation unless told
+    // otherwise, touch included.
+    const context = await browser.newContext({
+      viewport: testInfo.project.use.viewport!,
+      deviceScaleFactor: 1,
+      isMobile: false,
+      hasTouch: false,
+    });
+    const page = await context.newPage();
+    try {
+      await openRoute(page, "#/library", "library");
+      const root = await page.evaluate(() => ({ ...document.documentElement.dataset }));
+      expect(root.formFactor).toBe("compact");
+      expect(root.device).toBeUndefined();
+      for (const name of ["Library", "Store", "Settings"]) {
+        await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
+      }
+      await expect(page.locator("#topbar-search-control")).toBeVisible();
+      await expect(page.locator("#next-game")).toBeVisible();
 
-    // Play is disabled in browser mode (nothing to launch), so the next proof
-    // that the compact bar is still a tab order is the search field.
-    const search = await tabUntil(page, (report) => report.tag === "INPUT" && report.label.startsWith("Search"));
-    expect(search.found, "Tab never reached the search field").not.toBeNull();
+      const nav = await tabUntil(page, (report) => report.className.includes("nav-link"));
+      expect(nav.found, "Tab never reached the navigation").not.toBeNull();
+      // Play is disabled in browser mode (nothing to launch), so the next proof
+      // that the compact bar is still a tab order is the search field.
+      const search = await tabUntil(page, (report) => report.tag === "INPUT" && report.label.startsWith("Search"));
+      expect(search.found, "Tab never reached the search field").not.toBeNull();
+    } finally {
+      await context.close();
+    }
   });
 });
 

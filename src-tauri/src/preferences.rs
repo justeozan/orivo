@@ -56,12 +56,27 @@ pub enum MotionPreference {
     Reduced,
 }
 
+/// What Orivo does once a game it started is on screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GameStartAction {
+    /// Hide (macOS) or minimise (Windows, Linux) so the game has the screen.
+    #[default]
+    StepAside,
+    /// Stay where it is, behind the game.
+    Stay,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PreferencesDto {
     pub start_page: StartPage,
     pub store_region: StoreRegion,
     pub motion: MotionPreference,
+    /// Defaulted rather than required, like every field added after the
+    /// first: a preferences file written before it existed stays readable.
+    #[serde(default)]
+    pub on_game_start: GameStartAction,
     /// Debug-only: seed the library with the bundled demo (showcase) games.
     /// Off by default so a real library shows only the user's own games.
     #[serde(default)]
@@ -87,6 +102,7 @@ pub struct PreferencesUpdate {
     pub start_page: Option<StartPage>,
     pub store_region: Option<StoreRegion>,
     pub motion: Option<MotionPreference>,
+    pub on_game_start: Option<GameStartAction>,
     pub show_showcase_games: Option<bool>,
     pub debug_sample_social: Option<bool>,
     pub beta_features: Option<bool>,
@@ -151,6 +167,9 @@ impl PreferencesService {
             }
             if let Some(motion) = update.motion {
                 preferences.motion = motion;
+            }
+            if let Some(on_game_start) = update.on_game_start {
+                preferences.on_game_start = on_game_start;
             }
             if let Some(show_showcase_games) = update.show_showcase_games {
                 preferences.show_showcase_games = show_showcase_games;
@@ -353,6 +372,7 @@ mod tests {
                 start_page: Some(StartPage::Store),
                 store_region: Some(StoreRegion::Fr),
                 motion: Some(MotionPreference::Reduced),
+                on_game_start: Some(GameStartAction::Stay),
                 show_showcase_games: Some(true),
                 debug_sample_social: Some(true),
                 beta_features: Some(true),
@@ -362,7 +382,40 @@ mod tests {
             .unwrap();
         assert_eq!(dirs.service().load().unwrap(), saved);
         assert_eq!(saved.start_page, StartPage::Store);
+        assert_eq!(saved.on_game_start, GameStartAction::Stay);
         assert!(saved.show_editorial_games);
+    }
+
+    /// Orivo gets out of the way by default, and a file written before the
+    /// choice existed must still load rather than be called unreadable.
+    #[test]
+    fn a_preferences_file_from_before_the_game_start_choice_steps_aside() {
+        let dirs = TestDirectories::new("game-start-default");
+        fs::write(
+            dirs.data.join(PREFERENCES_FILE),
+            br#"{ "startPage": "store", "storeRegion": "fr", "motion": "full" }"#,
+        )
+        .unwrap();
+        let loaded = dirs.service().load().unwrap();
+        assert_eq!(loaded.start_page, StartPage::Store);
+        assert_eq!(loaded.on_game_start, GameStartAction::StepAside);
+    }
+
+    #[test]
+    fn the_game_start_choice_crosses_the_bridge_in_kebab_case() {
+        let update: PreferencesUpdate =
+            serde_json::from_value(serde_json::json!({ "onGameStart": "stay" })).unwrap();
+        assert_eq!(update.on_game_start, Some(GameStartAction::Stay));
+        assert_eq!(
+            serde_json::to_value(PreferencesDto::default()).unwrap()["onGameStart"],
+            "step-aside"
+        );
+        assert!(
+            serde_json::from_value::<PreferencesUpdate>(
+                serde_json::json!({ "onGameStart": "close" })
+            )
+            .is_err()
+        );
     }
 
     #[test]

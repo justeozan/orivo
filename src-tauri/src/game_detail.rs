@@ -85,12 +85,25 @@ pub struct GameMediaAsset {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+/// The address the WebView loads a downloaded image or video from. WebKit
+/// (macOS, iOS, Linux) answers a custom scheme as itself; Android's and
+/// Windows' WebViews only route `http://<scheme>.localhost` to a handler, so a
+/// bare `game-media:` there was never requested at all and the picture stayed
+/// blank. The handler accepts both forms (`game_media_requested_file`).
+pub fn game_media_url(file: &str) -> String {
+    if cfg!(any(target_os = "android", target_os = "windows")) {
+        format!("http://game-media.localhost/{file}")
+    } else {
+        format!("game-media:{file}")
+    }
+}
+
 impl GameMediaAsset {
     pub fn view(&self, selected: bool) -> GameMediaView {
         let preview_url = self
             .local_file
             .as_deref()
-            .map(|file| format!("game-media:{file}"))
+            .map(game_media_url)
             .or_else(|| self.source_url.clone())
             .unwrap_or_default();
         GameMediaView {
@@ -138,6 +151,7 @@ pub enum GameSourceView {
     Xbox,
     MicrosoftStore,
     InstantGaming,
+    Android,
 }
 
 impl GameSourceView {
@@ -152,6 +166,7 @@ impl GameSourceView {
             CatalogGameSource::Xbox => Some(Self::Xbox),
             CatalogGameSource::MicrosoftStore => Some(Self::MicrosoftStore),
             CatalogGameSource::InstantGaming => Some(Self::InstantGaming),
+            CatalogGameSource::Android => Some(Self::Android),
             CatalogGameSource::Local | CatalogGameSource::Steam => None,
         }
     }

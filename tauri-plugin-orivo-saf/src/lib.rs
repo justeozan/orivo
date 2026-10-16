@@ -29,13 +29,53 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unsupported => formatter.write_str("the document picker is Android-only"),
-            Self::Picker(detail) => write!(formatter, "the document picker failed: {detail}"),
+            Self::Unsupported => formatter.write_str("this is only available on Android"),
+            Self::Picker(detail) => write!(formatter, "Android did not answer: {detail}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+/// One game installed on the phone, as `SafPlugin.listInstalledGames` reports
+/// it. The pictures are file names inside the app cache's `media` folder, the
+/// one directory the WebView may read local files from.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledGame {
+    pub package_name: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub cover: Option<String>,
+    #[serde(default)]
+    pub hero: Option<String>,
+    #[serde(default)]
+    pub installed_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+struct InstalledGames {
+    #[serde(default)]
+    games: Vec<InstalledGame>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchPackageArgs<'a> {
+    package_name: &'a str,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartStreamArgs<'a> {
+    pc_name: &'a str,
+    app_name: Option<&'a str>,
+}
 
 /// What the picker resolved to. `None` is the ordinary answer: the user backed
 /// out of the folder chooser, which is not a failure.
@@ -71,6 +111,70 @@ impl<R: Runtime> OrivoSaf<R> {
         }
         #[cfg(not(target_os = "android"))]
         {
+            Err(Error::Unsupported)
+        }
+    }
+}
+
+impl<R: Runtime> OrivoSaf<R> {
+    /// The games installed on this phone, with pictures drawn from their icons.
+    pub async fn list_installed_games(&self) -> Result<Vec<InstalledGame>, Error> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin_async::<InstalledGames>("listInstalledGames", ())
+                .await
+                .map(|answer| answer.games)
+                .map_err(|error| Error::Picker(error.to_string()))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            Err(Error::Unsupported)
+        }
+    }
+
+    /// Start an installed app through the launch intent its package declares.
+    /// `Err` carries `not-installed` when Android knows no such app.
+    pub async fn launch_package(&self, package_name: &str) -> Result<(), Error> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin_async::<serde::de::IgnoredAny>(
+                    "launchPackage",
+                    LaunchPackageArgs { package_name },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| Error::Picker(error.to_string()))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = LaunchPackageArgs { package_name };
+            Err(Error::Unsupported)
+        }
+    }
+}
+
+impl<R: Runtime> OrivoSaf<R> {
+    /// Hand a stream to Moonlight: the PC by the name Moonlight shows for it,
+    /// and the game by the name its streaming host lists — or, with no game,
+    /// that PC's list. `Err` carries `moonlight-missing` when Moonlight is not
+    /// installed.
+    pub async fn start_stream(&self, pc_name: &str, app_name: Option<&str>) -> Result<(), Error> {
+        #[cfg(target_os = "android")]
+        {
+            self.handle
+                .run_mobile_plugin_async::<serde::de::IgnoredAny>(
+                    "startStream",
+                    StartStreamArgs { pc_name, app_name },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|error| Error::Picker(error.to_string()))
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = StartStreamArgs { pc_name, app_name };
             Err(Error::Unsupported)
         }
     }

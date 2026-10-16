@@ -16,12 +16,18 @@ export interface PlatformFeatures {
   localRunners: boolean;
   /** "Install" asks the host where the game can be got on this device. */
   storeChoices: boolean;
+  /**
+   * Orivo can get out of a started game's way. A phone switches to the game's
+   * app by itself, so there it is neither done nor offered as a setting.
+   */
+  stepsAside: boolean;
 }
 
 export const DESKTOP_FEATURES: PlatformFeatures = {
   downloadablePlugins: true,
   localRunners: true,
   storeChoices: false,
+  stepsAside: true,
 };
 
 function isTauriRuntime(): boolean {
@@ -38,6 +44,7 @@ export function readPlatformFeatures(value: unknown): PlatformFeatures {
     downloadablePlugins: flag("downloadablePlugins"),
     localRunners: flag("localRunners"),
     storeChoices: flag("storeChoices"),
+    stepsAside: flag("stepsAside"),
   };
 }
 

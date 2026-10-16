@@ -232,14 +232,32 @@ impl ProviderClient {
 /// Whether the Play button on a connected-store game should be live. This is
 /// what keeps Orivo from offering to start something it cannot start.
 pub fn provider_launchable(provider: &str) -> bool {
+    // A phone has no Epic client; Orivo installs Epic games there itself and
+    // starts them through Winlator, so the card's own install state decides.
+    if orivo_installs_on_this_device(provider) {
+        return true;
+    }
+    // An Android game is an app on this very phone: Android itself starts it.
+    if cfg!(target_os = "android") && provider == crate::android_games::PROVIDER {
+        return true;
+    }
     provider_client(provider).is_some_and(|client| client.installed())
 }
 
 /// Whether Orivo can hand this store an install request at all. Same rule as
 /// launching — the client has to be here — plus a published install URI.
 pub fn provider_installable(provider: &str) -> bool {
+    if orivo_installs_on_this_device(provider) {
+        return true;
+    }
     provider_client(provider)
         .is_some_and(|client| client.install_uri_template.is_some() && client.installed())
+}
+
+/// Stores whose games Orivo downloads itself on this device rather than
+/// handing the download to the store's client (`epic_android.rs`).
+pub fn orivo_installs_on_this_device(provider: &str) -> bool {
+    cfg!(target_os = "android") && provider == "epic"
 }
 
 /// Ask a connected store's own client to begin a download. Like Steam's install

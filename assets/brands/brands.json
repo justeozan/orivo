@@ -1,0 +1,74 @@
+{
+  "height": 72,
+  "font": "-apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif",
+  "logos": [
+    { "id": "steam", "label": "Steam", "parts": [{ "file": "steam.svg" }] },
+    {
+      "id": "epic",
+      "label": "Epic Games",
+      "parts": [{ "file": "epic-games.svg" }, { "text": "Epic Games", "scale": 0.5 }]
+    },
+    { "id": "gog", "label": "GOG", "parts": [{ "file": "gog-galaxy.svg", "split": "row", "nameScale": 1.6 }] },
+    {
+      "id": "ubisoft",
+      "label": "Ubisoft Connect",
+      "parts": [
+        { "file": "ubisoft-swirl.svg" },
+        { "file": "ubisoft-connect-wordmark.svg", "scale": 0.34 }
+      ]
+    },
+    { "id": "xbox", "label": "Xbox", "parts": [{ "file": "xbox.svg" }] },
+    {
+      "id": "microsoft-store",
+      "label": "Microsoft Store",
+      "parts": [{ "file": "microsoft-squares.svg", "scale": 0.86 }, { "text": "Microsoft Store", "scale": 0.46 }]
+    },
+    {
+      "id": "local",
+      "label": "Local",
+      "parts": [{ "file": "local-folder.svg", "mode": "silhouette" }, { "text": "Local", "scale": 0.56 }]
+    },
+    {
+      "id": "wine",
+      "label": "Wine",
+      "parts": [{ "file": "wine-glass.svg" }, { "text": "Wine", "scale": 0.56 }]
+    },
+    {
+      "id": "moonlight",
+      "label": "Moonlight",
+      "parts": [{ "file": "moonlight.svg" }, { "text": "Moonlight", "scale": 0.56 }]
+    },
+    {
+      "id": "ryujinx",
+      "label": "Ryujinx",
+      "parts": [{ "file": "ryujinx.svg", "mode": "silhouette" }, { "text": "Ryujinx", "scale": 0.56 }]
+    },
+    {
+      "id": "retroarch",
+      "label": "RetroArch",
+      "parts": [{ "file": "retroarch-invader.svg", "scale": 0.78 }, { "file": "retroarch-wordmark.svg", "scale": 0.6 }]
+    },
+    {
+      "id": "ppsspp",
+      "label": "PPSSPP",
+      "parts": [{ "file": "ppsspp.svg", "mode": "silhouette" }, { "text": "PPSSPP", "scale": 0.56 }]
+    },
+    {
+      "id": "macos",
+      "label": "Mac",
+      "parts": [{ "file": "apple.svg" }, { "file": "macos-wordmark.svg", "scale": 0.62 }]
+    },
+    { "id": "windows", "label": "Windows", "parts": [{ "file": "windows.svg" }] },
+    {
+      "id": "linux",
+      "label": "Linux",
+      "parts": [{ "file": "tux.svg" }, { "text": "Linux", "scale": 0.56 }]
+    },
+    { "id": "switch", "label": "Nintendo Switch", "parts": [{ "file": "nintendo-switch.svg", "split": "row", "nameScale": 1.3 }] },
+    { "id": "ps5", "label": "PlayStation 5", "parts": [{ "file": "playstation-5.svg" }] },
+    { "id": "psp", "label": "PSP", "parts": [{ "file": "psp.svg" }] },
+    { "id": "nes", "label": "NES", "parts": [{ "file": "nes.svg" }] },
+    { "id": "snes", "label": "SNES", "parts": [{ "file": "snes.svg" }] },
+    { "id": "gba", "label": "Game Boy Advance", "parts": [{ "file": "game-boy-advance.svg" }] }
+  ]
+}

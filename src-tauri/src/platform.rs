@@ -21,17 +21,23 @@ pub struct PlatformFeatures {
     /// "Install" asks the host where the game can be got on this device, rather
     /// than asking a store's client to download it (see `store_choices`).
     pub store_choices: bool,
+    /// Orivo can get out of a started game's way: hide on macOS, minimise on
+    /// Windows and Linux (`step_aside_for_game`). A phone switches to the
+    /// game's app by itself, so there it is not a choice to offer.
+    pub steps_aside: bool,
 }
 
-pub const CURRENT: PlatformFeatures = for_target(cfg!(target_os = "ios"));
+pub const CURRENT: PlatformFeatures = for_target(cfg!(target_os = "ios"), cfg!(mobile));
 
-/// The features of an iOS build, or of any other. A function of the target so
-/// that the iOS answer can be tested on the machine that builds it.
-pub const fn for_target(ios: bool) -> PlatformFeatures {
+/// The features of an iOS build, an Android build, or a desktop one. A
+/// function of the target so that each answer can be tested on the machine
+/// that builds it.
+pub const fn for_target(ios: bool, mobile: bool) -> PlatformFeatures {
     PlatformFeatures {
         downloadable_plugins: !ios,
         local_runners: !ios,
         store_choices: ios,
+        steps_aside: !mobile,
     }
 }
 
@@ -47,36 +53,52 @@ mod tests {
     #[test]
     fn an_ios_build_downloads_no_code_and_runs_nothing_itself() {
         assert_eq!(
-            for_target(true),
+            for_target(true, true),
             PlatformFeatures {
                 downloadable_plugins: false,
                 local_runners: false,
                 store_choices: true,
+                steps_aside: false,
             }
         );
     }
 
     #[test]
-    fn every_other_build_keeps_plugins_and_runners() {
+    fn an_android_build_keeps_plugins_and_runners_and_lets_the_system_switch_apps() {
         assert_eq!(
-            for_target(false),
+            for_target(false, true),
             PlatformFeatures {
                 downloadable_plugins: true,
                 local_runners: true,
                 store_choices: false,
+                steps_aside: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_desktop_build_keeps_plugins_and_runners_and_steps_aside_for_a_game() {
+        assert_eq!(
+            for_target(false, false),
+            PlatformFeatures {
+                downloadable_plugins: true,
+                local_runners: true,
+                store_choices: false,
+                steps_aside: true,
             }
         );
     }
 
     #[test]
     fn the_webview_reads_camel_case() {
-        let json = serde_json::to_value(for_target(true)).unwrap();
+        let json = serde_json::to_value(for_target(true, true)).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
                 "downloadablePlugins": false,
                 "localRunners": false,
                 "storeChoices": true,
+                "stepsAside": false,
             })
         );
     }

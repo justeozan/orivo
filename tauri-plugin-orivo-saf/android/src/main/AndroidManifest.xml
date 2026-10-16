@@ -17,6 +17,12 @@
      be handed to. Each entry is one of the packages in
      `console_runner.rs::launch_surface`; nothing here widens what Orivo can see
      beyond that closed list. -->
+<!-- The launcher entry below is the one wider view, and it is the narrowest that
+     answers "which games are on this phone": every app the home screen can show,
+     which `SafPlugin.listInstalledGames` then filters to Android's game category.
+     It is what a launcher declares, and unlike QUERY_ALL_PACKAGES it needs no
+     Play declaration. Winlator Cmod and Moonlight are named so Orivo can tell
+     whether the app a game is about to be handed to is here at all. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <queries>
         <package android:name="com.retroarch.aarch64" />
@@ -24,5 +30,12 @@
         <package android:name="com.retroarch.ra32" />
         <package android:name="org.ppsspp.ppsspp" />
         <package android:name="org.ppsspp.ppssppgold" />
+        <package android:name="com.winlator.cmod" />
+        <package android:name="com.limelight" />
+        <package android:name="com.limelight.noir" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 </manifest>

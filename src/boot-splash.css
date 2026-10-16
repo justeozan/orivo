@@ -1,0 +1,142 @@
+/* ---------------------------------------------------------------------------
+   The startup animation: one light in a dark room.
+
+   Linked from index.html rather than imported by the bundle, so it styles the
+   window's very first frame; and linked rather than inlined, because Tauri
+   gives every inline <style> a nonce, and a nonce in style-src switches
+   'unsafe-inline' off for the whole application.
+
+   Every element rests in its arrived state and the keyframes only say where it
+   arrives from, filled backwards over their delay and never forwards. That way
+   reduced motion is simply "no animation", and the exit transitions in
+   `.is-leaving` can start at all: a forwards fill would hold the very values
+   they change, and a transition never starts on a value an animation holds.
+   Only `transform` and `opacity` move.
+   --------------------------------------------------------------------------- */
+
+html { background: #0b0b0d; }
+
+.boot-splash[hidden] { display: none; }
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  /* The void, a shade lifted where the light will be, and the vignette at the
+     edges the brand uses for depth. */
+  background: radial-gradient(120% 95% at 50% 46%, #121118 0%, #0b0b0d 52%, #060609 100%);
+  /* Purely a picture: a click during the arrival reaches the shell behind it. */
+  pointer-events: none;
+  transition: opacity 520ms cubic-bezier(.4, 0, .2, 1);
+}
+
+/* The ring's own light, cast behind it: violet up and to the left, blue down
+   and to the right, the way the mark itself is lit. Two soft pools rather than
+   a blurred layer, so the first frame never pays for a filter. */
+.boot-splash__light {
+  position: absolute;
+  top: 45%;
+  left: 50%;
+  width: min(92vmin, 980px);
+  height: min(92vmin, 980px);
+  background:
+    radial-gradient(closest-side at 45% 44%, rgba(169, 133, 254, .4), rgba(169, 133, 254, 0) 78%),
+    radial-gradient(closest-side at 56% 57%, rgba(75, 123, 254, .3), rgba(75, 123, 254, 0) 74%);
+  transform: translate(-50%, -50%);
+  animation: boot-splash-light 1200ms cubic-bezier(.2, .8, .2, 1) backwards;
+  transition: transform 640ms cubic-bezier(.2, .8, .2, 1), opacity 520ms ease;
+}
+
+.boot-splash__stage {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: clamp(22px, 3.6vmin, 38px);
+  transition: transform 640ms cubic-bezier(.2, .8, .2, 1);
+}
+
+/* Sized by its width alone: the ring's own proportions, from the image's
+   width and height attributes, give it its height. */
+.boot-splash__mark {
+  position: relative;
+  width: clamp(100px, 14vmin, 168px);
+  animation: boot-splash-mark 800ms cubic-bezier(.2, .8, .2, 1) 60ms backwards;
+}
+
+.boot-splash__ring {
+  display: block;
+  width: 100%;
+  height: auto;
+  filter: drop-shadow(0 10px 36px rgba(84, 66, 200, .45));
+}
+
+/* A glint that travels once around the ring. The ring's own artwork is the
+   mask, so the light can only ever land on the ring; the gradient turns inside
+   it while the mask stays still. */
+.boot-splash__glint {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  -webkit-mask: url("/media/orivo-ring-icon.png") center / 100% 100% no-repeat;
+  mask: url("/media/orivo-ring-icon.png") center / 100% 100% no-repeat;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+.boot-splash__glint i {
+  position: absolute;
+  inset: -12%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0) 0deg 292deg,
+    rgba(240, 236, 255, .78) 326deg,
+    rgba(255, 255, 255, 0) 352deg 360deg
+  );
+  opacity: 0;
+  animation: boot-splash-glint 900ms cubic-bezier(.45, .05, .25, 1) 380ms backwards;
+}
+
+.boot-splash__wordmark {
+  display: block;
+  width: clamp(148px, 17vmin, 228px);
+  height: auto;
+  filter: drop-shadow(0 2px 14px rgba(6, 6, 10, .6));
+  animation: boot-splash-rise 680ms cubic-bezier(.2, .8, .2, 1) 320ms backwards;
+}
+
+/* The library is ready: the mark comes forward a touch as the void lifts off
+   the scene that was already painted behind it. */
+.boot-splash.is-leaving { opacity: 0; }
+.boot-splash.is-leaving .boot-splash__stage { transform: scale(1.06); }
+.boot-splash.is-leaving .boot-splash__light { transform: translate(-50%, -50%) scale(1.3); opacity: 0; }
+
+@keyframes boot-splash-light {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(.55); }
+}
+@keyframes boot-splash-mark {
+  from { opacity: 0; transform: scale(.88); }
+}
+@keyframes boot-splash-glint {
+  0% { opacity: 0; transform: rotate(-70deg); }
+  22% { opacity: 1; }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: rotate(290deg); }
+}
+@keyframes boot-splash-rise {
+  from { opacity: 0; transform: translateY(10px); }
+}
+
+/* No arrival and no exit: the splash is there, then it is not. */
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .boot-splash,
+  html:not([data-motion="full"]) .boot-splash * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+html[data-motion="reduced"] .boot-splash,
+html[data-motion="reduced"] .boot-splash * {
+  animation: none !important;
+  transition: none !important;
+}

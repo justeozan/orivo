@@ -470,6 +470,11 @@
 .onboarding.is-entering .onboarding__step:nth-child(2)::before { animation-delay: 590ms; }
 .onboarding.is-entering .onboarding__step:nth-child(3)::before { animation-delay: 710ms; }
 .onboarding.is-entering .onboarding__panel { animation: onboarding-panel-rise 760ms cubic-bezier(.2,.8,.2,1) 240ms both; }
+/* A first start lands here behind the startup animation, and the arrival would
+   play out unseen beneath it. It waits on its first frame instead, and plays
+   as the dark lifts (`data-booting`, src/boot-splash.ts). */
+html[data-booting] .onboarding.is-entering *,
+html[data-booting] .onboarding.is-entering *::before { animation-play-state: paused; }
 
 /* Panel navigation. The direction says which way the wizard moved, so going
    back never feels like arriving somewhere new. */

@@ -184,6 +184,70 @@ describe("browseSegments", () => {
     ]);
   });
 
+  // A library streamed from another machine was forty-one "Local" games and
+  // one "Windows" one in this row, which said nothing about any of them.
+  it("files a game by the runner its card starts through before its store token", () => {
+    const library = [
+      game({ id: "streamed-a", source: "local", runner: "com.orivo.gamestream" }),
+      game({ id: "streamed-b", source: "local", runner: "com.orivo.gamestream" }),
+      game({ id: "wine", source: "wine", runner: "com.orivo.wine-staging" }),
+      game({ id: "on-disk", source: "local" }),
+      game({ id: "owned", source: "steam" }),
+    ];
+    expect(browseSegments(library, "source", NOW)).toEqual([
+      { id: "moonlight", label: "Moonlight" },
+      { id: "local", label: "Local" },
+      { id: "steam", label: "Steam" },
+      { id: "wine", label: "Wine" },
+    ]);
+    expect(browseGames(library, "source", "moonlight", NOW).map((entry) => entry.id)).toEqual([
+      "streamed-a",
+      "streamed-b",
+    ]);
+    expect(browseGames(library, "source", "local", NOW).map((entry) => entry.id)).toEqual(["on-disk"]);
+  });
+
+  it("still files a Wine entry under Wine for a host that sends no runner", () => {
+    expect(browseSegments([game({ id: "w", source: "wine" })], "source", NOW)).toEqual([
+      { id: "wine", label: "Wine" },
+    ]);
+  });
+
+  it("names a runner it does not know by the profile the player set up", () => {
+    const library = [
+      game({
+        id: "dolphin",
+        source: "local",
+        runner: "org.example.dolphin",
+        launchOptions: [{ id: "own", label: "Dolphin", launchable: true, remote: false }],
+      }),
+    ];
+    expect(browseSegments(library, "source", NOW)).toEqual([
+      { id: "runner:org.example.dolphin", label: "Dolphin" },
+    ]);
+  });
+
+  it("files an emulated or console game under the console the host names", () => {
+    const library = [
+      game({ id: "zelda", systems: ["switch"] }),
+      game({ id: "halo", source: "xbox", systems: ["xbox"] }),
+      game({ id: "mario", systems: ["snes"] }),
+      game({ id: "both", supportedPlatforms: ["windows"], systems: ["switch"] }),
+      // A token this build has no shelf for stays out rather than in "Other".
+      game({ id: "future", systems: ["dreamcast"] }),
+    ];
+    expect(browseSegments(library, "platform", NOW)).toEqual([
+      { id: "windows", label: "Windows" },
+      { id: "switch", label: "Nintendo Switch" },
+      { id: "xbox", label: "Xbox" },
+      { id: "snes", label: "SNES" },
+    ]);
+    expect(browseGames(library, "platform", "switch", NOW).map((entry) => entry.id)).toEqual([
+      "both",
+      "zelda",
+    ]);
+  });
+
   it("shows only the busiest segments, so the row stays readable", () => {
     const many = Array.from({ length: 20 }, (_, index) =>
       game({ id: `g${index}`, genre: `Genre ${String(index).padStart(2, "0")}` }),

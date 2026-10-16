@@ -1,12 +1,16 @@
+mod android_games;
 mod catalog;
 mod console_runner;
 mod console_saf;
+mod epic_android;
+mod epic_download;
 mod epic_install;
 mod game_artwork;
 mod game_detail;
 mod game_media;
 mod gamestream;
 mod launcher;
+mod moonlight_android;
 // Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
 // numbers docs/performance.md records. It never runs in the default `cargo test`
 // gate, so a busy CI runner can't turn a timing into a false failure.
@@ -401,6 +405,16 @@ struct GameView {
     developer: String,
     genre: String,
     source: String,
+    /// The runner the card's own way of starting goes through — Moonlight,
+    /// Wine, Ryujinx, an emulator — as its opaque runner id, or empty for a
+    /// store's client or a game started directly. The Library's Source mode
+    /// files a game by it: forty games streamed through Moonlight are not
+    /// "local" in any way a player would recognise.
+    runner: String,
+    /// The consoles this game is for, as closed tokens: an emulator profile's
+    /// system, `switch` for Ryujinx, `xbox` for an Xbox entitlement. Empty for
+    /// a computer game, whose platforms are `supported_platforms`.
+    systems: Vec<String>,
     hero_url: Option<String>,
     cover_url: Option<String>,
     landscape_url: Option<String>,
@@ -456,6 +470,36 @@ struct SteamAccountSyncResponse {
 #[derive(Debug, Serialize)]
 struct LaunchResult {
     status: String,
+    /// Set on a launch, absent on an install or a retry. The WebView decides
+    /// when Orivo gets out of the game's way, and that hangs on who brings the
+    /// game's window up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff: Option<LaunchHandoff>,
+}
+
+/// Who puts a launched game on screen.
+///
+/// A store's client can take the foreground the moment it is asked — on macOS
+/// `open` activates Steam well before Steam starts anything — so for those,
+/// Orivo losing focus says nothing about the game yet. A process Orivo started
+/// itself is the first thing to take the foreground after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LaunchHandoff {
+    /// Orivo started the game's own process: directly, through Wine, or
+    /// through a runner.
+    Process,
+    /// The store's client was asked to start it.
+    Client,
+}
+
+/// The launch service hands Steam and the connected stores a URI, and starts
+/// everything else itself.
+fn launch_handoff(target: &LaunchTarget) -> LaunchHandoff {
+    match target {
+        LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => LaunchHandoff::Client,
+        LaunchTarget::Direct | LaunchTarget::Runner { .. } => LaunchHandoff::Process,
+    }
 }
 
 /// A Wine process may fail only after it has been created (for example while
@@ -832,6 +876,25 @@ pub fn run() {
         // the system chooser returns. See `tauri-plugin-orivo-saf/README.md`.
         .plugin(tauri_plugin_orivo_saf::init())
         .setup(|app| {
+            // On macOS a natively full-screen window is a desktop of its own.
+            // Opening Orivo slid the screen over to it, and every game it
+            // started slid back to the desktop the game opened on — or on to a
+            // third, if the game went full screen itself. Simple full screen
+            // covers the display from the desktop the user is already on, with
+            // the Dock and the menu bar tucked away, so the game opens where
+            // Orivo is and nothing slides. It is switched on first, before
+            // anything slow, so the window is never seen at its windowed size;
+            // and the window is created windowed for it (`tauri.macos.conf.json`)
+            // because a natively full-screen window cannot make the switch. That
+            // file also leaves it uncentred: tao applies a configured position
+            // on the next turn of the main queue, after this, and moved the
+            // screen-sized window 12 points left of the display.
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
+                && let Err(error) = window.set_simple_fullscreen(true)
+            {
+                eprintln!("[macos] could not cover the screen: {error}");
+            }
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
 
@@ -904,6 +967,11 @@ pub fn run() {
             // keychain item and macOS would ask for the keychain password once
             // per store, every time.
             sources::set_connections_path(app_data.join(sources::CONNECTIONS_FILE));
+            // The Epic games a phone installed through Orivo are recorded
+            // beside the catalog; the games themselves live in shared storage.
+            epic_android::configure(app_data.clone(), None);
+            // The PC a phone streams from through Moonlight, once named.
+            moonlight_android::configure(app_data.clone());
             // Compiled plugin components are regenerable, so they live in the
             // cache directory rather than beside the packages they came from.
             // Naming it is all that happens here: the cache is opened by the
@@ -1076,12 +1144,16 @@ pub fn run() {
             console_commands::connect_console_rom_folder,
             console_commands::import_console_roms,
             launch_game,
+            step_aside_for_game,
             install_steam_game,
             get_store_choices,
             open_store_choice,
             platform::get_platform_features,
             install_epic_game,
             uninstall_epic_game,
+            sync_android_games,
+            get_moonlight_stream_settings,
+            set_moonlight_stream_settings,
             get_epic_install_status,
             get_game_detail,
             set_game_wishlist,
@@ -4221,6 +4293,7 @@ async fn retry_wine_game_in_compatibility(
         *catalog = next;
         Ok(LaunchResult {
             status: "Retrying this game in the next compatible Wine mode".into(),
+            handoff: None,
         })
     })
     .await
@@ -4515,7 +4588,7 @@ fn refresh_epic_install_state(state: &State<'_, AppState>) -> Result<(), String>
 /// Rewrite every Epic record's install state from the launcher's manifests.
 /// Returns whether anything moved.
 fn apply_epic_install_state(catalog: &mut Catalog) -> bool {
-    let installations = epic_install::installations();
+    let statuses = epic_install::statuses();
     let mut changed = false;
 
     for game in catalog.games.iter_mut() {
@@ -4525,8 +4598,8 @@ fn apply_epic_install_state(catalog: &mut Catalog) -> bool {
         let status = game
             .source_id
             .as_deref()
-            .and_then(|app_name| installations.get(app_name))
-            .map(epic_install::status_for);
+            .and_then(|app_name| statuses.get(app_name))
+            .cloned();
 
         // A flag, never a path. Only a finished install counts: a download
         // still running must not make a game look ready to launch.
@@ -7088,10 +7161,11 @@ async fn launch_game(
     game_id: String,
     // Which of the game's own ways of starting to use, as offered by its view.
     // Absent means the card's own, which is every game with only one.
-    launch_option: Option<String>,
+    mut launch_option: Option<String>,
     state: State<'_, AppState>,
     runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
 ) -> Result<LaunchResult, String> {
+    let mut stream_or_download: Option<String> = None;
     let (game, mut wine_launch, winlator_launch, console_launch, runner_launch) = {
         let catalog = state
             .catalog
@@ -7105,6 +7179,16 @@ async fn launch_game(
             .ok_or_else(|| {
                 "This is a visual showcase. Import a local game to launch it.".to_string()
             })?;
+        // A stream from the player's PC and the download to this phone are
+        // offered beside a card's own targets rather than among them, so they
+        // are answered before the substitution below would refuse them.
+        if matches!(
+            launch_option.as_deref(),
+            Some(moonlight_android::STREAM_OPTION) | Some(moonlight_android::INSTALL_ON_PHONE_OPTION)
+        ) {
+            stream_or_download = launch_option.clone();
+            launch_option = None;
+        }
         // The choice is substituted here, once, so every branch below reads the
         // launch the player asked for exactly as it reads a card's only one.
         // The handle is resolved against this game's own list and nothing else,
@@ -7223,6 +7307,33 @@ async fn launch_game(
     };
     let title = game.title.clone();
 
+    match stream_or_download.as_deref() {
+        Some(moonlight_android::STREAM_OPTION) => {
+            let pc = moonlight_android::pc_name()
+                .filter(|_| moonlight_android::streams(&game))
+                .ok_or_else(|| "Name your PC in Settings › Libraries & Sources to stream from it.".to_string())?;
+            use tauri_plugin_orivo_saf::OrivoSafExt;
+            app.orivo_saf()
+                .start_stream(&pc, Some(&title))
+                .await
+                .map_err(|error| {
+                    if error.to_string().contains("moonlight-missing") {
+                        "Install Moonlight and pair it with your PC to stream this game.".to_string()
+                    } else {
+                        format!("Moonlight could not be opened: {error}")
+                    }
+                })?;
+            return Ok(LaunchResult {
+                status: format!("Streaming {title} from {pc}"),
+                handoff: Some(LaunchHandoff::Client),
+            });
+        }
+        Some(moonlight_android::INSTALL_ON_PHONE_OPTION) => {
+            return Err("Use Install to download this game to the phone.".into());
+        }
+        _ => {}
+    }
+
     if let Some((runner_id, profile_id, game_ref)) = runner_launch {
         let service = Arc::clone(&runners);
         // Loading and probing the component, asking it to prepare the launch and
@@ -7236,6 +7347,7 @@ async fn launch_game(
         .map_err(|error| error.to_string())?;
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title}"),
+            handoff: Some(LaunchHandoff::Process),
         });
     }
 
@@ -7273,6 +7385,7 @@ async fn launch_game(
         .map_err(|error| error.to_string())?;
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title} with Winlator"),
+            handoff: Some(LaunchHandoff::Process),
         });
     }
 
@@ -7312,6 +7425,7 @@ async fn launch_game(
         .map_err(|error| error.to_string())?;
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title} with {emulator_label}"),
+            handoff: Some(LaunchHandoff::Process),
         });
     }
 
@@ -7461,9 +7575,59 @@ async fn launch_game(
                 wine_graphics_backend_label(selected_backend),
                 retina_status.unwrap_or_default(),
             ),
+            handoff: Some(LaunchHandoff::Process),
         });
     }
 
+    // A game that is an app on this phone starts the way its home-screen icon
+    // does, through the launch intent its own package declares.
+    if cfg!(target_os = "android")
+        && let LaunchTarget::Provider { provider, app_ref } = &game.launch_target
+        && provider == android_games::PROVIDER
+    {
+        use tauri_plugin_orivo_saf::OrivoSafExt;
+        app.orivo_saf()
+            .launch_package(app_ref)
+            .await
+            .map_err(|error| {
+                if error.to_string().contains("not-installed") {
+                    format!("{title} is no longer installed on this phone.")
+                } else {
+                    format!("{title} could not be started: {error}")
+                }
+            })?;
+        return Ok(LaunchResult {
+            status: format!("Launching {title}"),
+            handoff: Some(LaunchHandoff::Process),
+        });
+    }
+
+    // An Epic game a phone installed through Orivo starts from the shortcut
+    // Orivo wrote beside it, in the container the player's other Winlator
+    // games use (`epic_android.rs`).
+    if cfg!(target_os = "android")
+        && let LaunchTarget::Provider { provider, .. } = &game.launch_target
+        && provider == "epic"
+    {
+        let app_name = game
+            .source_id
+            .clone()
+            .ok_or_else(|| "This Epic game has no launcher reference.".to_string())?;
+        let container = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())
+            .map(|catalog| winlator_runner::preferred_container(&catalog))?;
+        let status = tauri::async_runtime::spawn_blocking(move || epic_android::launch(&app_name, container))
+            .await
+            .map_err(|error| format!("Launch request did not finish: {error}"))??;
+        return Ok(LaunchResult {
+            status,
+            handoff: Some(LaunchHandoff::Process),
+        });
+    }
+
+    let handoff = launch_handoff(&game.launch_target);
     // `/usr/bin/open` can briefly wait while macOS checks whether the Steam
     // bundle accepted the URI. Keep that confirmation off the command/UI
     // executor, while direct launches still return once their process starts.
@@ -7473,7 +7637,36 @@ async fn launch_game(
         .map_err(|error| error.to_string())?;
     Ok(LaunchResult {
         status: format!("Launching {title}"),
+        handoff: Some(handoff),
     })
+}
+
+/// Get out of the way of a game that has started.
+///
+/// The WebView decides when: it knows whether the launch was accepted and
+/// whether something else has taken the foreground since. This only does the
+/// part it is not allowed to do itself.
+///
+/// macOS hides the app, as ⌘H would, rather than minimising its window: ⌘-Tab
+/// and the Dock both bring a hidden app back exactly as it was, still covering
+/// the screen on the same desktop, while ⌘-Tab leaves a minimised window where
+/// it is. Windows and Linux minimise the window to the taskbar, which is what
+/// stepping aside means there. A phone hands the screen to the game's app on
+/// its own, so there is nothing to do.
+#[tauri::command]
+fn step_aside_for_game(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    app.hide()
+        .map_err(|error| format!("Orivo could not step aside: {error}"))?;
+    #[cfg(all(desktop, not(target_os = "macos")))]
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        window
+            .minimize()
+            .map_err(|error| format!("Orivo could not step aside: {error}"))?;
+    }
+    #[cfg(mobile)]
+    let _ = app;
+    Ok(())
 }
 
 /// Ask the locally installed Steam client to begin an install for one owned
@@ -7511,6 +7704,7 @@ async fn install_steam_game(
         .map_err(|error| error.to_string())?;
     Ok(LaunchResult {
         status: format!("Opening Steam to install {title}"),
+        handoff: None,
     })
 }
 
@@ -7556,11 +7750,79 @@ fn open_store_choice(game_id: String, choice_id: String) -> Result<(), String> {
     store::open_store_url(&choice.url(), &store::SystemUrlOpener)
 }
 
+/// The PC a phone streams from through Moonlight, as the player named it.
+#[tauri::command]
+fn get_moonlight_stream_settings() -> moonlight_android::StreamSettings {
+    moonlight_android::settings()
+}
+
+#[tauri::command]
+fn set_moonlight_stream_settings(pc_name: String) -> Result<moonlight_android::StreamSettings, String> {
+    moonlight_android::save(&pc_name)
+}
+
+/// What a look at the phone's own games found.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidGamesSync {
+    games: usize,
+    changed: bool,
+}
+
+/// Bring the library's Android games in line with what is installed on this
+/// phone. Called once the first page is up and again whenever Orivo comes back
+/// to the foreground, which is when a game installed in the meantime appears.
+/// Anywhere but Android there is nothing to look at.
+#[tauri::command]
+async fn sync_android_games(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AndroidGamesSync, String> {
+    if !cfg!(target_os = "android") {
+        return Ok(AndroidGamesSync {
+            games: 0,
+            changed: false,
+        });
+    }
+    use tauri_plugin_orivo_saf::OrivoSafExt;
+    let installed = app
+        .orivo_saf()
+        .list_installed_games()
+        .await
+        .map_err(|error| format!("Orivo could not list the games on this phone: {error}"))?;
+    let media_dir = media_cache_dir(&app).map_err(|error| error.to_string())?;
+    let games = android_games::games_from(&installed, &media_dir);
+    let count = games.len();
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    let changed = android_games::apply(&mut next, games);
+    if changed {
+        persist_catalog(&next, &state.catalog_path).map_err(|error| error.to_string())?;
+        *state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())? = next;
+    }
+    Ok(AndroidGamesSync {
+        games: count,
+        changed,
+    })
+}
+
 /// Ask the locally installed Epic Games Launcher to begin a download for one
 /// owned entitlement. The WebView supplies only a stable catalog id; Rust looks
 /// up the validated launch reference and builds the fixed install URI itself.
 #[tauri::command]
 async fn install_epic_game(
+    app: AppHandle,
     game_id: String,
     state: State<'_, AppState>,
 ) -> Result<LaunchResult, String> {
@@ -7586,12 +7848,23 @@ async fn install_epic_game(
         return Err("Only Epic Games library entries can be installed this way.".into());
     }
 
+    // A phone has no Epic Games Launcher to hand the download to, so Orivo
+    // fetches the Windows build itself, for Winlator (`epic_android.rs`).
+    if cfg!(target_os = "android") {
+        let status = epic_android::start_install(app, title, &app_ref)?;
+        return Ok(LaunchResult {
+            status,
+            handoff: None,
+        });
+    }
+
     tauri::async_runtime::spawn_blocking(move || launcher::install_provider(&provider, &app_ref))
         .await
         .map_err(|error| format!("Epic install request did not finish: {error}"))?
         .map_err(|error| error.to_string())?;
     Ok(LaunchResult {
         status: format!("Opening Epic Games to install {title}"),
+        handoff: None,
     })
 }
 
@@ -7632,6 +7905,17 @@ async fn uninstall_epic_game(
     let _ = app_ref;
     let _ = provider;
 
+    if cfg!(target_os = "android") {
+        tauri::async_runtime::spawn_blocking(move || epic_android::uninstall(&app_name))
+            .await
+            .map_err(|error| format!("Epic uninstall request did not finish: {error}"))??;
+        refresh_epic_install_state(&state)?;
+        return Ok(LaunchResult {
+            status: format!("{title} has been removed from this phone"),
+            handoff: None,
+        });
+    }
+
     tauri::async_runtime::spawn_blocking(move || epic_install::uninstall(&app_name))
         .await
         .map_err(|error| format!("Epic uninstall request did not finish: {error}"))?
@@ -7641,6 +7925,7 @@ async fn uninstall_epic_game(
     refresh_epic_install_state(&state)?;
     Ok(LaunchResult {
         status: format!("{title} has been uninstalled"),
+        handoff: None,
     })
 }
 
@@ -8348,6 +8633,35 @@ fn launch_targets_of(game: &Game) -> impl Iterator<Item = &LaunchTarget> {
     std::iter::once(&game.launch_target).chain(game.alternate_launch_targets.iter())
 }
 
+/// The consoles a game is for, from what the catalog actually holds: the
+/// system an emulator profile was set up for, the console Ryujinx emulates,
+/// and Xbox for an entitlement the Xbox store reported. Any way of starting the
+/// game counts, so a Switch game that can also be streamed is still one.
+fn systems_of(game: &Game, catalog: &Catalog) -> Vec<String> {
+    let mut systems = BTreeSet::new();
+    if game.source == GameSource::Xbox {
+        systems.insert("xbox");
+    }
+    for target in launch_targets_of(game) {
+        let LaunchTarget::Runner {
+            runner_id,
+            profile_id,
+            ..
+        } = target
+        else {
+            continue;
+        };
+        if is_console_runner_id(runner_id)
+            && let Some(profile) = catalog.console_profile(profile_id)
+        {
+            systems.insert(profile.system.slug());
+        } else if runner_id == catalog::RYUJINX_RUNNER_ID {
+            systems.insert("switch");
+        }
+    }
+    systems.into_iter().map(str::to_owned).collect()
+}
+
 fn launch_option_id(target: &LaunchTarget) -> String {
     let encoded = serde_json::to_string(target).unwrap_or_default();
     let mut digest = Sha256::new();
@@ -8371,6 +8685,14 @@ fn launch_option_label(target: &LaunchTarget, catalog: &Catalog) -> String {
     match target {
         LaunchTarget::Direct => "This computer".into(),
         LaunchTarget::Steam { .. } => "Steam".into(),
+        // On a phone, an Epic game Orivo installed runs right here, through
+        // Winlator, which is what the menu should say beside a stream.
+        LaunchTarget::Provider { provider, .. } if launcher::orivo_installs_on_this_device(provider) => {
+            "This phone · Winlator".into()
+        }
+        LaunchTarget::Provider { provider, .. } if provider == android_games::PROVIDER => {
+            "This phone".into()
+        }
         LaunchTarget::Provider { provider, .. } => sources::SourceProvider::from_token(provider)
             .map(|provider| provider.label().to_owned())
             .unwrap_or_else(|| "Its store".into()),
@@ -8395,7 +8717,44 @@ fn launch_option_label(target: &LaunchTarget, catalog: &Catalog) -> String {
     }
 }
 
+/// Every way a card offers to start its game: its own targets, then — on a
+/// phone that knows the player's PC — a stream from that PC through Moonlight,
+/// and for an Epic game not yet downloaded, the download itself, so one menu
+/// answers both "play it here" and "play it from my PC".
+fn launch_options_of(game: &Game, catalog: &Catalog) -> Vec<LaunchOptionView> {
+    let mut options: Vec<LaunchOptionView> = launch_targets_of(game)
+        .map(|target| LaunchOptionView {
+            id: launch_option_id(target),
+            label: launch_option_label(target, catalog),
+            launchable: target_launchable(target, game, catalog),
+            remote: launch_target_is_remote(target, catalog),
+        })
+        .collect();
+    if let Some(label) = moonlight_android::stream_label(game) {
+        let downloadable = matches!(
+            &game.launch_target,
+            LaunchTarget::Provider { provider, .. } if launcher::orivo_installs_on_this_device(provider)
+        ) && game_detail::install_state_of(game) == game_detail::InstallStateView::NotInstalled;
+        if downloadable {
+            options.push(LaunchOptionView {
+                id: moonlight_android::INSTALL_ON_PHONE_OPTION.into(),
+                label: "Download to this phone".into(),
+                launchable: true,
+                remote: false,
+            });
+        }
+        options.push(LaunchOptionView {
+            id: moonlight_android::STREAM_OPTION.into(),
+            label,
+            launchable: true,
+            remote: true,
+        });
+    }
+    options
+}
+
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {
+    let launch_options = launch_options_of(game, catalog);
     // Wallpapers the user deliberately chose on the detail page. Each role is
     // independent: the background never overrides a card cover and vice versa.
     let home_image = media_source_url(game.home_image_path.as_deref(), cache_dir);
@@ -8458,6 +8817,13 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             },
         }
         .into(),
+        runner: match &game.launch_target {
+            LaunchTarget::Runner { runner_id, .. } => runner_id.clone(),
+            LaunchTarget::Direct | LaunchTarget::Steam { .. } | LaunchTarget::Provider { .. } => {
+                String::new()
+            }
+        },
+        systems: systems_of(game, catalog),
         // A wallpaper the player picked outranks everything. After that the
         // scene prefers art with no title burned into it — the capsule is the
         // publisher's branded key art and only stands in when nothing cleaner
@@ -8491,15 +8857,8 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
             .or(steam_cover),
         last_played_at: game.last_played_at.clone().unwrap_or_default(),
         play_time_seconds: game.play_time_seconds,
-        launchable: launch_targets_of(game).any(|target| target_launchable(target, game, catalog)),
-        launch_options: launch_targets_of(game)
-            .map(|target| LaunchOptionView {
-                id: launch_option_id(target),
-                label: launch_option_label(target, catalog),
-                launchable: target_launchable(target, game, catalog),
-                remote: launch_target_is_remote(target, catalog),
-            })
-            .collect(),
+        launchable: launch_options.iter().any(|option| option.launchable),
+        launch_options,
         host_platform: host_platform.into(),
         supported_platforms,
         compatible_with_host,
@@ -9019,6 +9378,107 @@ fn bundled_artwork_for_title(title: &str) -> Option<&'static BundledArtwork> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// The Library's Source mode files a game by the runner it starts through,
+    /// and its Platform mode by the console it is for. Both come out of the
+    /// catalog — the runner a card's own launch names, the system its emulator
+    /// profile was set up for — never out of text a plugin wrote.
+    #[test]
+    fn a_game_view_names_its_runner_and_the_consoles_it_is_for() {
+        use catalog::{ConsoleEmulator, ConsoleEmulatorProfile, ConsoleSystem};
+
+        let runner = |runner_id: &str, profile_id: &str| LaunchTarget::Runner {
+            runner_id: runner_id.into(),
+            game_ref: "game".into(),
+            profile_id: profile_id.into(),
+        };
+        let mut catalog = Catalog::default();
+        catalog.console_profiles.push(ConsoleEmulatorProfile {
+            id: "snes".into(),
+            display_name: "SNES (RetroArch)".into(),
+            emulator: ConsoleEmulator::RetroArch,
+            system: ConsoleSystem::Snes,
+            rom_directories: Vec::new(),
+            rom_trees: Vec::new(),
+            enabled: true,
+            last_imported_at: None,
+        });
+
+        let mut streamed = Game::from_executable("/bin/sh").unwrap();
+        streamed.launch_target = runner("com.orivo.gamestream", "moonlight");
+        let view = game_view(&streamed, &catalog, None);
+        assert_eq!(view.runner, "com.orivo.gamestream");
+        assert!(view.systems.is_empty());
+
+        let mut emulated = Game::from_executable("/bin/sh").unwrap();
+        emulated.launch_target = runner(catalog::RETROARCH_RUNNER_ID, "snes");
+        assert_eq!(game_view(&emulated, &catalog, None).systems, vec!["snes"]);
+
+        // A Switch game is one through any of its ways of starting.
+        let mut switch = Game::from_executable("/bin/sh").unwrap();
+        switch.alternate_launch_targets = vec![runner(catalog::RYUJINX_RUNNER_ID, "ryujinx")];
+        let view = game_view(&switch, &catalog, None);
+        assert_eq!(view.runner, "", "the card's own launch is direct");
+        assert_eq!(view.systems, vec!["switch"]);
+
+        let mut entitlement = Game::from_executable("/bin/sh").unwrap();
+        entitlement.source = GameSource::Xbox;
+        assert_eq!(game_view(&entitlement, &catalog, None).systems, vec!["xbox"]);
+
+        // A profile that is gone says nothing rather than guessing a console.
+        emulated.launch_target = runner(catalog::RETROARCH_RUNNER_ID, "deleted");
+        assert!(game_view(&emulated, &catalog, None).systems.is_empty());
+    }
+
+    /// The WebView reads "Orivo lost focus" as "the game is on screen" only
+    /// for a game Orivo started itself. A store's client is activated the
+    /// moment it is asked, long before the game it was asked for exists.
+    #[test]
+    fn a_launch_names_whoever_puts_the_game_on_screen() {
+        assert_eq!(
+            launch_handoff(&LaunchTarget::Steam { app_id: 480 }),
+            LaunchHandoff::Client
+        );
+        assert_eq!(
+            launch_handoff(&LaunchTarget::Provider {
+                provider: "epic".into(),
+                app_ref: "d5241c:a1b2c3:Sugar".into(),
+            }),
+            LaunchHandoff::Client
+        );
+        assert_eq!(
+            launch_handoff(&LaunchTarget::Direct),
+            LaunchHandoff::Process
+        );
+        assert_eq!(
+            launch_handoff(&LaunchTarget::Runner {
+                runner_id: WINE_STAGING_RUNNER_ID.into(),
+                game_ref: "game".into(),
+                profile_id: "profile".into(),
+            }),
+            LaunchHandoff::Process
+        );
+    }
+
+    #[test]
+    fn only_a_launch_says_who_puts_the_game_on_screen() {
+        let launch = LaunchResult {
+            status: "Launching Spacewar".into(),
+            handoff: Some(LaunchHandoff::Client),
+        };
+        assert_eq!(
+            serde_json::to_value(launch).unwrap(),
+            serde_json::json!({ "status": "Launching Spacewar", "handoff": "client" })
+        );
+        let install = LaunchResult {
+            status: "Opening Steam to install Spacewar".into(),
+            handoff: None,
+        };
+        assert_eq!(
+            serde_json::to_value(install).unwrap(),
+            serde_json::json!({ "status": "Opening Steam to install Spacewar" })
+        );
+    }
 
     /// Signing in with Google opens a popup. Refusing every one of them meant
     /// the button did nothing at all, which is not a safety property: the popup

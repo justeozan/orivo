@@ -15,8 +15,19 @@ afterEach(() => {
 describe("platform features", () => {
   it("reads what an iOS host says it can do", () => {
     expect(
-      readPlatformFeatures({ downloadablePlugins: false, localRunners: false, storeChoices: true }),
-    ).toEqual({ downloadablePlugins: false, localRunners: false, storeChoices: true });
+      readPlatformFeatures({
+        downloadablePlugins: false,
+        localRunners: false,
+        storeChoices: true,
+        stepsAside: false,
+      }),
+    ).toEqual({ downloadablePlugins: false, localRunners: false, storeChoices: true, stepsAside: false });
+  });
+
+  // Like every other flag, an answer the host did not give is the desktop's.
+  it("steps aside for a game unless the host says it cannot", () => {
+    expect(readPlatformFeatures({ storeChoices: false }).stepsAside).toBe(true);
+    expect(readPlatformFeatures({ stepsAside: false }).stepsAside).toBe(false);
   });
 
   it("keeps the desktop answer for any flag the host did not send as a boolean", () => {

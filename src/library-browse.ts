@@ -117,17 +117,78 @@ export function lastPlayedTime(value: string | undefined, now = Date.now()): num
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-type PlatformKey = "macos" | "windows" | "linux" | "other";
+/**
+ * Native support first — a Mac library is read by what runs on the Mac — then
+ * the consoles, newest family first. Each key is also the id of its logo in
+ * `brand-logos.ts`.
+ */
+const PLATFORM_ORDER = [
+  "macos",
+  "windows",
+  "linux",
+  "android",
+  "switch",
+  "xbox",
+  "ps5",
+  "psp",
+  "nes",
+  "snes",
+  "gb",
+  "gba",
+  "megadrive",
+  "other",
+] as const;
 
-/** Native support first: a Mac library is read by what runs on the Mac. */
-const PLATFORM_ORDER: readonly PlatformKey[] = ["macos", "windows", "linux", "other"];
+type PlatformKey = (typeof PLATFORM_ORDER)[number];
 
 const PLATFORM_LABELS: Record<PlatformKey, string> = {
   macos: "Mac",
   windows: "Windows",
   linux: "Linux",
+  android: "Android",
+  switch: "Nintendo Switch",
+  xbox: "Xbox",
+  ps5: "PlayStation 5",
+  psp: "PSP",
+  nes: "NES",
+  snes: "SNES",
+  gb: "Game Boy",
+  gba: "Game Boy Advance",
+  megadrive: "Mega Drive",
   other: "Other",
 };
+
+const isPlatformKey = (value: string): value is PlatformKey =>
+  (PLATFORM_ORDER as readonly string[]).includes(value);
+
+/**
+ * Where a game comes from, as Source mode reads it: the runner its card starts
+ * through, when there is one, before the store token. Forty games streamed
+ * through Moonlight are not "local" in any way a player would recognise, and a
+ * Wine entry is Wine before it is a folder. Each id is its logo's id.
+ */
+const RUNNER_SOURCES: ReadonlyMap<string, BrowseSegment> = new Map([
+  ["com.orivo.gamestream", { id: "moonlight", label: "Moonlight" }],
+  ["com.orivo.wine-staging", { id: "wine", label: "Wine" }],
+  ["com.orivo.ryujinx", { id: "ryujinx", label: "Ryujinx" }],
+  ["com.orivo.winlator", { id: "winlator", label: "Winlator" }],
+  ["com.orivo.retroarch", { id: "retroarch", label: "RetroArch" }],
+  ["com.orivo.ppsspp", { id: "ppsspp", label: "PPSSPP" }],
+]);
+
+function sourceOf(game: LibraryGame): BrowseSegment | null {
+  const runner = game.runner ? RUNNER_SOURCES.get(game.runner) : undefined;
+  if (runner) return runner;
+  // A host from before the runner field still says "wine" for a Wine entry.
+  if (game.source === "wine") return RUNNER_SOURCES.get("com.orivo.wine-staging") ?? null;
+  if (game.runner) {
+    // A third-party runner: its own name, as the profile the player set up
+    // calls it, rather than lumping it in with what is local.
+    return { id: `runner:${game.runner}`, label: game.launchOptions?.[0]?.label || "Other" };
+  }
+  const badge = sourceBadge(game.source);
+  return badge && game.source ? { id: game.source, label: badge.label } : null;
+}
 
 /**
  * A game belongs to every platform it actually declares.
@@ -149,6 +210,8 @@ const PLATFORM_LABELS: Record<PlatformKey, string> = {
  *    no macOS build — ended up filed under Windows.
  * 3. A Wine entry is a Windows build, that being the entire reason it needs
  *    Wine.
+ * 4. The consoles the host names in `systems`: an emulator profile's system,
+ *    Ryujinx's Switch, an Xbox entitlement's Xbox.
  *
  * `unknown` stays out, and a game with nothing to declare stays out of this
  * mode rather than being guessed into a segment.
@@ -157,6 +220,8 @@ function platformsOf(game: LibraryGame): PlatformKey[] {
   const declared = game.supportedPlatforms ?? [];
   const keys = new Set<PlatformKey>(declared);
   if (game.source === "wine") keys.add("windows");
+  // An app on the phone is an Android game, whatever else it may also be.
+  if (game.source === "android") keys.add("android");
   if (declared.length === 0) {
     // A catalog synced before stores recorded their matrix still carries the
     // macOS answer, and for those entries it is all there is. Epic's are
@@ -164,6 +229,9 @@ function platformsOf(game: LibraryGame): PlatformKey[] {
     // unsafe above.
     if (game.macCompatibility === "native") keys.add("macos");
     if (game.macCompatibility === "not-native") keys.add("windows");
+  }
+  for (const system of game.systems ?? []) {
+    if (isPlatformKey(system)) keys.add(system);
   }
   return [...keys];
 }
@@ -287,8 +355,8 @@ export function browseSegments(
       break;
     case "source":
       segments = tally(games, (game) => {
-        const badge = sourceBadge(game.source);
-        return badge && game.source ? [{ id: game.source, label: badge.label }] : [];
+        const source = sourceOf(game);
+        return source ? [source] : [];
       });
       break;
     case "platform":
@@ -325,7 +393,7 @@ export function browseGames(
 
   const matches = (game: LibraryGame): boolean => {
     if (mode === "genre") return knownGenre(game.genre) === segmentId;
-    if (mode === "source") return game.source === segmentId;
+    if (mode === "source") return sourceOf(game)?.id === segmentId;
     return platformsOf(game).includes(segmentId as PlatformKey);
   };
 

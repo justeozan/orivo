@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Moonlight's mark, drawn from its geometry rather than copied: a ring
+       and an eight-spoke star meeting it. -->
+  <path fill-rule="evenodd" d="M128 0a128 128 0 1 0 0 256a128 128 0 1 0 0-256Zm0 32a96 96 0 1 1 0 192a96 96 0 1 1 0-192Z"/>
+  <g transform="translate(128 128)">
+    <rect x="-96" y="-4" width="192" height="8"/>
+    <rect x="-96" y="-4" width="192" height="8" transform="rotate(45)"/>
+    <rect x="-96" y="-4" width="192" height="8" transform="rotate(90)"/>
+    <rect x="-96" y="-4" width="192" height="8" transform="rotate(135)"/>
+  </g>
+</svg>

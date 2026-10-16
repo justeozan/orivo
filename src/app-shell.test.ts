@@ -314,6 +314,39 @@ describe("application shell", () => {
     expect(visiblePages(root)).toEqual(["app-page-library"]);
   });
 
+  // The landscape art is 1920 pixels wide and only the selected card shows it.
+  // Every card used to fetch it, which on a phone was dozens of megabytes
+  // racing the wallpaper.
+  it("fetches landscape art only for the selected card and its neighbours", () => {
+    const cards = Array.from(root.querySelectorAll<HTMLButtonElement>("#game-cards .game-card"));
+    const selected = cards.findIndex((card) => card.classList.contains("is-selected"));
+    expect(selected).toBeGreaterThanOrEqual(0);
+    cards.forEach((card, index) => {
+      const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape")!;
+      const near = Math.abs(index - selected) <= 1;
+      expect(landscape.hasAttribute("src"), `card ${index}`).toBe(near);
+    });
+    expect(cards[selected].querySelector<HTMLImageElement>(".card-art--portrait")!.fetchPriority).toBe("high");
+  });
+
+  // A sourceless <img> is a broken-picture glyph in Android's WebView: a card
+  // whose every picture failed hides it and wears the game's name.
+  it("gives a card with no loadable picture its name instead of a broken one", () => {
+    const card = root.querySelector<HTMLButtonElement>("#game-cards .game-card:not(.is-selected)")!;
+    const portrait = card.querySelector<HTMLImageElement>(".card-art--portrait")!;
+    const attempts = new Set<string>();
+    for (let guard = 0; guard < 6 && portrait.hasAttribute("src"); guard += 1) {
+      attempts.add(portrait.getAttribute("src")!);
+      portrait.dispatchEvent(new Event("error"));
+    }
+    expect(attempts.size).toBeGreaterThan(0);
+    expect(portrait.hasAttribute("src")).toBe(false);
+    expect(portrait.classList.contains("is-missing")).toBe(true);
+    expect(card.classList.contains("is-art-missing")).toBe(true);
+    const fallback = card.querySelector<HTMLElement>(".card-fallback")!;
+    expect(fallback.textContent).toBe(card.getAttribute("aria-label")!.replace(/^Open details for /, ""));
+  });
+
   it("deploys on the first card click and opens the detail page on a second click", async () => {
     const cards = Array.from(root.querySelectorAll<HTMLButtonElement>("#game-cards .game-card"));
     expect(cards.length).toBeGreaterThan(1);
@@ -358,6 +391,33 @@ describe("application shell", () => {
     // and this menu is one of the reference screenshots.
     expect(menu.textContent).not.toContain("RetroArch");
     expect(menu.textContent).not.toContain("PPSSPP");
+  });
+
+  // On a phone the pills only show while the menu is open, so a finger going
+  // down on one must not close it: the pill would be hidden before its click.
+  // The click closes the menu itself, on every screen.
+  it("lets a pill be pressed while the menu is open, and closes the menu on its click", async () => {
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    const topbar = root.querySelector<HTMLElement>(".topbar")!;
+    const store = root.querySelector<HTMLButtonElement>("[data-nav-page='store']")!;
+    expect(topbar.classList.contains("is-library-menu-open")).toBe(true);
+
+    store.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    expect(menu.hidden).toBe(false);
+    expect(topbar.classList.contains("is-library-menu-open")).toBe(true);
+
+    store.click();
+    await settle();
+    expect(window.location.hash.startsWith("#/store")).toBe(true);
+    expect(menu.hidden).toBe(true);
+    expect(topbar.classList.contains("is-library-menu-open")).toBe(false);
+
+    // Anywhere else still closes it on the way down.
+    root.querySelector<HTMLButtonElement>("#library-menu-button")!.click();
+    expect(menu.hidden).toBe(false);
+    root.querySelector<HTMLElement>(".selector")!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    expect(menu.hidden).toBe(true);
   });
 
   // The menu is where Orivo gets extended; the plugins shortcut is the one
@@ -1914,5 +1974,298 @@ describe("the application shell on iOS", () => {
 
     expect(commandArgs("install_steam_game")).toEqual([{ gameId: "steam:413150" }]);
     expect(commandArgs("get_store_choices")).toEqual([]);
+  });
+});
+
+/**
+ * Starting a game: the splash over the shell, and Orivo getting out of the
+ * game's way. The timing rules live in launch-splash.test.ts; these cover the
+ * wiring — what the shell hands the splash, what it asks the host, and what a
+ * key does while a game starts. Being covered is the signal used here because
+ * it needs no clock: nobody can see the splash any more, so Orivo steps aside
+ * on the spot.
+ */
+describe("starting a game from the shell", () => {
+  let root: HTMLElement;
+  const alpha = { id: "local:alpha", title: "Alpha", source: "local", launchable: true };
+  const backend = {
+    launch: (): Promise<unknown> => Promise.resolve({ status: "Launching Alpha", handoff: "process" }),
+    preferences: {} as Record<string, unknown>,
+    features: undefined as Record<string, boolean> | undefined,
+  };
+
+  const mount = (options: Parameters<typeof mountApp>[1] = {}): void => {
+    root = document.createElement("div");
+    document.body.append(root);
+    detachShell = mountApp(root, { storePage: stubPage("Store"), ...options });
+  };
+  const calls = (command: string): unknown[] =>
+    tauri.invoke.mock.calls.filter(([name]) => name === command).map(([, args]) => args);
+  const splash = (): HTMLElement => root.querySelector<HTMLElement>("#launch-splash")!;
+  const press = (key: string): void => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  };
+  /** Something now fills the screen in front of Orivo. */
+  const coverOrivo = (): void => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  beforeEach(() => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    backend.launch = () => Promise.resolve({ status: "Launching Alpha", handoff: "process" });
+    backend.preferences = {};
+    backend.features = undefined;
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.invoke.mockReset();
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_library":
+          return [alpha];
+        case "get_preferences":
+          return backend.preferences;
+        case "update_preferences":
+          return backend.preferences;
+        case "get_platform_features":
+          return backend.features;
+        case "launch_game":
+          return backend.launch();
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "", personaName: "" };
+        case "get_wine_runner_settings":
+          return { runner: { state: "ready", available: true, version: "9.0", message: "" }, profiles: [] };
+        case "get_gamestream_settings":
+          return { host: "" };
+        default:
+          return undefined;
+      }
+    });
+  });
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+    delete (document as unknown as Record<string, unknown>).visibilityState;
+  });
+
+  it("covers the whole shell with the game while it starts", async () => {
+    mount();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(calls("launch_game")).toEqual([{ gameId: alpha.id, launchOption: null }]);
+    expect(splash().hidden).toBe(false);
+    expect(splash().textContent).toContain("Alpha");
+    // The topbar too: nothing behind the splash can be reached while it stands.
+    expect(root.querySelector<HTMLElement>(".topbar")!.inert).toBe(true);
+    expect(root.querySelector<HTMLElement>(".selector")!.inert).toBe(true);
+  });
+
+  it("gets out of the game's way once the game is on screen", async () => {
+    mount();
+    await settle();
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    coverOrivo();
+    await settle();
+
+    expect(calls("step_aside_for_game")).toHaveLength(1);
+  });
+
+  it("stays behind the game when the player asked it to", async () => {
+    backend.preferences = { onGameStart: "stay" };
+    mount();
+    await settle();
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    coverOrivo();
+    await settle();
+
+    expect(calls("step_aside_for_game")).toEqual([]);
+    expect(splash().hidden).toBe(true);
+  });
+
+  it("never steps aside where the system switches to the game by itself", async () => {
+    backend.features = { stepsAside: false };
+    mount();
+    await settle();
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    coverOrivo();
+    await settle();
+
+    expect(calls("step_aside_for_game")).toEqual([]);
+  });
+
+  it("gets out of the way of a launch that failed, and says why", async () => {
+    backend.launch = () => Promise.reject("Install the Epic Games app on this machine to start this game.");
+    mount();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    expect(splash().classList.contains("is-open")).toBe(false);
+    expect(root.querySelector<HTMLElement>(".selector")!.inert).toBe(false);
+    expect(root.querySelector<HTMLElement>("#toast")!.textContent).toContain("Install the Epic Games app");
+  });
+
+  it("starts one game at a time, and Escape takes the player back", async () => {
+    let accept!: (value: unknown) => void;
+    backend.launch = () => new Promise((resolve) => (accept = resolve));
+    mount();
+    await settle();
+    root.querySelector<HTMLButtonElement>("#play-button")!.click();
+    await settle();
+
+    // Enter would start the selected game; with one already starting it does nothing.
+    press("Enter");
+    await settle();
+    expect(calls("launch_game")).toHaveLength(1);
+
+    press("Escape");
+    expect(splash().classList.contains("is-open")).toBe(false);
+    expect(root.querySelector<HTMLElement>(".topbar")!.inert).toBe(false);
+
+    // The launch carries on, and its answer arriving later reopens nothing.
+    accept({ status: "Launching Alpha", handoff: "process" });
+    coverOrivo();
+    await settle();
+    expect(calls("step_aside_for_game")).toEqual([]);
+  });
+
+  it("lets the startup animation go once the library has answered", async () => {
+    const release = vi.fn();
+    mount({ bootSplash: { release } });
+    expect(release).not.toHaveBeenCalled();
+
+    await settle();
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0]?.[0]).toBeInstanceOf(Promise);
+  });
+
+  it("asks in Settings what Orivo does when a game starts", async () => {
+    mount();
+    await settle();
+    await goto("#/settings/general");
+
+    const row = root.querySelector<HTMLElement>("#preference-game-start-row")!;
+    const select = root.querySelector<HTMLSelectElement>("#preference-game-start")!;
+    expect(row.hidden).toBe(false);
+    expect(select.value).toBe("step-aside");
+
+    select.value = "stay";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+
+    expect(calls("update_preferences")).toEqual([{ update: { onGameStart: "stay" } }]);
+  });
+
+  it("does not ask where there is nothing to choose", async () => {
+    backend.features = { stepsAside: false };
+    mount();
+    await settle();
+    await goto("#/settings/general");
+
+    expect(root.querySelector<HTMLElement>("#preference-game-start-row")!.hidden).toBe(true);
+  });
+});
+
+/**
+ * Source and Platform read as the brands' own logos. The word stays in the
+ * button, where assistive technology and speech control still find it.
+ */
+describe("the browse bar's logos", () => {
+  let root: HTMLElement;
+  const streamed = (id: string) => ({
+    id,
+    title: id,
+    source: "local",
+    runner: "com.orivo.gamestream",
+    launchable: true,
+  });
+  const library = [streamed("a"), streamed("b"), { id: "c", title: "c", source: "local", launchable: true }];
+
+  beforeEach(() => {
+    window.location.hash = "";
+    document.body.replaceChildren();
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+    tauri.invoke.mockReset();
+    tauri.invoke.mockImplementation(async (command) => {
+      switch (command) {
+        case "get_library":
+          return library;
+        case "get_preferences":
+          return {};
+        case "get_steam_account_status":
+          return { connected: false, steamId: "", method: "", personaName: "" };
+        case "get_wine_runner_settings":
+          return { runner: { state: "ready", available: true, version: "9.0", message: "" }, profiles: [] };
+        case "get_gamestream_settings":
+          return { host: "" };
+        default:
+          return undefined;
+      }
+    });
+    root = document.createElement("div");
+    document.body.append(root);
+    detachShell = mountApp(root, { storePage: stubPage("Store") });
+  });
+
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  const segments = () => Array.from(root.querySelectorAll<HTMLButtonElement>("#browse-segments .browse-bar__segment"));
+  const showMode = async (label: string): Promise<void> => {
+    for (let press = 0; press < 4; press += 1) {
+      if (root.querySelector("#browse-mode-label")?.textContent === label) return;
+      root.querySelector<HTMLButtonElement>("#browse-mode")!.click();
+      await settle();
+    }
+    throw new Error(`the bar never reached ${label}`);
+  };
+
+  it("shows where each game comes from as its logo, and keeps the word as its name", async () => {
+    await settle();
+    await showMode("Source");
+
+    const [moonlight, local] = segments();
+    expect(moonlight.classList.contains("has-logo")).toBe(true);
+    expect(moonlight.querySelector("img")!.getAttribute("src")).toBe("/media/brands/moonlight.png");
+    expect(moonlight.textContent).toBe("Moonlight");
+    expect(local.querySelector("img")!.getAttribute("src")).toBe("/media/brands/local.png");
+  });
+
+  it("goes back to words where the bar sorts by something with no brand", async () => {
+    await settle();
+    await showMode("Source");
+    await showMode("Activity");
+
+    for (const segment of segments()) {
+      expect(segment.classList.contains("has-logo")).toBe(false);
+      expect(segment.querySelector("img")!.hidden).toBe(true);
+    }
+  });
+
+  it("gives the word back for good when a logo fails to load", async () => {
+    await settle();
+    await showMode("Source");
+    const [moonlight] = segments();
+
+    moonlight.querySelector("img")!.dispatchEvent(new Event("error"));
+    // A repaint, as every selection makes, must not try the same file again.
+    await showMode("Activity");
+    await showMode("Source");
+
+    expect(segments()[0].classList.contains("has-logo")).toBe(false);
   });
 });
