@@ -141,10 +141,22 @@ fn read_manifest_directory(directory: &Path) -> BTreeMap<String, EpicInstallatio
 /// The install state of one entitlement. A game with no manifest is simply not
 /// installed, which is the common case for an owned-but-never-downloaded title.
 pub fn status(app_name: &str) -> EpicInstallStatus {
-    match installations().get(app_name) {
-        Some(installation) => status_for(installation),
-        None => EpicInstallStatus::not_installed(app_name),
+    statuses()
+        .remove(app_name)
+        .unwrap_or_else(|| EpicInstallStatus::not_installed(app_name))
+}
+
+/// Every Epic game this device has, installed or downloading. On a desktop
+/// that is what the Epic Games Launcher recorded; on a phone, which has no
+/// launcher, it is what Orivo installed there itself (`epic_android.rs`).
+pub fn statuses() -> BTreeMap<String, EpicInstallStatus> {
+    if cfg!(target_os = "android") {
+        return crate::epic_android::statuses();
     }
+    installations()
+        .iter()
+        .map(|(app_name, installation)| (app_name.clone(), status_for(installation)))
+        .collect()
 }
 
 pub fn status_for(installation: &EpicInstallation) -> EpicInstallStatus {

@@ -1086,6 +1086,77 @@ impl PreparedWinlatorLaunch {
     }
 }
 
+/// The intent that starts a shortcut Orivo wrote itself — the one beside an Epic
+/// game it installed — through the same Cmod surface as an exported one. The
+/// file is Orivo's own, in shared storage, so there is no grant to check and no
+/// import to match it against; the container is the one the player's imported
+/// games use, or Cmod's first.
+pub fn orivo_shortcut_intent(
+    title: &str,
+    shortcut_path: &Path,
+    container_id: Option<u32>,
+) -> Result<AndroidIntent, WinlatorRunnerError> {
+    let surface = launch_surface(WinlatorDistribution::Cmod)?;
+    let path = shortcut_path
+        .to_str()
+        .ok_or(WinlatorRunnerError::ShortcutNotLaunchable)?
+        .to_string();
+    let mut extras = Vec::new();
+    if let Some(container_id) = container_id {
+        extras.push(AndroidIntentExtra::Int {
+            key: surface.container_id_extra,
+            value: i32::try_from(container_id).map_err(|_| WinlatorRunnerError::InvalidProfile)?,
+        });
+    }
+    extras.push(AndroidIntentExtra::Text {
+        key: surface.shortcut_name_extra,
+        value: title.to_string(),
+    });
+    extras.push(AndroidIntentExtra::Text {
+        key: surface.shortcut_path_extra,
+        value: path,
+    });
+    Ok(AndroidIntent {
+        package: surface.package,
+        activity: surface.activity,
+        flags: INTENT_FLAGS,
+        extras,
+    })
+}
+
+pub fn launch_orivo_shortcut(
+    title: &str,
+    shortcut_path: &Path,
+    container_id: Option<u32>,
+) -> Result<(), WinlatorRunnerError> {
+    let intent = orivo_shortcut_intent(title, shortcut_path, container_id)?;
+    #[cfg(target_os = "android")]
+    {
+        android::start_activity(intent)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = intent;
+        Err(WinlatorRunnerError::PlatformUnsupported)
+    }
+}
+
+/// The container a game Orivo installed should start in: the one the player's
+/// imported Winlator games name most often, else the profile's own hint.
+pub fn preferred_container(catalog: &crate::catalog::Catalog) -> Option<u32> {
+    let mut counts: std::collections::BTreeMap<u32, usize> = std::collections::BTreeMap::new();
+    for entry in &catalog.winlator_inventory {
+        if let Some(container) = entry.container_id {
+            *counts.entry(container).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(container, _)| container)
+        .or_else(|| catalog.winlator_profiles.iter().find_map(|profile| profile.container_id))
+}
+
 /// The only part of this module that is not testable on the host. It builds the
 /// intent through JNI on Android's main thread and reports back whether the
 /// platform accepted it, so "Winlator is not installed" reaches the user as a

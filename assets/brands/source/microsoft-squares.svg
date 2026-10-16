@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 23 23">
+  <!-- The four squares, drawn from their geometry. -->
+  <rect x="1" y="1" width="10" height="10"/>
+  <rect x="12" y="1" width="10" height="10"/>
+  <rect x="1" y="12" width="10" height="10"/>
+  <rect x="12" y="12" width="10" height="10"/>
+</svg>

@@ -245,6 +245,33 @@ async fn access_token() -> Result<String, SourceError> {
         .ok_or(SourceError::InvalidCredential(PROVIDER))
 }
 
+/// Where the current Windows build of one owned game can be downloaded from.
+/// Asked with the player's own session, like the library itself: Epic only
+/// answers for a game the account owns.
+pub async fn build_location(
+    namespace: &str,
+    catalog_item_id: &str,
+    app_name: &str,
+) -> Result<crate::epic_download::BuildLocation, SourceError> {
+    let token = access_token().await?;
+    let client = sources::http_client(PROVIDER)?;
+    let url = crate::epic_download::manifest_api_url(WINDOWS_PLATFORM, namespace, catalog_item_id, app_name);
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| SourceError::Network(PROVIDER))?;
+    if !response.status().is_success() {
+        return Err(sources::error_for_status(PROVIDER, response.status()));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|_| SourceError::UnexpectedResponse(PROVIDER))?;
+    crate::epic_download::parse_build_location(&body).map_err(|_| SourceError::UnexpectedResponse(PROVIDER))
+}
+
 #[derive(Debug, Deserialize)]
 struct LauncherAsset {
     #[serde(default, rename = "appName")]

@@ -27,6 +27,8 @@ describe("settings model", () => {
       startPage: "store",
       storeRegion: "fr",
       motion: "reduced",
+      // Absent from the record, so Orivo gets out of a started game's way.
+      onGameStart: "step-aside",
       showShowcaseGames: true,
       debugSampleSocial: true,
       // Absent from the record and so false: a beta surface is opt-in, and so
@@ -43,11 +45,21 @@ describe("settings model", () => {
     });
   });
 
+  it("reads what Orivo does when a game starts, and nothing it does not know", () => {
+    expect(DEFAULT_PREFERENCES.onGameStart).toBe("step-aside");
+    expect(normalisePreferences({ onGameStart: "stay" }).onGameStart).toBe("stay");
+    // The host speaks camelCase, but a snake_case record is read the same way
+    // every other preference is.
+    expect(normalisePreferences({ on_game_start: "stay" }).onGameStart).toBe("stay");
+    expect(normalisePreferences({ onGameStart: "quit" }).onGameStart).toBe("step-aside");
+  });
+
   it("resets preferences without carrying unrelated update fields", () => {
     const current = {
       startPage: "store",
       storeRegion: "jp",
       motion: "reduced",
+      onGameStart: "stay",
       showShowcaseGames: true,
       debugSampleSocial: true,
       betaFeatures: true,

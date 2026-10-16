@@ -1070,14 +1070,14 @@ mod tests {
 
     #[test]
     fn an_ios_build_is_offered_no_registry_plugin_at_all() {
-        let ios = crate::platform::for_target(true);
+        let ios = crate::platform::for_target(true, true);
         assert!(!entry_runs_here(&registry_entry(None), "0.3.7", ios));
         assert!(!entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", ios));
     }
 
     #[test]
     fn other_builds_are_offered_what_their_version_can_run() {
-        let desktop = crate::platform::for_target(false);
+        let desktop = crate::platform::for_target(false, false);
         assert!(entry_runs_here(&registry_entry(None), "0.3.7", desktop));
         assert!(entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", desktop));
         assert!(!entry_runs_here(&registry_entry(Some("0.4.0")), "0.3.7", desktop));

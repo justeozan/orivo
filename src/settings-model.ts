@@ -10,15 +10,22 @@ import type { IconName } from "./icons";
 export const START_PAGES = ["library", "store"] as const;
 export const STORE_REGIONS = ["automatic", "us", "ca", "gb", "fr", "de", "jp", "au"] as const;
 export const MOTION_PREFERENCES = ["full", "system", "reduced"] as const;
+/**
+ * What Orivo does once a game it started is on screen: get out of its way —
+ * hidden on macOS, minimised on Windows and Linux — or stay behind it.
+ */
+export const GAME_START_ACTIONS = ["step-aside", "stay"] as const;
 
 export type StartPage = (typeof START_PAGES)[number];
 export type StoreRegion = (typeof STORE_REGIONS)[number];
 export type MotionPreference = (typeof MOTION_PREFERENCES)[number];
+export type GameStartAction = (typeof GAME_START_ACTIONS)[number];
 
 export interface Preferences {
   startPage: StartPage;
   storeRegion: StoreRegion;
   motion: MotionPreference;
+  onGameStart: GameStartAction;
   /** Debug-only: seed the library with the bundled demo (showcase) games. */
   showShowcaseGames: boolean;
   /** Debug-only: fill detail pages with sample achievements, friends and activity. */
@@ -38,6 +45,7 @@ export interface PreferencesUpdate {
   startPage?: StartPage;
   storeRegion?: StoreRegion;
   motion?: MotionPreference;
+  onGameStart?: GameStartAction;
   showShowcaseGames?: boolean;
   debugSampleSocial?: boolean;
   betaFeatures?: boolean;
@@ -55,6 +63,7 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   startPage: "library",
   storeRegion: "automatic",
   motion: "system",
+  onGameStart: "step-aside",
   showShowcaseGames: false,
   debugSampleSocial: false,
   betaFeatures: false,
@@ -125,6 +134,12 @@ export function normalisePreferences(value: unknown): Preferences {
       DEFAULT_PREFERENCES.storeRegion,
     ),
     motion: readEnum(record, ["motion"], MOTION_PREFERENCES, DEFAULT_PREFERENCES.motion),
+    onGameStart: readEnum(
+      record,
+      ["onGameStart", "on_game_start"],
+      GAME_START_ACTIONS,
+      DEFAULT_PREFERENCES.onGameStart,
+    ),
     showShowcaseGames: record.showShowcaseGames === true || record.show_showcase_games === true,
     debugSampleSocial: record.debugSampleSocial === true || record.debug_sample_social === true,
     betaFeatures: record.betaFeatures === true || record.beta_features === true,

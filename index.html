@@ -15,8 +15,28 @@
       content="Orivo is a focused, local-first game library."
     />
     <title>Orivo</title>
+    <!-- The startup animation's sheet. A render-blocking link, so the splash
+      below is styled the moment it shows; never an inline <style>, which
+      Tauri would give a nonce that turns 'unsafe-inline' off for the whole
+      app. -->
+    <link rel="stylesheet" href="/src/boot-splash.css" />
   </head>
   <body>
+    <!-- The startup animation, standing in front of the shell while it mounts
+      and the library loads. It lives outside #app because mounting replaces
+      everything inside it. Held back until the bundle says this is an app
+      starting rather than a preview reloading; src/boot-splash.ts reveals it
+      and decides when it leaves. -->
+    <div id="boot-splash" class="boot-splash" aria-hidden="true" hidden>
+      <div class="boot-splash__light"></div>
+      <div class="boot-splash__stage">
+        <div class="boot-splash__mark">
+          <img class="boot-splash__ring" src="/media/orivo-ring-icon.png" width="563" height="549" alt="" />
+          <span class="boot-splash__glint"><i></i></span>
+        </div>
+        <img class="boot-splash__wordmark" src="/media/orivo-logo.png" width="1396" height="310" alt="" />
+      </div>
+    </div>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

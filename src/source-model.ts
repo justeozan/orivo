@@ -72,6 +72,8 @@ export function sourceBadge(
       return { label: "Microsoft Store", icon: "microsoft" };
     case "instant-gaming":
       return { label: "Instant Gaming", icon: "instant-gaming" };
+    case "android":
+      return { label: "Android", icon: "android" };
     default:
       return null;
   }

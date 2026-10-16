@@ -14,7 +14,7 @@ import {
   blockedRunsOnLabel,
   isBlockedForHost,
 } from "./game-detail-model";
-import { hostDeviceLabel } from "./host-device";
+import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { brandIcon, icon, type IconName } from "./icons";
 import {
   type BrowseMode,
@@ -40,7 +40,10 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
-import { prefersReducedMotion } from "./motion";
+import { prefersReducedMotion, rememberMotionPreference } from "./motion";
+import type { BootSplash } from "./boot-splash";
+import { brandLogoFor } from "./brand-logos";
+import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
   isWinlatorHost,
   normaliseWinlatorExportFolder,
@@ -104,6 +107,7 @@ import {
   EMPTY_WALLPAPER_CREDENTIALS,
   SETTINGS_SECTIONS,
   type DataUsage,
+  type GameStartAction,
   type MotionPreference,
   type Preferences,
   type PreferencesUpdate,
@@ -391,6 +395,12 @@ export interface MountAppOptions {
   storePage?: AppPage;
   mePage?: AppPage;
   gameDetailPage?: AppPage;
+  /**
+   * The startup animation standing in front of the shell (`main.ts`). It is
+   * told when the first library load has answered; a mount without one — every
+   * test — simply has nothing to release.
+   */
+  bootSplash?: BootSplash;
 }
 
 const lastUsedFallback = fallbackLibrary[0];
@@ -447,6 +457,12 @@ const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
+/** The launch option a phone offers to download an Epic game rather than stream it (`moonlight_android.rs`). */
+const INSTALL_ON_PHONE_OPTION = "install-on-phone";
+/** At most one look at the phone's own games per this many milliseconds. */
+const PHONE_GAMES_INTERVAL_MS = 20_000;
+/** How a download Orivo runs itself ends — an Epic game on a phone (`epic_android.rs`). */
+const EPIC_INSTALL_STATUS_EVENT = "epic-install-status";
 /**
  * The stores whose logo ships as its own file, under their own brand, for the
  * rows that have no account to show: buying games and reading store data are
@@ -561,6 +577,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const refs = {
     topbar: get<HTMLElement>(".topbar"),
+    selector: get<HTMLElement>(".selector"),
+    launchSplash: get<HTMLElement>("#launch-splash"),
     feedbackButton: get<HTMLButtonElement>("#feedback-button"),
     heroLayers: [get<HTMLImageElement>("#hero-a"), get<HTMLImageElement>("#hero-b")],
     genre: get<HTMLElement>("#hero-genre"),
@@ -580,6 +598,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
     librarySourceList: get<HTMLElement>("#library-source-list"),
+    primaryNav: get<HTMLElement>(".primary-nav"),
     toast: get<HTMLElement>("#toast"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
@@ -637,6 +656,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     navLinks: Array.from(root.querySelectorAll<HTMLButtonElement>(".primary-nav [data-nav-page]")),
   };
 
+  /**
+   * Starting a game (`launch-splash.ts`). Play covers the shell with the game's
+   * own art until the game is on screen, and then Orivo gets out of its way:
+   * whether it can is the platform's to say, whether it should is the player's
+   * (Settings › General).
+   */
+  const launchSplash = createLaunchSplash({
+    host: refs.launchSplash,
+    covers: [refs.topbar, refs.selector],
+    shouldStepAside: () =>
+      platformFeatures.stepsAside && state.preferences.onGameStart === "step-aside",
+    stepAside: () => invoke("step_aside_for_game").then(() => undefined),
+  });
+
   let activeHero = 0;
   let heroRequest = 0;
   /** When the settings entrance cascade has finished and may be disarmed. */
@@ -649,6 +682,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // costs a set lookup rather than another load.
   let heroLogoSource = "";
   const heroLogosReady = new Set<string>();
+  const heroLogosFailed = new Set<string>();
   const heroLogoWaiters = new Map<string, Array<() => void>>();
   let toastTimer: number | undefined;
   let libraryRequest = 0;
@@ -802,31 +836,52 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return appId ? `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/${asset}` : "";
   };
 
+  /**
+   * One card picture, from the first of its sources that loads. A source that
+   * fails hands over to the next, for every game rather than Steam's alone, and
+   * once none is left the picture is hidden and `onMissing` says so. Removing
+   * the src instead left a sized, sourceless <img>, which Android's WebView
+   * draws as a broken-picture glyph.
+   */
   const assignCardImage = (
     image: HTMLImageElement | null,
-    source: string,
-    fallback: string,
+    sources: readonly string[],
+    priority: "high" | "auto" | "low",
     eager: boolean,
+    onMissing?: () => void,
   ): void => {
     if (!image) {
       return;
     }
-    const initialSource = source || fallback;
-    if (!initialSource || image.getAttribute("src") === initialSource) {
+    const candidates = sources.filter((source, index) => source && sources.indexOf(source) === index);
+    image.fetchPriority = priority;
+    image.loading = eager ? "eager" : "lazy";
+    const key = candidates.join("\n");
+    if (image.dataset.sources === key) {
       return;
     }
-
-    let usedFallback = initialSource === fallback;
-    image.onerror = () => {
-      if (!usedFallback && fallback) {
-        usedFallback = true;
-        image.src = fallback;
-        return;
-      }
+    image.dataset.sources = key;
+    image.classList.remove("is-missing", "is-ready");
+    const missing = () => {
+      image.onerror = null;
       image.removeAttribute("src");
+      image.classList.add("is-missing");
+      onMissing?.();
     };
-    image.loading = eager ? "eager" : "lazy";
-    image.src = initialSource;
+    if (candidates.length === 0) {
+      missing();
+      return;
+    }
+    let next = 1;
+    image.onerror = () => {
+      const source = candidates[next++];
+      if (source) {
+        image.src = source;
+      } else {
+        missing();
+      }
+    };
+    image.src = candidates[0];
   };
 
   /**
@@ -880,6 +935,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       done?.();
       return;
     }
+    // A wordmark that failed once fails again: asking for it on every
+    // selection was a request per press for a picture that is not there.
+    if (heroLogosFailed.has(source)) return;
     const waiting = heroLogoWaiters.get(source);
     if (waiting) {
       if (done) waiting.push(done);
@@ -896,7 +954,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       heroLogosReady.add(source);
       for (const waiter of waiters) waiter();
     };
-    probe.onerror = () => heroLogoWaiters.delete(source);
+    probe.onerror = () => {
+      heroLogoWaiters.delete(source);
+      heroLogosFailed.add(source);
+    };
     probe.src = source;
   };
 
@@ -929,24 +990,83 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const heroSourceFor = (game: LibraryGame): string =>
     game.heroUrl || game.coverUrl || steamAssetUrl(game, "header.jpg");
 
+  /**
+   * What starting a game shows: the picture and the wordmark the Library's
+   * hero shows for it, so pressing Play there changes the scene around the art
+   * rather than the art itself — and both are already decoded.
+   */
+  const launchSplashFor = (game: LibraryGame): LaunchSplashGame => ({
+    id: game.id,
+    title: game.title,
+    artUrl: heroSourceFor(game),
+    logoUrl: game.logoUrl ?? "",
+  });
+
+  const heroCandidates = (game: LibraryGame): string[] => {
+    const sources = [heroSourceFor(game), steamAssetUrl(game, "header.jpg")];
+    return sources.filter((source, index) => source && sources.indexOf(source) === index);
+  };
+
+  /**
+   * The wallpapers either side of the selection, fetched while nothing else
+   * is, so stepping along the rail crossfades to a picture already here
+   * instead of waiting on the network with every press.
+   */
+  const primedHeroes = new Set<string>();
+  const primeNeighbourHeroes = (): void => {
+    const games = visibleGames();
+    const index = games.findIndex((game) => game.id === state.selectedId);
+    if (index < 0) return;
+    const idle = window.requestIdleCallback ?? window.setTimeout;
+    idle(() => {
+      for (const neighbour of [games[index + 1], games[index - 1]]) {
+        const source = neighbour ? heroSourceFor(neighbour) : "";
+        if (!source || primedHeroes.has(source)) continue;
+        primedHeroes.add(source);
+        const probe = new Image();
+        probe.decoding = "async";
+        probe.fetchPriority = "low";
+        probe.src = source;
+      }
+    });
+  };
+
   const updateHeroImage = (game: LibraryGame, immediate = false): void => {
-    const fallback = steamAssetUrl(game, "header.jpg");
-    const source = heroSourceFor(game);
+    const candidates = heroCandidates(game);
+    const source = candidates[0] ?? "";
     const current = refs.heroLayers[activeHero];
 
-    if (current.getAttribute("src") === source) {
+    if (source && current.getAttribute("src") === source) {
       return;
     }
 
+    // A game with no picture at all, or whose every picture failed, shows the
+    // scene's own dark ground: a sourceless layer left visible is a broken
+    // picture in Android's WebView, and the last game's wallpaper behind this
+    // game's name would be a lie.
+    const clear = (layer: HTMLImageElement) => {
+      layer.onerror = null;
+      layer.onload = null;
+      layer.removeAttribute("src");
+      layer.classList.remove("is-active");
+    };
+
     if (immediate) {
-      let usedFallback = source === fallback;
+      ++heroRequest;
+      if (!source) {
+        clear(current);
+        return;
+      }
+      let fallbackIndex = 1;
+      current.fetchPriority = "high";
+      current.onload = () => primeNeighbourHeroes();
       current.onerror = () => {
-        if (!usedFallback && fallback) {
-          usedFallback = true;
+        const fallback = candidates[fallbackIndex++];
+        if (fallback) {
           current.src = fallback;
           return;
         }
-        current.removeAttribute("src");
+        clear(current);
       };
       current.src = source;
       current.classList.add("is-active");
@@ -957,6 +1077,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const request = ++heroRequest;
     const nextIndex = 1 - activeHero;
     const next = refs.heroLayers[nextIndex];
+    if (!source) {
+      clear(next);
+      current.classList.remove("is-active");
+      return;
+    }
     const reveal = () => {
       if (request !== heroRequest) {
         return;
@@ -964,23 +1089,32 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       next.classList.add("is-active");
       current.classList.remove("is-active");
       activeHero = nextIndex;
+      primeNeighbourHeroes();
+    };
+    // Decoded before it is shown, so the crossfade never paints a picture
+    // still being decoded — a visible stall on a phone, mid-fade.
+    const revealDecoded = () => {
+      if (request !== heroRequest) return;
+      next.decode().then(reveal, reveal);
     };
 
-    let usedFallback = source === fallback;
-    next.onload = reveal;
+    let fallbackIndex = 1;
+    next.onload = revealDecoded;
     next.onerror = () => {
-      if (!usedFallback && fallback) {
-        usedFallback = true;
+      if (request !== heroRequest) return;
+      const fallback = candidates[fallbackIndex++];
+      if (fallback) {
         next.src = fallback;
         return;
       }
-      next.removeAttribute("src");
-      reveal();
+      clear(next);
+      current.classList.remove("is-active");
     };
+    next.fetchPriority = "high";
     next.src = source;
 
     if (next.complete && next.naturalWidth > 0) {
-      reveal();
+      revealDecoded();
     }
   };
 
@@ -1034,15 +1168,33 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.cards.setAttribute("aria-label", heading);
   };
 
+  /** Logos that did not load this run; their segments keep their words. */
+  const failedBrandLogos = new Set<string>();
+
   const createSegmentButton = (): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "browse-bar__segment";
 
+    const logo = document.createElement("img");
+    logo.className = "browse-bar__segment-logo";
+    logo.alt = "";
+    logo.decoding = "async";
+    logo.hidden = true;
+    // A logo that does not load gives the word back rather than a hole, and
+    // keeps giving it back: buttons are rebuilt whenever the mode changes, so
+    // the failure is remembered by the shell rather than by this button.
+    logo.addEventListener("error", () => {
+      const src = logo.getAttribute("src");
+      if (src) failedBrandLogos.add(src);
+      logo.hidden = true;
+      button.classList.remove("has-logo");
+    });
+
     const label = document.createElement("span");
     label.className = "browse-bar__segment-label";
 
-    button.append(label);
+    button.append(logo, label);
     button.addEventListener("click", () => {
       const id = button.dataset.segmentId;
       if (id) selectSegment(id);
@@ -1062,6 +1214,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // never interpolated into markup.
     const label = button.querySelector<HTMLElement>(".browse-bar__segment-label");
     if (label) label.textContent = segment.label;
+    // Source and Platform read best as the brands' own logos. The word stays in
+    // the button — out of sight, but it is still the button's name.
+    const found = brandLogoFor(state.browse.mode, segment.id);
+    const brand = found && !failedBrandLogos.has(found.src) ? found : null;
+    const logo = button.querySelector<HTMLImageElement>(".browse-bar__segment-logo");
+    if (logo) {
+      if (brand) {
+        if (logo.getAttribute("src") !== brand.src) {
+          logo.width = brand.width;
+          logo.height = brand.height;
+          logo.src = brand.src;
+        }
+        logo.hidden = false;
+      } else {
+        logo.hidden = true;
+        logo.removeAttribute("src");
+      }
+    }
+    button.classList.toggle("has-logo", Boolean(brand));
   };
 
   /**
@@ -1191,6 +1362,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // Whatever survived kept its relative order, so this walk only ever
     // inserts, and a card that stays put is never moved.
     let cursor = refs.cards.firstElementChild;
+    const selectedIndex = games.findIndex((game) => game.id === state.selectedId);
     for (const [index, game] of games.entries()) {
       const card = cardsById.get(game.id) ?? createGameCard();
       if (cursor === card) {
@@ -1198,7 +1370,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       } else {
         refs.cards.insertBefore(card, cursor);
       }
-      syncGameCard(card, game, index, game.id === state.selectedId);
+      // How far the card is from the one on screen decides what it fetches
+      // and how urgently: the shelf starts at the selection, not at the
+      // window's first card, which a re-centred window has scrolled away.
+      const distance = selectedIndex < 0 ? index : Math.abs(index - selectedIndex);
+      syncGameCard(card, game, distance, game.id === state.selectedId);
     }
 
     if (!anchor) return;
@@ -1254,8 +1430,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     landscape.className = "card-art card-art--landscape";
     landscape.alt = "";
     landscape.decoding = "async";
+    // Only the selected card shows its landscape art, so it is only marked
+    // ready — and only then replaces the portrait — once it has loaded.
+    landscape.addEventListener("load", () => landscape.classList.add("is-ready"));
 
-    media.append(portrait, landscape);
+    // What a card shows when no picture of the game could be had: its name,
+    // which the aria-label already carries for whoever cannot see the card.
+    const fallbackTitle = document.createElement("span");
+    fallbackTitle.className = "card-fallback";
+    fallbackTitle.setAttribute("aria-hidden", "true");
+
+    media.append(portrait, landscape, fallbackTitle);
 
     // The art stands alone: no name overlay, no darkening gradient and no
     // playtime stamp. Everything about the game is in the hero above the rail,
@@ -1289,14 +1474,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const syncGameCard = (
     card: HTMLButtonElement,
     game: LibraryGame,
-    index: number,
+    distance: number,
     selected: boolean,
   ): void => {
     const portrait = card.querySelector<HTMLImageElement>(".card-art--portrait");
     const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape");
-    const portraitSource = game.coverUrl || game.heroUrl;
-    const landscapeSource = game.landscapeUrl || game.heroUrl || portraitSource;
     const fallback = steamAssetUrl(game, "header.jpg");
+    const fallbackTitle = card.querySelector<HTMLElement>(".card-fallback");
+    if (fallbackTitle && fallbackTitle.textContent !== game.title) fallbackTitle.textContent = game.title;
 
     card.dataset.gameId = game.id;
     // Spatial navigation verbs: A opens the game's page, Enter starts it.
@@ -1307,8 +1492,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     card.setAttribute("aria-pressed", String(selected));
     card.setAttribute("aria-label", `Open details for ${game.title}`);
 
-    assignCardImage(portrait, portraitSource, fallback, index < 7);
-    assignCardImage(landscape, landscapeSource, fallback, index < 7);
+    // The cards in view load first, the selected one before all of them.
+    const priority = selected ? "high" : distance <= 6 ? "auto" : "low";
+    assignCardImage(
+      portrait,
+      [game.coverUrl ?? "", game.heroUrl, fallback],
+      priority,
+      distance <= 6,
+      () => card.classList.add("is-art-missing"),
+    );
+    if (portrait && !portrait.classList.contains("is-missing")) card.classList.remove("is-art-missing");
+    // The landscape art is 1920 pixels wide and shown by one card at a time.
+    // Fetching it for every card in the window was dozens of megabytes racing
+    // the wallpaper, so only the selection and its two neighbours ask for it.
+    if (distance <= 1) {
+      assignCardImage(
+        landscape,
+        [game.landscapeUrl ?? "", game.heroUrl, game.coverUrl ?? "", fallback],
+        selected ? "high" : "low",
+        true,
+      );
+    }
   };
 
   const hydrateLibraryMedia = (candidates: LibraryGame[]): void => {
@@ -1822,6 +2026,32 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     installWatchTimer = null;
   };
 
+  /**
+   * The artwork the scene was just given, decoded — or failed, which is an
+   * answer too. The startup animation waits for this (briefly), so what it
+   * uncovers is the picture rather than the dark surface the picture lands on.
+   */
+  const heroArtworkSettled = (): Promise<void> =>
+    Promise.all(
+      refs.heroLayers
+        .filter((layer) => layer.getAttribute("src") && !layer.complete)
+        .map(
+          (layer) =>
+            new Promise<void>((resolve) => {
+              layer.addEventListener("load", () => resolve(), { once: true });
+              layer.addEventListener("error", () => resolve(), { once: true });
+            }),
+        ),
+    ).then(() => undefined);
+
+  /** The first library answer is what the startup animation waits for. Once. */
+  let bootSplashReleased = false;
+  const releaseBootSplash = (): void => {
+    if (bootSplashReleased) return;
+    bootSplashReleased = true;
+    options.bootSplash?.release(heroArtworkSettled());
+  };
+
   const refreshLibrary = async (importedId?: string): Promise<void> => {
     // A library refresh mutates state every page reads, not just the Library
     // DOM, so it is deliberately *not* gated on the Library page still being
@@ -1840,6 +2070,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (!libraryLoaded) {
         libraryLoaded = true;
         renderSelection();
+        releaseBootSplash();
       }
       showToast("Your library could not be read.");
       return;
@@ -1857,6 +2088,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // either the scene or the welcome screen instead of holding its backdrop.
     libraryLoaded = true;
     renderSelection();
+    releaseBootSplash();
     // A download started in the Epic launcher is just as real as one started
     // here, so the watch follows the data rather than the click.
     if (state.games.some((game) => game.installState === "installing")) {
@@ -1869,6 +2101,63 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (state.pluginView === "wine") {
       renderWineSettingsPanel();
     }
+  };
+
+  /** The PC a phone streams from through Moonlight (`moonlight_android.rs`). */
+  const loadMoonlightStream = async (): Promise<void> => {
+    const input = root.querySelector<HTMLInputElement>("#moonlight-pc-name");
+    if (!input || !isTauriRuntime()) return;
+    try {
+      const settings = await invoke<{ pcName?: string }>("get_moonlight_stream_settings");
+      if (document.activeElement !== input) input.value = settings?.pcName ?? "";
+    } catch {
+      // The field stays empty, which is what "not set up" looks like anyway.
+    }
+  };
+
+  const saveMoonlightStream = async (): Promise<void> => {
+    const input = root.querySelector<HTMLInputElement>("#moonlight-pc-name");
+    const status = root.querySelector<HTMLElement>("#moonlight-stream-status");
+    if (!input) return;
+    try {
+      const settings = await invoke<{ pcName?: string }>("set_moonlight_stream_settings", {
+        pcName: input.value,
+      });
+      input.value = settings?.pcName ?? "";
+      if (status) {
+        status.textContent = settings?.pcName
+          ? `PC games now offer a stream from ${settings.pcName}.`
+          : "Streaming is off.";
+      }
+      // Every card's menu changes with this, so the library is read again.
+      void refreshLibrary();
+    } catch (error) {
+      if (status) status.textContent = messageFromError(error, "The PC name could not be saved.");
+    }
+  };
+
+  /**
+   * The games installed on the phone as apps of their own (`android_games.rs`).
+   * Asked after the first library load and whenever Orivo returns to the
+   * foreground; never more than once every twenty seconds, because a phone
+   * that flips between apps would otherwise re-read its whole app list on
+   * every flip.
+   */
+  let phoneGamesAskedAt = 0;
+  const syncPhoneGames = (): void => {
+    if (!isTauriRuntime() || !/\bAndroid\b/.test(navigator.userAgent)) return;
+    const now = Date.now();
+    if (now - phoneGamesAskedAt < PHONE_GAMES_INTERVAL_MS) return;
+    phoneGamesAskedAt = now;
+    void invoke<{ changed?: boolean }>("sync_android_games")
+      .then((result) => {
+        if (result?.changed) void refreshLibrary();
+      })
+      .catch((error: unknown) => {
+        // The library still has every other game; a phone that refuses the
+        // list is worth one line in the log, not a toast on every return.
+        console.warn("orivo: the phone's games could not be listed", error);
+      });
   };
 
   const importGame = async (): Promise<void> => {
@@ -4527,8 +4816,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showToast("Launch is available in the Orivo desktop app.");
       return;
     }
+    // Enter and the controller still reach this while a game is starting; a
+    // second launch on top of the first is never what was meant.
+    if (launchSplash.isOpen()) return;
 
     try {
+      // Offered beside a stream for an Epic game not yet on the phone: the
+      // download itself, answered exactly as the Install button answers it.
+      if (launchOption === INSTALL_ON_PHONE_OPTION) {
+        showToast("Starting the download for " + game.title + "…");
+        await invoke("install_epic_game", { gameId: game.id });
+        startInstallWatch(INSTALL_WATCH_GRACE_TICKS);
+        return;
+      }
       if (!game.launchable) {
         if (game.source === "steam" && platformFeatures.storeChoices) {
           await offerStoreChoices(game.id, refs.playLaunchMenu, closeLaunchMenu);
@@ -4566,9 +4866,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         };
         renderLaunchFeedback();
       }
-      showToast(game.source === "wine" ? "Preparing Wine for " + game.title + "…" : "Launching " + game.title + "…");
-      await invoke("launch_game", { gameId: game.id, launchOption: launchOption ?? null });
+      // The splash says "Starting" over the game's own art, so the toast that
+      // used to say it is gone; a failure still speaks through it below.
+      launchSplash.open(launchSplashFor(game));
+      const result = await invoke<unknown>("launch_game", {
+        gameId: game.id,
+        launchOption: launchOption ?? null,
+      });
+      launchSplash.launched(game.id, readLaunchHandoff(result));
     } catch (error) {
+      launchSplash.failed(game.id);
       const message = messageFromError(error, "Could not launch " + game.title + ".");
       if (game.source === "wine") {
         state.launchFeedback = {
@@ -4610,6 +4917,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // `html:not([data-motion="full"])` under prefers-reduced-motion) can see
     // the per-app choice and stay out of the way for "full" motion.
     document.documentElement.dataset.motion = value;
+    // And remembered, so the next start's first frame — the startup animation,
+    // painted before the host is asked — already honours it.
+    rememberMotionPreference(value);
+  };
+
+  /**
+   * What Orivo does once a game is on screen. The row exists only where Orivo
+   * can actually get out of the way, which the host says once it has answered.
+   */
+  const renderGameStartPreference = (): void => {
+    const row = root.querySelector<HTMLElement>("#preference-game-start-row");
+    const select = root.querySelector<HTMLSelectElement>("#preference-game-start");
+    if (row) row.hidden = !platformFeatures.stepsAside;
+    if (select) select.value = state.preferences.onGameStart;
   };
 
   const renderPreferenceControls = (): void => {
@@ -4617,6 +4938,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
     if (startPage) startPage.value = state.preferences.startPage;
     if (storeRegion) storeRegion.value = state.preferences.storeRegion;
+    renderGameStartPreference();
     for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
       input.checked = input.value === state.preferences.motion;
     }
@@ -5553,8 +5875,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       };
       renderLaunchFeedback();
       if (payload.phase === "failed") {
+        // Wine gave up after the launch was accepted. If the splash is still
+        // waiting for the game, it stops, so the failure and its Retry are on
+        // screen rather than behind a game that is never coming.
+        launchSplash.failed(payload.gameId);
         showToast(payload.message);
       }
+    });
+    // A phone downloads an Epic game itself, in the background. The card
+    // follows the percentage on its own; how the download ended is said once,
+    // and the library is re-read so Play appears the moment it can.
+    void listen<{ state?: string; message?: string }>(EPIC_INSTALL_STATUS_EVENT, (event) => {
+      const payload = event.payload;
+      if (!payload || typeof payload.message !== "string" || !payload.message) return;
+      if (payload.state === "installing") return;
+      if (payload.state !== "installed" && payload.state !== "failed" && payload.state !== "cancelled") return;
+      showToast(payload.message);
+      void refreshLibrary();
     });
   }
 
@@ -5767,6 +6104,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void loadPreferences(request);
 
       if (route.section === "libraries") {
+        void loadMoonlightStream();
         // Seeing the provider list is the whole point of the notice about
         // where prices come from, so arriving here retires it.
         const record = markLibrarySourcesVisited(state.notifications.record);
@@ -5924,6 +6262,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   for (const link of refs.navLinks) {
     link.addEventListener("click", () => {
+      closeLibraryMenu();
       const page = link.dataset.navPage;
       if (page === "store") {
         if (currentRoute.page === "store") return;
@@ -6031,6 +6370,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void runUpdateAction();
     }
 
+    if (target?.closest("#moonlight-stream-save")) {
+      void saveMoonlightStream();
+      return;
+    }
     if (target?.closest("#wallpaper-credentials-save")) {
       void saveWallpaperCredentials();
     }
@@ -6043,6 +6386,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         void savePreferences({ startPage: target.value as StartPage });
       } else if (target.id === "preference-store-region") {
         void savePreferences({ storeRegion: target.value as StoreRegion });
+      } else if (target.id === "preference-game-start") {
+        void savePreferences({ onGameStart: target.value as GameStartAction });
       }
       return;
     }
@@ -6292,10 +6637,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   document.addEventListener("pointerdown", (event) => {
     const target = event.target as Node;
+    // The navigation counts as inside the menu: on a phone the pills only
+    // show while it is open, so closing it as a finger lands on one would
+    // hide the pill before its click. The click closes it instead.
     if (
       state.libraryMenuOpen &&
       !refs.libraryMenu.contains(target) &&
-      !refs.libraryMenuButton.contains(target)
+      !refs.libraryMenuButton.contains(target) &&
+      !refs.primaryNav.contains(target)
     ) {
       closeLibraryMenu();
     }
@@ -6312,6 +6661,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   }, { signal: attached.signal });
 
   window.addEventListener("keydown", (event) => {
+    // While a game starts, the splash is the whole screen. Escape takes the
+    // player back to Orivo; nothing behind it may answer a key, and Enter in
+    // particular must not start a second game.
+    if (launchSplash.isOpen()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        launchSplash.dismiss();
+      } else if (!event.metaKey && !event.ctrlKey && !event.altKey) {
+        // Claimed, because spatial navigation yields to a handled key and
+        // would otherwise walk the shell behind the splash. A shortcut with a
+        // modifier is left alone: ⌘Q and its kind belong to the system.
+        event.preventDefault();
+      }
+      return;
+    }
+
     // `composedTarget` rather than `event.target`: a listener on `window` sees
     // the shadow host, not the field inside it, and Sentry's feedback form
     // lives in a shadow root.
@@ -6432,24 +6797,34 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     },
   });
 
+  // The controller gets the same rule as the keyboard while a game starts:
+  // B is Escape, and every other verb waits until the splash has gone.
+  const unlessStarting =
+    <A extends unknown[]>(action: (...args: A) => void) =>
+    (...args: A): void => {
+      if (!launchSplash.isOpen()) action(...args);
+    };
   createGamepadBridge({
-    move: (direction) => spatialNav.move(direction),
-    activate: () => void spatialNav.activate(),
-    back: () => spatialNav.back(),
-    launch: () => {
-      if (!spatialNav.launchFocused()) spatialNav.activate();
+    move: unlessStarting((direction) => spatialNav.move(direction)),
+    activate: unlessStarting(() => void spatialNav.activate()),
+    back: () => {
+      if (launchSplash.isOpen()) launchSplash.dismiss();
+      else spatialNav.back();
     },
-    focusSearch: () => {
+    launch: unlessStarting(() => {
+      if (!spatialNav.launchFocused()) spatialNav.activate();
+    }),
+    focusSearch: unlessStarting(() => {
       if (refs.search.disabled) return;
       refs.search.focus();
       refs.search.select();
-    },
-    cycleNav: (delta) => {
+    }),
+    cycleNav: unlessStarting((delta: number) => {
       const links = refs.navLinks;
       const index = links.findIndex((link) => link.classList.contains("is-active"));
       links[(index + delta + links.length) % links.length]?.click();
-    },
-    scroll: (delta) => spatialNav.scrollBy(delta),
+    }),
+    scroll: unlessStarting((delta: number) => spatialNav.scrollBy(delta)),
     onActivity: () => spatialNav.setInputMode("gamepad"),
   });
 
@@ -6504,10 +6879,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const idleWarmUp = window.requestIdleCallback;
   if (idleWarmUp) idleWarmUp(warmDeferredPages, { timeout: WARM_UP_DEADLINE_MS });
   else window.setTimeout(warmDeferredPages, WARM_UP_DEADLINE_MS);
-  void refreshLibrary();
+  void refreshLibrary().then(() => syncPhoneGames());
+  // A game installed while Orivo was in the background appears when Orivo is
+  // back: Android has no broadcast an app may still listen for that says so.
+  document.addEventListener(
+    "visibilitychange",
+    () => {
+      if (document.visibilityState === "visible") syncPhoneGames();
+    },
+    { signal: attached.signal },
+  );
   void loadPlatformFeatures().then((features) => {
     platformFeatures = features;
     renderPluginList();
+    renderGameStartPreference();
   });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
@@ -6561,6 +6946,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     stopRouting();
     attached.abort();
     runnerManager.dispose();
+    launchSplash.dispose();
   };
 }
 
@@ -6637,7 +7023,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   const artworkFallback = fallbackLibrary.find((game) => game.title === title) ?? null;
   const rawSource = readString(record, "source");
   const source: LibraryGame["source"] =
-    rawSource === "steam" || rawSource === "local"
+    rawSource === "steam" || rawSource === "local" || rawSource === "android"
       ? rawSource
       : isConnectedSource(rawSource)
         ? rawSource
@@ -6690,6 +7076,10 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       playTimeSeconds: readNumber(record, "playTimeSeconds", "play_time_seconds") ?? fallback.playTimeSeconds,
       launchable: readBoolean(record, "launchable") ?? fallback.launchable,
       launchOptions: readLaunchOptions(record),
+      // Opaque tokens from the host, compared against closed tables in
+      // library-browse.ts and never shown as they are.
+      runner: readString(record, "runner") || undefined,
+      systems: readStringArray(record, "systems"),
       hostPlatform,
       supportedPlatforms,
       compatibleWithHost: readBoolean(record, "compatibleWithHost", "compatible_with_host"),
@@ -7351,10 +7741,22 @@ function shell(): string {
                     <option value="au">Australia</option>
                   </select>
                 </div>
+                <!-- Desktop only: a phone switches to the game's app by itself, so
+                     there is nothing to choose. Shown once the host says it can. -->
+                <div class="settings-row" id="preference-game-start-row" hidden>
+                  <label class="settings-row__copy" for="preference-game-start">
+                    <strong>When a game starts</strong>
+                    <small>${stepAsideCopy().hint}</small>
+                  </label>
+                  <select id="preference-game-start" class="settings-select">
+                    <option value="step-aside">${stepAsideCopy().action}</option>
+                    <option value="stay">Keep Orivo open</option>
+                  </select>
+                </div>
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>Reset preferences</strong>
-                    <small>Restores the start page, store region, and motion preference. Your library, Wine profiles, Steam connection, wishlist, and media are never touched.</small>
+                    <small>Restores the start page, store region, what happens when a game starts, and motion preference. Your library, Wine profiles, Steam connection, wishlist, and media are never touched.</small>
                   </div>
                   <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">Reset preferences</button>
                 </div>
@@ -7393,6 +7795,27 @@ function shell(): string {
                   <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
               </section>
+              <!-- Android only: a phone streams PC games through Moonlight's own
+                   app, which takes the PC by the name it shows for it. Named
+                   once, every PC game in the library offers the stream beside
+                   Play (moonlight_android.rs). -->
+              ${
+                isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                  ? `<section id="moonlight-stream-panel" class="settings-card" data-settings-searchable aria-label="Stream from your PC">
+                <div class="credentials-form">
+                  <div class="credentials-form__field">
+                    <label for="moonlight-pc-name">Stream from your PC</label>
+                    <input id="moonlight-pc-name" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="Your PC's name in Moonlight" />
+                    <small>Pair Moonlight with your PC first, then type the name Moonlight shows for it. Every PC game in your library then offers “Stream from” beside Play, and an Epic game you have not downloaded offers both. A game streams when your PC’s Sunshine or Apollo lists it under the same name; Moonlight says so when it does not.</small>
+                  </div>
+                  <div class="credentials-form__actions">
+                    <button id="moonlight-stream-save" type="button" class="settings-button">Save</button>
+                    <small id="moonlight-stream-status" role="status"></small>
+                  </div>
+                </div>
+              </section>`
+                  : ""
+              }
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
@@ -7659,5 +8082,11 @@ function shell(): string {
 
       <p id="toast" class="toast" role="status" aria-live="polite"></p>
       </div>
+
+      <!-- Starting a game. A task, not a page: it stands over the whole shell,
+           topbar included, while a game starts, and the shell behind it is
+           inert until it has gone. Built from the game on each launch
+           (src/launch-splash.ts). -->
+      <div id="launch-splash" class="launch-splash" role="status" aria-live="polite" hidden></div>
   `;
 }

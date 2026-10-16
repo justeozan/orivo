@@ -43,6 +43,11 @@ pub const WINLATOR_RUNNER_ID: &str = "com.orivo.winlator";
 pub const RETROARCH_RUNNER_ID: &str = "com.orivo.retroarch";
 pub const PPSSPP_RUNNER_ID: &str = "com.orivo.ppsspp";
 
+/// Orivo's official Ryujinx runner plugin (`plugins/ryujinx`). It is a plugin
+/// like any other to the runner host; this name exists only so the library can
+/// say which console its games are for.
+pub const RYUJINX_RUNNER_ID: &str = "com.orivo.ryujinx";
+
 /// Is this one of the console-emulator runners Orivo ships natively?
 pub fn is_console_runner_id(runner_id: &str) -> bool {
     runner_id == RETROARCH_RUNNER_ID || runner_id == PPSSPP_RUNNER_ID
@@ -158,6 +163,9 @@ pub enum GameSource {
     Xbox,
     MicrosoftStore,
     InstantGaming,
+    /// A game installed on this Android phone as an app of its own, started
+    /// by the launch intent its package declares (`android_games.rs`).
+    Android,
 }
 
 impl GameSource {
@@ -174,6 +182,7 @@ impl GameSource {
             Self::Xbox => Some("xbox"),
             Self::MicrosoftStore => Some("microsoft-store"),
             Self::InstantGaming => Some("instant-gaming"),
+            Self::Android => Some("android"),
         }
     }
 
@@ -185,6 +194,7 @@ impl GameSource {
             Self::Xbox,
             Self::MicrosoftStore,
             Self::InstantGaming,
+            Self::Android,
         ]
         .into_iter()
         .find(|source| source.provider_token() == Some(token))

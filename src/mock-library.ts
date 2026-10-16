@@ -17,7 +17,7 @@ export interface LibraryGame {
   id: string;
   title: string;
   /** Presentation source returned by the desktop catalog; fixture entries can omit it. */
-  source?: "steam" | "wine" | "local" | "showcase" | ConnectedSource;
+  source?: "steam" | "wine" | "local" | "showcase" | "android" | ConnectedSource;
   description: string;
   metadata: string;
   /** The studio, as the store named it. Empty when no store named one. */
@@ -37,6 +37,14 @@ export interface LibraryGame {
    * Play asks which one. Absent on a fixture, which means "the one way".
    */
   launchOptions?: LaunchOption[];
+  /**
+   * The runner the card's own way of starting goes through, as its opaque id
+   * (`com.orivo.gamestream` for Moonlight, `com.orivo.wine-staging` for Wine…).
+   * Absent for a store's client or a game started directly.
+   */
+  runner?: string;
+  /** The consoles this game is for (`switch`, `xbox`, `snes`…), from the host's closed list. */
+  systems?: string[];
   /** Native platform support declared by Steam Store, not compatibility-layer support. */
   hostPlatform?: "windows" | "macos" | "linux" | "other";
   supportedPlatforms?: Array<"windows" | "macos" | "linux">;

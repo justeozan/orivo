@@ -468,6 +468,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
         "xbox",
         "microsoft-store",
         "instant-gaming",
+        "android",
       ] as const,
       "local",
     ),

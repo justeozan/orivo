@@ -1300,6 +1300,32 @@ button { border: 0; cursor: pointer; }
 .card-art--landscape { object-position: center center; opacity: 0; transform: scale(1.025); }
 .game-card.is-selected .card-art--portrait { opacity: 0; transform: scale(1.012); }
 .game-card.is-selected .card-art--landscape { opacity: 1; transform: scale(1); }
+/* The landscape art is only fetched once its card is selected or about to be.
+   Until it has arrived, the selected card keeps its portrait rather than going
+   blank for the length of a download. */
+.game-card.is-selected:not(:has(.card-art--landscape.is-ready)) .card-art--portrait { opacity: 1; transform: scale(1); }
+.game-card.is-selected:not(:has(.card-art--landscape.is-ready)) .card-art--landscape { opacity: 0; }
+/* A picture that never came is hidden outright: Android's WebView draws an
+   <img> left without a usable source as a broken-picture glyph. */
+.card-art.is-missing { visibility: hidden; }
+/* With no picture of the game at all, the card wears its name. */
+.card-fallback {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  padding: 10px;
+  overflow: hidden;
+  color: #ddd8e4;
+  background: linear-gradient(160deg, #262330 0%, #16151b 100%);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.game-card.is-art-missing:not(:has(.card-art--landscape.is-ready)) .card-fallback,
+.game-card.is-art-missing:not(.is-selected) .card-fallback { display: grid; }
 .game-card:hover .card-art { transform: scale(1.035); }
 
 @keyframes cover-glint-orbit { to { --cover-glint-angle: 360deg; } }
@@ -1369,6 +1395,16 @@ button { border: 0; cursor: pointer; }
 .browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .browse-bar__segment:hover { color: #ded9e4; }
 .browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
+/* Source and Platform wear the brands' own logos: white, every one the same
+   height, dimmed as a word is until it is the segment on the rail. The word
+   stays in the button for whoever cannot see the picture. The shadow is the
+   one the words carry, so a logo reads over a bright wallpaper as well. */
+.browse-bar__segment.has-logo { position: relative; }
+.browse-bar__segment-logo { display: block; width: auto; height: 18px; opacity: .52; filter: drop-shadow(0 1px 2px rgba(6,6,10,.7)); transition: opacity 180ms ease; }
+.browse-bar__segment-logo[hidden] { display: none; }
+.browse-bar__segment.has-logo .browse-bar__segment-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.browse-bar__segment.has-logo:hover .browse-bar__segment-logo { opacity: .82; }
+.browse-bar__segment.has-logo.is-active .browse-bar__segment-logo { opacity: 1; }
 
 /* Glass, like every other floating control, and no chevron: the word already
    changes each time it is pressed, which is the whole affordance. */
@@ -1396,6 +1432,129 @@ body[data-mood="rage"] { --violet: #f2453c; }
 
 .toast { position: absolute; z-index: 12; bottom: 90px; left: 50%; max-width: min(480px, calc(100vw - 48px)); margin: 0; padding: 10px 14px; transform: translate(-50%, 10px); border: 1px solid rgba(255,255,255,.15); border-radius: 10px; color: #f4f2f7; background: rgba(22,21,27,.88); box-shadow: 0 16px 44px rgba(0,0,0,.35); opacity: 0; pointer-events: none; -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); transition: opacity 160ms ease, transform 160ms ease; font-size: 13px; }
 .toast.is-visible { transform: translate(-50%, 0); opacity: 1; }
+
+/* ---------------------------------------------------------------------------
+   Starting a game
+   A task over the whole shell, topbar included: the game's own artwork, its
+   wordmark where it sits in the Library's hero, the word "Starting" and a line
+   that says Orivo is waiting. It stands until the game is on screen and Orivo
+   steps aside, or until Escape (src/launch-splash.ts). Only `opacity` and
+   `transform` move, and only while motion is allowed.
+   --------------------------------------------------------------------------- */
+.launch-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  overflow: hidden;
+  background: #0b0b0d;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms cubic-bezier(.4, 0, .2, 1);
+}
+.launch-splash[hidden] { display: none; }
+.launch-splash.is-open { opacity: 1; pointer-events: auto; transition: opacity 380ms cubic-bezier(.2, .8, .2, 1); }
+
+.launch-splash__art { position: absolute; inset: 0; overflow: hidden; background: #101014; }
+/* A slow push in, the length of a long launch, so the picture is never quite
+   still while Orivo waits — and never fast enough to be noticed doing it. */
+.launch-splash__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform-origin: 62% 46%;
+  animation: launch-splash-push 16s cubic-bezier(.2, .6, .25, 1) both;
+}
+/* The Library scene's two shadows, deeper: a floor under the words and a light
+   shade down the left. The art stays the picture; the words get ground. */
+.launch-splash__veil {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to top, rgba(11, 11, 13, .9) 0%, rgba(11, 11, 13, .52) 30%, rgba(11, 11, 13, 0) 62%),
+    linear-gradient(to right, rgba(11, 11, 13, .5) 0%, rgba(11, 11, 13, 0) 56%);
+}
+
+.launch-splash__content {
+  position: absolute;
+  bottom: clamp(88px, 15svh, 172px);
+  left: var(--hero-left);
+  display: grid;
+  justify-items: start;
+  gap: 14px;
+  width: min(640px, calc(100vw - var(--hero-left) - var(--edge-right)));
+  animation: launch-splash-rise 560ms cubic-bezier(.2, .8, .2, 1) 90ms backwards;
+}
+.launch-splash__eyebrow {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 560;
+  text-shadow: 0 1px 2px rgba(6, 6, 10, .7), 0 2px 16px rgba(6, 6, 10, .55);
+}
+.launch-splash__title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-hero-title);
+  font-weight: 680;
+  line-height: 1.02;
+  text-wrap: balance;
+  text-shadow: 0 2px 18px rgba(6, 6, 10, .55);
+}
+.launch-splash__content.has-logo .launch-splash__title { display: none; }
+/* Bounded in height, not width, like the hero's: a wide mark and a tall one
+   read as the same piece of furniture. */
+.launch-splash__logo {
+  display: block;
+  max-width: 100%;
+  height: clamp(110px, 19svh, 236px);
+  object-fit: contain;
+  object-position: left bottom;
+  filter: drop-shadow(0 2px 12px rgba(6, 6, 10, .55));
+}
+/* Indeterminate on purpose: Orivo cannot know how far along a game is, so it
+   never draws a percentage. A light travels the track instead; with motion off
+   the whole track glows evenly, which still reads as busy rather than stuck. */
+.launch-splash__progress {
+  position: relative;
+  width: min(300px, 62vw);
+  height: 3px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .12);
+}
+.launch-splash__progress span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(193, 170, 253, 0), #c1aafd 45%, #7d54f4 100%);
+  animation: launch-splash-sweep 1.5s cubic-bezier(.45, 0, .25, 1) infinite;
+}
+/* Signed, quietly, in the corner the browse bar would be in. */
+.launch-splash__mark {
+  position: absolute;
+  right: var(--edge-right);
+  bottom: var(--edge-bottom);
+  width: 26px;
+  height: auto;
+  opacity: .72;
+}
+
+@keyframes launch-splash-push { from { transform: scale(1); } to { transform: scale(1.07); } }
+@keyframes launch-splash-rise { from { opacity: 0; transform: translateY(12px); } }
+@keyframes launch-splash-sweep { from { transform: translateX(-100%); } to { transform: translateX(265%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .launch-splash__image { animation: none; }
+  html:not([data-motion="full"]) .launch-splash__progress span { width: 100%; animation: none; opacity: .5; }
+}
+[data-motion="reduced"] .launch-splash__image { animation: none; }
+[data-motion="reduced"] .launch-splash__progress span { width: 100%; animation: none; opacity: .5; }
 
 @media (max-width: 1180px) {
   .topbar { grid-template-columns: minmax(0, 1fr) minmax(200px, min(352px, 31vw)) minmax(0, 1fr); }
@@ -2642,3 +2801,102 @@ html[data-form-factor="compact"] .wine-panel {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
+
+/* Starting a game on a phone: the words sit over the browse bar's corner, and
+   the wordmark gets the hero's own compact height. */
+html[data-form-factor="compact"] .launch-splash__content {
+  bottom: calc(var(--edge-bottom) + 40px);
+  gap: 10px;
+  width: calc(100vw - var(--hero-left) - var(--edge-right));
+}
+html[data-form-factor="compact"] .launch-splash__logo { height: clamp(52px, 20svh, 96px); }
+html[data-form-factor="compact"] .launch-splash__eyebrow { font-size: 13px; }
+html[data-form-factor="compact"] .browse-bar__segment-logo { height: 15px; }
+
+/* ---------------------------------------------------------------------------
+   Phone — the compact layout, pointed at with a finger (`src/form-factor.ts`)
+
+   Immersive, like the Android build around it: the scene is the screen. At
+   rest the topbar is the Orivo mark, the bell and the avatar. The navigation
+   waits behind the mark and comes out with its menu; the search and the scene
+   arrows go, since a finger walks the rail itself; the title, the wordmark,
+   Play, the cards and the browse bar's words all come down a size. A desktop
+   window dragged as short keeps every one of them.
+   --------------------------------------------------------------------------- */
+html[data-device="phone"] {
+  --fs-hero-title: clamp(17px, 5.4svh, 25px);
+  --play-w: 100px;
+  --play-h: 36px;
+  --fs-play: 13px;
+  /* The same portrait card, a size down; its width and the selected card's
+     2.5:1 follow from the height in the compact block. 174 = 6 under the
+     topbar + 84 of hero + 16 of gap + 24 of rail header + 16 of focus room
+     + 28 of browse bar. */
+  --rail-card-height: clamp(80px, calc(100svh - var(--topbar-height) - 174px - var(--edge-bottom)), 100px);
+  --rail-bottom: calc(var(--edge-bottom) + 28px);
+  --fs-rail-title: 11px;
+  --fs-bar: 10px;
+}
+
+/* The search goes, so the bar is the mark on the left and the bell and the
+   avatar on the right. */
+html[data-device="phone"] .topbar { grid-template-columns: minmax(0, 1fr) auto; }
+html[data-device="phone"] .search-control { display: none; }
+
+/* Hidden rather than removed: the pills keep their place, so nothing in the
+   bar moves when they come out of the mark. `visibility` waits for the fade on
+   the way out and goes first on the way in. */
+html[data-device="phone"] .top-divider,
+html[data-device="phone"] .primary-nav {
+  transition: opacity 160ms ease, transform 240ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 240ms;
+}
+html[data-device="phone"] .topbar:not(.is-library-menu-open) .top-divider,
+html[data-device="phone"] .topbar:not(.is-library-menu-open) .primary-nav {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(-12px);
+}
+html[data-device="phone"] .topbar.is-library-menu-open .top-divider,
+html[data-device="phone"] .topbar.is-library-menu-open .primary-nav { transition-delay: 0s; }
+
+/* Out of the mark the pills are buttons over the artwork, and an icon has no
+   text shadow to stand on: each wears the glass plate the current page's pill
+   already has, a shade lighter. So does the bell, a third of the bar here — a
+   white glyph on a white glint was a dot floating on its own. */
+html[data-device="phone"] .primary-nav { gap: 6px; }
+html[data-device="phone"] .nav-link:not(.is-active),
+html[data-device="phone"] .notifications-button {
+  border: 1px solid rgba(255,255,255,.12);
+  color: #e4e1e8;
+  background: rgba(18,17,22,.4);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+}
+html[data-device="phone"] .nav-link:not(.is-active)[data-nav-focus],
+html[data-device="phone"] .notifications-button[data-nav-focus],
+html[data-device="phone"] .notifications-button[aria-expanded="true"] {
+  border-color: rgba(255,255,255,.28);
+  color: #fff;
+  background: rgba(40,38,46,.62);
+}
+/* With every pill on a plate, the current page is the lit one. */
+html[data-device="phone"] .nav-link.is-active {
+  border-color: rgba(255,255,255,.3);
+  color: #fff;
+  background: rgba(255,255,255,.2);
+}
+
+html[data-device="phone"] .scene-arrow { display: none; }
+
+html[data-device="phone"] .hero-logo { height: clamp(36px, 12svh, 58px); }
+html[data-device="phone"] .play-button { gap: 7px; }
+html[data-device="phone"] .play-button .icon { width: 12px; height: 12px; }
+/* Scaled with the card, so a smaller card is the same shape and not a
+   rounder one. */
+html[data-device="phone"] .game-card { --card-radius: 10px; }
+
+html[data-device="phone"] .browse-bar { gap: 10px; }
+html[data-device="phone"] .browse-bar__segments { gap: 16px; }
+html[data-device="phone"] .browse-bar__segment { font-size: var(--fs-bar); }
+html[data-device="phone"] .browse-bar__segment-logo { height: 12px; }
+html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; padding: 0 12px; font-size: var(--fs-bar); }

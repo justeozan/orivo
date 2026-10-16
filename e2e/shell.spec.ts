@@ -217,3 +217,45 @@ test.describe("an iPad held upright", () => {
     expect(back!.y + back!.height).toBeLessThanOrEqual(title!.y + 1);
   });
 });
+
+test.describe("the startup animation", () => {
+  // It belongs to an app starting. The browser preview reloads all day, so it
+  // plays there only when asked for: `?boot`.
+  test("is not played by a browser preview that did not ask for it", async ({ page }) => {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.locator("#boot-splash")).toHaveCount(0);
+  });
+
+  test("stands in front of the shell without ever taking a click, then gives way", async ({ page }) => {
+    await page.goto("/?boot", { waitUntil: "domcontentloaded" });
+    const splash = page.locator("#boot-splash");
+
+    // It may already be leaving, but it was the first thing on the page.
+    await expect(splash).toHaveCSS("pointer-events", "none");
+    await expect(splash).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator("#app-page-library #hero-title")).toBeVisible();
+  });
+
+  test("has nothing to hold under reduced motion: it goes as soon as the library is in", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.goto("/?boot", { waitUntil: "domcontentloaded" });
+
+    // Measured on the page's own clock, so a slow runner cannot flake it: the
+    // splash must be gone well before its arrival would have finished.
+    const goneAt = await page.evaluate(
+      () =>
+        new Promise<number>((resolve) => {
+          const check = (): void => {
+            if (document.getElementById("boot-splash")) requestAnimationFrame(check);
+            else resolve(performance.now());
+          };
+          check();
+        }),
+    );
+    const libraryAt = await page.evaluate(() => {
+      const entry = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+      return entry?.domContentLoadedEventEnd ?? 0;
+    });
+    expect(goneAt - libraryAt).toBeLessThan(1_400);
+  });
+});

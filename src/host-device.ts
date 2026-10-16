@@ -13,3 +13,22 @@ export function hostDeviceLabel(): string {
   }
   return "this device";
 }
+
+/**
+ * How Orivo gets out of a started game's way here, in the words of the system
+ * it runs on: a Mac hides an app and brings it back with ⌘-Tab or the Dock,
+ * Windows and Linux minimise a window to the taskbar (`step_aside_for_game`).
+ */
+export function stepAsideCopy(): { action: string; hint: string } {
+  const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  if (userAgent.includes("Mac")) {
+    return {
+      action: "Hide Orivo",
+      hint: "Orivo hides once the game is on screen. ⌘-Tab or the Dock brings it back.",
+    };
+  }
+  return {
+    action: "Minimise Orivo",
+    hint: "Orivo minimises once the game is on screen. The taskbar brings it back.",
+  };
+}
