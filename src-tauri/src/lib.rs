@@ -1185,6 +1185,7 @@ pub fn run() {
             preferences::get_data_usage,
             preferences::clear_derived_cache,
             quiky_installer::get_quiky_status,
+            quiky_installer::search_quiky,
             quiky_installer::get_quiky_progress,
             quiky_installer::start_quiky_install,
             quiky_installer::cancel_quiky_install,

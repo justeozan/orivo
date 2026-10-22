@@ -59,7 +59,22 @@ const MAX_SIZE_SCAN_ENTRIES: usize = 200_000;
 struct QuikyCatalog {
     #[allow(dead_code)]
     version: u32,
+    #[serde(default)]
+    provider: Option<QuikyProvider>,
     titles: Vec<QuikyCatalogTitle>,
+}
+
+/// The declarative half of a dynamic source. The host owns the HTTP client,
+/// the scraper and the torrent process; the plugin only says which hub to ask
+/// and where its game pages live.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuikyProvider {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    base_url: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,7 +85,11 @@ struct QuikyCatalogTitle {
     #[serde(default)]
     match_titles: Vec<String>,
     url: String,
+    /// Empty for a FitGirl page entry: the torrent's piece hashes and the
+    /// repack's own MD5 list are the integrity checks for that source.
+    #[serde(default)]
     sha256: String,
+    #[serde(default)]
     download_bytes: u64,
     #[serde(default)]
     installed_bytes: u64,
@@ -82,6 +101,7 @@ struct QuikyCatalogTitle {
 enum InstallerKind {
     Nsis,
     Inno,
+    Fitgirl,
 }
 
 impl InstallerKind {
@@ -89,6 +109,7 @@ impl InstallerKind {
         match value {
             "nsis" => Some(Self::Nsis),
             "inno" => Some(Self::Inno),
+            "fitgirl" => Some(Self::Fitgirl),
             _ => None,
         }
     }
@@ -118,6 +139,8 @@ pub struct QuikyTitleView {
     pub title: String,
     pub match_titles: Vec<String>,
     pub download_bytes: u64,
+    /// `fitgirl`, `inno` or `nsis`; the Store uses it only for a badge.
+    pub source: String,
     pub installed: bool,
     pub install_path: Option<String>,
 }
@@ -126,6 +149,9 @@ pub struct QuikyTitleView {
 #[serde(rename_all = "camelCase")]
 pub struct QuikyStatusView {
     pub available: bool,
+    /// True when the plugin also supplies a searchable source. A static
+    /// catalogue is still usable; this only controls the Store's search shelf.
+    pub searchable: bool,
     pub plugin_name: String,
     pub version: String,
     pub message: String,
@@ -136,6 +162,7 @@ impl QuikyStatusView {
     fn unavailable(message: &str) -> Self {
         Self {
             available: false,
+            searchable: false,
             plugin_name: String::new(),
             version: String::new(),
             message: message.into(),
@@ -172,6 +199,10 @@ pub struct QuikyService {
     games_root: PathBuf,
     host_version: &'static str,
     jobs: Mutex<BTreeMap<String, Arc<InstallJob>>>,
+    /// Search results are ephemeral catalogue entries. The WebView receives a
+    /// slug and nothing else; `start_quiky_install` resolves it back through
+    /// this map, so a page URL or a magnet never crosses the IPC boundary.
+    dynamic_titles: Mutex<BTreeMap<String, ResolvedTitle>>,
 }
 
 impl QuikyService {
@@ -189,6 +220,7 @@ impl QuikyService {
             games_root,
             host_version,
             jobs: Mutex::new(BTreeMap::new()),
+            dynamic_titles: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -218,6 +250,10 @@ impl QuikyService {
 
     fn job(&self, slug: &str) -> Option<Arc<InstallJob>> {
         self.jobs.lock().ok()?.get(slug).cloned()
+    }
+
+    fn dynamic_title(&self, slug: &str) -> Option<ResolvedTitle> {
+        self.dynamic_titles.lock().ok()?.get(slug).cloned()
     }
 }
 
@@ -293,11 +329,13 @@ fn read_bounded(path: &Path, max_bytes: u64) -> Option<Vec<u8>> {
     fs::read(path).ok()
 }
 
+fn read_catalog(plugin: &InstallerPlugin) -> Option<QuikyCatalog> {
+    let bytes = read_bounded(&plugin.directory.join(CATALOG_ASSET), MAX_CATALOG_BYTES)?;
+    serde_json::from_slice::<QuikyCatalog>(&bytes).ok()
+}
+
 fn load_catalog(plugin: &InstallerPlugin) -> Vec<ResolvedTitle> {
-    let Some(bytes) = read_bounded(&plugin.directory.join(CATALOG_ASSET), MAX_CATALOG_BYTES) else {
-        return Vec::new();
-    };
-    let Ok(catalog) = serde_json::from_slice::<QuikyCatalog>(&bytes) else {
+    let Some(catalog) = read_catalog(plugin) else {
         return Vec::new();
     };
     let mut seen = Vec::new();
@@ -316,18 +354,33 @@ fn load_catalog(plugin: &InstallerPlugin) -> Vec<ResolvedTitle> {
         .collect()
 }
 
+fn load_provider(plugin: &InstallerPlugin) -> Option<QuikyProvider> {
+    let provider = read_catalog(plugin)?.provider?;
+    let host = url_host(&provider.base_url)?;
+    host_allowed(&host, &plugin.network_domains).then_some(provider)
+}
+
 fn resolve_title(entry: QuikyCatalogTitle, allowlist: &[String]) -> Option<ResolvedTitle> {
+    let kind = InstallerKind::parse(&entry.installer_kind)?;
     if !valid_slug(&entry.slug)
         || !valid_folder_name(&entry.folder_name)
-        || !valid_sha256(&entry.sha256)
         || entry.title.trim().is_empty()
         || entry.title.chars().count() > 128
-        || entry.download_bytes == 0
         || entry.download_bytes > MAX_DOWNLOAD_BYTES
     {
         return None;
     }
-    let kind = InstallerKind::parse(&entry.installer_kind)?;
+    // A direct installer is only accepted with the exact digest and size the
+    // plugin promised. A FitGirl entry names a page, not a package: its
+    // integrity comes from the torrent and the repack's own MD5 list.
+    if kind != InstallerKind::Fitgirl
+        && (!valid_sha256(&entry.sha256) || entry.download_bytes == 0)
+    {
+        return None;
+    }
+    if kind == InstallerKind::Fitgirl && !entry.sha256.is_empty() && !valid_sha256(&entry.sha256) {
+        return None;
+    }
     let host = url_host(&entry.url)?;
     if !host_allowed(&host, allowlist) {
         return None;
@@ -348,6 +401,84 @@ fn resolve_title(entry: QuikyCatalogTitle, allowlist: &[String]) -> Option<Resol
         kind,
         folder_name: entry.folder_name,
     })
+}
+
+/// A FitGirl search result has a title, not a folder name. Keep the readable
+/// title where possible and fall back to a safe single path segment.
+fn folder_name_from_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut last_space = false;
+    for character in title.chars() {
+        if character.is_ascii_graphic() && character != ':' {
+            if character == ' ' {
+                if !last_space {
+                    out.push(' ');
+                }
+                last_space = true;
+            } else {
+                out.push(character);
+                last_space = false;
+            }
+        } else if !last_space {
+            out.push('-');
+            last_space = true;
+        }
+    }
+    let mut value = out.trim_matches([' ', '-', '.']).to_string();
+    if value.len() > 96 {
+        value.truncate(96);
+        value = value.trim_end_matches([' ', '-', '.']).to_string();
+    }
+    if value.is_empty() || !valid_folder_name(&value) {
+        "FitGirl Repack".into()
+    } else {
+        value
+    }
+}
+
+fn slugify(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut dash = false;
+    for character in value.to_ascii_lowercase().chars() {
+        if character.is_ascii_lowercase() || character.is_ascii_digit() {
+            out.push(character);
+            dash = false;
+        } else if !dash {
+            out.push('-');
+            dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn slug_from_page_url(value: &str) -> Option<String> {
+    let url = url::Url::parse(value).ok()?;
+    let segment = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .next_back()?;
+    let slug = slugify(segment);
+    (!slug.is_empty()).then_some(slug)
+}
+
+fn unique_slug(base: &str, used: &mut std::collections::BTreeSet<String>) -> String {
+    let mut base = slugify(base);
+    if base.is_empty() {
+        base = "fitgirl-repack".into();
+    }
+    base.truncate(56);
+    base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        base = "fitgirl-repack".into();
+    }
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while used.contains(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +507,12 @@ pub async fn get_quiky_status(
                     title: title.title,
                     match_titles: title.match_titles,
                     download_bytes: title.download_bytes,
+                    source: match title.kind {
+                        InstallerKind::Fitgirl => "fitgirl",
+                        InstallerKind::Inno => "inno",
+                        InstallerKind::Nsis => "nsis",
+                    }
+                    .to_string(),
                     installed,
                     install_path: installed.then(|| destination.to_string_lossy().into_owned()),
                 }
@@ -383,6 +520,7 @@ pub async fn get_quiky_status(
             .collect::<Vec<_>>();
         QuikyStatusView {
             available: true,
+            searchable: load_provider(&plugin).is_some(),
             plugin_name: plugin.name,
             version: plugin.version,
             message: if titles.is_empty() {
@@ -395,6 +533,146 @@ pub async fn get_quiky_status(
     })
     .await
     .map_err(|_| "The installer plugin could not be read.".to_string())
+}
+
+/// Search the plugin's declared source and return opaque catalogue entries.
+///
+/// The WebView sends a query, never a URL. The host scrapes the hub, validates
+/// every returned page against the manifest allowlist, and keeps the page URL
+/// and future magnet on this side of the IPC boundary.
+#[tauri::command]
+pub async fn search_quiky(
+    query: String,
+    service: State<'_, Arc<QuikyService>>,
+) -> Result<Vec<QuikyTitleView>, String> {
+    let query = query.trim().to_string();
+    if query.chars().count() < 2 || query.chars().count() > 80 {
+        return Err("Cherche un titre d'au moins deux caractères.".into());
+    }
+    if query.chars().any(char::is_control) {
+        return Err("Cette recherche contient des caractères invalides.".into());
+    }
+
+    let service = Arc::clone(&service);
+    let (plugin, provider) = tauri::async_runtime::spawn_blocking({
+        let service = Arc::clone(&service);
+        move || {
+            let plugin = service.plugin()?;
+            if plugin.state != PluginState::Ready {
+                return None;
+            }
+            let provider = load_provider(&plugin)?;
+            Some((plugin, provider))
+        }
+    })
+    .await
+    .map_err(|_| "Le plugin installateur n'a pas pu être lu.".to_string())?
+    .ok_or_else(|| "Ce plugin ne fournit pas de source consultable.".to_string())?;
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (plugin, provider, service, query);
+        return Err("La recherche FitGirl est disponible sur macOS.".into());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let allowlist = plugin.network_domains.clone();
+            let redirect_allowlist = allowlist.clone();
+            let client = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    if attempt.previous().len() >= 4 {
+                        return attempt.stop();
+                    }
+                    let allowed = attempt.url().scheme() == "https"
+                        && attempt
+                            .url()
+                            .host_str()
+                            .is_some_and(|host| host_allowed(host, &redirect_allowlist));
+                    if allowed {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
+                .build()
+                .map_err(|_| "Le client de recherche n'a pas pu démarrer.".to_string())?;
+
+            let hub = quiky_host::search::Hub::new(
+                if provider.id.is_empty() {
+                    provider.name.clone()
+                } else {
+                    provider.id.clone()
+                },
+                provider.base_url,
+            );
+            let hits = quiky_host::search::search_game_pages(&client, &hub, &query, 12)
+                .map_err(|error| error.to_string())?;
+
+            let catalog = load_catalog(&plugin);
+            let mut used = catalog
+                .iter()
+                .map(|title| title.slug.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut dynamic = service
+                .dynamic_titles
+                .lock()
+                .map_err(|_| "Le catalogue de recherche est indisponible.".to_string())?;
+            used.extend(dynamic.keys().cloned());
+            if dynamic.len() > 256 {
+                dynamic.clear();
+            }
+
+            let mut views = Vec::new();
+            for hit in hits {
+                if hit.title.trim().is_empty() || hit.title.chars().count() > 128 {
+                    continue;
+                }
+                let normalized = hit.url.trim_end_matches('/');
+                let existing = catalog.iter().find(|title| {
+                    title.kind == InstallerKind::Fitgirl
+                        && title.url.trim_end_matches('/') == normalized
+                });
+                let title = if let Some(existing) = existing {
+                    existing.clone()
+                } else {
+                    let base = slug_from_page_url(&hit.url)
+                        .unwrap_or_else(|| slugify(&hit.title));
+                    let slug = unique_slug(&base, &mut used);
+                    let folder_name = folder_name_from_title(&hit.title);
+                    let title = ResolvedTitle {
+                        slug,
+                        title: hit.title.clone(),
+                        match_titles: vec![hit.title],
+                        url: hit.url,
+                        sha256: String::new(),
+                        download_bytes: 0,
+                        installed_bytes: 0,
+                        kind: InstallerKind::Fitgirl,
+                        folder_name,
+                    };
+                    dynamic.insert(title.slug.clone(), title.clone());
+                    title
+                };
+                let destination = service.destination(&title.folder_name);
+                let installed = directory_has_content(&destination);
+                views.push(QuikyTitleView {
+                    slug: title.slug,
+                    title: title.title,
+                    match_titles: title.match_titles,
+                    download_bytes: title.download_bytes,
+                    source: "fitgirl".into(),
+                    installed,
+                    install_path: installed.then(|| destination.to_string_lossy().into_owned()),
+                });
+            }
+            Ok(views)
+        })
+        .await
+        .map_err(|_| "La recherche FitGirl n'a pas abouti.".to_string())?
+    }
 }
 
 #[tauri::command]
@@ -445,6 +723,7 @@ pub async fn start_quiky_install(
     let title = load_catalog(&plugin)
         .into_iter()
         .find(|candidate| candidate.slug == slug)
+        .or_else(|| service.dynamic_title(&slug))
         .ok_or_else(|| "This title is not part of the installer catalogue.".to_string())?;
 
     // Refuse an install that cannot fit before spending the bandwidth on it.
@@ -747,6 +1026,9 @@ async fn download_package(
     title: &ResolvedTitle,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
+    if title.kind == InstallerKind::Fitgirl {
+        return download_fitgirl_package(app, service, title, cancelled).await;
+    }
     let directory = service.downloads_root.join(&title.slug);
     fs::create_dir_all(&directory)
         .map_err(|_| "The download folder is unavailable.".to_string())?;
@@ -818,6 +1100,172 @@ async fn download_package(
         None,
     );
     Ok(package)
+}
+
+/// A FitGirl install starts from a page, not a package: scrape the magnet,
+/// download the torrent with aria2, then verify the repack's own MD5 list.
+/// Every step stays in the host; the plugin supplied only the page URL.
+async fn download_fitgirl_package(
+    app: &AppHandle,
+    service: &Arc<QuikyService>,
+    title: &ResolvedTitle,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    let app = app.clone();
+    let service = Arc::clone(service);
+    let title = title.clone();
+    let cancelled = Arc::clone(cancelled);
+    tauri::async_runtime::spawn_blocking(move || {
+        download_fitgirl_blocking(&app, &service, &title, &cancelled)
+    })
+    .await
+    .map_err(|_| "The FitGirl download did not finish.".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn download_fitgirl_blocking(
+    app: &AppHandle,
+    service: &Arc<QuikyService>,
+    title: &ResolvedTitle,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    let allowlist = title_allowlist(service, title);
+    if !url_host(&title.url).is_some_and(|host| host_allowed(&host, &allowlist)) {
+        return Err("This FitGirl page is outside the plugin's declared domains.".into());
+    }
+
+    publish(
+        app,
+        service,
+        &title.slug,
+        "downloading",
+        0,
+        "Reading the FitGirl page…".into(),
+        None,
+    );
+    let redirect_allowlist = allowlist.clone();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 4 {
+                return attempt.stop();
+            }
+            let allowed = attempt.url().scheme() == "https"
+                && attempt
+                    .url()
+                    .host_str()
+                    .is_some_and(|host| host_allowed(host, &redirect_allowlist));
+            if allowed {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .map_err(|_| "The FitGirl client could not start.".to_string())?;
+    let links = quiky_host::scrape::scrape_game_page(&client, &title.url)?;
+    let source = links.magnet.as_deref().or(links.torrent.as_deref());
+    let Some(source) = source else {
+        return Err(if links.direct.is_some() {
+            "This repack only offers hoster links; Quiky needs a magnet or torrent.".into()
+        } else {
+            "No magnet or torrent was found on this FitGirl page.".into()
+        });
+    };
+    if !source.starts_with("magnet:")
+        && !url_host(source).is_some_and(|host| host_allowed(&host, &allowlist))
+    {
+        return Err("This torrent is outside the plugin's declared domains.".into());
+    }
+
+    let directory = service.downloads_root.join(&title.slug).join("fitgirl");
+    fs::create_dir_all(&directory)
+        .map_err(|_| "The FitGirl download folder is unavailable.".to_string())?;
+
+    // A previous complete download is reused. aria2 can also resume a partial
+    // one in this directory; deleting it would throw away gigabytes.
+    if let Some(repack) = quiky_host::fitgirl::find_repack_dir(&directory) {
+        let checked = quiky_host::fitgirl::verify_bins_md5(&repack).map_err(|error| error.to_string())?;
+        if checked > 0 {
+            publish(
+                app,
+                service,
+                &title.slug,
+                "downloading",
+                100,
+                "Already downloaded and verified.".into(),
+                None,
+            );
+            return Ok(repack);
+        }
+    }
+
+    let aria2 = quiky_host::download::find_aria2(None)
+        .ok_or_else(|| "aria2c is required for a magnet. Install it with `brew install aria2`.".to_string())?;
+    publish(
+        app,
+        service,
+        &title.slug,
+        "downloading",
+        1,
+        "Starting aria2…".into(),
+        None,
+    );
+    let ok = quiky_host::download::run_aria2_with_progress(
+        &aria2,
+        source,
+        &directory,
+        Some(cancelled),
+        |percent, written, total| {
+            let message = if total > 0 {
+                format!("Downloading {} of {}", human_bytes(written), human_bytes(total))
+            } else {
+                format!("Downloading {}", human_bytes(written))
+            };
+            publish(
+                app,
+                service,
+                &title.slug,
+                "downloading",
+                percent.max(1),
+                message,
+                None,
+            );
+        },
+    )?;
+    if !ok {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Installation cancelled.".into());
+        }
+        return Err("aria2 could not download this repack.".into());
+    }
+
+    let repack = quiky_host::fitgirl::find_repack_dir(&directory)
+        .ok_or_else(|| "The downloaded folder does not contain a FitGirl repack.".to_string())?;
+    let checked = quiky_host::fitgirl::verify_bins_md5(&repack).map_err(|error| error.to_string())?;
+    if checked == 0 {
+        return Err("The repack does not include its MD5 list; refusing to extract it.".into());
+    }
+    publish(
+        app,
+        service,
+        &title.slug,
+        "downloading",
+        100,
+        format!("Download verified ({checked} archives)."),
+        None,
+    );
+    Ok(repack)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn download_fitgirl_blocking(
+    _app: &AppHandle,
+    _service: &Arc<QuikyService>,
+    _title: &ResolvedTitle,
+    _cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    Err("FitGirl installs are available on macOS.".into())
 }
 
 /// The whole network surface, in one place: the allowlist is re-checked on
@@ -941,6 +1389,16 @@ fn extract_package(
     store_game_id: Option<&str>,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
+    if title.kind == InstallerKind::Fitgirl {
+        return extract_fitgirl_package(
+            app,
+            service,
+            title,
+            package,
+            store_game_id,
+            cancelled,
+        );
+    }
     publish(
         app,
         service,
@@ -1032,6 +1490,126 @@ fn extract_package(
     Err(last_error)
 }
 
+#[cfg(target_os = "macos")]
+fn extract_fitgirl_package(
+    app: &AppHandle,
+    service: &Arc<QuikyService>,
+    title: &ResolvedTitle,
+    repack: &Path,
+    store_game_id: Option<&str>,
+    cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    publish(
+        app,
+        service,
+        &title.slug,
+        "extracting",
+        0,
+        "Preparing the FitGirl extractor…".into(),
+        None,
+    );
+
+    let wine = wine_runner::detect_wine_staging(&AtomicBool::new(false))
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            "Wine is required to unpack this repack. Install Wine-Staging and try again."
+                .to_string()
+        })?;
+    let profile_id = format!("{INSTALLER_PROFILE_ID}-fitgirl-{}", title.slug);
+    let stale = service.wine_prefix_root.join(&profile_id);
+    if stale.exists() {
+        stop_wineserver(&wine, &stale);
+        let _ = fs::remove_dir_all(&stale);
+    }
+    let prefix = wine_runner::ensure_managed_profile_prefix(&service.wine_prefix_root, &profile_id)
+        .map_err(|_| "The Windows runtime could not be prepared.".to_string())?;
+    bootstrap_prefix(&wine, &prefix, cancelled)?;
+
+    let destination = service.destination(&title.folder_name);
+    let _ = fs::remove_dir_all(&destination);
+    fs::create_dir_all(&destination)
+        .map_err(|_| "The games folder could not be created.".to_string())?;
+
+    let work = service.downloads_root.join(&title.slug).join("fitgirl-work");
+    if work.exists() {
+        let _ = fs::remove_dir_all(&work);
+    }
+    fs::create_dir_all(&work)
+        .map_err(|_| "The FitGirl workspace could not be created.".to_string())?;
+    let bundled = quiky_host::fitgirl::ensure_bundled_tools(&work.join("bundled"))
+        .map_err(|error| error.to_string())?;
+    let options = quiky_host::fitgirl::FitGirlOptions {
+        tools_dir: None,
+        work_dir: work,
+        wine: wine.clone(),
+        wine_prefix: prefix.clone(),
+        srep: Some(bundled.srep),
+        helper: Some(bundled.helper),
+        native_unarc: bundled.native_unarc,
+        innoextract: quiky_host::extract::find_innoextract(),
+    };
+
+    let mut progress = |step: &str, percent: u8, message: String| {
+        publish(
+            app,
+            service,
+            &title.slug,
+            "extracting",
+            percent.min(99),
+            format!("FitGirl {step}: {message}"),
+            None,
+        );
+    };
+    let report = quiky_host::fitgirl::install_fitgirl(
+        repack,
+        &destination,
+        &options,
+        cancelled,
+        &mut progress,
+    )
+    .map_err(|error| match error {
+        quiky_host::fitgirl::FitGirlError::Cancelled => "Installation cancelled.".to_string(),
+        other => other.to_string(),
+    })?;
+
+    stop_wineserver(&wine, &prefix);
+    if !directory_has_content(&destination) {
+        return Err("The FitGirl extractor produced no files.".into());
+    }
+    if let Some(executable) = primary_executable(&destination) {
+        let _ = crate::register_installed_game(app, executable, store_game_id);
+    }
+    publish(
+        app,
+        service,
+        &title.slug,
+        "extracting",
+        99,
+        format!(
+            "FitGirl installed: {} archives, {} audio banks, {} resources ({}).",
+            report.archives,
+            report.fgpacks,
+            report.resource_files,
+            human_bytes(report.installed_bytes)
+        ),
+        None,
+    );
+    Ok(destination)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn extract_fitgirl_package(
+    _app: &AppHandle,
+    _service: &Arc<QuikyService>,
+    _title: &ResolvedTitle,
+    _repack: &Path,
+    _store_game_id: Option<&str>,
+    _cancelled: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
+    Err("FitGirl installs are available on macOS.".into())
+}
+
 /// `wineboot -u` creates the private prefix. Mono and Gecko are disabled so
 /// Wine never raises its own download dialog on a user's screen.
 fn bootstrap_prefix(wine: &Path, prefix: &Path, cancelled: &AtomicBool) -> Result<(), String> {
@@ -1115,6 +1693,11 @@ fn run_installer(
         // NSIS: /S is the silent switch and /D must come last, unquoted.
         InstallerKind::Nsis => {
             command.arg("/S").arg(format!("/D={windows_destination}"));
+        }
+        // FitGirl never reaches the generic setup.exe path: its extraction
+        // pipeline is host-owned and branches before this function.
+        InstallerKind::Fitgirl => {
+            return Err("FitGirl repacks use their own extractor.".into());
         }
     }
     if let Some(parent) = package.parent() {
@@ -1445,7 +2028,7 @@ mod tests {
         assert!(
             plugin
                 .network_domains
-                .contains(&"cdn.openttd.org".to_string())
+                .contains(&"fitgirl-repacks.site".to_string())
         );
 
         let titles = load_catalog(&plugin);
@@ -1453,13 +2036,14 @@ mod tests {
             !titles.is_empty(),
             "the catalogue resolves at least one title"
         );
-        let openttd = titles
+        let mini = titles
             .iter()
-            .find(|title| title.slug == "openttd")
-            .expect("openttd is offered");
-        assert_eq!(openttd.kind, InstallerKind::Nsis);
-        assert_eq!(openttd.folder_name, "OpenTTD");
-        assert!(openttd.url.starts_with("https://cdn.openttd.org/"));
+            .find(|title| title.slug == "mini-madness")
+            .expect("mini-madness is offered");
+        assert_eq!(mini.kind, InstallerKind::Fitgirl);
+        assert_eq!(mini.folder_name, "Mini Madness");
+        assert!(mini.url.starts_with("https://fitgirl-repacks.site/"));
+        assert!(mini.sha256.is_empty(), "FitGirl is verified by its MD5 list");
     }
 
     /// Exercises the real network path end to end against the catalogue entry
@@ -1476,8 +2060,13 @@ mod tests {
             .expect("plugin");
         let title = load_catalog(&plugin)
             .into_iter()
-            .find(|title| title.slug == "openttd")
-            .expect("openttd");
+            .find(|title| !title.sha256.is_empty() && title.download_bytes > 0);
+        // The shipped catalogue is FitGirl-only. Its integrity comes from the
+        // torrent and the repack's MD5 list, so there is no direct package to
+        // stream here; a future direct entry exercises this path again.
+        let Some(title) = title else {
+            return;
+        };
 
         let temporary = std::env::temp_dir()
             .join(format!("orivo-quiky-download-{}", std::process::id()))

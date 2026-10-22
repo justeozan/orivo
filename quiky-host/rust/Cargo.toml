@@ -1,0 +1,31 @@
+[package]
+name = "orivo-plugin-quiky-host"
+version = "0.1.0"
+# Vendored from justeozan/orivo-plugin-quiky (host/rust). Inlined here because
+# Orivo's workspace does not define [workspace.package]; see quiky-host/README.md.
+edition = "2021"
+license = "UNLICENSED"
+
+[lib]
+name = "quiky_host"
+path = "src/lib.rs"
+
+[features]
+default = ["scraping", "aria2", "wine", "win32-ui"]
+scraping = ["dep:reqwest"]
+aria2 = []
+wine = []
+win32-ui = []
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+sha2 = "0.10"
+md-5 = "0.10"
+thiserror = "2"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "stream"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

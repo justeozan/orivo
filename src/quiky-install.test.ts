@@ -373,6 +373,7 @@ describe("an absent Quiky plugin", () => {
 
     expect(controller.status()).toEqual({
       available: false,
+      searchable: false,
       pluginName: "",
       version: "",
       message: "",
@@ -388,6 +389,7 @@ describe("an absent Quiky plugin", () => {
     const client = createDefaultQuikyClient();
     await expect(client.getStatus(liveSignal())).resolves.toEqual({
       available: false,
+      searchable: false,
       pluginName: "",
       version: "",
       message: "",

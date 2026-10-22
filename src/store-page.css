@@ -915,6 +915,94 @@
   transition: width 220ms ease;
 }
 
+/* --- Quiky search results ------------------------------------------------- */
+
+.quiky-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px var(--pad) 0;
+  padding: 14px 16px;
+  border: 1px solid var(--glass-line);
+  border-radius: 16px;
+  background: rgba(10, 12, 15, 0.56);
+  box-shadow: var(--glass-sheen);
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
+.quiky-results[hidden] { display: none; }
+
+.quiky-results__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.quiky-results__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.quiky-results__badge {
+  flex: none;
+  padding: 3px 8px;
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.quiky-results__list { display: grid; gap: 8px; }
+
+.quiky-results__empty {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 13px;
+}
+
+.quiky-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 10px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.quiky-result__copy { min-width: 0; }
+.quiky-result__title {
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.quiky-result__meta {
+  margin: 2px 0 0;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+/* The card control is absolutely positioned over artwork. In a result row it
+   is an ordinary inline action, always visible. */
+.quiky-result__install {
+  position: static;
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  opacity: 1;
+}
+
 /* --- Empty shelf ---------------------------------------------------------- */
 
 .store-empty {

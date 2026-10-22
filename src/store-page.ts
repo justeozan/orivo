@@ -15,6 +15,7 @@ import {
   formatQuikyLabel,
   isQuikyBusy,
   matchTitle,
+  quikyErrorMessage,
   quikyPercent,
   type QuikyClient,
   type QuikyController,
@@ -410,6 +411,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let quiky: QuikyController | null = null;
   let quikyOff: (() => void) | null = null;
   const installNodes = new Map<string, InstallNodes>();
+  let quikySearchPhase: "idle" | "loading" | "ready" | "empty" | "error" = "idle";
+  let quikySearchMessage = "";
+  let quikySearchResults: QuikyTitle[] = [];
+  let quikySearchSequence = 0;
+  let renderedQuikySearch = "";
 
   // Long-lived nodes. The page paints once and then updates in place: a full
   // rebuild would drop the rail's scroll position and restart the backdrop
@@ -430,6 +436,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     status: null as HTMLElement | null,
     whyPanel: null as HTMLElement | null,
     emptyState: null as HTMLElement | null,
+    quikyPanel: null as HTMLElement | null,
+    quikyHeading: null as HTMLElement | null,
+    quikyList: null as HTMLElement | null,
   };
 
   const dispatch = (action: StorePageAction, shouldRender = true): void => {
@@ -588,7 +597,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
   const quikyTitleBySlug = (slug: string): QuikyTitle | null =>
     quiky?.status().titles.find((title) => title.slug === slug) ?? null;
 
-  const handleInstall = async (slug: string, gameId: string): Promise<void> => {
+  const handleInstall = async (slug: string, gameId: string | null): Promise<void> => {
     const controller = quiky;
     if (!controller) return;
     // One control, two jobs: while the host is working it is the way out.
@@ -600,6 +609,119 @@ export function createStorePage(options: StorePageOptions): AppPage {
     await controller.install(slug, gameId);
     const progress = controller.progressFor(slug);
     if (progress?.phase === "failed" && progress.message) showTransientStatus(progress.message);
+  };
+
+  const quikyResultMeta = (title: QuikyTitle): string => {
+    if (title.installed) return "Déjà installé";
+    return title.source === "fitgirl"
+      ? "Repack FitGirl · téléchargement aria2"
+      : "Installateur Windows";
+  };
+
+  const buildQuikyResult = (title: QuikyTitle): HTMLElement => {
+    const row = element("article", "quiky-result");
+    row.dataset.slug = title.slug;
+    const copy = element("div", "quiky-result__copy");
+    copy.append(
+      element("h3", "quiky-result__title", title.title),
+      element("p", "quiky-result__meta", quikyResultMeta(title)),
+    );
+    const install = buildInstall(`quiky:${title.slug}`, title, null);
+    install.button.classList.add("quiky-result__install");
+    row.append(copy, install.button);
+    return row;
+  };
+
+  /**
+   * The panel is driven by the same query as the Store search. That is the
+   * whole point: typing a game name should find the repack even when no shop
+   * carries it, without a second search box that would look like a different
+   * product.
+   */
+  const renderQuikySearch = (): void => {
+    const panel = nodes.quikyPanel;
+    const list = nodes.quikyList;
+    if (!panel || !list) return;
+    const query = state.query.trim();
+    const status = quiky?.status();
+    const visible = Boolean(status?.available && status.searchable && query);
+    panel.hidden = !visible;
+    if (!visible) {
+      renderedQuikySearch = "";
+      quikySearchPhase = "idle";
+      quikySearchMessage = "";
+      quikySearchResults = [];
+      list.replaceChildren();
+      return;
+    }
+
+    const signature = `${quikySearchPhase}|${query}|${quikySearchResults
+      .map((title) => title.slug)
+      .join(",")}`;
+    if (signature !== renderedQuikySearch) {
+      renderedQuikySearch = signature;
+      for (const key of [...installNodes.keys()]) {
+        if (key.startsWith("quiky:")) installNodes.delete(key);
+      }
+      const fragment = document.createDocumentFragment();
+      if (quikySearchPhase === "ready") {
+        for (const title of quikySearchResults) fragment.append(buildQuikyResult(title));
+      } else {
+        const message =
+          quikySearchPhase === "loading"
+            ? "Recherche sur FitGirl…"
+            : quikySearchPhase === "error"
+              ? quikySearchMessage || "La recherche FitGirl a échoué."
+              : quikySearchPhase === "empty"
+                ? "Aucun repack FitGirl ne correspond à cette recherche."
+                : "";
+        if (message) fragment.append(element("p", "quiky-results__empty", message));
+      }
+      list.replaceChildren(fragment);
+    }
+
+    if (nodes.quikyHeading) {
+      const short = query.length > 48 ? `${query.slice(0, 48)}…` : query;
+      nodes.quikyHeading.textContent =
+        quikySearchPhase === "loading"
+          ? `Recherche pour « ${short} »…`
+          : quikySearchPhase === "error"
+            ? `Recherche indisponible pour « ${short} »`
+            : `Résultats pour « ${short} »`;
+    }
+    renderInstallState();
+  };
+
+  const searchQuiky = async (context: PageActivation, query: string): Promise<void> => {
+    const controller = quiky;
+    const trimmed = query.trim();
+    const sequence = ++quikySearchSequence;
+    const status = controller?.status();
+    if (!controller || !status?.available || !status.searchable || trimmed.length < 2) {
+      quikySearchPhase = "idle";
+      quikySearchMessage = "";
+      quikySearchResults = [];
+      renderQuikySearch();
+      return;
+    }
+
+    quikySearchPhase = "loading";
+    quikySearchMessage = "";
+    quikySearchResults = [];
+    renderQuikySearch();
+    try {
+      const results = await controller.search(trimmed, context.signal);
+      if (sequence !== quikySearchSequence || !isActive(context)) return;
+      quikySearchResults = results;
+      quikySearchPhase = results.length > 0 ? "ready" : "empty";
+    } catch (error) {
+      if (sequence !== quikySearchSequence || !isActive(context)) return;
+      if (error instanceof Error && error.name === "AbortError") return;
+      quikySearchResults = [];
+      quikySearchPhase = "error";
+      quikySearchMessage = quikyErrorMessage(error);
+    }
+    renderQuikySearch();
   };
 
   // ---------------------------------------------------------------------------
@@ -759,13 +881,35 @@ export function createStorePage(options: StorePageOptions): AppPage {
     return filters;
   };
 
+  /**
+   * Search results live beside the editorial shelf, not inside it: a FitGirl
+   * repack has no Store artwork, price or offer, and pretending it is a Store
+   * card would make the page promise things it cannot show. The panel appears
+   * only while the Store search has a query and the plugin declares a source.
+   */
+  const buildQuikySearch = (): HTMLElement => {
+    const panel = element("section", "quiky-results");
+    panel.hidden = true;
+    panel.setAttribute("aria-label", "Résultats FitGirl");
+    const head = element("div", "quiky-results__head");
+    nodes.quikyHeading = element("p", "quiky-results__title");
+    head.append(
+      nodes.quikyHeading,
+      element("span", "quiky-results__badge", "FitGirl"),
+    );
+    nodes.quikyList = element("div", "quiky-results__list");
+    panel.append(head, nodes.quikyList);
+    nodes.quikyPanel = panel;
+    return panel;
+  };
+
   const buildSkeleton = (): void => {
     if (!pageRoot) return;
     const body = element("div", "store-page__body");
     nodes.status = element("div", "store-status");
     nodes.status.setAttribute("aria-live", "polite");
     nodes.status.hidden = true;
-    body.append(buildHero(), buildShelf(), buildFilters());
+    body.append(buildHero(), buildShelf(), buildFilters(), buildQuikySearch());
     pageRoot.replaceChildren(buildBackdrop(), body, nodes.status);
   };
 
@@ -840,12 +984,13 @@ export function createStorePage(options: StorePageOptions): AppPage {
    * the bar is three pixels on the foot of the artwork and nothing else.
    */
   const buildInstall = (
-    game: GameSummary,
+    key: string,
     title: QuikyTitle,
+    gameId: string | null,
   ): { button: HTMLButtonElement; meter: HTMLElement } => {
     const button = element("button", "store-card__install");
     button.type = "button";
-    button.dataset.focusKey = `install-${game.id}`;
+    button.dataset.focusKey = `install-${key}`;
     button.dataset.phase = "idle";
     button.setAttribute("aria-label", `Installer ${title.title}`);
     const glyph = iconElement("download", "store-card__install-glyph");
@@ -854,7 +999,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     button.addEventListener("click", (event) => {
       // The card is one big link to the game page; installing is not going.
       event.stopPropagation();
-      void handleInstall(title.slug, game.id);
+      void handleInstall(title.slug, gameId);
     });
 
     // Spans, not divs: the artwork lives inside the card's open button, and a
@@ -870,7 +1015,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     fill.style.width = "0%";
     meter.append(fill);
 
-    installNodes.set(game.id, {
+    installNodes.set(key, {
       title,
       button,
       label,
@@ -1074,7 +1219,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
     const quikyTitle = quikyTitleFor(game);
     if (quikyTitle) {
-      const install = buildInstall(game, quikyTitle);
+      const install = buildInstall(game.id, quikyTitle, game.id);
       media.append(install.meter);
       card.append(install.button);
     }
@@ -1152,6 +1297,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const games = visibleGames();
     if (cardSignature(games) === renderedGameIds) renderInstallState();
     else renderCards(games);
+    renderQuikySearch();
   };
 
   const teardownQuiky = (): void => {
@@ -1258,6 +1404,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     renderMorePanel();
     renderWhyPanel();
     renderStatus();
+    renderQuikySearch();
     restoreFocus(focusSnapshot);
   };
 
@@ -1413,7 +1560,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const controller = createQuikyController(quikyClient);
       quiky = controller;
       quikyOff = controller.onChange(onQuikyChange);
-      void controller.load(context.signal);
+      void controller.load(context.signal).then(() => {
+        if (!isActive(context)) return;
+        void searchQuiky(context, route.query);
+      });
       void loadOwned(context);
       void loadHome(context).then(() => {
         if (
@@ -1434,6 +1584,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
       transientStatus = "";
       morePlatformsOpen = false;
       whyOpen = false;
+      quikySearchSequence += 1;
+      quikySearchPhase = "idle";
+      quikySearchMessage = "";
+      quikySearchResults = [];
+      renderedQuikySearch = "";
       teardownQuiky();
       const focusKey = captureFocus()?.focusKey ?? null;
       const restoreState: PageRestoreState = {

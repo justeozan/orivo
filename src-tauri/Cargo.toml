@@ -80,6 +80,14 @@ ndk-context = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+# The privileged half of the Quiky plugin. The `.orivo-plugin` archive is
+# deliberately data-only, so the FitGirl search/scrape/aria2/Wine pipeline lives
+# in a host crate that is linked into Orivo at build time. It is vendored from
+# the plugin repository (justeozan/orivo-plugin-quiky, `host/rust`) rather than
+# referenced by path, because Orivo's CI and release builds check out only this
+# repository — an out-of-repo path dependency would not resolve there. See
+# quiky-host/README.md for how to re-sync the vendored copy.
+quiky_host = { package = "orivo-plugin-quiky-host", path = "../quiky-host/rust" }
 
 # `keyring`'s default `v1` feature turns on `apple-native-keyring-store/keychain`
 # but never `protected`, and that crate compile_error!s on iOS without it. There
