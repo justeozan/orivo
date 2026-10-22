@@ -285,6 +285,7 @@ button { border: 0; cursor: pointer; }
 /* A store choice says where it leads on a second line. */
 .play-launch-option--store { display: grid; gap: 3px; }
 .play-launch-option__detail { color: #a9a4b0; font-size: 11.5px; }
+.library-source-action[hidden] { display: none; }
 .library-source-action {
   display: grid;
   width: 100%;

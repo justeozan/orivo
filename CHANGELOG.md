@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-## [0.3.8] - 2026-10-16
+## [0.3.9] - 2026-10-22
+
+### Added
+
+- A games folder on desktop. Choose it once from the Library's sources menu (*Games folder*), and every game in it joins the library by itself: an `.exe` sitting in the folder is a game, and a folder inside it is a game too, its largest game executable found up to three levels down. Setup programs, redistributables and crash handlers are never picked, and Steam's library folder is left to Steam. Orivo looks shortly after it starts and every three minutes after, so a game copied in appears without anything else to do; a short notice says how many games were added. A Windows game is launchable through Wine-Staging on a Mac, as it is when imported by hand.
 
 ### Added
 

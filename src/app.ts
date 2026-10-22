@@ -455,6 +455,7 @@ const SOURCE_ACCOUNT_CONNECTED_EVENT = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
+const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 /** The launch option a phone offers to download an Epic game rather than stream it (`moonlight_android.rs`). */
@@ -2183,6 +2184,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       }
     } catch (error) {
       showToast(messageFromError(error, "Could not import this game."));
+    }
+  };
+
+  const chooseGameFolder = async (): Promise<void> => {
+    closeLibraryMenu();
+    if (!isTauriRuntime()) {
+      showToast("The games folder is available in the Orivo desktop app.");
+      return;
+    }
+
+    try {
+      // Null means the dialog was cancelled. Otherwise the host is scanning now,
+      // and the GAME_FOLDER_SCANNED_EVENT listener reports what it added.
+      const folder = await invoke<string | null>("choose_game_folder");
+      if (folder) showToast(`Looking for games in ${folder}…`);
+    } catch (error) {
+      showToast(messageFromError(error, "Orivo could not use that folder."));
     }
   };
 
@@ -5557,6 +5575,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       navigate({ page: "settings", section: "plugins", attachGameId: null });
     } else if (action === "local") {
       void importGame();
+    } else if (action === "game-folder") {
+      void chooseGameFolder();
     } else if (action === "winlator-folder") {
       void connectWinlatorExportFolder();
     } else if (action === "winlator-import") {
@@ -5844,6 +5864,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         renderSourceAccountsPanel();
       },
     );
+    // The host scans the games folder in the background; a scan that found new
+    // games says so here, and the library is pulled again to show them.
+    void listen<number>(GAME_FOLDER_SCANNED_EVENT, (event) => {
+      const added = typeof event.payload === "number" ? event.payload : 0;
+      if (added <= 0) return;
+      void refreshLibrary();
+      showToast(added === 1 ? "1 game added from your games folder." : `${added} games added from your games folder.`);
+    });
     void listen<unknown>(SOURCE_LIBRARY_SYNCED_EVENT, (event) => {
       const result = normaliseSourceSyncResult(event.payload);
       if (!result) return;
@@ -6893,6 +6921,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     platformFeatures = features;
     renderPluginList();
     renderGameStartPreference();
+    const gameFolderRow = document.querySelector<HTMLElement>('[data-library-action="game-folder"]');
+    if (gameFolderRow) gameFolderRow.hidden = !features.localRunners;
   });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
@@ -7460,6 +7490,13 @@ function shell(): string {
               <button type="button" class="library-source-action" role="menuitem" data-library-action="local">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
+              </button>
+              <!-- Desktop only, for the same reason as the Wine rows: the folder is
+                   read by the host, and every game inside it is added on its own.
+                   Hidden until the platform features say the host can read it. -->
+              <button type="button" class="library-source-action" role="menuitem" data-library-action="game-folder" hidden>
+                <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
+                <span class="library-source-action__copy"><strong>Games folder</strong><small>Choose it once; every game in it is added on its own</small></span>
               </button>
               <!-- Android only, and deliberately not a desktop no-op: Winlator is
                    an Android application, and the folder chooser this opens does

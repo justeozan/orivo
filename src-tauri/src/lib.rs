@@ -7,6 +7,7 @@ mod epic_download;
 mod epic_install;
 mod game_artwork;
 mod game_detail;
+mod game_folder;
 mod game_media;
 mod gamestream;
 mod launcher;
@@ -76,7 +77,7 @@ use catalog::{
     Catalog, CatalogError, Game, GameSource, LaunchTarget, WINE_STAGING_RUNNER_ID,
     WINLATOR_RUNNER_ID, WineGameCompatibility, WineGameInventoryEntry, WineGraphicsBackend,
     WineGraphicsOptions, WineProfile, WinlatorDistribution, WinlatorProfile,
-    WinlatorShortcutInventoryEntry, is_console_runner_id,
+    WinlatorShortcutInventoryEntry, is_console_runner_id, local_game_id,
 };
 use futures_util::StreamExt;
 use game_detail::{
@@ -150,6 +151,14 @@ const SOURCE_ACCOUNT_CONNECTED_EVENT: &str = "source-account-authenticated";
 const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT: &str = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT: &str = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT: &str = "source-library-synced";
+/// Carries how many games a games-folder scan just added.
+const GAME_FOLDER_SCANNED_EVENT: &str = "game-folder-scanned";
+/// The record of the chosen games folder, kept beside the catalog.
+const GAME_FOLDER_RECORD: &str = "game-folder.json";
+const GAME_FOLDER_FIRST_SCAN_DELAY: Duration = Duration::from_secs(5);
+const GAME_FOLDER_SCAN_INTERVAL: Duration = Duration::from_secs(180);
+/// Scans can be asked for from several places at once; only one runs.
+static GAME_FOLDER_SCANNING: AtomicBool = AtomicBool::new(false);
 /// A first sign-in involves a password, a second factor and often a consent
 /// screen, so the window is given room before Orivo gives up on it.
 const SOURCE_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
@@ -960,6 +969,7 @@ pub fn run() {
             );
             app.manage(Arc::clone(&runners));
             app.manage(state);
+            spawn_game_folder_watch(app.handle().clone());
             app.manage(detail);
             app.manage(media);
             // Which stores are connected is answered from this secret-free
@@ -1092,6 +1102,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_library,
             import_game,
+            choose_game_folder,
             fetch_game_artwork,
             reset_game_artwork,
             remove_game,
@@ -4778,6 +4789,133 @@ fn import_game(app: AppHandle, state: State<'_, AppState>) -> Result<ImportRespo
             imported_id: Some(imported_id),
         })
     }
+}
+
+/// Let the player choose the folder their games live in. Every game in it is
+/// then added by `run_game_folder_scan`, which this starts without waiting.
+/// Returns the folder's name, or `None` when the dialog was cancelled.
+#[tauri::command]
+fn choose_game_folder(app: AppHandle) -> Result<Option<String>, String> {
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        return Ok(None);
+    }
+    #[cfg(desktop)]
+    {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Choose your games folder")
+            .pick_folder()
+        else {
+            return Ok(None);
+        };
+        let record = game_folder_record(&app).ok_or("The app data folder is unavailable.")?;
+        game_folder::store_folder(&record, &folder).map_err(|error| error.to_string())?;
+        let label = folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Games folder")
+            .to_string();
+        let scanning = app.clone();
+        thread::spawn(move || run_game_folder_scan(&scanning));
+        Ok(Some(label))
+    }
+}
+
+fn game_folder_record(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|directory| directory.join(GAME_FOLDER_RECORD))
+}
+
+/// Keep the games folder in step with the disk: look in it shortly after
+/// startup and then every few minutes, so a game copied in appears by itself.
+fn spawn_game_folder_watch(app: AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(GAME_FOLDER_FIRST_SCAN_DELAY);
+        loop {
+            run_game_folder_scan(&app);
+            thread::sleep(GAME_FOLDER_SCAN_INTERVAL);
+        }
+    });
+}
+
+fn run_game_folder_scan(app: &AppHandle) {
+    if GAME_FOLDER_SCANNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let added = scan_game_folder(app);
+    GAME_FOLDER_SCANNING.store(false, Ordering::Release);
+    if added > 0 {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_FOLDER_SCANNED_EVENT, added);
+    }
+}
+
+/// Add every game in the chosen folder that the catalog does not hold yet.
+/// Returns how many were added. Games already in the library keep their
+/// state, and nothing is removed when a game leaves the folder.
+fn scan_game_folder(app: &AppHandle) -> usize {
+    let Some(record) = game_folder_record(app) else {
+        return 0;
+    };
+    let Some(folder) = game_folder::stored_folder(&record) else {
+        return 0;
+    };
+    let Some(state) = app.try_state::<AppState>() else {
+        return 0;
+    };
+    let known = match state.catalog.read() {
+        Ok(catalog) => catalog
+            .games
+            .iter()
+            .map(|game| game.id.clone())
+            .collect::<BTreeSet<_>>(),
+        Err(_) => return 0,
+    };
+    // Copying artwork is the slow part, so it happens before the catalog
+    // lease is taken: an import or a launch never waits behind a scan.
+    let mut found = Vec::new();
+    for executable in game_folder::discover_games(&folder) {
+        if known.contains(&local_game_id(&executable)) {
+            continue;
+        }
+        let Ok(mut game) = Game::from_executable(&executable) else {
+            continue;
+        };
+        let _ = cache_game_media(app, &mut game);
+        found.push(game);
+    }
+    if found.is_empty() {
+        return 0;
+    }
+
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return 0;
+    };
+    let mut next = match state.catalog.read() {
+        Ok(catalog) => catalog.clone(),
+        Err(_) => return 0,
+    };
+    let mut added = 0;
+    for game in found {
+        if next.add(game).is_ok() {
+            added += 1;
+        }
+    }
+    if added == 0 {
+        return 0;
+    }
+    // Same as a manual import: a Windows .exe becomes launchable through
+    // Wine-Staging in the same transaction, where Wine-Staging is installed.
+    auto_apply_wine_to_direct_games(&mut next, &state.wine_prefix_root);
+    if persist_catalog(&next, &state.catalog_path).is_err() {
+        return 0;
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+    added
 }
 
 /// Download best-effort cover/hero art for a game via the keyless Steam Store
