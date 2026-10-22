@@ -21,9 +21,54 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One draft for the whole release, created before any build starts. Each
+  # macOS build runs tauri-action, and when no draft exists yet, each one used to
+  # create its own: the assets split between them and the verify step read
+  # whichever it found, so a complete release never reached it. With the draft
+  # made here, tauri-action only ever finds that one.
+  prepare-draft:
+    name: Create the draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create the draft if it does not exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_TAG" ]; then
+            tag="$REF_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          if gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -qx "$tag"; then
+            echo "A release for $tag already exists; the builds add their assets to it."
+            exit 0
+          fi
+          gh release create "$tag" --draft --title "Orivo ${tag#v}" --notes "$(cat <<'NOTES'
+          ## Downloads
+
+          - **macOS:** download the `.dmg` matching your Mac (Apple Silicon or Intel).
+          - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
+          - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
+          - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
+
+          The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
+          The `.aab` (Android App Bundle) is for Google Play uploads.
+
+          Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
+          NOTES
+          )"
+
   release:
     name: Build ${{ matrix.label }}
     runs-on: ${{ matrix.platform }}
+    needs: prepare-draft
     strategy:
       fail-fast: false
       matrix:
@@ -150,6 +195,7 @@ jobs:
   android:
     name: Build Android (arm64 APK + AAB)
     runs-on: ubuntu-latest
+    needs: prepare-draft
     env:
       # One place: the SDK package to install, and the path Tauri is pointed at.
       NDK_VERSION: 27.0.12077973
