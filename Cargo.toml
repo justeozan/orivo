@@ -1,5 +1,5 @@
 [workspace]
-members = ["src-tauri", "sdk/orivo-plugin-sdk", "tauri-plugin-orivo-saf"]
+members = ["src-tauri", "sdk/orivo-plugin-sdk", "tauri-plugin-orivo-saf", "quiky-host/rust"]
 resolver = "2"
 
 [profile.dev]

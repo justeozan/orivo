@@ -1,0 +1,16 @@
+  FreeArc usage license
+  ~~~~~~~~~~~~~~~~~~~~~
+
+  FreeArc Copyright (C) 2004-2012 Bulat Ziganshin.
+
+  You can use FreeArc on any computer, including a computer in a commercial
+  organization. You don't need to register or pay for FreeArc.
+
+  See Contributors.txt for full list of program contributors.
+
+  File FreeArcCodecs.dll cannot be redistributed without my prior written
+  permission.
+
+
+  --
+  Bulat Ziganshin

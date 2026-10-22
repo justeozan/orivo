@@ -17,6 +17,8 @@ export interface QuikyTitle {
   /** Normalised alternative titles used to match a store card. */
   matchTitles: string[];
   downloadBytes: number;
+  /** `fitgirl`, `inno` or `nsis`; only used as a badge. */
+  source?: string;
   installed: boolean;
   installPath: string | null;
 }
@@ -24,6 +26,8 @@ export interface QuikyTitle {
 export interface QuikyStatus {
   /** False when the plugin is absent: the whole feature stays hidden. */
   available: boolean;
+  /** True when the plugin also declares a searchable source. */
+  searchable?: boolean;
   pluginName: string;
   version: string;
   message: string;
@@ -53,6 +57,8 @@ export interface QuikyProgress {
  */
 export interface QuikyClient {
   getStatus(signal: AbortSignal): Promise<QuikyStatus>;
+  /** Optional so an older host (or a test double) still satisfies the client. */
+  search?(query: string, signal: AbortSignal): Promise<QuikyTitle[]>;
   startInstall(slug: string, gameId: string | null, signal: AbortSignal): Promise<void>;
   cancelInstall(slug: string, signal: AbortSignal): Promise<void>;
   subscribe(onProgress: (progress: QuikyProgress) => void): () => void;
@@ -62,6 +68,8 @@ export interface QuikyClient {
 export interface QuikyController {
   load(signal: AbortSignal): Promise<void>;
   status(): QuikyStatus;
+  /** Search the plugin's source and merge the results into `status().titles`. */
+  search(query: string, signal: AbortSignal): Promise<QuikyTitle[]>;
   progressFor(slug: string): QuikyProgress | null;
   install(slug: string, gameId?: string | null): Promise<void>;
   cancel(slug: string): Promise<void>;
@@ -80,7 +88,14 @@ const BUSY_PHASES: ReadonlySet<QuikyPhase> = new Set<QuikyPhase>([
 
 /** What the Store sees whenever Quiky is missing, broken or unreachable. */
 export function unavailableQuikyStatus(): QuikyStatus {
-  return { available: false, pluginName: "", version: "", message: "", titles: [] };
+  return {
+    available: false,
+    searchable: false,
+    pluginName: "",
+    version: "",
+    message: "",
+    titles: [],
+  };
 }
 
 function isTauriRuntime(): boolean {
@@ -114,10 +129,15 @@ function readQuikyTitle(value: unknown): QuikyTitle[] {
         ? raw.matchTitles.filter((entry): entry is string => typeof entry === "string")
         : [],
       downloadBytes: typeof raw.downloadBytes === "number" ? raw.downloadBytes : 0,
+      source: typeof raw.source === "string" ? raw.source : undefined,
       installed: raw.installed === true,
       installPath: typeof raw.installPath === "string" ? raw.installPath : null,
     },
   ];
+}
+
+function readQuikyTitles(value: unknown): QuikyTitle[] {
+  return Array.isArray(value) ? value.flatMap(readQuikyTitle) : [];
 }
 
 function readQuikyStatus(value: unknown): QuikyStatus {
@@ -126,10 +146,11 @@ function readQuikyStatus(value: unknown): QuikyStatus {
   if (raw.available !== true) return unavailableQuikyStatus();
   return {
     available: true,
+    searchable: raw.searchable === true,
     pluginName: typeof raw.pluginName === "string" ? raw.pluginName : "",
     version: typeof raw.version === "string" ? raw.version : "",
     message: typeof raw.message === "string" ? raw.message : "",
-    titles: Array.isArray(raw.titles) ? raw.titles.flatMap(readQuikyTitle) : [],
+    titles: readQuikyTitles(raw.titles),
   };
 }
 
@@ -148,6 +169,13 @@ export function createDefaultQuikyClient(): QuikyClient {
       } catch {
         return unavailableQuikyStatus();
       }
+    },
+    async search(query, signal) {
+      if (!isTauriRuntime()) return [];
+      assertActive(signal);
+      const results = await invoke<unknown>("search_quiky", { query });
+      assertActive(signal);
+      return readQuikyTitles(results);
     },
     async startInstall(slug, gameId, signal) {
       if (!isTauriRuntime()) return;
@@ -314,6 +342,19 @@ export function createQuikyController(client: QuikyClient): QuikyController {
 
     status() {
       return status;
+    },
+
+    async search(query, signal) {
+      if (disposed || !status.available || !status.searchable || !client.search) return [];
+      const results = await client.search(query, signal);
+      if (disposed || signal.aborted) return [];
+      const known = new Map(status.titles.map((entry) => [entry.slug, entry]));
+      for (const result of results) {
+        if (!known.has(result.slug)) known.set(result.slug, result);
+      }
+      status = { ...status, titles: [...known.values()] };
+      notify();
+      return results.map((result) => known.get(result.slug) ?? result);
     },
 
     progressFor(slug) {
