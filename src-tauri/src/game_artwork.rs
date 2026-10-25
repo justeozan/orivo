@@ -96,13 +96,6 @@ impl ArtworkSet {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.cover.is_empty()
-            && self.landscape.is_empty()
-            && self.background.is_empty()
-            && self.logo.is_empty()
-    }
-
     /// Keep whichever role the better tier already filled. A SteamGridDB hit
     /// for the cover must not be replaced by Steam's smaller one just because
     /// Steam also answered.
@@ -170,6 +163,17 @@ pub(crate) fn download_client() -> Option<reqwest::Client> {
         .user_agent(USER_AGENT)
         .build()
         .ok()
+}
+
+/// Whether the artwork host answers at all. Any HTTP reply counts, even an
+/// error status: the question is only whether the network is there, because an
+/// artwork search that comes back empty looks the same offline as it does for a
+/// title nobody has art for.
+pub async fn is_reachable() -> bool {
+    let Some(client) = client() else {
+        return false;
+    };
+    client.head(STEAM_SEARCH_ENDPOINT).send().await.is_ok()
 }
 
 /// Resolve a title to artwork for all three roles. `steamgriddb_key` is the

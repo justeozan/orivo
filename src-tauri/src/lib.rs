@@ -1,4 +1,5 @@
 mod android_games;
+mod artwork_backfill;
 mod catalog;
 mod console_runner;
 mod console_saf;
@@ -981,6 +982,8 @@ pub fn run() {
             app.manage(Arc::clone(&runners));
             app.manage(state);
             spawn_game_folder_watch(app.handle().clone());
+            // Strengthen thin artwork a little after the first paint, quietly.
+            tauri::async_runtime::spawn(artwork_backfill::run(app.handle().clone()));
             app.manage(detail);
             app.manage(media);
             // Which stores are connected is answered from this secret-free
@@ -5054,7 +5057,8 @@ async fn reset_game_artwork(
             .ok_or_else(|| "This game is no longer in your library.".to_string())?
     };
 
-    apply_resolved_artwork(&app, &state, &credentials, &game_id, title).await
+    apply_resolved_artwork(&app, &state, &credentials, &game_id, title, ArtworkWrite::Everything)
+        .await
 }
 
 /// How many cards one call will try to fill. An import can bring in a library,
@@ -5157,10 +5161,16 @@ async fn fetch_runner_profile_artwork(
     let credentials_ref = &**credentials;
     let mut results = futures_util::stream::iter(batch.into_iter().map(
         |(game_id, title)| async move {
-            let found =
-                apply_resolved_artwork(app_ref, state_ref, credentials_ref, &game_id, title)
-                    .await
-                    .is_ok();
+            let found = apply_resolved_artwork(
+                app_ref,
+                state_ref,
+                credentials_ref,
+                &game_id,
+                title,
+                ArtworkWrite::Everything,
+            )
+            .await
+            .is_ok();
             (game_id, found)
         },
     ))
@@ -5181,30 +5191,66 @@ async fn fetch_runner_profile_artwork(
     Ok(ArtworkFillResult { filled, remaining })
 }
 
+/// Which of a game's artwork slots an artwork search may write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtworkWrite {
+    /// Every role, replacing whatever is there: the player asked for a reset,
+    /// or the card has nothing worth keeping.
+    Everything,
+    /// Only these roles, and only while their slot is still empty when the
+    /// result lands. The background top-up uses this so it can never replace
+    /// art a store published or the player chose, even one chosen while the
+    /// search was running.
+    GapsOnly(Vec<game_artwork::ArtworkRole>),
+}
+
+impl ArtworkWrite {
+    fn roles(&self) -> Vec<game_artwork::ArtworkRole> {
+        match self {
+            Self::Everything => game_artwork::ArtworkRole::all().to_vec(),
+            Self::GapsOnly(roles) => roles.clone(),
+        }
+    }
+
+    /// Whether `role` may be written into `game` as it is right now.
+    fn allows(&self, role: game_artwork::ArtworkRole, game: &Game) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::GapsOnly(roles) => {
+                roles.contains(&role) && artwork_backfill::missing_roles(game).contains(&role)
+            }
+        }
+    }
+}
+
 /// Find artwork for one game and write it into its card.
 ///
 /// Split out of the command so the same work can be done for a game the user
 /// never asked about by name: a library import brings in cards with no artwork
 /// at all, and filling them is the same four roles, the same trusted hosts and
-/// the same cache.
+/// the same cache. `write` narrows that to the empty slots for the launch-time
+/// top-up.
 async fn apply_resolved_artwork(
     app: &AppHandle,
     state: &AppState,
     credentials: &wallpaper_credentials::WallpaperCredentialsService,
     game_id: &str,
     title: String,
+    write: ArtworkWrite,
 ) -> Result<ArtworkResetResponse, String> {
     let artwork = game_artwork::resolve(&title, credentials.steamgriddb_api_key().as_deref()).await;
-    if artwork.is_empty() {
+    let wanted = write.roles();
+    if wanted.iter().all(|role| artwork.for_role(*role).is_empty()) {
         return Err(format!("No artwork was found for \u{201c}{title}\u{201d}."));
     }
 
     let cache_dir = media_cache_dir(app).map_err(|error| error.to_string())?;
     fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
     let stem = cache_stem(game_id);
-    // The four roles are independent, so they download side by side: a slow
-    // host costs one role's time, not the sum of all four.
-    let downloads = game_artwork::ArtworkRole::all().map(|role| {
+    // The roles are independent, so they download side by side: a slow host
+    // costs one role's time, not the sum of all of them.
+    let replaces = write == ArtworkWrite::Everything;
+    let downloads = wanted.iter().copied().map(|role| {
         let cache_dir = &cache_dir;
         let stem = &stem;
         let candidates = artwork.for_role(role);
@@ -5238,7 +5284,12 @@ async fn apply_resolved_artwork(
                 };
                 // A fresh filename each time, so the WebView repaints instead of
                 // serving its cached copy of a stable path.
-                remove_cached_artwork(cache_dir, &format!("{stem}-{prefix}-"));
+                // A top-up writes into an empty slot, and the player may fill it
+                // while the search runs; a sweep of the prefix could delete the
+                // file they just picked.
+                if replaces {
+                    remove_cached_artwork(cache_dir, &format!("{stem}-{prefix}-"));
+                }
                 let path =
                     cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
                 if fs::write(&path, &bytes).is_ok() {
@@ -5280,6 +5331,10 @@ async fn apply_resolved_artwork(
                 return Err("This game is no longer in your library.".to_string());
             };
             for (role, path) in downloaded {
+                if !write.allows(role, game) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
                 match role {
                     game_artwork::ArtworkRole::Cover => {
                         game.cover_path = Some(path.clone());
@@ -5303,6 +5358,10 @@ async fn apply_resolved_artwork(
                 }
                 replaced.push(role.token().to_string());
             }
+        }
+        // A top-up whose every slot was filled meanwhile has nothing to save.
+        if replaced.is_empty() {
+            return Ok(ArtworkResetResponse { title, replaced });
         }
         persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
         let mut catalog = state
