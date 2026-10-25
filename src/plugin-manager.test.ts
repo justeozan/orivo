@@ -221,9 +221,9 @@ describe("isPluginInstallBusy", () => {
 
 describe("formatPluginSize", () => {
   it("uses the units a French desktop shows and drops a meaningless zero", () => {
-    expect(formatPluginSize(48_234_496)).toBe("48,2 Mo");
-    expect(formatPluginSize(2_400_000_000)).toBe("2,4 Go");
-    expect(formatPluginSize(84_000)).toBe("84 ko");
+    expect(formatPluginSize(48_234_496)).toBe("48.2 MB");
+    expect(formatPluginSize(2_400_000_000)).toBe("2.4 GB");
+    expect(formatPluginSize(84_000)).toBe("84 KB");
     expect(formatPluginSize(0)).toBe("");
     expect(formatPluginSize(Number.NaN)).toBe("");
   });
@@ -233,8 +233,8 @@ describe("pluginErrorMessage", () => {
   it("prefers the host's own words and falls back to a sentence", () => {
     expect(pluginErrorMessage("Signature invalide.")).toBe("Signature invalide.");
     expect(pluginErrorMessage(new Error("Le disque est plein."))).toBe("Le disque est plein.");
-    expect(pluginErrorMessage(null)).toBe("L'opération n'a pas abouti.");
-    expect(pluginErrorMessage("   ")).toBe("L'opération n'a pas abouti.");
+    expect(pluginErrorMessage(null)).toBe("That did not work. Try again.");
+    expect(pluginErrorMessage("   ")).toBe("That did not work. Try again.");
   });
 });
 
@@ -703,14 +703,14 @@ describe("a host without the plugin commands", () => {
     const client = createDefaultPluginManagerClient();
     // The row prints this message, so it has to be a sentence and not a stack.
     await expect(client.installFromRegistry("com.orivo.dolphin", liveSignal())).rejects.toThrow(
-      "L'installation de plugins est réservée à l'application Orivo.",
+      "Installing plugins needs the Orivo desktop app.",
     );
 
     const controller = createPluginManagerController(client);
     await controller.load(liveSignal());
     await controller.installFromRegistry("com.orivo.dolphin");
     expect(controller.progressFor("com.orivo.dolphin")?.message).toBe(
-      "L'installation de plugins est réservée à l'application Orivo.",
+      "Installing plugins needs the Orivo desktop app.",
     );
     expect(formatInstallLabel(controller.progressFor("com.orivo.dolphin"), available())).toBe(
       "Retry",

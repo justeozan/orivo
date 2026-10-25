@@ -160,13 +160,13 @@ function isTauriRuntime(): boolean {
 }
 
 function assertActive(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("La requête plugin a été annulée.", "AbortError");
+  if (signal.aborted) throw new DOMException("The plugin request was cancelled.", "AbortError");
 }
 
 export function pluginErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "L'opération n'a pas abouti.";
+  return "That did not work. Try again.";
 }
 
 /* ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
       // Deliberately not caught, here and below: a refused install is news the
       // user needs, and the row has a place to print it.
       if (!isTauriRuntime()) {
-        throw new Error("L'installation de plugins est réservée à l'application Orivo.");
+        throw new Error("Installing plugins needs the Orivo desktop app.");
       }
       assertActive(signal);
       await invoke("install_plugin_from_registry", { pluginId });
@@ -307,7 +307,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
 
     async update(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("L'installation de plugins est réservée à l'application Orivo.");
+        throw new Error("Installing plugins needs the Orivo desktop app.");
       }
       assertActive(signal);
       await invoke("update_plugin", { pluginId });
@@ -315,7 +315,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
 
     async rollback(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Le retour à une version précédente est réservé à l'application Orivo.");
+        throw new Error("Going back to a previous version needs the Orivo desktop app.");
       }
       assertActive(signal);
       return await invoke<string>("rollback_plugin", { pluginId });
@@ -408,12 +408,12 @@ export function formatInstallLabel(
   }
 }
 
-/** Download weights, in the units a French desktop uses. */
+/** Download weights, in decimal units (a plugin row says "48.2 MB", as the OS does). */
 export function formatPluginSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
-  if (bytes < 1_000_000) return `${Math.max(1, Math.round(bytes / 1_000))} ko`;
-  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1).replace(".", ",")} Mo`;
-  return `${(bytes / 1_000_000_000).toFixed(1).replace(".", ",")} Go`;
+  if (bytes < 1_000_000) return `${Math.max(1, Math.round(bytes / 1_000))} KB`;
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+  return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 }
 
 /* ---------------------------------------------------------------------------
