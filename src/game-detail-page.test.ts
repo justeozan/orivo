@@ -1116,10 +1116,12 @@ describe("game detail page store media", () => {
     expect(tiles()[1]?.querySelector(".gd-gallery__play")).toBeNull();
   });
 
-  it("starts the first trailer muted on its own, and with sound when it is clicked", async () => {
-    await mountWith(createFallbackGameDetail(GAME_ID), {
-      getStoreMedia: async () => storeMedia,
-    });
+  it("starts the first trailer muted when sound is off in Settings, and with sound when it is clicked", async () => {
+    await mountWith(
+      createFallbackGameDetail(GAME_ID),
+      { getStoreMedia: async () => storeMedia },
+      { trailerSound: () => false },
+    );
 
     // Opened like a store page: the trailer is already in the hero, muted,
     // with no play button over it.
@@ -1143,6 +1145,13 @@ describe("game detail page store media", () => {
     video = container.querySelector<HTMLVideoElement>(".gd-hero .gd-hero__video");
     expect(video).not.toBeNull();
     expect(video?.muted).toBe(false);
+  });
+
+  it("plays a trailer that starts on its own with sound by default", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+    expect(container.querySelector<HTMLVideoElement>(".gd-hero__video")?.muted).toBe(false);
   });
 
   it("shows each tile as the arrows reach it, without a confirm press", async () => {

@@ -5164,6 +5164,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (beta) beta.checked = state.preferences.betaFeatures;
     const trailerAutoplay = root.querySelector<HTMLInputElement>("#preference-trailer-autoplay");
     if (trailerAutoplay) trailerAutoplay.checked = !state.preferences.trailerAutoplayOff;
+    const trailerSound = root.querySelector<HTMLInputElement>("#preference-trailer-sound");
+    if (trailerSound) trailerSound.checked = !state.preferences.trailerMuted;
     applyBetaFeatures();
     applyMotionPreference();
   };
@@ -6526,6 +6528,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return createGameDetailPage({
         navigate: (route) => navigate(route),
         autoplayTrailers: () => !state.preferences.trailerAutoplayOff,
+        trailerSound: () => !state.preferences.trailerMuted,
         // A deep link opened without history still has somewhere to go back to.
         back: () => router.back({ page: "library" }),
         play: (gameId) => {
@@ -6746,6 +6749,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     if (target instanceof HTMLInputElement && target.id === "preference-trailer-autoplay") {
       void savePreferences({ trailerAutoplayOff: !target.checked });
+    }
+    if (target instanceof HTMLInputElement && target.id === "preference-trailer-sound") {
+      void savePreferences({ trailerMuted: !target.checked });
     }
   });
 
@@ -8427,7 +8433,11 @@ function shell(): string {
                 <div class="settings-choices">
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-trailer-autoplay" />
-                    <span><strong>Play trailers automatically</strong><small>A game's page starts its first trailer on its own, muted. Off, the trailer waits for you.</small></span>
+                    <span><strong>Play trailers automatically</strong><small>A game's page starts its first trailer on its own. Off, the trailer waits for you.</small></span>
+                  </label>
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-trailer-sound" />
+                    <span><strong>Play trailers with sound</strong><small>A trailer that starts by itself plays its sound. Off, it starts muted; one you choose always has sound.</small></span>
                   </label>
                 </div>
                 <p class="settings-group__label">Beta &amp; debug</p>

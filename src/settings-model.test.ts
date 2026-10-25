@@ -36,6 +36,7 @@ describe("settings model", () => {
       betaFeatures: false,
       showEditorialGames: false,
       trailerAutoplayOff: false,
+      trailerMuted: false,
     });
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -66,6 +67,7 @@ describe("settings model", () => {
       betaFeatures: true,
       showEditorialGames: true,
       trailerAutoplayOff: true,
+      trailerMuted: true,
     } as const;
     expect(applyPreferencesUpdate(current, { reset: true, storeRegion: "de" })).toEqual(
       DEFAULT_PREFERENCES,

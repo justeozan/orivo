@@ -99,6 +99,10 @@ pub struct PreferencesDto {
     /// default, which is to play.
     #[serde(default)]
     pub trailer_autoplay_off: bool,
+    /// Opt-out, like the one above: trailers that start on their own play
+    /// with sound unless this is set.
+    #[serde(default)]
+    pub trailer_muted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -113,6 +117,7 @@ pub struct PreferencesUpdate {
     pub beta_features: Option<bool>,
     pub show_editorial_games: Option<bool>,
     pub trailer_autoplay_off: Option<bool>,
+    pub trailer_muted: Option<bool>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -191,6 +196,9 @@ impl PreferencesService {
             }
             if let Some(off) = update.trailer_autoplay_off {
                 preferences.trailer_autoplay_off = off;
+            }
+            if let Some(muted) = update.trailer_muted {
+                preferences.trailer_muted = muted;
             }
         }
         self.save_atomically(&preferences)?;
@@ -387,6 +395,7 @@ mod tests {
                 beta_features: Some(true),
                 show_editorial_games: Some(true),
                 trailer_autoplay_off: Some(true),
+                trailer_muted: Some(true),
                 reset: false,
             })
             .unwrap();

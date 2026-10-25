@@ -41,6 +41,8 @@ export interface Preferences {
   showEditorialGames: boolean;
   /** Opt-out: a game page plays its first trailer on its own unless set. */
   trailerAutoplayOff: boolean;
+  /** Opt-out: a trailer that starts by itself plays with sound unless set. */
+  trailerMuted: boolean;
 }
 
 export interface PreferencesUpdate {
@@ -53,6 +55,7 @@ export interface PreferencesUpdate {
   betaFeatures?: boolean;
   showEditorialGames?: boolean;
   trailerAutoplayOff?: boolean;
+  trailerMuted?: boolean;
   reset?: boolean;
 }
 
@@ -72,6 +75,7 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   betaFeatures: false,
   showEditorialGames: false,
   trailerAutoplayOff: false,
+  trailerMuted: false,
 });
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -151,6 +155,7 @@ export function normalisePreferences(value: unknown): Preferences {
       record.showEditorialGames === true || record.show_editorial_games === true,
     trailerAutoplayOff:
       record.trailerAutoplayOff === true || record.trailer_autoplay_off === true,
+    trailerMuted: record.trailerMuted === true || record.trailer_muted === true,
   };
 }
 

@@ -230,6 +230,11 @@ export interface GameDetailPageOptions {
    */
   autoplayTrailers?(): boolean;
   /**
+   * Whether a trailer that starts on its own plays its sound (a Settings
+   * choice, on by default). Absent means yes. A chosen trailer always does.
+   */
+  trailerSound?(): boolean;
+  /**
    * Notifies the shell that a catalog change (new home art, refetched cover,
    * or a removed game) means the Library needs to reload so its cards and hero
    * reflect the change.
@@ -1543,9 +1548,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     player.controls = true;
     player.preload = "auto";
     player.playsInline = true;
-    // Chosen by a click, it plays with sound; started by the page, muted,
-    // which is also the only way a WebView lets a video start by itself.
-    player.muted = storeSelection?.auto === true;
+    // Chosen by a click, it plays with sound; started by the page, it follows
+    // the Settings choice. If the WebView refuses to start it with sound, it
+    // starts muted rather than not at all (below).
+    player.muted = storeSelection?.auto === true && !(options.trailerSound?.() ?? true);
     player.autoplay = true;
     player.src = video.src;
     if (video.poster) player.poster = video.poster;
@@ -1573,7 +1579,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       play.hidden = false;
     });
     void player.play()?.catch(() => {
-      play.hidden = false;
+      if (player.muted) {
+        play.hidden = false;
+        return;
+      }
+      player.muted = true;
+      void player.play()?.catch(() => {
+        play.hidden = false;
+      });
     });
     heroPlayer = { src: video.src, player, play };
     frame.append(player, play);

@@ -41,9 +41,10 @@ describe("the main window", () => {
   });
 
   it("is otherwise the same window on macOS", () => {
-    expect({ ...macos[0], fullscreen: shared[0].fullscreen, center: shared[0].center }).toEqual(
-      shared[0],
-    );
+    const { shadow, ...rest } = macos[0] as typeof macos[0] & { shadow?: boolean };
+    expect({ ...rest, fullscreen: shared[0].fullscreen, center: shared[0].center }).toEqual(shared[0]);
+    // The macOS shadow draws a light rim, a white line along a covered screen.
+    expect(shadow).toBe(false);
   });
 
   it("is the void before the WebView has painted anything", () => {
