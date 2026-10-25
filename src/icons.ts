@@ -212,9 +212,9 @@ const paths: Record<IconName, string> = {
     '<path fill="currentColor" stroke="none" d="M11.4 9.6v4.2H7.2V9.6h4.2zm0 9.6V15H7.2v4.2h4.2zm5.4-9.6v4.2h-4.2V9.6h4.2zm0 9.6V15h-4.2v4.2h4.2zM7.2 5.4V2.7c0-1.16.94-2.1 2.1-2.1h5.4c1.16 0 2.1.94 2.1 2.1v2.7h6.3a.9.9 0 0 1 .9.9v13.8a3.3 3.3 0 0 1-3.3 3.3H3.3A3.3 3.3 0 0 1 0 20.1V6.3a.9.9 0 0 1 .9-.9h6.3zM9 2.7v2.7h6V2.7a.3.3 0 0 0-.3-.3H9.3a.3.3 0 0 0-.3.3zM1.8 20.1a1.5 1.5 0 0 0 1.5 1.5h17.4a1.5 1.5 0 0 0 1.5-1.5V7.2H1.8v12.9z" />',
   microsoft:
     '<path fill="currentColor" stroke="none" d="M3 3h8.4v8.4H3zM12.6 3H21v8.4h-8.4zM3 12.6h8.4V21H3zM12.6 12.6H21V21h-8.4z" />',
-  // Instant Gaming sells keys, so its mark is a key rather than a storefront.
+  // Instant Gaming's own emblem, from its site's logo file.
   "instant-gaming":
-    '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M8.6 6.4a5.6 5.6 0 1 0 0 11.2 5.6 5.6 0 0 0 5.3-3.8h1.6v2.4h2.3v-2.4h1.1v2.4h2.3v-4.6h-7.3A5.6 5.6 0 0 0 8.6 6.4Zm0 3.6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" />',
+    '<g stroke="none" transform="translate(1.9 1) scale(0.0632)"><g transform="matrix(1.013953 0 0 1.013953 .002702 -4.857437)"><path fill="currentColor" d="M50.082 4.795a16.72 16.72 0 0 0-7.939 2.242L8.391 26.51C.368 31.137-2.383 41.393 2.248 49.414c3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.375-2.248l33.752-19.472c8.023-4.627 10.774-14.884 6.143-22.904-3.186-5.513-9.032-8.533-14.982-8.379zm84.151 48.289c-2.896 0-5.793.749-8.389 2.246L8.389 123.092c-8.025 4.63-10.774 14.884-6.141 22.904 3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.373-2.248l109.063-62.922 134.232 77.443L33.556 302.176v-58.082l1.859-1.073-24.527-24.581-2.5 1.454c-5.192 2.995-8.389 8.531-8.389 14.521v96.801c0 5.991 3.197 11.526 8.389 14.521 2.596 1.498 5.493 2.246 8.391 2.246a16.77 16.77 0 0 0 8.389-2.246L310.41 181.172a16.77 16.77 0 0 0 8.391-14.52c.002-5.992-3.199-11.525-8.391-14.52l-83.609-48.236c-.179-.108-.36-.212-.543-.312L142.621 55.33a16.78 16.78 0 0 0-8.389-2.246z" /></g></g>',
 };
 
 /**
@@ -232,14 +232,17 @@ const brandPaths: Partial<Record<IconName, string>> = {
   gog: paths.gog.replace('fill="currentColor"', 'fill="#b25fd6"'),
   ubisoft: paths.ubisoft.replace('fill="currentColor"', 'fill="#f4f3f7"'),
   xbox: paths.xbox.replace('fill="currentColor"', 'fill="#107c10"'),
-  "microsoft-store": paths["microsoft-store"].replace('fill="currentColor"', 'fill="#f4f3f7"'),
+  // The Store's bag with Microsoft's four windows, as it appears in colour.
+  "microsoft-store":
+    '<path fill="#f4f3f7" stroke="none" d="M7.2 5.4V2.7c0-1.16.94-2.1 2.1-2.1h5.4c1.16 0 2.1.94 2.1 2.1v2.7h6.3a.9.9 0 0 1 .9.9v13.8a3.3 3.3 0 0 1-3.3 3.3H3.3A3.3 3.3 0 0 1 0 20.1V6.3a.9.9 0 0 1 .9-.9h6.3zM9 2.7v2.7h6V2.7a.3.3 0 0 0-.3-.3H9.3a.3.3 0 0 0-.3.3zM1.8 20.1a1.5 1.5 0 0 0 1.5 1.5h17.4a1.5 1.5 0 0 0 1.5-1.5V7.2H1.8v12.9z" /><path fill="#f25022" stroke="none" d="M7.2 9.6h4.2v4.2H7.2z" /><path fill="#7fba00" stroke="none" d="M12.6 9.6h4.2v4.2h-4.2z" /><path fill="#00a4ef" stroke="none" d="M7.2 15h4.2v4.2H7.2z" /><path fill="#ffb900" stroke="none" d="M12.6 15h4.2v4.2h-4.2z" />',
   // The Microsoft mark is the one case where the colours carry the identity.
   microsoft:
     '<path fill="#f25022" stroke="none" d="M3 3h8.4v8.4H3z" />' +
     '<path fill="#7fba00" stroke="none" d="M12.6 3H21v8.4h-8.4z" />' +
     '<path fill="#00a4ef" stroke="none" d="M3 12.6h8.4V21H3z" />' +
     '<path fill="#ffb900" stroke="none" d="M12.6 12.6H21V21h-8.4z" />',
-  "instant-gaming": paths["instant-gaming"].replace('fill="currentColor"', 'fill="#f76b15"'),
+  "instant-gaming":
+    '<defs><linearGradient id="ig-a" x1="-.005" y1="347.983" x2="319.1" y2="166.653" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff8a15"/><stop offset="1" stop-color="#ff3131"/></linearGradient><linearGradient id="ig-b" x1="10.889" y1="218.57" x2="97.001" y2="72.088" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff771b"/><stop offset="1" stop-color="#ff452b" stop-opacity="0"/></linearGradient></defs><g stroke="none" transform="translate(1.9 1) scale(0.0632)"><g transform="matrix(1.013953 0 0 1.013953 .002702 -4.857437)"><path fill="url(#ig-a)" d="M50.082 4.795a16.72 16.72 0 0 0-7.939 2.242L8.391 26.51C.368 31.137-2.383 41.393 2.248 49.414c3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.375-2.248l33.752-19.472c8.023-4.627 10.774-14.884 6.143-22.904-3.186-5.513-9.032-8.533-14.982-8.379zm84.151 48.289c-2.896 0-5.793.749-8.389 2.246L8.389 123.092c-8.025 4.63-10.774 14.884-6.141 22.904 3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.373-2.248l109.063-62.922 134.232 77.443L33.556 302.176v-58.082l1.859-1.073-24.527-24.581-2.5 1.454c-5.192 2.995-8.389 8.531-8.389 14.521v96.801c0 5.991 3.197 11.526 8.389 14.521 2.596 1.498 5.493 2.246 8.391 2.246a16.77 16.77 0 0 0 8.389-2.246L310.41 181.172a16.77 16.77 0 0 0 8.391-14.52c.002-5.992-3.199-11.525-8.391-14.52l-83.609-48.236c-.179-.108-.36-.212-.543-.312L142.621 55.33a16.78 16.78 0 0 0-8.389-2.246z" /><path fill="url(#ig-b)" d="M184.481 118.255L15.633 215.661l-6.096 3.57 24.019 24.863 184.483-106.478z" /></g></g>',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {
