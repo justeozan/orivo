@@ -451,6 +451,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   height: var(--search-h);
   gap: 11px;
   padding: 0 12px 0 16px;
+  justify-content: center;
   border-radius: var(--search-r);
   color: rgba(237,230,226,.62);
   cursor: text;
@@ -468,17 +469,24 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   backdrop-filter: blur(22px) saturate(130%);
   content: "";
   opacity: 0;
-  transform: scaleX(.18);
-  transform-origin: 20px 50%;
+  transform: scaleX(.14);
+  transform-origin: 50% 50%;
   transition: opacity 200ms ease, transform 420ms cubic-bezier(.2,.9,.25,1), border-color 160ms ease, background 160ms ease;
 }
-.search-control > :not(.icon) { opacity: 0; transform: translateX(-8px); transition: opacity 220ms ease, transform 360ms cubic-bezier(.2,.9,.25,1); }
+/* At rest the field and the shortcut take no room, so the magnifier sits in
+   the middle of the bar; opening grows them, which carries the magnifier out
+   to the pill's left edge as the glass widens around it. */
+.search-control input { flex: 0 1 0; width: 0; transition: flex-grow 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
+.search-shortcut { max-width: 0; overflow: hidden; transition: max-width 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
+.search-control > :not(.icon) { opacity: 0; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) input { flex-grow: 1; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) .search-shortcut { max-width: 64px; }
 .search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) { color: #ede6e2; }
 .search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)))::before { opacity: 1; transform: none; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; transform: none; transition-delay: 70ms; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; }
 
 .search-control .icon { width: 16px; height: 16px; }
-.search-control input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
+.search-control input { min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
 .search-control input::placeholder { color: #d1c9c5; opacity: .95; }
 .search-shortcut { display: flex; gap: 4px; }
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
