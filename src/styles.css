@@ -516,6 +516,61 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
 .avatar { width: var(--avatar-size); height: var(--avatar-size); border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
 
+/* The profile menu: the picture is the button, and a small glass card under
+   it holds the two things a player sets — a picture and a name. */
+.profile-control { position: relative; flex: none; display: flex; }
+.profile-button { display: grid; padding: 0; place-items: center; border-radius: 50%; background: none; transition: box-shadow 160ms ease, transform 160ms ease; }
+.profile-button:hover,
+.profile-button[data-nav-focus],
+.profile-button[aria-expanded="true"] { box-shadow: 0 0 0 2px rgba(255,255,255,.28); }
+.profile-button:active { transform: scale(.96); }
+.profile-panel {
+  position: absolute;
+  z-index: 22;
+  top: calc(100% + 11px);
+  right: -4px;
+  display: flex;
+  width: 268px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 16px;
+  color: #f4f2f7;
+  background: rgba(22,20,23,.62);
+  box-shadow: 0 18px 44px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.055);
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  backdrop-filter: blur(24px) saturate(130%);
+  animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
+}
+.profile-panel[hidden] { display: none; }
+.profile-panel__picture { position: relative; flex: none; width: 52px; height: 52px; overflow: hidden; border-radius: 50%; cursor: pointer; }
+.profile-panel__picture img { width: 100%; height: 100%; object-fit: cover; background: #28242c; }
+/* Hovering the picture says it can be changed. */
+.profile-panel__picture-hint { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; background: rgba(10,10,14,.5); opacity: 0; transition: opacity 160ms ease; }
+.profile-panel__picture-hint .icon { width: 18px; height: 18px; }
+.profile-panel__picture:hover .profile-panel__picture-hint,
+.profile-panel__picture:focus-within .profile-panel__picture-hint { opacity: 1; }
+.profile-panel__fields { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.profile-panel__name {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 9px;
+  outline: 0;
+  color: #f4f2f7;
+  background: rgba(255,255,255,.06);
+  font-size: 13px;
+  font-weight: 560;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.profile-panel__name::placeholder { color: rgba(244,242,247,.42); font-weight: 450; }
+.profile-panel__name:focus { border-color: rgba(185,168,255,.55); background: rgba(255,255,255,.09); }
+.profile-panel__reset { align-self: flex-start; padding: 0; color: rgba(244,242,247,.5); background: none; font-size: 11.5px; }
+.profile-panel__reset:hover { color: #fff; }
+.profile-panel__reset[hidden] { display: none; }
+
 .feedback-button {
   display: grid;
   width: var(--tap-round);
@@ -1629,8 +1684,10 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* `overflow: hidden` alone does not round WebKit's composited layers: while a
    card widens (and while it tilts) the art is painted on its own layer and
    showed square corners outside the radius for the length of the animation.
-   A real clip holds for every layer underneath. */
-.card-media { clip-path: inset(0 round calc(var(--card-radius) - 1px)); -webkit-mask-image: -webkit-radial-gradient(white, black); }
+   A real clip holds for every layer underneath. Not on an artless card: a
+   clip or a mask makes the element a backdrop root, and the glass inside it
+   then had nothing behind it to blur — and it has no art to escape anyway. */
+.game-card:not(.is-art-missing) .card-media { clip-path: inset(0 round calc(var(--card-radius) - 1px)); -webkit-mask-image: -webkit-radial-gradient(white, black); }
 .card-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center top; opacity: 1; transform: scale(1); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1); }
 .card-art--landscape { object-position: center center; opacity: 0; transform: scale(1.025); }
 .game-card.is-selected .card-art--portrait { opacity: 0; transform: scale(1.012); }

@@ -18,6 +18,7 @@ import { ambientPalette } from "./ambient-colour";
 import { displayTitle } from "./game-title";
 import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
+import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } from "./profile";
 import { brandIcon, icon, type IconName } from "./icons";
 import {
   type BrowseMode,
@@ -682,6 +683,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     wallpaperSearchTermBackground: get<HTMLInputElement>("#wallpaper-search-term-background"),
     wallpaperSearchTermLogo: get<HTMLInputElement>("#wallpaper-search-term-logo"),
     notificationsControl: get<HTMLElement>(".notifications-control"),
+    profileControl: get<HTMLElement>(".profile-control"),
+    profileButton: get<HTMLButtonElement>("#profile-button"),
+    profilePanel: get<HTMLElement>("#profile-panel"),
+    profileAvatar: get<HTMLImageElement>("#profile-avatar"),
+    profilePanelAvatar: get<HTMLImageElement>("#profile-panel-avatar"),
+    profileAvatarInput: get<HTMLInputElement>("#profile-avatar-input"),
+    profileAvatarReset: get<HTMLButtonElement>("#profile-avatar-reset"),
+    profileName: get<HTMLInputElement>("#profile-name"),
     notificationsButton: get<HTMLButtonElement>("#notifications-button"),
     notificationsDot: get<HTMLElement>("#notifications-dot"),
     notificationsPanel: get<HTMLElement>("#notifications-panel"),
@@ -6847,6 +6856,57 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     setNotificationsOpen(!state.notifications.open);
   });
 
+  // The profile menu: a name and a picture, saved as they change.
+  let profile = loadProfile();
+  const renderProfile = (): void => {
+    const source = avatarSource(profile);
+    refs.profileAvatar.src = source;
+    refs.profilePanelAvatar.src = source;
+    refs.profileButton.setAttribute("aria-label", profile.name ? `Profile: ${profile.name}` : "Profile");
+    refs.profileButton.title = profile.name || "Profile";
+    if (document.activeElement !== refs.profileName) refs.profileName.value = profile.name;
+    refs.profileAvatarReset.hidden = !profile.avatar;
+  };
+  const setProfileOpen = (open: boolean, restoreFocus = false): void => {
+    refs.profilePanel.hidden = !open;
+    refs.profileButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+      if (state.notifications.open) setNotificationsOpen(false);
+      renderProfile();
+      refs.profileName.focus();
+      refs.profileName.select();
+    } else if (restoreFocus) {
+      refs.profileButton.focus();
+    }
+  };
+  renderProfile();
+  refs.profileButton.addEventListener("click", () => setProfileOpen(refs.profilePanel.hidden === true));
+  refs.profileName.addEventListener("input", () => {
+    profile = { ...profile, name: cleanName(refs.profileName.value) };
+    saveProfile(profile);
+    renderProfile();
+  });
+  refs.profileName.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") setProfileOpen(false, true);
+  });
+  refs.profileAvatarInput.addEventListener("change", () => {
+    const file = refs.profileAvatarInput.files?.[0];
+    refs.profileAvatarInput.value = "";
+    if (!file) return;
+    void avatarFromFile(file)
+      .then((avatar) => {
+        profile = { ...profile, avatar };
+        saveProfile(profile);
+        renderProfile();
+      })
+      .catch((error: unknown) => showToast(error instanceof Error ? error.message : "That picture could not be used."));
+  });
+  refs.profileAvatarReset.addEventListener("click", () => {
+    profile = { ...profile, avatar: "" };
+    saveProfile(profile);
+    renderProfile();
+  });
+
   refs.notificationsPanel.addEventListener("click", (event) => {
     const trigger = (event.target as Element | null)?.closest<HTMLElement>(
       "[data-notification-action]",
@@ -6900,6 +6960,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (state.notifications.open && !refs.notificationsControl.contains(target)) {
       setNotificationsOpen(false);
     }
+    if (!refs.profilePanel.hidden && !refs.profileControl.contains(target)) {
+      setProfileOpen(false);
+    }
     if (
       !refs.playLaunchMenu.hidden &&
       !refs.playLaunchMenu.contains(target) &&
@@ -6937,6 +7000,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (state.notifications.open && event.key === "Escape") {
       event.preventDefault();
       setNotificationsOpen(false, true);
+      return;
+    }
+
+    if (!refs.profilePanel.hidden && event.key === "Escape") {
+      event.preventDefault();
+      setProfileOpen(false, true);
       return;
     }
 
@@ -7816,7 +7885,24 @@ function shell(): string {
               <div id="notifications-list"></div>
             </div>
           </div>
-          <img class="avatar" src="/media/steam-avatar.png" alt="Steam profile" />
+          <!-- The profile: the picture opens a small menu to rename yourself
+               and change the picture. Nothing else lives here yet. -->
+          <div class="profile-control">
+            <button id="profile-button" class="profile-button" type="button" aria-label="Profile" aria-expanded="false" aria-controls="profile-panel">
+              <img id="profile-avatar" class="avatar" src="/media/steam-avatar.png" alt="" />
+            </button>
+            <div id="profile-panel" class="profile-panel" role="group" aria-label="Profile" hidden>
+              <label class="profile-panel__picture" title="Change picture">
+                <img id="profile-panel-avatar" src="/media/steam-avatar.png" alt="" />
+                <span class="profile-panel__picture-hint">${icon("cover")}</span>
+                <input id="profile-avatar-input" type="file" accept="image/*" hidden />
+              </label>
+              <div class="profile-panel__fields">
+                <input id="profile-name" class="profile-panel__name" type="text" maxlength="32" placeholder="Your name" aria-label="Your name" autocomplete="off" spellcheck="false" />
+                <button id="profile-avatar-reset" class="profile-panel__reset" type="button">Use the default picture</button>
+              </div>
+            </div>
+          </div>
         </div>
       </header>
 
