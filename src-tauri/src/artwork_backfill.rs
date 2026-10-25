@@ -39,7 +39,7 @@ use crate::{
 /// The first paint, the library sync and the games-folder scan all happen in
 /// the first seconds; the top-up waits until they have settled so it never
 /// competes with them for the network.
-const FIRST_PASS_DELAY: Duration = Duration::from_secs(20);
+const FIRST_PASS_DELAY: Duration = Duration::from_secs(8);
 /// One launch looks at no more games than this. A big library is topped up
 /// over several launches instead of in one burst.
 const MAX_GAMES_PER_LAUNCH: usize = 40;
@@ -69,19 +69,28 @@ const WATCHED_ROLES: [ArtworkRole; 3] = [
 /// publishes URLs of its own, and a Store card carries asset routes. A game
 /// served by any of those is not missing that role, and the top-up must not
 /// start downloading a second copy over it.
+/// Whether a stored artwork slot still points at a picture. The downloaded art
+/// lives in the OS cache directory, which macOS is free to empty: a slot whose
+/// file is gone is as empty as one never filled, and was the reason cards
+/// stayed blank while every slot looked answered. Bundled web paths
+/// (`/media/...`) are not files and always count.
+fn slot_usable(path: &Option<std::path::PathBuf>) -> bool {
+    path.as_deref().is_some_and(|path| path.starts_with("/media/") || path.exists())
+}
+
 pub(crate) fn missing_roles(game: &Game) -> Vec<ArtworkRole> {
-    let has_cover = game.cover_path.is_some()
+    let has_cover = slot_usable(&game.cover_path)
         || crate::store_artwork_url(game, crate::STORE_COVER_URL_KEY).is_some()
         || crate::steam_store_asset_url(game, "library_600x900.jpg").is_some()
         || crate::source_asset_url(game, catalog::SOURCE_COVER_URL_KEY).is_some();
     // The background slot is shared with the wallpaper the player may have
     // picked by hand (`home_image_path`), so a filled slot there is an answer.
-    let has_background = game.home_image_path.is_some()
-        || game.artwork_path.is_some()
+    let has_background = slot_usable(&game.home_image_path)
+        || slot_usable(&game.artwork_path)
         || crate::store_artwork_url(game, crate::STORE_HERO_URL_KEY).is_some()
         || crate::steam_store_asset_url(game, "library_hero.jpg").is_some()
         || crate::source_asset_url(game, catalog::SOURCE_HERO_URL_KEY).is_some();
-    let has_logo = game.logo_path.is_some()
+    let has_logo = slot_usable(&game.logo_path)
         || crate::steam_store_asset_url(game, "logo.png").is_some()
         || crate::source_asset_url(game, catalog::SOURCE_LOGO_URL_KEY).is_some();
 
@@ -367,6 +376,25 @@ pub(crate) async fn run(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real file, since a slot only counts while its picture exists.
+    fn existing(name: &str) -> String {
+        let directory = std::env::temp_dir().join("orivo-backfill-tests");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_slot_whose_file_is_gone_is_missing() {
+        let gone = game(json!({
+            "cover_path": "/nowhere/orivo-gone-cover.jpg",
+            "home_image_path": existing("h.jpg"),
+            "logo_path": existing("l.png"),
+        }));
+        assert_eq!(tokens(&gone), ["cover"]);
+    }
     use serde_json::json;
 
     fn game(value: serde_json::Value) -> Game {
@@ -392,13 +420,13 @@ mod tests {
     #[test]
     fn filled_slots_are_not_missing() {
         let full = game(json!({
-            "cover_path": "/c.jpg",
-            "home_image_path": "/h.jpg",
-            "logo_path": "/l.png",
+            "cover_path": existing("c.jpg"),
+            "home_image_path": existing("h.jpg"),
+            "logo_path": existing("l.png"),
         }));
         assert!(tokens(&full).is_empty());
         // Only the logo is absent: the common case this pass exists for.
-        let no_logo = game(json!({"cover_path": "/c.jpg", "artwork_path": "/a.jpg"}));
+        let no_logo = game(json!({"cover_path": existing("c.jpg"), "artwork_path": existing("a.jpg")}));
         assert_eq!(tokens(&no_logo), ["logo"]);
     }
 
@@ -427,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_top_up_writes_only_the_roles_still_empty() {
-        let no_logo = game(json!({"cover_path": "/c.jpg", "artwork_path": "/a.jpg"}));
+        let no_logo = game(json!({"cover_path": existing("c.jpg"), "artwork_path": existing("a.jpg")}));
         let write = ArtworkWrite::GapsOnly(vec![ArtworkRole::Logo, ArtworkRole::Cover]);
         // The logo is empty and was asked for.
         assert!(write.allows(ArtworkRole::Logo, &no_logo));
@@ -472,9 +500,9 @@ mod tests {
         hidden.hidden = true;
         let showcase = played("showcase-elden-ring", None);
         let mut complete = played("complete", None);
-        complete.cover_path = Some("/c.jpg".into());
-        complete.artwork_path = Some("/a.jpg".into());
-        complete.logo_path = Some("/l.png".into());
+        complete.cover_path = Some(existing("c.jpg").into());
+        complete.artwork_path = Some(existing("a.jpg").into());
+        complete.logo_path = Some(existing("l.png").into());
         let untitled = game(json!({"id": "untitled", "title": "  "}));
         let wanted = played("wanted", None);
         let picked = select_candidates(

@@ -111,6 +111,28 @@ button { border: 0; cursor: pointer; }
    shadow instead of standing on a tint. */
 .hero-image.is-active { opacity: 1; transform: scale(1); }
 
+/* Artwork search progress: a 2px line along the top edge of the window, in
+   the brand's violet, with a soft glow at its head. Fades out once complete. */
+.artwork-progress {
+  position: fixed;
+  z-index: 1000;
+  inset: 0 0 auto;
+  height: 2px;
+  pointer-events: none;
+  transition: opacity 500ms ease 300ms;
+}
+.artwork-progress[hidden] { display: none; }
+.artwork-progress span {
+  display: block;
+  width: var(--artwork-progress, 0%);
+  height: 100%;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(90deg, rgba(122, 140, 255, .55), #b9a8ff);
+  box-shadow: 0 0 10px rgba(185, 168, 255, .6);
+  transition: width 420ms cubic-bezier(.2, .8, .2, 1);
+}
+.artwork-progress.is-done { opacity: 0; }
+
 /* The ground a game stands on when it has no picture: one gradient for every
    game for now — cyan light top left, violet falling to magenta below, a deep
    indigo pool between — under a fixed grain. The cards in front of it are

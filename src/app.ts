@@ -629,6 +629,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     feedbackButton: get<HTMLButtonElement>("#feedback-button"),
     heroLayers: [get<HTMLImageElement>("#hero-a"), get<HTMLImageElement>("#hero-b")],
     heroGround: get<HTMLElement>("#hero-ground"),
+    artworkProgress: get<HTMLElement>("#artwork-progress"),
     genre: get<HTMLElement>("#hero-genre"),
     title: get<HTMLElement>("#hero-title"),
     logo: get<HTMLImageElement>("#hero-logo"),
@@ -737,6 +738,30 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const artworkPending = new Set<string>();
   let artworkRefreshTimer = 0;
+  /** How many games the running artwork search started with. */
+  let artworkBatchSize = 0;
+  let artworkProgressHide = 0;
+  const renderArtworkProgress = (): void => {
+    const bar = refs.artworkProgress;
+    const total = artworkBatchSize;
+    const done = Math.max(0, total - artworkPending.size);
+    const percent = total > 0 ? Math.round((done / total) * 100) : 100;
+    bar.style.setProperty("--artwork-progress", `${percent}%`);
+    bar.setAttribute("aria-valuenow", String(percent));
+    window.clearTimeout(artworkProgressHide);
+    if (artworkPending.size > 0) {
+      bar.hidden = false;
+      bar.classList.remove("is-done");
+      return;
+    }
+    // Finish the line, then let it fade, rather than vanishing mid-stroke.
+    bar.classList.add("is-done");
+    artworkProgressHide = window.setTimeout(() => {
+      bar.hidden = true;
+      bar.classList.remove("is-done");
+      artworkBatchSize = 0;
+    }, 900);
+  };
   /** Wordmarks already decoded and measured, by their catalog source. */
   const heroLogosReady = new Map<string, PreparedLogo>();
   let toastTimer: number | undefined;
@@ -6004,8 +6029,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     void listen<unknown>(GAME_ARTWORK_PROGRESS_EVENT, (event) => {
       const progress = readArtworkProgress(event.payload);
       if (!progress) return;
+      // The opening event names the whole batch; later ones only shrink it.
+      if (progress.pending.length > artworkBatchSize || artworkPending.size === 0) {
+        artworkBatchSize = progress.pending.length;
+      }
       artworkPending.clear();
       for (const id of progress.pending) artworkPending.add(id);
+      renderArtworkProgress();
       if (progress.found || progress.pending.length === 0) {
         window.clearTimeout(artworkRefreshTimer);
         artworkRefreshTimer = window.setTimeout(() => void refreshLibrary(), 450);
@@ -7672,6 +7702,9 @@ function messageFromError(error: unknown, fallback: string): string {
 
 function shell(): string {
   return `
+      <!-- A hairline across the top of the window while artwork is being
+           looked for: present, never in the way. -->
+      <div id="artwork-progress" class="artwork-progress" role="progressbar" aria-label="Finding artwork" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
       <!-- The topbar is the document banner, so it sits outside the page
            wrapper: a <header> nested in <main> is not a banner, and each page
            owns the only <main> on screen. -->
