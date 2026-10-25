@@ -111,42 +111,47 @@ button { border: 0; cursor: pointer; }
    shadow instead of standing on a tint. */
 .hero-image.is-active { opacity: 1; transform: scale(1); }
 
-/* The ground a game stands on when it has no picture (art-fallback.ts sets the
-   hues and the light's position). Two lights on a dark field, then a fixed
-   grain: dark enough at every hue for a light title to read on it. */
+/* The ground a game stands on when it has no picture: one gradient for every
+   game for now — cyan light top left, violet falling to magenta below, a deep
+   indigo pool between — under a fixed grain. The cards in front of it are
+   glass (.card-fallback), so it is what they refract. */
 .art-ground {
-  --art-hue: 262;
-  --art-hue-2: 222;
-  --art-x: 30%;
-  --art-y: 24%;
   background:
-    radial-gradient(85% 70% at var(--art-x) var(--art-y), hsl(var(--art-hue) 62% 42% / .78) 0%, hsl(var(--art-hue) 62% 30% / 0) 70%),
-    radial-gradient(90% 80% at calc(100% - var(--art-x) / 2) calc(100% - var(--art-y) / 3), hsl(var(--art-hue-2) 58% 30% / .7) 0%, hsl(var(--art-hue-2) 58% 22% / 0) 72%),
-    linear-gradient(165deg, hsl(var(--art-hue) 26% 13%) 0%, #0c0b10 78%);
+    radial-gradient(38% 30% at 30% 20%, rgba(84, 232, 255, .9) 0%, rgba(84, 232, 255, 0) 100%),
+    radial-gradient(45% 40% at 8% 45%, rgba(24, 92, 255, .85) 0%, rgba(24, 92, 255, 0) 100%),
+    radial-gradient(40% 35% at 85% 18%, rgba(132, 70, 255, .8) 0%, rgba(132, 70, 255, 0) 100%),
+    radial-gradient(42% 36% at 45% 80%, rgba(226, 64, 255, .85) 0%, rgba(226, 64, 255, 0) 100%),
+    radial-gradient(50% 45% at 72% 52%, rgba(38, 10, 92, .95) 0%, rgba(38, 10, 92, 0) 100%),
+    linear-gradient(160deg, #1673ff 0%, #4a3dff 40%, #3a1580 70%, #7a2cf0 100%);
 }
 .art-ground::before,
-.art-ground::after { position: absolute; inset: 0; content: ""; pointer-events: none; }
-.art-ground::before {
+.art-ground::after,
+.card-fallback::before,
+.card-fallback::after { position: absolute; inset: 0; content: ""; pointer-events: none; }
+.art-ground::before,
+.card-fallback::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
   background-size: 180px 180px;
   mix-blend-mode: overlay;
   opacity: .32;
 }
 /* While its artwork is being looked for, a slow light crosses the ground. */
-.art-ground::after {
+.art-ground::after,
+.card-fallback::after {
   background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .09) 50%, transparent 70%);
   background-size: 250% 100%;
   opacity: 0;
 }
 .art-ground.is-art-pending::after,
-.game-card.is-art-pending .art-ground::after { animation: art-ground-search 2.4s ease-in-out infinite; opacity: 1; }
+.game-card.is-art-pending .card-fallback::after { animation: art-ground-search 2.4s ease-in-out infinite; opacity: 1; }
 @keyframes art-ground-search { from { background-position: 120% 0; } to { background-position: -120% 0; } }
 @media (prefers-reduced-motion: reduce) {
   html:not([data-motion="full"]) .art-ground.is-art-pending::after,
-  html:not([data-motion="full"]) .game-card.is-art-pending .art-ground::after { animation: none; background: rgba(255, 255, 255, .05); }
+  html:not([data-motion="full"]) .game-card.is-art-pending .card-fallback::after { animation: none; background: rgba(255, 255, 255, .05); }
 }
 [data-motion="reduced"] .art-ground.is-art-pending::after,
-[data-motion="reduced"] .game-card.is-art-pending .art-ground::after { animation: none; background: rgba(255, 255, 255, .05); }
+[data-motion="reduced"] .game-card.is-art-pending .card-fallback::after { animation: none; background: rgba(255, 255, 255, .05); }
+.card-fallback::before { opacity: .2; }
 .hero-ground { position: absolute; inset: 0; }
 
 .scene-overlay { z-index: -2; }
@@ -1512,8 +1517,11 @@ button { border: 0; cursor: pointer; }
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
-/* With no picture of the game at all, the card wears its generated ground
-   (.art-ground) and its name: no real cover is behind it to carry the title. */
+/* With no picture of the game at all, the card turns to glass: the scene
+   behind it shows through, frosted and bent, and its name stands on it — no
+   real cover is there to carry the title. The rim and the two inner lights
+   are what make a blur read as a pane of glass rather than a smudge. */
+.game-card.is-art-missing .card-media { background: transparent; }
 .card-fallback {
   position: absolute;
   inset: 0;
@@ -1522,18 +1530,32 @@ button { border: 0; cursor: pointer; }
   gap: 6px;
   padding: 14px 12px;
   overflow: hidden;
+  border-radius: inherit;
   color: #f4f1f8;
   text-align: left;
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(255, 255, 255, .2) 0%, rgba(255, 255, 255, 0) 55%),
+    radial-gradient(90% 50% at 100% 100%, rgba(214, 120, 255, .16) 0%, rgba(214, 120, 255, 0) 60%),
+    linear-gradient(155deg, rgba(120, 200, 255, .14), rgba(40, 20, 110, .22) 55%, rgba(150, 70, 255, .18));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .42),
+    inset 0 0 0 1px rgba(255, 255, 255, .16),
+    inset 1px 0 0 rgba(160, 230, 255, .22),
+    inset 0 -14px 28px rgba(110, 60, 255, .18),
+    inset 14px 0 30px rgba(110, 220, 255, .1);
+  -webkit-backdrop-filter: blur(22px) saturate(175%) brightness(1.08) contrast(1.05);
+  backdrop-filter: blur(22px) saturate(175%) brightness(1.08) contrast(1.05);
 }
 .card-fallback__title {
   position: relative;
   display: -webkit-box;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 640;
-  letter-spacing: -.01em;
-  line-height: 1.18;
-  text-shadow: 0 1px 10px rgba(6, 6, 10, .6);
+  color: #f1d6ff;
+  font-size: 13.5px;
+  font-weight: 760;
+  letter-spacing: -.005em;
+  line-height: 1.12;
+  text-shadow: 0 1px 12px rgba(40, 10, 90, .55);
   overflow-wrap: break-word;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;

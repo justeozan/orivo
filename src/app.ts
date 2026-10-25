@@ -14,7 +14,6 @@ import {
   blockedRunsOnLabel,
   isBlockedForHost,
 } from "./game-detail-model";
-import { applyArtSeed } from "./art-fallback";
 import { displayTitle } from "./game-title";
 import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
@@ -1066,10 +1065,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   const updateHeroImage = (game: LibraryGame, immediate = false): void => {
-    // The ground under the layers is this game's own, so a game with no
-    // picture, or one still being looked for, shows its generated ground
-    // rather than a blank scene or the last game's colours.
-    applyArtSeed(refs.heroGround, game.id);
+    // The ground under the layers stands for a game with no picture, or one
+    // still being looked for, instead of a blank scene.
     refs.heroGround.classList.toggle("is-art-pending", artworkPending.has(game.id));
     const candidates = heroCandidates(game);
     const source = candidates[0] ?? "";
@@ -1476,7 +1473,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // What a card shows when no picture of the game could be had: its name,
     // which the aria-label already carries for whoever cannot see the card.
     const fallbackTitle = document.createElement("span");
-    fallbackTitle.className = "card-fallback art-ground";
+    fallbackTitle.className = "card-fallback";
     fallbackTitle.setAttribute("aria-hidden", "true");
     const fallbackName = document.createElement("span");
     fallbackName.className = "card-fallback__title";
@@ -1525,10 +1522,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const portrait = card.querySelector<HTMLImageElement>(".card-art--portrait");
     const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape");
     const fallback = steamAssetUrl(game, "header.jpg");
-    const fallbackTitle = card.querySelector<HTMLElement>(".card-fallback");
     const fallbackName = card.querySelector<HTMLElement>(".card-fallback__title");
     if (fallbackName && fallbackName.textContent !== game.title) fallbackName.textContent = game.title;
-    if (fallbackTitle) applyArtSeed(fallbackTitle, game.id);
     card.classList.toggle("is-art-pending", artworkPending.has(game.id));
 
     card.dataset.gameId = game.id;

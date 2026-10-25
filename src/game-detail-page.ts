@@ -12,7 +12,6 @@ import type {
   WallpaperCategory,
   WallpaperSearchView,
 } from "./contracts";
-import { applyArtSeed } from "./art-fallback";
 import { icon } from "./icons";
 import { sourceBadge } from "./source-model";
 import type { AppPage, PageActivation } from "./page-lifecycle";
@@ -1473,10 +1472,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       frame.append(video, play);
       return frame;
     }
-    // The game's own generated ground, under the picture: what stands when it
-    // has none yet, the same one its library card wears (art-fallback.ts).
+    // The shared ground, under the picture: what stands when it has none yet,
+    // the same one the Library's scene shows.
     const ground = element("div", "gd-hero__ground art-ground");
-    applyArtSeed(ground, detail.id);
     frame.append(ground);
     const image = element("img", "gd-hero__image");
     image.decoding = "async";
