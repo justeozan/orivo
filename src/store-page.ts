@@ -1332,10 +1332,12 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const item = element("li", "store-more-panel__item");
       item.dataset.provider = status.provider;
       item.dataset.health = status.health;
+      // The dot says the state; the sentence behind it is a hover away rather
+      // than a paragraph per shop.
+      item.title = status.message;
       item.append(
         element("span", "store-more-panel__dot"),
         element("span", "store-more-panel__name", status.label),
-        element("span", "store-more-panel__message", status.message),
       );
       list.append(item);
     }

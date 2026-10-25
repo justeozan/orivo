@@ -383,9 +383,8 @@ describe("Store page degraded sources", () => {
       '.store-more-panel__item[data-provider="ubisoft"]',
     );
     expect(ubisoft?.dataset.health).toBe("unavailable");
-    expect(ubisoft?.querySelector(".store-more-panel__message")?.textContent).toBe(
-      "No authorized catalog feed is configured.",
-    );
+    // The reason is a hover away, not a paragraph in the panel.
+    expect(ubisoft?.title).toBe("No authorized catalog feed is configured.");
     expect(
       mounted.container.querySelector<HTMLElement>('.store-more-panel__item[data-provider="steam"]')
         ?.dataset.health,
