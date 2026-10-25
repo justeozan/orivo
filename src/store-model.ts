@@ -350,8 +350,18 @@ export function matchesCategory(game: GameSummary, category: StoreCategory): boo
   return (CATEGORY_KEYWORDS[category] ?? []).some((keyword) => facts.includes(keyword));
 }
 
+/**
+ * Every platform a game is available on: the union of what the shell merged
+ * (`availablePlatforms`, which includes the IGDB lookup), the curator's list,
+ * its offers and its declared builds. A union, because each is partial: a game
+ * sold on Steam has no PlayStation offer even when it ships on PlayStation, so
+ * the PlayStation filter must not depend on offers alone. Without IGDB
+ * credentials `availablePlatforms` only repeats what offers and the curated
+ * catalogue prove, so a live multi-platform game shows up under PC only.
+ */
 export function gamePlatforms(game: GameSummary): StorePlatform[] {
   const platforms = new Set<StorePlatform>(game.curation?.platforms ?? []);
+  for (const platform of game.availablePlatforms ?? []) platforms.add(platform);
   for (const offer of game.offers) platforms.add(PROVIDER_PLATFORM[offer.provider]);
   if (game.supportedPlatforms.some((platform) => platform !== "ios" && platform !== "android")) {
     platforms.add("pc");
