@@ -5089,6 +5089,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (editorialGames) editorialGames.checked = state.preferences.showEditorialGames;
     const beta = root.querySelector<HTMLInputElement>("#preference-beta");
     if (beta) beta.checked = state.preferences.betaFeatures;
+    const trailerAutoplay = root.querySelector<HTMLInputElement>("#preference-trailer-autoplay");
+    if (trailerAutoplay) trailerAutoplay.checked = !state.preferences.trailerAutoplayOff;
     applyBetaFeatures();
     applyMotionPreference();
   };
@@ -6418,6 +6420,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const { createGameDetailPage } = await import("./game-detail-page");
       return createGameDetailPage({
         navigate: (route) => navigate(route),
+        autoplayTrailers: () => !state.preferences.trailerAutoplayOff,
         // A deep link opened without history still has somewhere to go back to.
         back: () => router.back({ page: "library" }),
         play: (gameId) => {
@@ -6635,6 +6638,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     if (target instanceof HTMLInputElement && target.id === "preference-beta") {
       void savePreferences({ betaFeatures: target.checked });
+    }
+    if (target instanceof HTMLInputElement && target.id === "preference-trailer-autoplay") {
+      void savePreferences({ trailerAutoplayOff: !target.checked });
     }
   });
 
@@ -8230,6 +8236,13 @@ function shell(): string {
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="reduced" />
                     <span><strong>Reduced</strong><small>Always keep motion to a minimum in Orivo.</small></span>
+                  </label>
+                </div>
+                <p class="settings-group__label">Game pages</p>
+                <div class="settings-choices">
+                  <label class="settings-choice settings-choice--toggle">
+                    <input type="checkbox" id="preference-trailer-autoplay" />
+                    <span><strong>Play trailers automatically</strong><small>A game's page starts its first trailer on its own, muted. Off, the trailer waits for you.</small></span>
                   </label>
                 </div>
                 <p class="settings-group__label">Beta &amp; debug</p>

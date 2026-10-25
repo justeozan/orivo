@@ -214,6 +214,11 @@ export interface GameDetailPageOptions {
   /** Launching stays owned by the application shell. */
   play(gameId: string): void;
   /**
+   * Whether the first trailer starts on its own when the page opens (a
+   * Settings choice, on by default). Absent means yes.
+   */
+  autoplayTrailers?(): boolean;
+  /**
    * Notifies the shell that a catalog change (new home art, refetched cover,
    * or a removed game) means the Library needs to reload so its cards and hero
    * reflect the change.
@@ -483,7 +488,19 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   let storeSelection: {
     kind: "movie" | "screenshot";
     index: number;
+    /** Started by the page rather than by a click: plays muted. */
+    auto?: boolean;
   } | null = null;
+  /**
+   * The trailer player, kept across repaints. `render()` rebuilds the page,
+   * and a fresh <video> each time restarted the trailer — or, detached but
+   * not paused, left its sound playing under the next one.
+   */
+  let heroPlayer: { src: string; player: HTMLVideoElement; play: HTMLElement } | null = null;
+  const stopHeroPlayer = (): void => {
+    heroPlayer?.player.pause();
+    heroPlayer = null;
+  };
   /** Ticks the Epic download percentage while one is running; null otherwise. */
   let epicProgressTimer: ReturnType<typeof setTimeout> | null = null;
   /** The percentage the poll last measured, so the hero chip moves with it. */
@@ -622,6 +639,16 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       const media = await client.getStoreMedia(gameId, context.signal);
       if (!isFresh(context, gameId)) return;
       storeMedia = media;
+      // Like a store page: the first trailer plays on its own, muted, unless
+      // the player turned that off in Settings. (`previewMediaId` is not a
+      // reason to hold back: it already names the saved wallpaper on open.)
+      if (
+        media.movies.length > 0 &&
+        storeSelection === null &&
+        (options.autoplayTrailers?.() ?? true)
+      ) {
+        storeSelection = { kind: "movie", index: 0, auto: true };
+      }
       render();
     } catch {
       // The rail is optional. Forget the attempt so the next load tries again.
@@ -1457,12 +1484,21 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       onError?: () => void;
     },
   ): HTMLElement => {
+    // The same trailer survives a repaint: its element is moved, not rebuilt.
+    if (heroPlayer?.src === video.src) {
+      frame.append(heroPlayer.player, heroPlayer.play);
+      return frame;
+    }
+    stopHeroPlayer();
     const player = document.createElement("video");
     player.className = "gd-hero__video";
     player.controls = true;
-    player.preload = "metadata";
+    player.preload = "auto";
     player.playsInline = true;
-    player.autoplay = false;
+    // Chosen by a click, it plays with sound; started by the page, muted,
+    // which is also the only way a WebView lets a video start by itself.
+    player.muted = storeSelection?.auto === true;
+    player.autoplay = true;
     player.src = video.src;
     if (video.poster) player.poster = video.poster;
     player.setAttribute("aria-label", video.label);
@@ -1472,16 +1508,26 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     play.dataset.focusKey = "hero-play";
     play.setAttribute("aria-label", `Play ${video.title}`);
     play.append(iconElement("play"));
+    // The big button is only there while nothing plays.
+    play.hidden = true;
     play.addEventListener("click", () => {
-      play.hidden = true;
-      // Explicit user intent only: nothing here ever autoplays.
       void player.play().catch(() => {
         play.hidden = false;
       });
     });
+    player.addEventListener("playing", () => {
+      play.hidden = true;
+    });
     player.addEventListener("pause", () => {
       play.hidden = false;
     });
+    player.addEventListener("ended", () => {
+      play.hidden = false;
+    });
+    void player.play()?.catch(() => {
+      play.hidden = false;
+    });
+    heroPlayer = { src: video.src, player, play };
     frame.append(player, play);
     return frame;
   };
@@ -1643,6 +1689,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     // Choosing the tile that is already showing lets the slideshow resume.
     tile.addEventListener("click", () => {
       storeSelection = selected ? null : { kind: item.kind, index: item.index };
+      if (!storeSelection || storeSelection.kind !== "movie") stopHeroPlayer();
+      else if (heroPlayer) stopHeroPlayer();
       render();
     });
     return tile;
@@ -2574,6 +2622,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       });
     },
     deactivate() {
+      stopHeroPlayer();
       if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
       stopEpicProgress();

@@ -389,6 +389,12 @@
   backdrop-filter: blur(10px);
 }
 
+/* The rule above sets a display, which outranks the UA `[hidden]` rule: the
+   button showed over a trailer that was already playing. */
+.gd-hero__play[hidden] {
+  display: none;
+}
+
 .gd-hero__play .icon {
   width: 22px;
   height: 22px;

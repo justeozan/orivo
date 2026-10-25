@@ -39,6 +39,8 @@ export interface Preferences {
    * has actually just come out.
    */
   showEditorialGames: boolean;
+  /** Opt-out: a game page plays its first trailer on its own unless set. */
+  trailerAutoplayOff: boolean;
 }
 
 export interface PreferencesUpdate {
@@ -50,6 +52,7 @@ export interface PreferencesUpdate {
   debugSampleSocial?: boolean;
   betaFeatures?: boolean;
   showEditorialGames?: boolean;
+  trailerAutoplayOff?: boolean;
   reset?: boolean;
 }
 
@@ -68,6 +71,7 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   debugSampleSocial: false,
   betaFeatures: false,
   showEditorialGames: false,
+  trailerAutoplayOff: false,
 });
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -145,6 +149,8 @@ export function normalisePreferences(value: unknown): Preferences {
     betaFeatures: record.betaFeatures === true || record.beta_features === true,
     showEditorialGames:
       record.showEditorialGames === true || record.show_editorial_games === true,
+    trailerAutoplayOff:
+      record.trailerAutoplayOff === true || record.trailer_autoplay_off === true,
   };
 }
 

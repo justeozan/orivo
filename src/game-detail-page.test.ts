@@ -1118,31 +1118,33 @@ describe("game detail page store media", () => {
     expect(tiles()[1]?.querySelector(".gd-gallery__play")).toBeNull();
   });
 
-  it("puts a controlled, non-autoplaying video in the hero when the trailer is clicked", async () => {
+  it("starts the first trailer muted on its own, and with sound when it is clicked", async () => {
     await mountWith(createFallbackGameDetail(GAME_ID), {
       getStoreMedia: async () => storeMedia,
     });
-    expect(container.querySelector(".gd-hero__video")).toBeNull();
 
-    tiles()[0]?.click();
-
-    const video = container.querySelector<HTMLVideoElement>(
-      ".gd-hero .gd-hero__video",
-    );
-    expect(video).not.toBeNull();
+    // Opened like a store page: the trailer is already in the hero, muted,
+    // with no play button over it.
+    let video = container.querySelector<HTMLVideoElement>(".gd-hero .gd-hero__video");
     expect(video?.getAttribute("src")).toBe(
       "https://video.akamai.steamstatic.com/movie_max.mp4",
     );
     expect(video?.controls).toBe(true);
-    expect(video?.autoplay).toBe(false);
+    expect(video?.autoplay).toBe(true);
+    expect(video?.muted).toBe(true);
     expect(video?.poster).toContain("/store/movie-t.jpg");
-    expect(tiles()[0]?.classList.contains("gd-gallery__tile--selected")).toBe(
-      true,
-    );
+    expect(container.querySelector<HTMLElement>(".gd-hero__play")?.hidden).toBe(true);
+    expect(tiles()[0]?.classList.contains("gd-gallery__tile--selected")).toBe(true);
 
-    // Clicking the same tile again hands the hero back to the pictures.
+    // Clicking the playing tile hands the hero back to the pictures...
     tiles()[0]?.click();
     expect(container.querySelector(".gd-hero__video")).toBeNull();
+
+    // ...and choosing it plays it with sound.
+    tiles()[0]?.click();
+    video = container.querySelector<HTMLVideoElement>(".gd-hero .gd-hero__video");
+    expect(video).not.toBeNull();
+    expect(video?.muted).toBe(false);
   });
 
   it("shows a clicked screenshot full size in the hero", async () => {
@@ -1169,6 +1171,8 @@ describe("game detail page store media", () => {
         navigate: () => {},
         back: () => {},
         play: () => {},
+        // The trailer would take the hero; this is about the pictures.
+        autoplayTrailers: () => false,
         client: clientWithDetail(detail, {
           getStoreMedia: async () => storeMedia,
         }),
