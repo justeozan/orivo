@@ -761,18 +761,31 @@ impl ThirdPartyRunnerService {
 
     /// Resolve and start one third-party runner game. Returns the title the
     /// plugin's inventory recorded, which is what the player sees start.
+    #[cfg(test)]
     pub fn launch(
         &self,
         plugin_id: &str,
         profile_id: &str,
         game_ref: &str,
     ) -> Result<String, RunnerHostError> {
+        self.launch_owned(plugin_id, profile_id, game_ref)
+            .map(|(title, _child)| title)
+    }
+
+    /// `launch`, keeping the process: the host owns it, so the caller can tell
+    /// when the session ends.
+    pub fn launch_owned(
+        &self,
+        plugin_id: &str,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Result<(String, std::process::Child), RunnerHostError> {
         let package = self.package(plugin_id)?;
         let catalog = self.store.snapshot()?;
         let cancelled = AtomicBool::new(false);
         let prepared = prepare_runner_launch(&package, &catalog, profile_id, game_ref, &cancelled)?;
-        prepared.spawn()?;
-        Ok(prepared.title().to_owned())
+        let child = prepared.spawn()?;
+        Ok((prepared.title().to_owned(), child))
     }
 
     /// Start pairing this profile's client with the configured machine, and

@@ -98,12 +98,17 @@ impl std::fmt::Display for LaunchError {
 
 impl std::error::Error for LaunchError {}
 
+#[cfg(test)]
 pub fn launch(game: &Game) -> Result<(), LaunchError> {
+    launch_owned(game).map(drop)
+}
+
+/// Start a game and hand back the process when the game is one Orivo started
+/// itself. A store client's hand-off has no process of Orivo's to return: the
+/// client owns the game, so how long it ran is not Orivo's to know.
+pub fn launch_owned(game: &Game) -> Result<Option<std::process::Child>, LaunchError> {
     match &game.launch_target {
-        LaunchTarget::Direct => {
-            let _ = launch_direct(game)?;
-            Ok(())
-        }
+        LaunchTarget::Direct => launch_direct(game).map(Some),
         LaunchTarget::Steam { app_id } => {
             if !game
                 .installation_path
@@ -112,7 +117,7 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
             {
                 return Err(LaunchError::SteamNotInstalled);
             }
-            launch_steam(*app_id)
+            launch_steam(*app_id).map(|()| None)
         }
         LaunchTarget::Runner { runner_id, .. } => {
             // A runner id, a game reference and a profile id never become a
@@ -124,7 +129,9 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
                 runner_id: runner_id.clone(),
             })
         }
-        LaunchTarget::Provider { provider, app_ref } => launch_provider(provider, app_ref),
+        LaunchTarget::Provider { provider, app_ref } => {
+            launch_provider(provider, app_ref).map(|()| None)
+        }
     }
 }
 

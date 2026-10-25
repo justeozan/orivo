@@ -155,6 +155,12 @@ const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT: &str = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT: &str = "source-library-synced";
 /// Carries how many games a games-folder scan just added.
 const GAME_FOLDER_SCANNED_EVENT: &str = "game-folder-scanned";
+/// A game's last-played date or play time just changed. It carries nothing: the
+/// WebView pulls the library again, which is what the Activity shelves read.
+const GAME_PLAY_RECORDED_EVENT: &str = "game-play-recorded";
+/// A session shorter than this is a start that failed (a crash on the splash, a
+/// launcher that handed off and quit), not time the player spent in the game.
+const MIN_RECORDED_SESSION: Duration = Duration::from_secs(10);
 /// Progress of an artwork search over a batch of games: one event when it
 /// starts, then one per game as it finishes.
 const GAME_ARTWORK_PROGRESS_EVENT: &str = "game-artwork-progress";
@@ -7401,14 +7407,129 @@ async fn disconnect_source_account(
     Ok(removed as u32)
 }
 
+/// `seconds` since the Unix epoch as an RFC 3339 UTC timestamp.
+///
+/// The Library's Activity shelves parse `lastPlayedAt` with `Date.parse`
+/// (`lastPlayedTime` in `library-browse.ts`), which reads exactly this form.
+/// Written by hand because the host carries no calendar crate for one format;
+/// the day count is Howard Hinnant's `civil_from_days`.
+fn rfc3339_utc(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let rest = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
+}
+
+fn now_rfc3339() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    rfc3339_utc(seconds)
+}
+
+/// The seconds a finished session adds to a game's play time, or none when it
+/// was too short to be a session at all (see `MIN_RECORDED_SESSION`).
+fn countable_session_seconds(elapsed: Duration) -> Option<u64> {
+    (elapsed >= MIN_RECORDED_SESSION).then(|| elapsed.as_secs())
+}
+
+/// Stamp one game as played at `played_at` and, when a session ended, add its
+/// length to the play time. Reports whether the game was found.
+fn apply_play_record(
+    catalog: &mut Catalog,
+    game_id: &str,
+    played_at: &str,
+    session_seconds: Option<u64>,
+) -> bool {
+    let Some(game) = catalog.games.iter_mut().find(|game| game.id == game_id) else {
+        return false;
+    };
+    game.last_played_at = Some(played_at.to_string());
+    if let Some(seconds) = session_seconds {
+        game.play_time_seconds = game.play_time_seconds.saturating_add(seconds);
+    }
+    true
+}
+
+/// Persist a play record the way every other catalog edit is: under the
+/// mutation lock, on a clone, swapped in only once it is on disk. Then tell the
+/// WebView, which is what makes the shelves move without a restart.
+///
+/// Best effort on purpose: a game that has already started must never fail
+/// because its bookkeeping could not be written.
+fn record_play(app: &AppHandle, game_id: &str, session_seconds: Option<u64>) {
+    let state = app.state::<AppState>();
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return;
+    };
+    let Ok(mut next) = state.catalog.read().map(|catalog| catalog.clone()) else {
+        return;
+    };
+    if !apply_play_record(&mut next, game_id, &now_rfc3339(), session_seconds) {
+        return;
+    }
+    if persist_catalog(&next, &state.catalog_path).is_err() {
+        return;
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_PLAY_RECORDED_EVENT, ());
+}
+
+/// A game Orivo started has just been handed over: it was played now. Where
+/// Orivo does not own the process (Steam, Epic, streaming, an Android intent)
+/// this is all that is known, and no play time is invented.
+fn record_launch(app: &AppHandle, game_id: &str) {
+    record_play(app, game_id, None);
+}
+
+/// A process Orivo owns has just ended: add the time it ran.
+fn record_session(app: &AppHandle, game_id: &str, started: Instant) {
+    let Some(seconds) = countable_session_seconds(started.elapsed()) else {
+        return;
+    };
+    record_play(app, game_id, Some(seconds));
+}
+
+/// Wait for a game process Orivo started and record how long it ran. This also
+/// reaps it, so a direct launch no longer leaves a zombie behind.
+fn watch_game_session(app: AppHandle, game_id: String, mut child: std::process::Child) {
+    let started = Instant::now();
+    thread::spawn(move || {
+        let _ = child.wait();
+        record_session(&app, &game_id, started);
+    });
+}
+
 fn monitor_wine_startup(
     app: AppHandle,
     game_id: String,
     graphics_label: &'static str,
     mut child: std::process::Child,
 ) {
+    let started = Instant::now();
     thread::spawn(move || {
-        let deadline = Instant::now() + WINE_EARLY_EXIT_WINDOW;
+        let deadline = started + WINE_EARLY_EXIT_WINDOW;
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => {
@@ -7442,7 +7563,7 @@ fn monitor_wine_startup(
                         MAIN_WINDOW_LABEL,
                         WINE_LAUNCH_STATUS_EVENT,
                         WineLaunchStatusEvent {
-                            game_id,
+                            game_id: game_id.clone(),
                             phase: "started",
                             message: format!(
                                 "Wine-Staging is running this game with {graphics_label}."
@@ -7452,6 +7573,7 @@ fn monitor_wine_startup(
                     // Reap the direct Wine process once it exits, but do not
                     // turn a normal end-of-session into a launch failure.
                     let _ = child.wait();
+                    record_session(&app, &game_id, started);
                     return;
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(75)),
@@ -7460,8 +7582,29 @@ fn monitor_wine_startup(
     });
 }
 
+/// Start a game, and remember that it was started.
+///
+/// `launch_game_inner` has many branches and early returns, and every `Ok` it
+/// gives back is a game that was handed over: the install-on-phone choice
+/// answers with an error, and installs have their own commands. Recording here,
+/// once, keeps a new branch from forgetting to.
 #[tauri::command]
 async fn launch_game(
+    app: AppHandle,
+    game_id: String,
+    launch_option: Option<String>,
+    state: State<'_, AppState>,
+    runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
+) -> Result<LaunchResult, String> {
+    let result =
+        launch_game_inner(app.clone(), game_id.clone(), launch_option, state, runners).await;
+    if result.is_ok() {
+        record_launch(&app, &game_id);
+    }
+    result
+}
+
+async fn launch_game_inner(
     app: AppHandle,
     game_id: String,
     // Which of the game's own ways of starting to use, as offered by its view.
@@ -7644,12 +7787,14 @@ async fn launch_game(
         // Loading and probing the component, asking it to prepare the launch and
         // resolving the game file are all blocking work, and none of it may run
         // on the command executor.
-        let resolved_title = tauri::async_runtime::spawn_blocking(move || {
-            service.launch(&runner_id, &profile_id, &game_ref)
+        let (resolved_title, child) = tauri::async_runtime::spawn_blocking(move || {
+            service.launch_owned(&runner_id, &profile_id, &game_ref)
         })
         .await
         .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
         .map_err(|error| error.to_string())?;
+        // The emulator is Orivo's own child here, so its session is timed.
+        watch_game_session(app.clone(), game.id.clone(), child);
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title}"),
             handoff: Some(LaunchHandoff::Process),
@@ -7936,10 +8081,16 @@ async fn launch_game(
     // `/usr/bin/open` can briefly wait while macOS checks whether the Steam
     // bundle accepted the URI. Keep that confirmation off the command/UI
     // executor, while direct launches still return once their process starts.
-    tauri::async_runtime::spawn_blocking(move || launcher::launch(&game))
+    let game_id_for_session = game.id.clone();
+    let child = tauri::async_runtime::spawn_blocking(move || launcher::launch_owned(&game))
         .await
         .map_err(|error| format!("Launch request did not finish: {error}"))?
         .map_err(|error| error.to_string())?;
+    // Only a direct launch leaves a process of Orivo's own to time; a store
+    // client's hand-off ends when the client has accepted the request.
+    if let Some(child) = child {
+        watch_game_session(app.clone(), game_id_for_session, child);
+    }
     Ok(LaunchResult {
         status: format!("Launching {title}"),
         handoff: Some(handoff),
@@ -9894,6 +10045,64 @@ pub(crate) mod tests {
         ));
         assert!(set_or_remove_extra(&mut game, "k", None));
         assert!(!set_or_remove_extra(&mut game, "k", None));
+    }
+
+    /// The Activity shelves hand `lastPlayedAt` to `Date.parse`, so the only
+    /// thing that matters is that the host writes the form it reads.
+    #[test]
+    fn a_launch_timestamp_is_rfc3339_utc() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339_utc(1_792_000_000), "2026-10-14T17:46:40Z");
+        assert_eq!(rfc3339_utc(4_102_444_799), "2099-12-31T23:59:59Z");
+        let now = now_rfc3339();
+        assert_eq!(now.len(), 20);
+        assert!(now.ends_with('Z') && now.as_bytes()[10] == b'T');
+    }
+
+    #[test]
+    fn a_session_shorter_than_ten_seconds_is_a_failed_start() {
+        assert_eq!(countable_session_seconds(Duration::from_secs(0)), None);
+        assert_eq!(countable_session_seconds(Duration::from_millis(9_999)), None);
+        assert_eq!(countable_session_seconds(Duration::from_secs(10)), Some(10));
+        assert_eq!(
+            countable_session_seconds(Duration::from_millis(3_600_900)),
+            Some(3_600)
+        );
+    }
+
+    #[test]
+    fn a_play_record_stamps_the_date_and_adds_only_session_time() {
+        let mut played = Game::from_executable("/bin/sh").unwrap();
+        played.play_time_seconds = 600;
+        let mut other = Game::from_executable("/bin/ls").unwrap();
+        other.play_time_seconds = 42;
+        let id = played.id.clone();
+        let mut catalog = Catalog::default();
+        catalog.games.push(played);
+        catalog.games.push(other);
+
+        // A launch alone dates the game and leaves its time as it was.
+        assert!(apply_play_record(&mut catalog, &id, "2026-10-25T10:00:00Z", None));
+        assert_eq!(
+            catalog.games[0].last_played_at.as_deref(),
+            Some("2026-10-25T10:00:00Z")
+        );
+        assert_eq!(catalog.games[0].play_time_seconds, 600);
+
+        // A finished session adds to what is there.
+        assert!(apply_play_record(&mut catalog, &id, "2026-10-25T11:00:00Z", Some(3_000)));
+        assert_eq!(
+            catalog.games[0].last_played_at.as_deref(),
+            Some("2026-10-25T11:00:00Z")
+        );
+        assert_eq!(catalog.games[0].play_time_seconds, 3_600);
+
+        // The other game, and an id that is not in the catalog, are untouched.
+        assert!(catalog.games[1].last_played_at.is_none());
+        assert_eq!(catalog.games[1].play_time_seconds, 42);
+        assert!(!apply_play_record(&mut catalog, "missing", "2026-10-25T12:00:00Z", Some(5)));
     }
 
     #[test]

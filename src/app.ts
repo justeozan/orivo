@@ -459,6 +459,9 @@ const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
+// A launch, or the end of a session Orivo timed, changed a game's last-played
+// date or play time, which is what the Activity shelves are built from.
+const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
 
 /** How far a library card leans toward the pointer at its edges, each way. */
 const CARD_TILT_DEGREES = 14;
@@ -5989,6 +5992,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (added <= 0) return;
       void refreshLibrary();
       showToast(added === 1 ? "1 game added from your games folder." : `${added} games added from your games folder.`);
+    });
+    void listen<null>(GAME_PLAY_RECORDED_EVENT, () => {
+      void refreshLibrary();
     });
     // Artwork for freshly imported cards arrives one game at a time. Each find
     // pulls the library again — batched, since four lookups run at once — so
