@@ -8345,7 +8345,8 @@ function shell(): string {
                         <strong>Wine</strong>
                         <small>Wine-Staging runner and isolated profiles</small>
                       </div>
-                      <button type="button" class="source-account-row__account plugin-state-button is-on is-safe" data-plugin-open="wine" aria-label="Open Wine settings"><span class="source-account-row__account-name">Installed</span><span class="source-account-row__account-hover" aria-hidden="true">Settings</span></button>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
                     </div>
                     <div class="settings-row plugin-row">
                       <span class="plugin-tile" aria-hidden="true">${icon("landscape")}</span>
@@ -8353,7 +8354,8 @@ function shell(): string {
                         <strong>Wallpaper Searcher</strong>
                         <small>Finds wallpaper artwork from IGDB and Google Images</small>
                       </div>
-                      <button type="button" class="source-account-row__account plugin-state-button is-on is-safe" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings"><span class="source-account-row__account-name">Installed</span><span class="source-account-row__account-hover" aria-hidden="true">Settings</span></button>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">Installed</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
                     <!-- Third-party runners has no row here on purpose: it is
                          not a plugin but part of Orivo itself, and the section

@@ -2551,13 +2551,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   background: rgba(76,146,222,.14);
 }
 .plugin-state-button.is-on:disabled { cursor: default; opacity: 1; transform: none; }
-.plugin-state-button.is-safe:hover,
-.plugin-state-button.is-safe:focus-visible,
-.plugin-state-button.is-safe[data-nav-focus] {
-  color: #fff;
-  border-color: rgba(255,255,255,.72);
-  background: rgba(255,255,255,.1);
-}
+/* A built-in's "Installed" is a statement, not a control: its settings sit
+   behind the chevron beside it. */
+.plugin-state-button.is-static,
+.plugin-state-button.is-static:hover { cursor: default; color: #dcebfa; border-color: rgba(114,170,232,.78); background: rgba(76,146,222,.14); transform: none; }
 .plugin-state-button:disabled:not(.is-on) { cursor: default; opacity: .7; transform: none; }
 html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .plugin-row__state[hidden] { display: none; }
