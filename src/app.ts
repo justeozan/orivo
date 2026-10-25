@@ -464,6 +464,13 @@ const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 // date or play time, which is what the Activity shelves are built from.
 const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
 
+/** Glyphs for the Source row's segments that have no brand wordmark. */
+const SOURCE_GLYPHS: Readonly<Record<string, IconName>> = {
+  local: "monitor",
+  moonlight: "cast",
+  wine: "wine",
+};
+
 /** How far a library card leans toward the pointer at its edges, each way. */
 const CARD_TILT_DEGREES = 14;
 
@@ -1300,6 +1307,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     button.type = "button";
     button.className = "browse-bar__segment";
 
+    const glyph = document.createElement("span");
+    glyph.className = "browse-bar__segment-icon";
+    glyph.setAttribute("aria-hidden", "true");
+    glyph.hidden = true;
+
     const logo = document.createElement("img");
     logo.className = "browse-bar__segment-logo";
     logo.alt = "";
@@ -1318,7 +1330,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const label = document.createElement("span");
     label.className = "browse-bar__segment-label";
 
-    button.append(logo, label);
+    button.append(glyph, logo, label);
     button.addEventListener("click", () => {
       const id = button.dataset.segmentId;
       if (id) selectSegment(id);
@@ -1357,6 +1369,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       }
     }
     button.classList.toggle("has-logo", Boolean(brand));
+    // A source with no wordmark reads as an ordinary segment with a glyph.
+    const glyph = button.querySelector<HTMLElement>(".browse-bar__segment-icon");
+    const glyphName = !brand && state.browse.mode === "source" ? SOURCE_GLYPHS[segment.id] : undefined;
+    if (glyph) {
+      if (glyphName && glyph.dataset.icon !== glyphName) {
+        glyph.innerHTML = icon(glyphName);
+        glyph.dataset.icon = glyphName;
+      }
+      glyph.hidden = !glyphName;
+    }
   };
 
   /**

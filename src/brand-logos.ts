@@ -17,9 +17,18 @@ export interface BrandLogo {
   height: number;
 }
 
+/**
+ * Sources with no wordmark of their own. Their lockups were drawn here (a
+ * glyph beside the name set in an image), which read as neither official nor
+ * part of the interface; they are plain segments with a standard glyph now
+ * (`SOURCE_GLYPHS` in app.ts).
+ */
+const NOT_BRANDS = new Set(["local", "wine", "moonlight"]);
+
 export function brandLogoFor(mode: BrowseMode, segmentId: string): BrandLogo | null {
   // A genre called "Steam" is a genre, not the store.
   if (mode !== "source" && mode !== "platform") return null;
+  if (NOT_BRANDS.has(segmentId)) return null;
   return Object.prototype.hasOwnProperty.call(BRAND_LOGOS, segmentId)
     ? BRAND_LOGOS[segmentId as BrandLogoId]
     : null;

@@ -1854,6 +1854,11 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .browse-bar__segments { min-width: 0; flex: 1; justify-content: center; gap: clamp(18px, 2.6vw, 40px); }
 .browse-bar__segment { min-width: 0; flex: none; padding: 0; color: #97929f; background: none; font-size: 12.5px; text-align: center; transition: color 180ms ease; }
 .browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A wordmark-less source (Local, Moonlight, Wine): a standard glyph in the
+   segment's own colour, then its name in the interface's type. */
+.browse-bar__segment-icon { display: inline-flex; margin-right: 6px; }
+.browse-bar__segment-icon[hidden] { display: none; }
+.browse-bar__segment-icon .icon { width: 14px; height: 14px; }
 .browse-bar__segment:hover { color: #ded9e4; }
 .browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
 /* Source and Platform wear the brands' own logos: white, every one the same

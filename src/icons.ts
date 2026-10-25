@@ -26,6 +26,8 @@ export type IconName =
   | "refresh"
   | "folder"
   | "monitor"
+  | "cast"
+  | "wine"
   | "alert"
   | "star"
   | "thumbs-up"
@@ -114,7 +116,11 @@ const paths: Record<IconName, string> = {
   close: '<path d="m6 6 12 12M18 6 6 18" />',
   refresh: '<path d="M20 11a8 8 0 1 0 1.2 4.2M20 5v6h-6" />',
   folder: '<path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />',
-  monitor: '<rect x="3" y="4" width="18" height="13" rx="1" /><path d="M8 21h8M12 17v4" />',
+  // Lucide's "monitor", "cast" and "wine" (ISC licence): the Source row's
+  // glyphs for Local, Moonlight streaming and Wine, which have no wordmark.
+  monitor: '<rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" />',
+  cast: '<path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><path d="M2 12a9 9 0 0 1 8 8" /><path d="M2 16a5 5 0 0 1 4 4" /><line x1="2" x2="2.01" y1="20" y2="20" />',
+  wine: '<path d="M8 22h8" /><path d="M7 10h10" /><path d="M12 15v7" /><path d="M12 15a5 5 0 0 0 5-5c0-2-.5-4-2-8H9c-1.5 4-2 6-2 8a5 5 0 0 0 5 5Z" />',
   alert: '<circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5M12 16h.01" />',
   star:
     '<path d="m12 3.6 2.55 5.16 5.7.83-4.12 4.02.97 5.67L12 16.9l-5.07 2.68.97-5.67-4.12-4.02 5.7-.83z" />',

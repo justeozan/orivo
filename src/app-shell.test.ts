@@ -2208,7 +2208,12 @@ describe("the browse bar's logos", () => {
     runner: "com.orivo.gamestream",
     launchable: true,
   });
-  const library = [streamed("a"), streamed("b"), { id: "c", title: "c", source: "local", launchable: true }];
+  const library = [
+    streamed("a"),
+    streamed("b"),
+    { id: "c", title: "c", source: "local", launchable: true },
+    { id: "steam:7", title: "d", source: "steam", launchable: true },
+  ];
 
   beforeEach(() => {
     window.location.hash = "";
@@ -2251,15 +2256,19 @@ describe("the browse bar's logos", () => {
     throw new Error(`the bar never reached ${label}`);
   };
 
-  it("shows where each game comes from as its logo, and keeps the word as its name", async () => {
+  it("gives a source with no wordmark a standard glyph and its name in the interface's type", async () => {
     await settle();
     await showMode("Source");
 
     const [moonlight, local] = segments();
-    expect(moonlight.classList.contains("has-logo")).toBe(true);
-    expect(moonlight.querySelector("img")!.getAttribute("src")).toBe("/media/brands/moonlight.png");
+    for (const segment of [moonlight, local]) {
+      expect(segment.classList.contains("has-logo")).toBe(false);
+      expect(segment.querySelector("img")!.hidden).toBe(true);
+      expect(segment.querySelector<HTMLElement>(".browse-bar__segment-icon")!.hidden).toBe(false);
+    }
+    expect(moonlight.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("cast");
+    expect(local.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("monitor");
     expect(moonlight.textContent).toBe("Moonlight");
-    expect(local.querySelector("img")!.getAttribute("src")).toBe("/media/brands/local.png");
   });
 
   it("goes back to words where the bar sorts by something with no brand", async () => {
@@ -2278,11 +2287,17 @@ describe("the browse bar's logos", () => {
     await showMode("Source");
     const [moonlight] = segments();
 
-    moonlight.querySelector("img")!.dispatchEvent(new Event("error"));
+    // Moonlight has no wordmark any more, so the logo under test is a store's.
+    void moonlight;
+    const branded = segments().find((segment) => segment.classList.contains("has-logo"));
+    if (!branded) throw new Error("the Steam segment must wear its logo");
+    branded.querySelector("img")!.dispatchEvent(new Event("error"));
     // A repaint, as every selection makes, must not try the same file again.
     await showMode("Activity");
     await showMode("Source");
 
-    expect(segments()[0].classList.contains("has-logo")).toBe(false);
+    expect(
+      segments().find((segment) => segment.dataset.segmentId === branded.dataset.segmentId)?.classList.contains("has-logo"),
+    ).toBe(false);
   });
 });
