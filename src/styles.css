@@ -2521,6 +2521,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   gap: 14px;
   padding: 12px 0;
 }
+/* Every row keeps a gutter on the right for a chevron, so the one row that
+   has one (a built-in's settings) lines its button up with all the others. */
+.plugin-row, .plugin-catalog-row { position: relative; padding-right: 34px; }
+.plugin-row > .plugin-open-button { position: absolute; top: 50%; right: 0; transform: translateY(-50%); }
 /* Rows sit on the page, not between rules: the tiles already pace the list. */
 .plugins-group__list > .settings-row + .settings-row { border-top: 0; }
 .plugin-tile {
