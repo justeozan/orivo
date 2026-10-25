@@ -57,7 +57,7 @@ describe("brand marks", () => {
       expect(settings).toContain(colour);
     }
     expect(brandIcon("xbox")).toContain("#107c10");
-    expect(brandIcon("epic")).toContain("#2a2a2a");
+    expect(brandIcon("epic")).toContain("#f4f3f7");
   });
 
   it("falls back to the monochrome mark for a store with no colour variant", () => {
