@@ -1022,6 +1022,8 @@ pub fn run() {
                     .unwrap_or_else(|_| app_data.clone())
                     .join(plugin_compile_cache::CACHE_DIRECTORY),
             );
+            // Its key sits with the app's data, away from the cache it vouches for.
+            plugin_compile_cache::configure_key_file(app_data.join("plugin-compile-cache.key"));
             // Phones are the only platforms whose URL hand-off runs through a
             // Tauri plugin, so they need the handle the `UrlOpener` seam omits.
             #[cfg(mobile)]
