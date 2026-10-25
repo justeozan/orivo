@@ -387,6 +387,56 @@ button { border: 0; cursor: pointer; }
 .nav-link[hidden] { display: none !important; }
 .nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
 .nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
+/* The page indicator (app.ts `placeNavIndicator`): the active link's plate,
+   lifted out of the link so it can travel. A slight overshoot on the way in
+   is what makes it feel carried rather than teleported. */
+.primary-nav { position: relative; isolation: isolate; }
+.primary-nav > .nav-link { position: relative; z-index: 1; }
+.nav-indicator {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  width: var(--nav-w, 0);
+  height: var(--nav-h, 0);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.03)), rgba(24,22,26,.46);
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 6px 18px rgba(0,0,0,.18);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  opacity: 0;
+  transform: translate(var(--nav-x, 0), var(--nav-y, 0));
+  transition:
+    transform 520ms cubic-bezier(.3, 1.3, .4, 1),
+    width 520ms cubic-bezier(.3, 1.3, .4, 1),
+    opacity 200ms ease;
+  pointer-events: none;
+}
+.nav-indicator.is-placed { opacity: 1; }
+.nav-indicator.is-instant { transition: none; }
+/* With the plate travelling, the link itself wears none. */
+.primary-nav.has-indicator .nav-link.is-active { border-color: transparent; background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.nav-link .icon { transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1); }
+.nav-link:hover .icon { transform: translateY(-1px) scale(1.06); }
+.nav-link.is-arriving .icon { animation: nav-icon-arrive 520ms cubic-bezier(.3, 1.4, .5, 1); }
+@keyframes nav-icon-arrive {
+  0% { transform: scale(.82); }
+  45% { transform: translateY(-2px) scale(1.14); }
+  100% { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .nav-indicator { transition: opacity 200ms ease; }
+  html:not([data-motion="full"]) .nav-link.is-arriving .icon { animation: none; }
+}
+[data-motion="reduced"] .nav-indicator { transition: opacity 200ms ease; }
+[data-motion="reduced"] .nav-link.is-arriving .icon { animation: none; }
+/* The phone gives every link its own plate; the travelling one stays home. */
+html[data-device="phone"] .nav-indicator { display: none; }
+html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
+  border-color: rgba(255,255,255,.3);
+  background: rgba(255,255,255,.2);
+}
 .nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
 /* Search stays out of the scene's way: at rest it is a magnifier and nothing

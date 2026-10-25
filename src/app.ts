@@ -644,6 +644,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
     librarySourceList: get<HTMLElement>("#library-source-list"),
     primaryNav: get<HTMLElement>(".primary-nav"),
+    navIndicator: get<HTMLElement>(".nav-indicator"),
     toast: get<HTMLElement>("#toast"),
     steamAccountPanel: get<HTMLElement>("#steam-account-panel"),
     steamAccountBody: get<HTMLElement>("#steam-account-body"),
@@ -6129,7 +6130,42 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (link.dataset.navPage === "me") link.hidden = !beta;
     }
     if (!beta && currentRoute.page === "me") navigate({ page: "library" }, { replace: true });
+    placeNavIndicator();
   };
+
+  /**
+   * One plate of glass under the current page's link, slid from link to link
+   * rather than switched off on one and on at the next, so changing page reads
+   * as moving along the bar. The first placement (and any after a resize) is
+   * instant: a plate gliding in from nowhere on launch would be noise.
+   */
+  let navIndicatorPlaced = false;
+  const placeNavIndicator = (): void => {
+    const active = refs.navLinks.find((link) => link.classList.contains("is-active") && !link.hidden);
+    const indicator = refs.navIndicator;
+    if (!active || active.offsetWidth === 0) {
+      indicator.classList.remove("is-placed");
+      refs.primaryNav.classList.remove("has-indicator");
+      return;
+    }
+    indicator.classList.toggle("is-instant", !navIndicatorPlaced);
+    indicator.style.setProperty("--nav-x", `${active.offsetLeft}px`);
+    indicator.style.setProperty("--nav-y", `${active.offsetTop}px`);
+    indicator.style.setProperty("--nav-w", `${active.offsetWidth}px`);
+    indicator.style.setProperty("--nav-h", `${active.offsetHeight}px`);
+    indicator.classList.add("is-placed");
+    refs.primaryNav.classList.add("has-indicator");
+    if (!navIndicatorPlaced) {
+      navIndicatorPlaced = true;
+      requestAnimationFrame(() => indicator.classList.remove("is-instant"));
+    }
+  };
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(() => {
+      navIndicatorPlaced = false;
+      placeNavIndicator();
+    }).observe(refs.primaryNav);
+  }
 
   /**
    * The Store, the game page and Me float the topbar over their own art with
@@ -6180,6 +6216,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     syncTopbarScrolled(route);
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
+      // The glyph of the page just reached gives a small hop as the plate
+      // arrives under it; staying on the same page replays nothing.
+      if (active && !link.classList.contains("is-active")) {
+        link.classList.remove("is-arriving");
+        void link.offsetWidth;
+        link.classList.add("is-arriving");
+      }
       link.classList.toggle("is-active", active);
       // Exactly one navigation link is ever marked as the current page.
       if (active) {
@@ -6188,6 +6231,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         link.removeAttribute("aria-current");
       }
     }
+    placeNavIndicator();
     syncTopbarSearch(route);
   };
 
@@ -7685,6 +7729,7 @@ function shell(): string {
           </div>
           <span class="top-divider" aria-hidden="true"></span>
           <nav class="primary-nav" aria-label="Orivo navigation">
+            <span class="nav-indicator" aria-hidden="true"></span>
             <!-- The labels are the accessible name on desktop and are hidden
                  on a short screen, so each button carries the name itself
                  rather than losing it along with the text. -->
