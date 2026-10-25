@@ -1494,8 +1494,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (items.length === 0) return null;
 
     const rail = element("aside", "gd-gallery");
+    rail.dataset.scrollKey = "gallery";
     rail.setAttribute("aria-label", "Wallpapers");
     const track = element("div", "gd-gallery__track");
+    track.dataset.scrollKey = "gallery-track";
     track.setAttribute("role", "group");
     track.setAttribute("aria-label", "Backgrounds");
     for (const item of items) track.append(renderGalleryTile(item));
@@ -1738,6 +1740,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
     const grid = element("div", "gd-wallgrid");
     grid.dataset.category = category;
+    grid.dataset.scrollKey = `wallgrid-${category}`;
     grid.setAttribute("role", "group");
     grid.setAttribute("aria-labelledby", title.id);
     for (const slide of slides) grid.append(renderWallpaperTile(slide));
@@ -1785,6 +1788,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       "div",
       "gd-modal__dialog gd-modal__dialog--wallpapers",
     );
+    dialog.dataset.scrollKey = "wallpaper-dialog";
 
     // The header is the whole set of controls: which shape to look at, and what
     // to look for. There is no source picker — every provider is asked at once,
@@ -1837,6 +1841,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const panes = element("div", "gd-wallpanes");
     panes.classList.toggle("gd-wallpanes--single", search.focus !== null);
     const cards = element("div", "gd-wallpanes__cards");
+    cards.dataset.scrollKey = "wallpanes-cards";
     const feed = element("div", "gd-wallpanes__feed");
     for (const category of WALLPAPER_CATEGORIES) {
       if (search.focus && search.focus !== category) continue;
@@ -2270,6 +2275,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       body.append(renderActivity(detail));
     if (shouldRenderSection(detail, "related"))
       body.append(renderRelated(detail));
+    // Each panel scrolls on its own (`.gd-body > *`). Their classes tell them
+    // apart, which stays true when a neighbouring panel appears or goes.
+    for (const panel of body.children) {
+      if (panel instanceof HTMLElement) {
+        panel.dataset.scrollKey = `panel-${panel.className.split(" ").join("-")}`;
+      }
+    }
     if (body.childElementCount > 0) fragment.append(body);
 
     const modal = renderWallpaperModal();
@@ -2306,6 +2318,37 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (container) container.scrollTop = value;
   };
 
+  /**
+   * The inner scrollers (`data-scroll-key`) are rebuilt with the page, so their
+   * offsets are lifted out of the old tree and put back by key on the new one.
+   */
+  const readInnerScrolls = (): Map<string, { top: number; left: number }> => {
+    const offsets = new Map<string, { top: number; left: number }>();
+    const nodes = pageRoot?.querySelectorAll<HTMLElement>("[data-scroll-key]");
+    for (const node of nodes ?? []) {
+      if (node.scrollTop || node.scrollLeft) {
+        offsets.set(node.dataset.scrollKey ?? "", {
+          top: node.scrollTop,
+          left: node.scrollLeft,
+        });
+      }
+    }
+    return offsets;
+  };
+
+  const writeInnerScrolls = (
+    offsets: Map<string, { top: number; left: number }>,
+  ): void => {
+    if (offsets.size === 0) return;
+    const nodes = pageRoot?.querySelectorAll<HTMLElement>("[data-scroll-key]");
+    for (const node of nodes ?? []) {
+      const offset = offsets.get(node.dataset.scrollKey ?? "");
+      if (!offset) continue;
+      node.scrollTop = offset.top;
+      node.scrollLeft = offset.left;
+    }
+  };
+
   const render = (): void => {
     if (!pageRoot) return;
     // A repaint discards the menu DOM, so drop its document listeners first.
@@ -2313,6 +2356,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     moreMenuCleanup = null;
     const restoreFocusKey = currentFocusKey();
     const scrollTop = readScrollTop();
+    const innerScrolls = readInnerScrolls();
     const fragment = document.createDocumentFragment();
     // With a loaded game the back control floats inside the hero; the standalone
     // top bar is only for the loading, error and empty states below.
@@ -2353,6 +2397,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     pageRoot.classList.toggle("gd-page--fit", Boolean(state.detail));
     pageRoot.replaceChildren(fragment);
     writeScrollTop(scrollTop);
+    writeInnerScrolls(innerScrolls);
     focusByKey(restoreFocusKey);
   };
 

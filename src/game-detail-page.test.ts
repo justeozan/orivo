@@ -595,6 +595,38 @@ describe("wallpaper dialog category rows", () => {
       )?.disabled,
     ).toBe(false);
   });
+
+  it("keeps every inner scroll position across a repaint", async () => {
+    await openWallpaperDialog({
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 30),
+        };
+      },
+    });
+    const scroller = (key: string): HTMLElement =>
+      container.querySelector<HTMLElement>(`[data-scroll-key='${key}']`)!;
+    const feed = scroller("wallgrid-background");
+    const cover = scroller("wallgrid-cover");
+    feed.scrollTop = 420;
+    cover.scrollLeft = 150;
+    scroller("wallpanes-cards").scrollTop = 80;
+
+    // A tick repaints the whole page; the rows are rebuilt from scratch.
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wall-background-0']")
+      ?.click();
+
+    expect(scroller("wallgrid-background")).not.toBe(feed);
+    expect(scroller("wallgrid-background").scrollTop).toBe(420);
+    expect(scroller("wallgrid-cover").scrollLeft).toBe(150);
+    expect(scroller("wallgrid-cover").scrollTop).toBe(0);
+    expect(scroller("wallpanes-cards").scrollTop).toBe(80);
+  });
 });
 
 describe("resetting the covers", () => {
