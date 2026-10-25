@@ -2204,16 +2204,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       ],
       ["Genre", detail.genres.length > 0 ? detail.genres.join(", ") : null],
     ];
+    // Every row stands even when its source said nothing: a card of one line
+    // read as broken, and the same rows in the same places on every game are
+    // what make the panel scannable. An unknown is a quiet dash.
     for (const [label, value] of rows) {
-      if (!value) continue;
       list.append(
         element("dt", "gd-info__term", label),
-        element("dd", "gd-info__value", value),
+        value
+          ? element("dd", "gd-info__value", value)
+          : element("dd", "gd-info__value gd-info__value--unknown", "—"),
       );
     }
     // Platform renders as brand glyphs, matching the reference's Windows mark.
-    if (detail.supportedPlatforms.length > 0) {
-      list.append(element("dt", "gd-info__term", "Platform"));
+    list.append(element("dt", "gd-info__term", "Platform"));
+    if (detail.supportedPlatforms.length === 0) {
+      list.append(element("dd", "gd-info__value gd-info__value--unknown", "—"));
+    } else {
       const value = element("dd", "gd-info__value gd-info__value--icons");
       for (const platform of detail.supportedPlatforms) {
         const glyph = iconElement(platformIcon(platform), "gd-info__platform");

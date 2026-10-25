@@ -907,8 +907,10 @@
   position: absolute;
   z-index: 3;
   top: calc(var(--topbar-height) + clamp(12px, 1.6vw, 22px));
-  bottom: clamp(14px, 1.8vw, 26px);
   right: var(--gd-mg-right);
+  /* As tall as its tiles, up to the band's foot: the frame always ends one
+     tile gap under the last tile, never on a stretch of empty glass. */
+  max-height: calc(100% - var(--topbar-height) - clamp(12px, 1.6vw, 22px) - clamp(14px, 1.8vw, 26px));
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -1014,8 +1016,9 @@
   display: flex;
   overflow-y: auto;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 9px;
-  max-height: min(46vh, 420px);
+  min-height: 0;
   scrollbar-width: none;
   overscroll-behavior: contain;
 }
@@ -1876,6 +1879,10 @@
   min-width: 0;
   flex-direction: column;
   gap: 18px;
+}
+
+.gd-info__value--unknown {
+  color: var(--gd-muted, rgba(255, 255, 255, 0.38));
 }
 
 .gd-info {
