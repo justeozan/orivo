@@ -1334,6 +1334,19 @@ describe("status chips", () => {
     );
   });
 
+  it("shows the download bar from a live measurement before the catalogue catches up", () => {
+    const detail = {
+      ...detailWithStatus({ installState: "not-installed" }),
+      primaryAction: "install-epic" as const,
+    };
+
+    expect(resolvePrimaryAction(detail, "epic:abc").label).toBe("Install");
+    const action = resolvePrimaryAction(detail, "epic:abc", 40);
+    expect(action.label).toBe("Downloading 40%");
+    expect(action.progress).toBe(40);
+    expect(action.disabled).toBe(true);
+  });
+
   it("offers a plain Install button when nothing is downloading", () => {
     const action = resolvePrimaryAction(
       {

@@ -699,3 +699,129 @@ describe("game detail page on a device that cannot install", () => {
     expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "steam-page");
   });
 });
+
+describe("watching an Epic install", () => {
+  const status = (
+    state: "not-installed" | "installing" | "installed",
+    percent = 0,
+  ) => ({
+    appName: "Sugar",
+    state,
+    percent,
+    installedBytes: 0,
+    totalBytes: 0,
+    installPath: null,
+  });
+  const primaryText = (): string | null | undefined =>
+    container.querySelector("[data-focus-key='primary-action']")?.textContent;
+
+  function epicDetail(
+    installState: "not-installed" | "installing" | "installed",
+  ) {
+    const detail = createFallbackGameDetail(GAME_ID);
+    detail.source = "epic";
+    detail.primaryAction =
+      installState === "installed" ? "play" : "install-epic";
+    detail.installState = installState;
+    return detail;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("follows an install from the hand-off to Play without settling early", async () => {
+    const sequence = [
+      status("not-installed"),
+      status("not-installed"),
+      status("installing", 40),
+      status("installed", 100),
+    ];
+    let polls = 0;
+    let installed = false;
+    const detail = epicDetail("not-installed");
+    await mountWith(detail, {
+      async getDetail() {
+        return installed ? epicDetail("installed") : detail;
+      },
+      async epicInstallStatus() {
+        const next = sequence[Math.min(polls, sequence.length - 1)];
+        polls += 1;
+        installed = next.state === "installed";
+        return next;
+      },
+    });
+    vi.useFakeTimers();
+    expect(primaryText()).toContain("Install");
+
+    container
+      .querySelector<HTMLElement>("[data-focus-key='primary-action']")
+      ?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(primaryText()).toContain("Install");
+
+    // The launcher has not written a manifest yet: still waiting, not done.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Install");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(polls).toBe(2);
+    expect(primaryText()).toContain("Install");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Downloading 40%");
+    expect(
+      container
+        .querySelector("[data-focus-key='primary-action']")
+        ?.getAttribute("aria-valuenow"),
+    ).toBe("40");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Play");
+    // The watch is over: nothing keeps polling a finished install.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(polls).toBe(4);
+  });
+
+  it("gives up on a download that never starts, after the grace period", async () => {
+    let polls = 0;
+    await mountWith(epicDetail("not-installed"), {
+      async epicInstallStatus() {
+        polls += 1;
+        return status("not-installed");
+      },
+    });
+    vi.useFakeTimers();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='primary-action']")
+      ?.click();
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    // Four minutes in, it is still watching.
+    expect(polls).toBeGreaterThan(100);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    const afterDeadline = polls;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(polls).toBe(afterDeadline);
+    expect(primaryText()).toContain("Install");
+  });
+
+  it("picks the progress back up when the page opens mid-download", async () => {
+    vi.useFakeTimers();
+    let polls = 0;
+    const page = createGameDetailPage({
+      navigate: () => {},
+      back: () => {},
+      play: () => {},
+      client: clientWithDetail(epicDetail("installing"), {
+        async epicInstallStatus() {
+          polls += 1;
+          return status("installing", 63);
+        },
+      }),
+    });
+    host = new PageLifecycleHost(container, page);
+    await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(polls).toBeGreaterThan(0);
+    expect(primaryText()).toContain("Downloading 63%");
+  });
+});

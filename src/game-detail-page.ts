@@ -156,6 +156,14 @@ const HERO_SLIDE_MS = 7000;
  * honest without turning progress into disk churn.
  */
 const EPIC_PROGRESS_INTERVAL_MS = 2000;
+/**
+ * How long a watch tolerates "not installed" before concluding no download is
+ * running. The launcher writes its manifest only once it has opened and, often,
+ * once the user has confirmed an install location, so a cold start plus a human
+ * decision routinely outlasts a few polls. Five minutes covers that; any longer
+ * and a dismissed dialog would keep a poll alive for nothing.
+ */
+const EPIC_START_GRACE_MS = 5 * 60_000;
 
 /** Confirmation toasts per role. */
 const WALLPAPER_ROLE_APPLIED: Record<WallpaperRole, string> = {
@@ -484,10 +492,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   /**
    * Poll the launcher while a download runs. Epic never calls back, so the only
    * honest progress is a re-read; once it finishes, the detail is reloaded so
-   * the button becomes Play instead of Install.
+   * the button becomes Play instead of Install. "Not installed" is not a verdict
+   * on its own: the launcher reports it until its manifest exists, so it only
+   * ends the watch after `EPIC_START_GRACE_MS` without a download in sight.
    */
   const trackEpicInstall = (context: PageActivation, gameId: string): void => {
     stopEpicProgress();
+    /** When a download was last seen running, or when the watch began. */
+    let lastActiveAt = Date.now();
     const tick = async (): Promise<void> => {
       if (!isFresh(context, gameId)) return stopEpicProgress();
       let status: EpicInstallStatus;
@@ -499,14 +511,20 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         return stopEpicProgress();
       }
       if (!isFresh(context, gameId)) return stopEpicProgress();
-      // Any settled state ends the watch: this same loop follows an uninstall,
-      // where "not installed" is the successful outcome rather than a failure.
-      if (status.state !== "installing") {
+      const settled =
+        status.state === "installed" ||
+        (status.state === "not-installed" &&
+          Date.now() - lastActiveAt > EPIC_START_GRACE_MS);
+      if (settled) {
         stopEpicProgress();
-        void loadDetail(context, gameId);
+        void loadDetail(context, gameId).then(() => {
+          if (isFresh(context, gameId)) clearTransientStatus();
+        });
         return;
       }
       if (status.state === "installing") {
+        lastActiveAt = Date.now();
+        epicProgressPercent = status.percent;
         dispatch({
           type: "status-changed",
           message: `Downloading… ${status.percent}%`,
@@ -2384,6 +2402,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       });
       void loadDetail(context, gameId).then(() => {
         if (isActive(context)) restorePageState();
+        // Reopening the page mid-download: the catalog snapshot is already
+        // stale, so pick the live measurement back up.
+        if (
+          isFresh(context, gameId) &&
+          state.detail?.source === "epic" &&
+          state.detail.installState === "installing"
+        ) {
+          trackEpicInstall(context, gameId);
+        }
       });
     },
     deactivate() {

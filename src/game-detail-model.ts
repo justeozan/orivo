@@ -901,8 +901,9 @@ export function resolvePrimaryAction(
     case "install-epic": {
       // A download already running is not a second install to offer. The button
       // becomes the progress bar instead — which is why the status row no
-      // longer carries a "Downloading 42%" chip.
-      if (detail.installState === "installing") {
+      // longer carries a "Downloading 42%" chip. A live measurement counts as
+      // proof on its own: the detail was loaded before the download began.
+      if (detail.installState === "installing" || liveInstallPercent !== null) {
         const percent = liveInstallPercent ?? detail.installPercent;
         return {
           ...base,
