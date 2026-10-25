@@ -29,23 +29,22 @@ test.describe("Store filters", () => {
     await openRoute(page, "#/store", "store");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_CATALOG_SIZE);
 
-    await page.locator("[data-focus-key='category-short-sessions']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions");
-    const shortSessionsCount = await page.locator(`${storeHost} .store-card`).count();
-    expect(shortSessionsCount).toBeGreaterThan(0);
-    expect(shortSessionsCount).toBeLessThan(STORE_CATALOG_SIZE);
+    await page.locator("[data-focus-key='category-all-games']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games");
+    const allGamesCount = await page.locator(`${storeHost} .store-card`).count();
+    expect(allGamesCount).toBeGreaterThan(0);
 
     await page.locator("[data-focus-key='platform-pc']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games&platform=pc");
     const combinedCount = await page.locator(`${storeHost} .store-card`).count();
     expect(combinedCount).toBeGreaterThan(0);
-    expect(combinedCount).toBeLessThanOrEqual(shortSessionsCount);
+    expect(combinedCount).toBeLessThanOrEqual(allGamesCount);
 
-    await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
+    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
+    await expect(page.locator("[data-focus-key='category-for-you']")).toHaveAttribute(
       "aria-pressed",
       "false",
     );
@@ -53,16 +52,16 @@ test.describe("Store filters", () => {
   });
 
   test("filter state survives a reload", async ({ page }) => {
-    await openRoute(page, "#/store?category=short-sessions&platform=pc", "store");
+    await openRoute(page, "#/store?category=all-games&platform=pc", "store");
     const count = await page.locator(`${storeHost} .store-card`).count();
     expect(count).toBeGreaterThan(0);
 
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    expect(await currentHash(page)).toBe("#/store?category=all-games&platform=pc");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
-    await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
+    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -113,19 +112,18 @@ test.describe("Store price honesty", () => {
 });
 
 test.describe("Store price sources", () => {
-  test("each source's message sits beside its dot, and the panel stays on screen", async ({ page }) => {
+  test("each source's message is a hover on its dot, and the panel stays on screen", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await page.click(`${storeHost} .store-chip--more`);
     const layout = await page.evaluate(() => {
       const panel = document.querySelector(".store-more-panel")!.getBoundingClientRect();
-      const item = document.querySelector(".store-more-panel__item")!;
-      const name = item.querySelector(".store-more-panel__name")!.getBoundingClientRect();
-      const message = item.querySelector(".store-more-panel__message")!.getBoundingClientRect();
-      return { panelTop: panel.top, nameLeft: name.left, messageLeft: message.left };
+      const items = [...document.querySelectorAll<HTMLElement>(".store-more-panel__item")];
+      return { panelTop: panel.top, items: items.length, untitled: items.filter((item) => !item.title).length };
     });
-    // Auto-placed, the message fell into the dot's 8px column, one word per
-    // line, and the panel grew up past the top of the window.
-    expect(Math.abs(layout.messageLeft - layout.nameLeft)).toBeLessThanOrEqual(1);
+    // The sentence behind each dot is its tooltip, not a paragraph that once
+    // grew the panel up past the top of the window.
+    expect(layout.items).toBeGreaterThan(0);
+    expect(layout.untitled).toBe(0);
     expect(layout.panelTop).toBeGreaterThanOrEqual(0);
   });
 });
@@ -167,9 +165,9 @@ test.describe("Store never mutates the Library", () => {
 test.describe("Store return state", () => {
   test("navigating away and back restores the filters", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    await page.locator("[data-focus-key='category-short-sessions']").click();
+    await page.locator("[data-focus-key='category-all-games']").click();
     await page.locator("[data-focus-key='platform-pc']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games&platform=pc");
     const count = await page.locator(`${storeHost} .store-card`).count();
 
     await page.locator("[data-nav-page='library']").click();
@@ -178,9 +176,9 @@ test.describe("Store return state", () => {
     await page.goBack();
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
+    expect(await currentHash(page)).toBe("#/store?category=all-games&platform=pc");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
-    await expect(page.locator("[data-focus-key='category-short-sessions']")).toHaveAttribute(
+    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
       "aria-pressed",
       "true",
     );

@@ -183,7 +183,8 @@ test.describe("Plugins & Runners browser", () => {
     // soon.length`) has nothing to say and stays hidden.
     await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
     await expect(page.locator("#plugins-catalog-empty")).toBeHidden();
-    await expect(page.locator("[data-plugin-install-file]")).toBeVisible();
+    // Install from file is a debug control: it only shows with Beta features on.
+    await expect(page.locator("[data-plugin-install-file]")).toBeHidden();
   });
 
   test("the chevron opens a plugin's settings and back returns to the browser", async ({ page }) => {
@@ -201,7 +202,7 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
     await expect(page.locator("#plugins-catalog-panel")).toBeHidden();
     await expect(page.locator("#wallpaper-plugin-panel")).toContainText(
-      "Steam Store, Wikimedia Commons and Openverse work without any keys",
+      "Official store art and free-licence images. No key needed.",
     );
 
     await page.locator("#wallpaper-igdb-client-id").fill("twitch-client");
@@ -257,7 +258,7 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
     await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
     await expect(page.locator("#plugins-catalog-empty")).toHaveText(
-      "Aucun plugin à installer pour le moment.",
+      "There are no plugins to install right now.",
     );
 
     await page.locator("#plugins-catalog-search").fill("");
@@ -268,6 +269,9 @@ test.describe("Plugins & Runners browser", () => {
   test("installing from a file needs the desktop app and stays on the browser", async ({
     page,
   }) => {
+    // Install from file is a debug control, offered with Beta features on.
+    await openRoute(page, "#/settings/appearance", "settings");
+    await page.locator("#preference-beta").check();
     await openRoute(page, "#/settings/plugins", "settings");
 
     await page.locator("[data-plugin-install-file]").click();
