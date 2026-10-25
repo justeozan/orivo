@@ -5659,6 +5659,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   root.querySelector<HTMLButtonElement>("#next-game")?.addEventListener("click", () => moveSelection(1));
   // The keys step the rail through the library's own list: the rail renders a
   // window of it, so the card after the last one on screen is ours to name.
+  // The left fade (styles.css `.game-cards.is-scrolled`) only once the shelf
+  // has moved: at rest the first card must not be dimmed.
+  let shelfFadeFrame = 0;
+  const syncShelfFade = (): void => {
+    cancelAnimationFrame(shelfFadeFrame);
+    shelfFadeFrame = requestAnimationFrame(() =>
+      refs.cards.classList.toggle("is-scrolled", refs.cards.scrollLeft > 4),
+    );
+  };
+  refs.cards.addEventListener("scroll", syncShelfFade, { passive: true });
+
   refs.cards.addEventListener(NAV_STEP_EVENT, (event) => {
     event.preventDefault();
     moveSelection((event as CustomEvent<NavStepDetail>).detail.delta);

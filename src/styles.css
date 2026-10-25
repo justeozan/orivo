@@ -1556,6 +1556,13 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   scrollbar-width: none;
 }
 .game-cards::-webkit-scrollbar { display: none; }
+/* Once the shelf has scrolled, the cards leaving on the left fade out over
+   the first stretch instead of being cut by the rail's edge. At rest the first
+   card is fully drawn. */
+.game-cards.is-scrolled {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 72px);
+  mask-image: linear-gradient(to right, transparent 0, #000 72px);
+}
 /* Walked with the keys or a pad, a card scrolled into view brings its
    neighbour on either side with it, so the next game stays in sight: the shelf
    starts moving at the card before the edge rather than once the edge is
