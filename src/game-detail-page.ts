@@ -1071,18 +1071,18 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
             saved.push({ mediaId: slide.id, role });
           }
         }
-        // The background pick (or a lone pick of any shape) is what the hero and
-        // the Library card paint, so that one is also the committed selection.
-        const home =
-          saved.find((entry) => entry.role === "background") ?? saved[0];
+        // Only a background pick becomes the selected wallpaper. A logo or a
+        // cover chosen on its own used to be committed as one, which is how
+        // wordmarks ended up offered back as backgrounds.
+        const home = saved.find((entry) => entry.role === "background");
         if (home) {
           const media = await client.selectMedia(gameId, home.mediaId, signal);
           const committed = normaliseGameMedia(media);
           if (committed.length > 0 && isFresh(context, gameId))
             dispatch({ type: "media-committed", media: committed });
-          for (const entry of saved) {
-            await client.setHomeImage(gameId, entry.mediaId, entry.role, signal);
-          }
+        }
+        for (const entry of saved) {
+          await client.setHomeImage(gameId, entry.mediaId, entry.role, signal);
         }
       });
       options.onLibraryChanged?.();

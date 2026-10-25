@@ -972,14 +972,14 @@ describe("saving chosen artwork", () => {
       { onLibraryChanged, notify },
     );
 
-    tick("wall-cover-0");
+    tick("wall-background-0");
     tick("wallpaper-apply");
     await flush();
     host!.deactivate();
     gate.resolve();
     await flush();
 
-    expect(calls).toEqual(["import:cover-0"]);
+    expect(calls).toEqual(["import:background-0"]);
     expect(notify).toHaveBeenCalledWith("The disk is full.");
     expect(onLibraryChanged).toHaveBeenCalledTimes(1);
   });
@@ -1015,11 +1015,8 @@ describe("saving chosen artwork", () => {
     gate.resolve();
     await flush();
 
-    expect(calls).toEqual([
-      "import:cover-0",
-      "select:saved-cover-0",
-      "home:saved-cover-0:cover",
-    ]);
+    // A lone cover is set as the cover, never selected as the wallpaper.
+    expect(calls).toEqual(["import:cover-0", "home:saved-cover-0:cover"]);
     expect(container.textContent).not.toContain("Saving wallpapers…");
     expect(loads).toBeGreaterThan(loadsWhileSaving);
     expect(onLibraryChanged).toHaveBeenCalledTimes(1);
