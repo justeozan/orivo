@@ -51,6 +51,16 @@ const MAX_QUERY_LENGTH: usize = 200;
 const MAX_OFFER_ID_LENGTH: usize = 128;
 const MAX_RECOMMENDATION_REASONS: usize = 3;
 const BROWSE_CURSOR_PREFIX: &str = "store_";
+/// How long a platform lookup is trusted before the game is asked about again.
+/// Where a game ships changes a few times in its life, so a refresh that runs
+/// daily must not repeat the question daily.
+const PLATFORM_LOOKUP_TTL: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+/// IGDB answers up to 500 rows a request; a hundred Steam ids keeps the query
+/// string short and the response well under [`MAX_RESPONSE_BYTES`].
+const PLATFORM_LOOKUP_BATCH: usize = 100;
+/// The most games asked about in one refresh, so a first run over a large
+/// cache spreads across a few refreshes instead of one long burst.
+const MAX_PLATFORM_LOOKUPS: usize = 400;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -412,6 +422,12 @@ pub struct GameSummary {
     pub genres: Vec<String>,
     pub tags: Vec<String>,
     pub supported_platforms: Vec<GamePlatform>,
+    /// Every Store platform the game is available on: its offers, the builds
+    /// it declares, the curator's list and the platform lookup, merged. The
+    /// WebView filters on this so it never has to rebuild the answer from
+    /// offers alone.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub available_platforms: Vec<StorePlatformId>,
     pub owned: bool,
     pub launchable: bool,
     pub wishlisted: bool,
@@ -531,6 +547,38 @@ struct CachedGame {
     /// unchanged, so the cards keep the exact French copy the design approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     curation: Option<StoreCuration>,
+    /// Where the game is *sold*, as a data source reports it. Offers only ever
+    /// describe a storefront Orivo can quote, so a multi-platform game sold on
+    /// Steam says nothing about its PlayStation release; this does.
+    #[serde(default)]
+    availability: PlatformAvailability,
+}
+
+/// The platforms a data source says a game ships on, and when it said so.
+///
+/// Kept apart from `offers` and `supported_platforms` on purpose: those are
+/// facts about a storefront listing and about the build the user can install,
+/// while this is a fact about the game. Folding it into either would invent a
+/// PlayStation offer with no price and nowhere to send the shopper.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformAvailability {
+    #[serde(default)]
+    platforms: Vec<StorePlatformId>,
+    /// `None` until a lookup has answered, so a game that was never asked
+    /// about is retried and one that was is left alone until the TTL lapses.
+    #[serde(default)]
+    checked_at_epoch_ms: Option<u64>,
+}
+
+impl PlatformAvailability {
+    /// An answer is fresh while it is younger than [`PLATFORM_LOOKUP_TTL`];
+    /// platform lists move on the scale of months, not minutes.
+    fn is_fresh(&self, now_ms: u64) -> bool {
+        self.checked_at_epoch_ms.is_some_and(|checked| {
+            now_ms.saturating_sub(checked) < PLATFORM_LOOKUP_TTL.as_millis() as u64
+        })
+    }
 }
 
 impl CachedGame {
@@ -546,6 +594,7 @@ impl CachedGame {
             genres: self.genres.clone(),
             tags: self.tags.clone(),
             supported_platforms: self.supported_platforms.clone(),
+            available_platforms: available_platforms(self).into_iter().collect(),
             owned: false,
             launchable: false,
             wishlisted: false,
@@ -807,6 +856,7 @@ impl CatalogSeed {
             })
             .collect();
         Some(CachedGame {
+            availability: PlatformAvailability::default(),
             id: self.id,
             title: self.title,
             short_description: self.short_description,
@@ -1307,14 +1357,15 @@ fn without_owned(games: Vec<CachedGame>, library: &[OwnedGame]) -> Vec<CachedGam
     games.into_iter().filter(|game| !owned.owns(game)).collect()
 }
 
-/// A game satisfies a platform filter when one of its offers comes from a
-/// storefront for that platform, or when the game itself declares a platform
-/// that maps onto it. Anything Orivo cannot map stays unmatched rather than
-/// being assumed to fit.
-fn matches_platforms(game: &CachedGame, platforms: &[StorePlatformId]) -> bool {
-    if platforms.is_empty() {
-        return true;
-    }
+/// Every Store platform a game is available on: the union of what its offers,
+/// its declared builds, the curator and the platform lookup each say.
+///
+/// A union, because each source is partial in a different way. Offers cover
+/// only storefronts Orivo can quote, so a game sold on Steam carries no
+/// PlayStation offer even when it ships on PlayStation; the lookup knows that
+/// but cannot say where to buy it. Anything none of them mentions stays out
+/// rather than being assumed to fit.
+fn available_platforms(game: &CachedGame) -> BTreeSet<StorePlatformId> {
     game.offers
         .iter()
         .filter_map(|offer| offer.provider.platform())
@@ -1323,7 +1374,24 @@ fn matches_platforms(game: &CachedGame, platforms: &[StorePlatformId]) -> bool {
                 .iter()
                 .filter_map(|platform| platform.store_platform()),
         )
-        .any(|platform| platforms.contains(&platform))
+        .chain(
+            game.curation
+                .iter()
+                .flat_map(|curation| curation.platforms.iter().copied()),
+        )
+        .chain(game.availability.platforms.iter().copied())
+        .collect()
+}
+
+/// A game satisfies a platform filter when it is available on any of the
+/// chosen platforms, not only when it is sold there exclusively. Choosing
+/// PlayStation therefore lists every game that ships on PlayStation.
+fn matches_platforms(game: &CachedGame, platforms: &[StorePlatformId]) -> bool {
+    if platforms.is_empty() {
+        return true;
+    }
+    let available = available_platforms(game);
+    platforms.iter().any(|platform| available.contains(platform))
 }
 
 fn matches_request(
@@ -1579,6 +1647,258 @@ fn apply_outcome(games: &mut Vec<CachedGame>, outcome: ProviderOutcome) {
             None => game.offers.push(offer),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Platform availability. Offers say where a game can be bought; they do not say
+// where it exists. IGDB does, and it can be asked by Steam app id, which every
+// live row and nearly every catalogue row already carries.
+// ---------------------------------------------------------------------------
+
+/// An IGDB platform id as a Store filter platform. Only current hardware is
+/// mapped: a PlayStation 3 or Xbox 360 release does not make a game something
+/// to look for under today's PlayStation or Xbox pill.
+///
+/// IGDB ids: 6 PC (Windows), 14 Mac, 3 Linux, 48 PS4, 167 PS5, 49 Xbox One,
+/// 169 Xbox Series X|S, 130 Switch, 508 Switch 2.
+fn igdb_platform(id: i64) -> Option<StorePlatformId> {
+    match id {
+        3 | 6 | 14 => Some(StorePlatformId::Pc),
+        48 | 167 => Some(StorePlatformId::PlayStation),
+        49 | 169 => Some(StorePlatformId::Xbox),
+        130 | 508 => Some(StorePlatformId::Switch),
+        _ => None,
+    }
+}
+
+/// Reads an IGDB `external_games` answer (`uid` plus the expanded
+/// `game.platforms`) into Store platforms per Steam app id. A row that names no
+/// uid is skipped; two rows for one uid, a game and its edition, are merged.
+fn igdb_platforms_from_payload(
+    payload: &serde_json::Value,
+) -> BTreeMap<String, Vec<StorePlatformId>> {
+    let mut by_app: BTreeMap<String, BTreeSet<StorePlatformId>> = BTreeMap::new();
+    for row in payload.as_array().into_iter().flatten() {
+        let Some(uid) = row.get("uid").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let platforms = row
+            .pointer("/game/platforms")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_i64)
+            .filter_map(igdb_platform);
+        by_app.entry(uid.to_string()).or_default().extend(platforms);
+    }
+    by_app
+        .into_iter()
+        .map(|(uid, platforms)| (uid, platforms.into_iter().collect()))
+        .collect()
+}
+
+/// Where the platform lookup comes from. A seam like [`StoreHttp`] so tests
+/// never reach the network.
+pub trait PlatformSource: Send + Sync {
+    /// The platforms IGDB lists for each Steam app id it knows. An id it does
+    /// not know is absent from the map; a failed request is an `Err`.
+    fn platforms_for<'a>(
+        &'a self,
+        steam_app_ids: &'a [String],
+    ) -> BoxFuture<'a, Result<BTreeMap<String, Vec<StorePlatformId>>, String>>;
+}
+
+/// IGDB, through the same Twitch application the wallpaper search uses. It
+/// only exists when the user (or the environment) supplied that application's
+/// credentials: without them the Store works from offers, declared builds and
+/// the curated list alone, and a platform filter shows only what those prove.
+pub struct IgdbPlatformSource {
+    client: reqwest::Client,
+    client_id: String,
+    client_secret: String,
+    token: std::sync::Mutex<Option<String>>,
+}
+
+impl IgdbPlatformSource {
+    /// `None` when either half of the credentials is missing.
+    pub fn from_credentials(
+        stored: &crate::wallpaper_credentials::WallpaperCredentialsDto,
+    ) -> Option<Self> {
+        Self::from_parts(
+            &stored.igdb_client_id,
+            &stored.igdb_client_secret,
+            |key| std::env::var(key).ok(),
+        )
+    }
+
+    fn from_parts(
+        stored_id: &str,
+        stored_secret: &str,
+        get_env: impl Fn(&str) -> Option<String>,
+    ) -> Option<Self> {
+        let pick = |stored: &str, key: &str| {
+            let value = if stored.trim().is_empty() {
+                get_env(key).unwrap_or_default()
+            } else {
+                stored.to_string()
+            };
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(value)
+        };
+        let client_id = pick(stored_id, crate::wallpaper_search::IGDB_CLIENT_ID_ENV)?;
+        let client_secret = pick(stored_secret, crate::wallpaper_search::IGDB_CLIENT_SECRET_ENV)?;
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .user_agent(USER_AGENT)
+            .build()
+            .ok()?;
+        Some(Self {
+            client,
+            client_id,
+            client_secret,
+            token: std::sync::Mutex::new(None),
+        })
+    }
+
+    async fn access_token(&self) -> Result<String, String> {
+        if let Some(token) = self.token.lock().ok().and_then(|held| held.clone()) {
+            return Ok(token);
+        }
+        let response = self
+            .client
+            .post(crate::wallpaper_search::IGDB_TOKEN_URL)
+            .form(&[
+                ("client_id", self.client_id.as_str()),
+                ("client_secret", self.client_secret.as_str()),
+                ("grant_type", "client_credentials"),
+            ])
+            .send()
+            .await
+            .map_err(|error| format!("IGDB could not be reached: {error}"))?;
+        if !response.status().is_success() {
+            return Err(format!("IGDB refused the credentials ({})", response.status()));
+        }
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|_| "IGDB sent an unreadable token".to_string())?;
+        let token = body
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| "IGDB returned no access token".to_string())?
+            .to_string();
+        if let Ok(mut held) = self.token.lock() {
+            *held = Some(token.clone());
+        }
+        Ok(token)
+    }
+}
+
+impl PlatformSource for IgdbPlatformSource {
+    fn platforms_for<'a>(
+        &'a self,
+        steam_app_ids: &'a [String],
+    ) -> BoxFuture<'a, Result<BTreeMap<String, Vec<StorePlatformId>>, String>> {
+        Box::pin(async move {
+            let token = self.access_token().await?;
+            // Source 1 is Steam. Asking by Steam app id is exact, so no title
+            // is ever fuzzy-matched onto the wrong game.
+            let uids = steam_app_ids
+                .iter()
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "fields uid,game.platforms; where external_game_source = 1 & uid = ({uids}); limit 500;"
+            );
+            let response = self
+                .client
+                .post(format!("{}/external_games", crate::wallpaper_search::IGDB_API_URL))
+                .header("Client-ID", &self.client_id)
+                .header("Authorization", format!("Bearer {token}"))
+                .header("Accept", "application/json")
+                .body(query)
+                .send()
+                .await
+                .map_err(|error| format!("IGDB request failed: {error}"))?;
+            if !response.status().is_success() {
+                // A stale token is the usual cause; drop it so the next
+                // refresh signs in again rather than repeating the failure.
+                if let Ok(mut held) = self.token.lock() {
+                    *held = None;
+                }
+                return Err(format!("IGDB returned HTTP {}", response.status()));
+            }
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|error| format!("IGDB response was interrupted: {error}"))?;
+            if bytes.len() > MAX_RESPONSE_BYTES {
+                return Err("IGDB response exceeds the supported size".to_string());
+            }
+            let payload = serde_json::from_slice(&bytes)
+                .map_err(|_| "IGDB returned unreadable JSON".to_string())?;
+            Ok(igdb_platforms_from_payload(&payload))
+        })
+    }
+}
+
+/// Carry earlier platform answers onto a freshly rebuilt game list. A refresh
+/// starts from the bundled catalogue and re-fetches the live rows, so without
+/// this every refresh would throw away the lookup it paid for.
+fn carry_platform_availability(games: &mut [CachedGame], previous: &[CachedGame]) {
+    for game in games.iter_mut() {
+        if game.availability.checked_at_epoch_ms.is_some() {
+            continue;
+        }
+        if let Some(earlier) = previous.iter().find(|earlier| earlier.id == game.id) {
+            game.availability = earlier.availability.clone();
+        }
+    }
+}
+
+/// Ask the source about every Steam-keyed game whose answer is missing or past
+/// its TTL, in batches, and record what comes back. Returns whether anything
+/// changed so the caller only rewrites the cache when it has to.
+///
+/// This runs after the prices are already cached and served, so a slow or
+/// failing lookup can delay nothing the shopper sees: the first paint never
+/// waits on it. A failed batch stops the run and leaves those games unchecked,
+/// to be retried by the next refresh.
+async fn enrich_platform_availability(
+    games: &mut [CachedGame],
+    source: &dyn PlatformSource,
+    now_ms: u64,
+) -> bool {
+    let wanted: Vec<String> = games
+        .iter()
+        .filter(|game| !game.availability.is_fresh(now_ms))
+        .filter_map(|game| steam_app_id(&game.id))
+        .take(MAX_PLATFORM_LOOKUPS)
+        .collect();
+    let mut changed = false;
+    for batch in wanted.chunks(PLATFORM_LOOKUP_BATCH) {
+        let Ok(answers) = source.platforms_for(batch).await else {
+            break;
+        };
+        for game in games.iter_mut() {
+            let Some(app_id) = steam_app_id(&game.id) else {
+                continue;
+            };
+            if !batch.contains(&app_id) {
+                continue;
+            }
+            // A game IGDB does not know keeps whatever it had; it is still
+            // marked as asked so it is not queried on every refresh.
+            if let Some(platforms) = answers.get(&app_id) {
+                game.availability.platforms = platforms.clone();
+            }
+            game.availability.checked_at_epoch_ms = Some(now_ms);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// One catalogue game the Steam storefront can be asked about. The offer
@@ -1999,6 +2319,7 @@ fn steam_new_release_from_payload(
     };
 
     let game = CachedGame {
+        availability: PlatformAvailability::default(),
         id: game_id,
         title: title.to_string(),
         short_description: data
@@ -2202,6 +2523,7 @@ fn apple_entry(
         url: url.to_string(),
     };
     let game = CachedGame {
+        availability: PlatformAvailability::default(),
         id: game_id,
         title: title.to_string(),
         short_description: description,
@@ -2511,14 +2833,29 @@ fn browse(
 /// Background refresh. Provider failures are recorded as provider statuses, so
 /// this only returns an error when the derived cache itself cannot be written.
 #[tauri::command]
-pub async fn refresh_store_sources(app: AppHandle) -> Result<(), String> {
+pub async fn refresh_store_sources(
+    app: AppHandle,
+    credentials: State<'_, std::sync::Arc<crate::wallpaper_credentials::WallpaperCredentialsService>>,
+) -> Result<(), String> {
     let directory = app_data_dir(&app)?;
     let config = RefreshConfig {
         region: resolve_region(&directory),
     };
     let http = ReqwestStoreHttp::new()?;
-    let document = refresh_all(&http, &config, now_epoch_ms()).await;
-    StoreCache::new(&directory).write(&document)
+    let cache = StoreCache::new(&directory);
+    let previous = cache.read().games;
+    let now_ms = now_epoch_ms();
+    let mut document = refresh_all(&http, &config, now_ms).await;
+    carry_platform_availability(&mut document.games, &previous);
+    // Prices first: the Store is served from this write, and the platform
+    // lookup below is a second, optional pass that must never hold it up.
+    cache.write(&document)?;
+    if let Some(source) = IgdbPlatformSource::from_credentials(&credentials.dto())
+        && enrich_platform_availability(&mut document.games, &source, now_ms).await
+    {
+        cache.write(&document)?;
+    }
+    Ok(())
 }
 
 /// The WebView passes an opaque identifier. The destination is resolved and
@@ -2862,6 +3199,7 @@ mod tests {
 
     fn game_fixture(offers: Vec<CachedOffer>) -> CachedGame {
         CachedGame {
+            availability: PlatformAvailability::default(),
             id: "steam:1".to_string(),
             title: "Fixture".to_string(),
             short_description: "A fixture.".to_string(),
@@ -2927,6 +3265,7 @@ mod tests {
             "genres",
             "tags",
             "supportedPlatforms",
+            "availablePlatforms",
             "owned",
             "launchable",
             "wishlisted",
@@ -2940,7 +3279,7 @@ mod tests {
         // `curation?:` is optional in `src/contracts.ts`, so a game without
         // editorial copy must not carry the key at all.
         assert!(!object.contains_key("curation"));
-        assert_eq!(object.len(), 17, "GameSummary has unexpected fields");
+        assert_eq!(object.len(), 18, "GameSummary has unexpected fields");
         assert_eq!(object["source"], "store");
         assert_eq!(object["supportedPlatforms"], serde_json::json!(["macos"]));
 
@@ -2976,7 +3315,7 @@ mod tests {
             .expect("Planet of Lana is in the catalogue")
             .to_summary(NOW_MS, Vec::new());
         let curated = serde_json::to_value(&curated).unwrap();
-        assert_eq!(curated.as_object().unwrap().len(), 18);
+        assert_eq!(curated.as_object().unwrap().len(), 19);
         let curation = curated["curation"].as_object().unwrap();
         for key in [
             "genres",
@@ -3714,6 +4053,7 @@ mod tests {
             .cache()
             .write(&StoreCacheDocument {
                 games: vec![CachedGame {
+                    availability: PlatformAvailability::default(),
                     offers: vec![offer],
                     ..game
                 }],
@@ -4096,6 +4436,211 @@ mod tests {
         }
     }
 
+    /// The bug: a game sold on Steam but shipping on PlayStation carries no
+    /// PlayStation offer, so the filter used to keep only console exclusives.
+    /// Availability from the platform lookup must put it back.
+    #[test]
+    fn a_platform_filter_keeps_every_game_available_there() {
+        let steam_offer = || offer_fixture("offer_pc", "https://store.steampowered.com/app/1/");
+        let on_ps5 = CachedGame {
+            id: "steam:1".to_string(),
+            offers: vec![steam_offer()],
+            availability: PlatformAvailability {
+                platforms: vec![StorePlatformId::Pc, StorePlatformId::PlayStation],
+                checked_at_epoch_ms: Some(NOW_MS),
+            },
+            ..game_fixture(Vec::new())
+        };
+        let pc_only = CachedGame {
+            id: "steam:2".to_string(),
+            offers: vec![steam_offer()],
+            availability: PlatformAvailability {
+                platforms: vec![StorePlatformId::Pc],
+                checked_at_epoch_ms: Some(NOW_MS),
+            },
+            ..game_fixture(Vec::new())
+        };
+        let unasked = CachedGame {
+            id: "steam:3".to_string(),
+            offers: vec![steam_offer()],
+            ..game_fixture(Vec::new())
+        };
+
+        let playstation = [StorePlatformId::PlayStation];
+        assert!(matches_platforms(&on_ps5, &playstation));
+        assert!(matches_platforms(&on_ps5, &[StorePlatformId::Pc]));
+        assert!(!matches_platforms(&on_ps5, &[StorePlatformId::Xbox]));
+        assert!(!matches_platforms(&pc_only, &playstation));
+        assert!(!matches_platforms(&unasked, &playstation));
+
+        // The curator's list counts too, so a catalogue game is not lost just
+        // because the lookup has not run.
+        let curated = CachedGame {
+            curation: Some(StoreCuration {
+                platforms: vec![StorePlatformId::PlayStation],
+                ..StoreCuration::default()
+            }),
+            ..unasked
+        };
+        assert!(matches_platforms(&curated, &playstation));
+
+        // And the WebView is handed the merged set to filter on.
+        let summary = on_ps5.to_summary(NOW_MS, Vec::new());
+        assert_eq!(
+            summary.available_platforms,
+            vec![StorePlatformId::Pc, StorePlatformId::PlayStation]
+        );
+    }
+
+    #[test]
+    fn igdb_platform_ids_map_onto_the_store_platforms() {
+        let payload = serde_json::json!([
+            { "uid": "10", "game": { "id": 1, "platforms": [6, 14, 167, 169, 508] } },
+            // A second row for the same app (an edition) merges, and a
+            // PlayStation 3 release maps to nothing rather than to PlayStation.
+            { "uid": "10", "game": { "id": 2, "platforms": [9, 48] } },
+            { "uid": "20", "game": { "id": 3, "platforms": [6] } },
+            { "uid": "30", "game": { "id": 4 } },
+            { "game": { "id": 5, "platforms": [48] } },
+        ]);
+        let answers = igdb_platforms_from_payload(&payload);
+        assert_eq!(
+            answers["10"],
+            vec![
+                StorePlatformId::Pc,
+                StorePlatformId::PlayStation,
+                StorePlatformId::Xbox,
+                StorePlatformId::Switch
+            ]
+        );
+        assert_eq!(answers["20"], vec![StorePlatformId::Pc]);
+        assert!(answers["30"].is_empty());
+        assert_eq!(answers.len(), 3);
+    }
+
+    struct FakePlatforms {
+        answers: BTreeMap<String, Vec<StorePlatformId>>,
+        fail: bool,
+        asked: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl FakePlatforms {
+        fn new(answers: &[(&str, &[StorePlatformId])]) -> Self {
+            Self {
+                answers: answers
+                    .iter()
+                    .map(|(id, platforms)| (id.to_string(), platforms.to_vec()))
+                    .collect(),
+                fail: false,
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl PlatformSource for FakePlatforms {
+        fn platforms_for<'a>(
+            &'a self,
+            steam_app_ids: &'a [String],
+        ) -> BoxFuture<'a, Result<BTreeMap<String, Vec<StorePlatformId>>, String>> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push(steam_app_ids.to_vec());
+                if self.fail {
+                    return Err("IGDB unavailable".to_string());
+                }
+                Ok(self.answers.clone())
+            })
+        }
+    }
+
+    fn lookup_game(id: &str) -> CachedGame {
+        CachedGame {
+            id: id.to_string(),
+            ..game_fixture(Vec::new())
+        }
+    }
+
+    #[test]
+    fn the_platform_lookup_fills_live_games_and_is_not_repeated_within_the_ttl() {
+        let mut games = vec![
+            lookup_game("steam:1"),
+            lookup_game("steam:2"),
+            lookup_game("apple:9"),
+        ];
+        let source = FakePlatforms::new(&[(
+            "1",
+            &[StorePlatformId::Pc, StorePlatformId::PlayStation],
+        )]);
+
+        assert!(block_on(enrich_platform_availability(
+            &mut games, &source, NOW_MS
+        )));
+        assert_eq!(
+            games[0].availability.platforms,
+            vec![StorePlatformId::Pc, StorePlatformId::PlayStation]
+        );
+        // IGDB did not know steam:2: it is marked asked, and gains nothing.
+        assert!(games[1].availability.platforms.is_empty());
+        assert_eq!(games[1].availability.checked_at_epoch_ms, Some(NOW_MS));
+        // Only Steam-keyed games are asked about, never an App Store row.
+        assert_eq!(
+            source.asked.lock().unwrap().as_slice(),
+            [vec!["1".to_string(), "2".to_string()]]
+        );
+        assert_eq!(games[2].availability, PlatformAvailability::default());
+
+        // A second refresh inside the TTL asks nothing...
+        let later = NOW_MS + 60_000;
+        assert!(!block_on(enrich_platform_availability(
+            &mut games, &source, later
+        )));
+        assert_eq!(source.asked.lock().unwrap().len(), 1);
+        // ...and one past it asks again.
+        let expired = NOW_MS + PLATFORM_LOOKUP_TTL.as_millis() as u64 + 1;
+        assert!(block_on(enrich_platform_availability(
+            &mut games, &source, expired
+        )));
+        assert_eq!(source.asked.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_failed_platform_lookup_leaves_games_unchecked_for_the_next_refresh() {
+        let mut games = vec![lookup_game("steam:1")];
+        let mut source = FakePlatforms::new(&[]);
+        source.fail = true;
+
+        assert!(!block_on(enrich_platform_availability(
+            &mut games, &source, NOW_MS
+        )));
+        assert_eq!(games[0].availability.checked_at_epoch_ms, None);
+    }
+
+    #[test]
+    fn a_rebuilt_game_list_keeps_the_platforms_it_already_paid_for() {
+        let mut earlier = lookup_game("steam:1");
+        earlier.availability = PlatformAvailability {
+            platforms: vec![StorePlatformId::Switch],
+            checked_at_epoch_ms: Some(NOW_MS),
+        };
+        let mut games = vec![lookup_game("steam:1"), lookup_game("steam:2")];
+        carry_platform_availability(&mut games, std::slice::from_ref(&earlier));
+
+        assert_eq!(games[0].availability, earlier.availability);
+        assert_eq!(games[1].availability, PlatformAvailability::default());
+    }
+
+    #[test]
+    fn the_igdb_source_needs_both_halves_of_the_credentials() {
+        let none = |_: &str| None;
+        assert!(IgdbPlatformSource::from_parts("", "", none).is_none());
+        assert!(IgdbPlatformSource::from_parts("id", "", none).is_none());
+        assert!(IgdbPlatformSource::from_parts("id", "secret", none).is_some());
+        // The environment is the fallback for either half.
+        let env = |key: &str| {
+            (key == crate::wallpaper_search::IGDB_CLIENT_SECRET_ENV).then(|| "secret".to_string())
+        };
+        assert!(IgdbPlatformSource::from_parts("id", "", env).is_some());
+    }
+
     #[test]
     fn platform_filters_apply_alongside_provider_filters() {
         for (provider, expected) in [
@@ -4244,8 +4789,8 @@ mod tests {
         }
         assert_eq!(switch.provider_statuses.len(), StoreProviderId::ALL.len());
 
-        // A machine nothing in the catalogue is sold for empties the page
-        // without erroring.
+        // No storefront sells for emulators, so only the games the curator
+        // listed for them answer; the rest of the catalogue does not.
         let emulators = browse(
             &directory.cache(),
             &directory.root,
@@ -4253,8 +4798,30 @@ mod tests {
             &request(vec![StorePlatformId::Emulators]),
             NOW_MS,
         );
-        assert!(emulators.games.is_empty());
+        assert!(!emulators.games.is_empty());
+        for game in &emulators.games {
+            assert!(
+                game.curation.as_ref().is_some_and(|curation| curation
+                    .platforms
+                    .contains(&StorePlatformId::Emulators)),
+                "{} is not listed for emulators",
+                game.title
+            );
+        }
         assert!(emulators.next_cursor.is_none());
+
+        // A machine nothing lists empties the page without erroring.
+        let nothing = browse(
+            &directory.cache(),
+            &directory.root,
+            &[],
+            &StoreBrowseRequest {
+                query: "zzzz-no-such-game".to_string(),
+                ..request(vec![StorePlatformId::Switch])
+            },
+            NOW_MS,
+        );
+        assert!(nothing.games.is_empty());
     }
 
     // -- the embedded catalogue ----------------------------------------------

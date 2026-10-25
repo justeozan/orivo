@@ -75,8 +75,8 @@ pub const GOOGLE_API_KEY_ENV: &str = "ORIVO_GOOGLE_SEARCH_API_KEY";
 pub const GOOGLE_CSE_ID_ENV: &str = "ORIVO_GOOGLE_SEARCH_CSE_ID";
 pub const STEAMGRIDDB_API_KEY_ENV: &str = "ORIVO_STEAMGRIDDB_API_KEY";
 
-const IGDB_TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
-const IGDB_API_URL: &str = "https://api.igdb.com/v4";
+pub(crate) const IGDB_TOKEN_URL: &str = "https://id.twitch.tv/oauth2/token";
+pub(crate) const IGDB_API_URL: &str = "https://api.igdb.com/v4";
 const GOOGLE_SEARCH_URL: &str = "https://www.googleapis.com/customsearch/v1";
 const STEAM_STORE_SEARCH_URL: &str = "https://store.steampowered.com/api/storesearch/";
 /// Steam's per-app asset CDN. Every Steam row is built from predictable paths

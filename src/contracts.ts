@@ -234,6 +234,12 @@ export interface GameSummary {
   genres: string[];
   tags: string[];
   supportedPlatforms: Array<"windows" | "macos" | "linux" | "ios" | "android">;
+  /**
+   * Every Store platform the game is available on, as the shell merged it from
+   * offers, declared builds, the curator and the IGDB platform lookup. Absent
+   * when nothing is known.
+   */
+  availablePlatforms?: StorePlatform[];
   owned: boolean;
   launchable: boolean;
   wishlisted: boolean;
