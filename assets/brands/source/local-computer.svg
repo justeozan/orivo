@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- "This computer": a desktop display on its stand, drawn for Orivo in the
+       same round-capped stroke as the glyphs in src/icons.ts. -->
+  <rect x="2.5" y="3.5" width="19" height="13" rx="2.2"/>
+  <path d="M12 16.5v3.5M7.5 20.5h9"/>
+</svg>

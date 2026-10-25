@@ -2,8 +2,10 @@
 
 The white logos in `public/media/brands` are built from these files by
 `scripts/build-brand-logos.mjs`, following `brands.json`. Every source is in the
-public domain, under CC0, or drawn for Orivo: nothing here carries a copyleft or
-attribution licence into the app.
+public domain, under CC0, or drawn for Orivo, with one exception: Moonlight's
+mark is the project's own file, published in a GPL-3.0 repository. It is a
+logo shown to name the project, shipped as an image and not linked with any
+code.
 
 They are trademarks of their owners. Orivo shows them for one reason only: to
 name the store a game comes from or the platform it runs on, in the Library's
@@ -33,9 +35,9 @@ affiliated with Orivo.
 | `retroarch-wordmark.svg` | Wikimedia Commons, [Retroarch wordmark.svg](https://commons.wikimedia.org/wiki/File:Retroarch_wordmark.svg) | Public domain |
 | `ppsspp.svg` | Wikimedia Commons, [PPSSPP logo.svg](https://commons.wikimedia.org/wiki/File:PPSSPP_logo.svg) | Public domain |
 | `ryujinx.svg` | Wikimedia Commons, [Ryujinx.svg](https://commons.wikimedia.org/wiki/File:Ryujinx.svg) | Public domain |
-| `moonlight.svg` | Drawn for Orivo from the geometry of Moonlight's mark — a ring and an eight-spoke star. The project's own file lives in a GPL-3.0 repository, so it was described rather than copied. | Orivo |
+| `moonlight.svg` | The project's own mark, [moonlight-qt `app/res/moonlight.svg`](https://github.com/moonlight-stream/moonlight-qt/blob/master/app/res/moonlight.svg): a disc, a smaller disc, an eight-spoke star. Only the three shapes were kept. | GPL-3.0 (moonlight-qt repository); a trademark of the Moonlight project |
 | `microsoft-squares.svg` | Drawn for Orivo: the four squares. | Orivo |
-| `local-folder.svg` | Orivo's own folder glyph from `src/icons.ts`. | Orivo |
+| `local-computer.svg` | Drawn for Orivo: a desktop display on its stand, in the stroke of the glyphs in `src/icons.ts`. | Orivo |
 
 The names beside the marks for Epic Games, Microsoft Store, Local, Wine,
 Moonlight, Ryujinx, Linux and PPSSPP are set in the system font at build time;
