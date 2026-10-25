@@ -1147,7 +1147,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const current = refs.heroLayers[activeHero];
 
     if (source && current.getAttribute("src") === source) {
-      return;
+      // Already this game's picture. It may have been hidden in the meantime —
+      // a neighbour with no art fades the scene out but leaves the layer's
+      // source in place — so coming back has to show it again, not just
+      // conclude there is nothing to do.
+      if (current.complete && current.naturalWidth > 0) {
+        ++heroRequest;
+        current.classList.add("is-active");
+        refs.heroLayers[1 - activeHero].classList.remove("is-active");
+        return;
+      }
+      if (current.classList.contains("is-active")) return;
     }
 
     // A game with no picture at all, or whose every picture failed, shows the
