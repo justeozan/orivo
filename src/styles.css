@@ -1604,6 +1604,11 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   animation: cover-glint-orbit 7.2s linear infinite;
 }
 .card-media { position: absolute; inset: 0; z-index: 0; overflow: hidden; border-radius: calc(var(--card-radius) - 1px); background: #17171b; }
+/* `overflow: hidden` alone does not round WebKit's composited layers: while a
+   card widens (and while it tilts) the art is painted on its own layer and
+   showed square corners outside the radius for the length of the animation.
+   A real clip holds for every layer underneath. */
+.card-media { clip-path: inset(0 round calc(var(--card-radius) - 1px)); -webkit-mask-image: -webkit-radial-gradient(white, black); }
 .card-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center top; opacity: 1; transform: scale(1); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1); }
 .card-art--landscape { object-position: center center; opacity: 0; transform: scale(1.025); }
 .game-card.is-selected .card-art--portrait { opacity: 0; transform: scale(1.012); }
