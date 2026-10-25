@@ -4494,6 +4494,9 @@ mod tests {
             local_file: Some(file.into()),
             mime_type: Some("image/png".into()),
             byte_size: 1_024,
+            role: None,
+            width: None,
+            height: None,
             extra: BTreeMap::new(),
         }
     }

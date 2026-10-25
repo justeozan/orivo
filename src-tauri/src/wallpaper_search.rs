@@ -53,7 +53,7 @@
 //! literal `no_logo` value, and the wordmark is published separately so the app
 //! can composite the real one over a clean scene.
 
-use crate::game_detail::{GameMediaView, validate_opaque_id};
+use crate::game_detail::{GameMediaRole, GameMediaView, validate_opaque_id};
 use crate::game_media::GameMediaService;
 use crate::wallpaper_credentials::{WallpaperCredentialsDto, WallpaperCredentialsService};
 use futures_util::future::join_all;
@@ -148,6 +148,18 @@ pub enum WallpaperCategory {
     Logo,
 }
 
+/// A row and the role stored on an imported image are the same four words.
+impl From<WallpaperCategory> for GameMediaRole {
+    fn from(category: WallpaperCategory) -> Self {
+        match category {
+            WallpaperCategory::Cover => Self::Cover,
+            WallpaperCategory::Landscape => Self::Landscape,
+            WallpaperCategory::Background => Self::Background,
+            WallpaperCategory::Logo => Self::Logo,
+        }
+    }
+}
+
 impl WallpaperCategory {
     fn slug(self) -> &'static str {
         match self {
@@ -176,33 +188,37 @@ impl WallpaperCategory {
     /// the typed endpoints included, which is the one rule they do not get to
     /// bypass.
     ///
-    /// The background row is the reason this exists. It is a full-bleed image
+    /// The background row is the one with a choice. It is a full-bleed image
     /// behind the whole page, so it is the one slot where a 1920-wide picture
-    /// visibly falls apart, and it now asks for 4K and nothing else. That has a
-    /// real cost, stated plainly: Steam's screenshots (1920x1080), its page
-    /// backgrounds (1438 wide) and IGDB's `t_1080p` renders can never qualify,
-    /// so on a game whose publisher uploaded no 4K art the row comes back
-    /// empty rather than filled with something smaller.
+    /// visibly falls apart - but demanding 4K unconditionally left the row
+    /// empty for every game whose publisher uploaded no 4K art, because Steam's
+    /// screenshots (1920x1080), its page backgrounds (1438 wide) and IGDB's
+    /// `t_1080p` renders can never qualify. So the default floor is 1920, 4K
+    /// results are ranked first (see `rank_for_category`), and `only_4k` - the
+    /// picker's "4K only" toggle - restores the strict 3840 floor for someone
+    /// who would rather see nothing than something smaller.
     ///
     /// The card rows keep a low floor on purpose: they are drawn small, and
     /// `header.jpg` at 460 wide is a genuinely useful last resort for an old
-    /// game with no library art at all.
-    fn min_width(self) -> u32 {
+    /// game with no library art at all. `only_4k` means nothing to them.
+    fn min_width(self, only_4k: bool) -> u32 {
         match self {
             Self::Cover => 600,
             Self::Landscape => 460,
-            Self::Background => 3840,
+            Self::Background if only_4k => BACKGROUND_4K_WIDTH,
+            Self::Background => BACKGROUND_DEFAULT_MIN_WIDTH,
             Self::Logo => LOGO_MIN_WIDTH,
         }
     }
 
     /// An empty row has to say which row is empty, because the other three may
     /// well have filled at the same time.
-    fn empty_message(self) -> &'static str {
+    fn empty_message(self, only_4k: bool) -> &'static str {
         match self {
             Self::Cover => "No cover art matched that search.",
             Self::Landscape => "No wide key art matched that search.",
-            Self::Background => "No 4K background matched that search.",
+            Self::Background if only_4k => "No 4K background matched that search.",
+            Self::Background => "No background matched that search.",
             Self::Logo => "No logo matched that search.",
         }
     }
@@ -233,7 +249,19 @@ impl WallpaperCategory {
         match self {
             Self::Cover => &["screenshot", "gameplay", "wallpaper"],
             Self::Landscape => &["screenshot", "gameplay"],
-            Self::Background => &["screenshot", "gameplay"],
+            // A background is a bare scene. The extra words name the other
+            // roles - a wordmark, a box, a store capsule - that a keyword
+            // engine happily files under "wallpaper", and they are also hard
+            // rejections in `is_clean_background`.
+            Self::Background => &[
+                "screenshot",
+                "gameplay",
+                "logo",
+                "wordmark",
+                "cover",
+                "capsule",
+                "poster",
+            ],
             Self::Logo => &["screenshot", "gameplay", "wallpaper"],
         }
     }
@@ -305,6 +333,13 @@ pub struct WallpaperCandidateView {
     title: String,
     thumbnail_url: String,
     category: WallpaperCategory,
+    /// Pixel size the source reported for the full image, so a tile can say
+    /// "4K" or "1080p". Absent when nothing measured it: the tile then shows no
+    /// badge rather than a made-up one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
 }
 
 /// One row's answer. There is no source on it: a row is filled from every
@@ -392,7 +427,20 @@ struct WallpaperCandidate {
     title: String,
     thumbnail_url: String,
     url: String,
+    /// The row it was found for, which is the role it is stored under if it is
+    /// imported.
+    category: WallpaperCategory,
+    /// Reported size of the full image; `None` when nothing measured it.
+    size: Option<(u32, u32)>,
 }
+
+/// What `to_candidates` consumes: where it came from, (title, thumbnail, full
+/// URL) and the size the source reported, if it did.
+type CandidateInput = (
+    WallpaperSource,
+    (String, String, String),
+    Option<(u32, u32)>,
+);
 
 /// Bounded, insertion-ordered cache so a search result can be imported a moment
 /// after the search. Oldest entries are evicted once the cap is reached.
@@ -454,11 +502,11 @@ static CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// opaque id per row.
 fn to_candidates(
     category: WallpaperCategory,
-    entries: impl IntoIterator<Item = (WallpaperSource, (String, String, String))>,
+    entries: impl IntoIterator<Item = CandidateInput>,
 ) -> Vec<WallpaperCandidate> {
     let mut seen = std::collections::HashSet::new();
     let mut built = Vec::new();
-    for (source, (title, raw_thumbnail, raw_url)) in entries {
+    for (source, (title, raw_thumbnail, raw_url), size) in entries {
         let Some(url) = https_url(&raw_url) else {
             continue;
         };
@@ -476,6 +524,8 @@ fn to_candidates(
             title,
             thumbnail_url,
             url,
+            category,
+            size,
         });
     }
     built
@@ -498,6 +548,10 @@ const LANDSCAPE_MIN_WIDTH: u32 = 600;
 const BACKGROUND_MIN_RATIO: f64 = 1.60;
 const BACKGROUND_MAX_RATIO: f64 = 6.00;
 const BACKGROUND_MIN_WIDTH: u32 = 1280;
+/// The default floor of the background row, and the strict one behind its
+/// "4K only" toggle. See `WallpaperCategory::min_width`.
+const BACKGROUND_DEFAULT_MIN_WIDTH: u32 = 1920;
+const BACKGROUND_4K_WIDTH: u32 = 3840;
 /// A wordmark is as wide as the words are, so the logo row bounds only what a
 /// wordmark can never be: thumbnail-sized, or taller than it is wide. The lower
 /// bound sits just below square rather than at it, because a stacked two-line
@@ -563,6 +617,10 @@ struct SizedCandidate {
     /// mock-up. Trusting the endpoint is what lets the good asset through
     /// without loosening the guard on the sources that need it.
     trusted_shape: bool,
+    /// ISO 639-1 code of the text in the picture, for the sources that tag it
+    /// (SteamGridDB). Only the rows that are mostly text - logo and cover -
+    /// care; see `rank_for_category`.
+    language: Option<String>,
 }
 
 impl SizedCandidate {
@@ -572,6 +630,19 @@ impl SizedCandidate {
 
     fn pixels(&self) -> u64 {
         u64::from(self.width) * u64::from(self.height)
+    }
+
+    /// The size to show on a tile, or `None` when it is only a stand-in.
+    ///
+    /// Steam's wordmarks are reported at the logo row's floor because their real
+    /// size varies per game and is never fetched; printing that floor as if it
+    /// were the image's size would be a made-up badge. Zero means a source that
+    /// reported nothing.
+    fn reported_size(&self) -> Option<(u32, u32)> {
+        let stand_in = self.source == WallpaperSource::SteamStore
+            && self.width == LOGO_MIN_WIDTH
+            && self.height == LOGO_MIN_HEIGHT;
+        (self.width > 0 && self.height > 0 && !stand_in).then_some((self.width, self.height))
     }
 
     fn into_triple(self) -> (String, String, String) {
@@ -630,9 +701,88 @@ fn keyword_score(title: &str, category: WallpaperCategory) -> i32 {
 /// endpoint does not get to opt out of it. The shape band binds only measured
 /// results, because a typed endpoint's proportions are already known to be
 /// right and several of them sit outside a band drawn to catch fan mock-ups.
-fn admits(entry: &SizedCandidate, category: WallpaperCategory) -> bool {
-    entry.width >= category.min_width()
+fn admits(entry: &SizedCandidate, category: WallpaperCategory, only_4k: bool) -> bool {
+    entry.width >= category.min_width(only_4k)
         && (entry.trusted_shape || fits_category(entry.width, entry.height, category))
+}
+
+/// Words that name a different role from a background. A hit carrying one of
+/// them is a wordmark, a box, a store capsule or an icon - not a bare scene.
+const OTHER_ROLE_WORDS: &[&str] = &[
+    "logo", "logos", "wordmark", "icon", "icons", "cover", "covers", "capsule", "header", "poster",
+    "boxart", "packshot",
+];
+
+/// Splits on anything that is not a letter or digit, so `library_logo.png`,
+/// `Elden-Ring_Logo` and `Elden Ring logo` all yield the same `logo` token.
+fn words_of(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn names_another_role(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| OTHER_ROLE_WORDS.contains(&word.as_str()))
+        || words
+            .windows(2)
+            .any(|pair| pair[0] == "box" && pair[1] == "art")
+}
+
+/// Whether a hit is a bare scene fit for the background row.
+///
+/// The picker shows a background full-bleed behind the whole page, so a white
+/// wordmark on nothing, or key art with the title burned in, is the worst thing
+/// it can offer. Three independent tests, because no single signal catches all
+/// of them:
+///
+/// - the URL path: Steam's own `library_logo.png`, `capsule_616x353.jpg` and
+///   `header.jpg` give themselves away, as does any `.../logo.png`;
+/// - the caption, with the game's own name removed first so "Cover Fire" or
+///   "Iconoclasts" is not mistaken for a cover or an icon;
+/// - for results the host did not pick by endpoint, the container: PNG, SVG and
+///   ICO are where transparent wordmarks live, and transparency cannot be read
+///   from search metadata, so those formats are not trusted for a background.
+///   (The cost is a few genuine PNG wallpapers from Wikimedia or Openverse.)
+///
+/// The typed endpoints are already clean by construction - SteamGridDB heroes
+/// in the `alternate` style, Steam's `library_hero` - so they skip the format
+/// test, but not the URL and caption ones.
+fn is_clean_background(entry: &SizedCandidate, game: &str) -> bool {
+    let path = entry
+        .url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(entry.url.as_str());
+    let path = path.split_once("://").map_or(path, |(_, rest)| rest);
+    // Drop the host so a domain such as `logos.example` does not count.
+    let path = path.split_once('/').map_or("", |(_, rest)| rest);
+    if names_another_role(&words_of(path)) {
+        return false;
+    }
+    let lowered_title = entry.title.to_lowercase();
+    let lowered_game = game.trim().to_lowercase();
+    let title = if lowered_game.is_empty() {
+        lowered_title
+    } else {
+        lowered_title.replace(&lowered_game, " ")
+    };
+    if names_another_role(&words_of(&title)) {
+        return false;
+    }
+    if !entry.trusted_shape {
+        let extension = path
+            .rsplit_once('.')
+            .map_or("", |(_, ext)| ext)
+            .to_lowercase();
+        if matches!(extension.as_str(), "png" | "svg" | "ico" | "gif") {
+            return false;
+        }
+    }
+    true
 }
 
 /// Merges every source's hits into one row, best first, with repeats dropped.
@@ -644,21 +794,65 @@ fn admits(entry: &SizedCandidate, category: WallpaperCategory) -> bool {
 /// keeps a true 16:9 4K wallpaper ahead of a letterboxed 3840x1240 hero in the
 /// background row, which is the right answer for an image drawn full-bleed.
 ///
+/// The background row is the exception to "typed endpoint first": with its
+/// floor lowered to 1920, a 4K picture is worth more than any other signal
+/// there, so true-4K results lead and the rest are ordered as above inside each
+/// half. With `only_4k` on nothing below 4K survives, so that key is a no-op.
+///
 /// Deduplication is by URL, so the same asset reached through two sources — a
 /// Steam CDN path that Google also indexed — occupies one tile and not two.
 fn rank_for_category(
     entries: Vec<SizedCandidate>,
     category: WallpaperCategory,
+    only_4k: bool,
+) -> Vec<SizedCandidate> {
+    rank_with_languages(
+        entries,
+        category,
+        only_4k,
+        crate::game_artwork::preferred_languages(),
+    )
+}
+
+/// `rank_for_category` with the language list passed in, so a test does not
+/// depend on the machine's locale.
+///
+/// Logo and cover are the rows whose picture is mostly lettering, so language
+/// outranks everything but the 4K key (which only the background has): a
+/// smaller wordmark you can read beats a larger one in a script you cannot.
+/// Another language is shown only when nothing in the preferred languages, or
+/// declaring none, exists - the same rule the artwork reset uses.
+fn rank_with_languages(
+    entries: Vec<SizedCandidate>,
+    category: WallpaperCategory,
+    only_4k: bool,
+    preferred: &[String],
 ) -> Vec<SizedCandidate> {
     let target = category.target_ratio();
     let mut kept = entries
         .into_iter()
-        .filter(|entry| admits(entry, category))
+        .filter(|entry| admits(entry, category, only_4k))
         .collect::<Vec<_>>();
+    let leads_with_4k = category == WallpaperCategory::Background;
+    let reads_text = matches!(category, WallpaperCategory::Logo | WallpaperCategory::Cover);
+    let rank_of = |entry: &SizedCandidate| {
+        if reads_text {
+            crate::game_artwork::language_rank(entry.language.as_deref(), preferred)
+        } else {
+            0
+        }
+    };
+    if let Some(best) = kept.iter().map(rank_of).min()
+        && best <= preferred.len()
+    {
+        kept.retain(|entry| rank_of(entry) <= preferred.len());
+    }
     kept.sort_by(|left, right| {
-        right
-            .trusted_shape
-            .cmp(&left.trusted_shape)
+        let is_4k = |entry: &SizedCandidate| leads_with_4k && entry.width >= BACKGROUND_4K_WIDTH;
+        is_4k(right)
+            .cmp(&is_4k(left))
+            .then_with(|| rank_of(left).cmp(&rank_of(right)))
+            .then_with(|| right.trusted_shape.cmp(&left.trusted_shape))
             .then_with(|| {
                 keyword_score(&right.title, category).cmp(&keyword_score(&left.title, category))
             })
@@ -956,6 +1150,7 @@ fn build_igdb_candidates(
             // only `/screenshots` is a shape a caption could lie about, and it
             // is a capture of the game either way.
             trusted_shape: true,
+            language: None,
         });
     }
     built
@@ -1058,6 +1253,7 @@ fn parse_google_search(body: &str) -> Result<Vec<SizedCandidate>, WallpaperSearc
             // A web index returns whatever the page held, so the shape is a
             // measurement and the caption is a claim. Both are checked.
             trusted_shape: false,
+            language: None,
         });
     }
     Ok(built)
@@ -1149,6 +1345,7 @@ fn parse_wikimedia_search(body: &str) -> Result<Vec<SizedCandidate>, WallpaperSe
             width: info.width,
             height: info.height,
             trusted_shape: false,
+            language: None,
         });
     }
     Ok(built)
@@ -1215,6 +1412,7 @@ fn parse_openverse_search(body: &str) -> Result<Vec<SizedCandidate>, WallpaperSe
             width: item.width,
             height: item.height,
             trusted_shape: false,
+            language: None,
         });
     }
     Ok(built)
@@ -1271,6 +1469,7 @@ impl SteamAsset {
             width: self.width,
             height: self.height,
             trusted_shape: true,
+            language: None,
         }
     }
 }
@@ -1337,12 +1536,16 @@ fn steam_category_assets(category: WallpaperCategory, app_id: u64, game: &str) -
                 optional: false,
             },
         ],
-        // The 4K library art is the only thing Steam publishes that clears the
-        // background row's width floor. `page_bg_raw` is around 1438 wide and
-        // `page_bg_generated_v6b` is a stretched header, so neither could ever
-        // qualify and neither is requested — which also means this row costs one
-        // probe rather than four.
-        WallpaperCategory::Background => vec![hero("_2x", "background (4K)", 3840, 1240)],
+        // Only the library hero: the one Steam asset that is a scene with no
+        // title on it (Steam composites `logo.png` over it itself). The header,
+        // the capsule and the cover all carry the title and are for the card
+        // rows; `page_bg_generated_v6b` is a stretched header. The 4K sibling
+        // leads and clears every floor; the 1920 one only serves the default
+        // floor, and costs one more probe.
+        WallpaperCategory::Background => vec![
+            hero("_2x", "background (4K)", 3840, 1240),
+            hero("", "background", 1920, 620),
+        ],
         // Both wordmark paths genuinely 404 on plenty of apps, so this row is
         // allowed to come back empty rather than offering a broken tile. A
         // wordmark's size varies per game, so it is reported at the row's floor:
@@ -1445,6 +1648,9 @@ struct GridDbAsset {
     width: u32,
     #[serde(default)]
     height: u32,
+    /// ISO 639-1 code of the text in the picture, when it has any.
+    #[serde(default)]
+    language: Option<String>,
 }
 
 /// One SteamGridDB fetch: an asset kind, the dimensions that row accepts, and
@@ -1490,10 +1696,12 @@ fn steamgriddb_requests(category: WallpaperCategory) -> Vec<GridDbRequest> {
     match category {
         WallpaperCategory::Cover => vec![grid("600x900,660x930")],
         WallpaperCategory::Landscape => vec![hero("3840x1240,1920x620"), grid("920x430,460x215")],
-        // The background row takes 4K and nothing else, so there is one hero
-        // dimension it can use and asking for 1920x620 as well would only fetch
-        // tiles the row is about to discard.
-        WallpaperCategory::Background => vec![hero("3840x1240")],
+        // Heroes only, in the `alternate` style only (never `material`, which
+        // has a title in it) - and never the `logos` or `icons` endpoints, which
+        // is what keeps a wordmark out of this row. 1920x620 is asked for as
+        // well as 4K because the row's default floor is 1920; with "4K only" on
+        // the lower ones are simply discarded by `admits`.
+        WallpaperCategory::Background => vec![hero("3840x1240,1920x620")],
         WallpaperCategory::Logo => vec![GridDbRequest {
             kind: "logos",
             dimensions: "",
@@ -1573,6 +1781,7 @@ fn build_griddb_candidates(
                 // A grid is a grid and a hero is a hero: the endpoint and the
                 // `dimensions` filter together already pin the shape.
                 trusted_shape: true,
+                language: asset.language,
             })
         })
         .collect()
@@ -1667,6 +1876,7 @@ impl WallpaperSearchService {
         category: WallpaperCategory,
         query: &str,
         offset: u32,
+        only_4k: bool,
     ) -> WallpaperSearchView {
         let query = query.trim().to_owned();
         if query.is_empty() {
@@ -1699,7 +1909,13 @@ impl WallpaperSearchService {
             }
         }
 
-        let ranked = rank_for_category(found, category);
+        // The background is a bare scene: whatever a source filed under it that
+        // is really a wordmark, a box or a store capsule is dropped here, once,
+        // for every source alike.
+        if category == WallpaperCategory::Background {
+            found.retain(|entry| is_clean_background(entry, &query));
+        }
+        let ranked = rank_for_category(found, category, only_4k);
         let total = ranked.len();
         let candidates = to_candidates(
             category,
@@ -1707,7 +1923,10 @@ impl WallpaperSearchService {
                 .into_iter()
                 .skip(offset as usize)
                 .take(MAX_CANDIDATES)
-                .map(|entry| (entry.source, entry.into_triple())),
+                .map(|entry| {
+                    let size = entry.reported_size();
+                    (entry.source, entry.into_triple(), size)
+                }),
         );
         let views = candidates
             .into_iter()
@@ -1717,6 +1936,8 @@ impl WallpaperSearchService {
                     title: candidate.title.clone(),
                     thumbnail_url: candidate.thumbnail_url.clone(),
                     category,
+                    width: candidate.size.map(|(width, _)| width),
+                    height: candidate.size.map(|(_, height)| height),
                 };
                 if let Ok(mut registry) = self.inner.registry.lock() {
                     registry.insert(candidate);
@@ -1728,11 +1949,11 @@ impl WallpaperSearchService {
         let message = if !views.is_empty() {
             format!("{total} result(s)")
         } else if setbacks.is_empty() {
-            category.empty_message().to_owned()
+            category.empty_message(only_4k).to_owned()
         } else {
             // An empty row is the only moment the set-aside reasons matter, and
             // they are what tells someone their SteamGridDB key never saved.
-            format!("{} {}", category.empty_message(), setbacks.join(" "))
+            format!("{} {}", category.empty_message(only_4k), setbacks.join(" "))
         };
         WallpaperSearchView {
             phase: WallpaperSearchPhase::Ready,
@@ -1783,7 +2004,13 @@ impl WallpaperSearchService {
             .cloned()
             .ok_or_else(|| "This search result has expired. Run the search again.".to_owned())?;
         media
-            .download_wallpaper(game_id, &candidate.url, &candidate.title)
+            .download_wallpaper(
+                game_id,
+                &candidate.url,
+                &candidate.title,
+                candidate.category.into(),
+                candidate.size,
+            )
             .await
             .map_err(|error| error.to_string())
     }
@@ -2272,14 +2499,23 @@ impl WallpaperSearchService {
 /// Fill one row from every source at once. No source is named, because none is
 /// chosen: a missing key, an unreachable host or a refused request quietly
 /// removes that one source from the row and the rest still answers.
+///
+/// `only_4k` (sent as `only4k`) only matters to the background row: on, it
+/// asks for 3840 wide or more; off or absent, the floor is 1920.
 #[tauri::command]
 pub async fn search_wallpapers(
     category: WallpaperCategory,
     query: String,
     offset: u32,
+    only_4k: Option<bool>,
     service: State<'_, WallpaperSearchService>,
 ) -> Result<WallpaperSearchView, String> {
-    Ok(service.search(category, &query, offset).await)
+    // Optional so a payload from before the toggle existed still deserialises;
+    // it reads as "off", which is the old behaviour for every row but the
+    // background (whose default floor is now 1920).
+    Ok(service
+        .search(category, &query, offset, only_4k.unwrap_or(false))
+        .await)
 }
 
 /// Turn one opaque search result into durable wallpaper media for a game.
@@ -2326,6 +2562,7 @@ mod tests {
             width,
             height,
             trusted_shape: false,
+            language: None,
         }
     }
 
@@ -2342,6 +2579,7 @@ mod tests {
             width,
             height,
             trusted_shape: true,
+            language: None,
         }
     }
 
@@ -2811,7 +3049,7 @@ mod tests {
             sized("https://a.example/exact.jpg", 3840, 2160),
             sized("https://a.example/portrait.jpg", 600, 900),
         ];
-        let ranked = rank_for_category(entries.clone(), WallpaperCategory::Background);
+        let ranked = rank_for_category(entries.clone(), WallpaperCategory::Background, false);
         // 5120x2880 and 3840x2160 share the target ratio, so the larger wins;
         // 1.60 is further from 16:9 and trails both even though it has the most
         // pixels. The portrait entry is gone.
@@ -2826,7 +3064,7 @@ mod tests {
                 "https://a.example/off.jpg",
             ]
         );
-        let ranked = rank_for_category(entries, WallpaperCategory::Cover);
+        let ranked = rank_for_category(entries, WallpaperCategory::Cover, false);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].url, "https://a.example/portrait.jpg");
     }
@@ -2891,11 +3129,9 @@ mod tests {
         assert!(landscape[2].optional);
         assert!(!landscape[3].optional);
 
-        // The background row takes 4K and nothing else, so the 4K library art
-        // is the only thing Steam publishes that can appear in it at all.
-        // `library_hero.jpg` is 1920 wide, `page_bg_raw` is about 1438, and
-        // `page_bg_generated_v6b` is a stretched header — none can qualify, so
-        // none is requested and the row costs one probe rather than four.
+        // The background row takes only the library hero - the one Steam asset
+        // with no title on it - 4K first. The header, capsule and cover all
+        // carry the title, and `page_bg_generated_v6b` is a stretched header.
         let background =
             steam_category_assets(WallpaperCategory::Background, 1245620, "ELDEN RING");
         assert_eq!(
@@ -2903,7 +3139,10 @@ mod tests {
                 .iter()
                 .map(|asset| asset.url.as_str())
                 .collect::<Vec<_>>(),
-            vec![format!("{base}/library_hero_2x.jpg")]
+            vec![
+                format!("{base}/library_hero_2x.jpg"),
+                format!("{base}/library_hero.jpg"),
+            ]
         );
         assert!(background[0].optional);
         assert_eq!((background[0].width, background[0].height), (3840, 1240));
@@ -3055,6 +3294,8 @@ mod tests {
                 title: format!("artwork {index}"),
                 thumbnail_url: format!("https://images.igdb.com/thumb-{index}.jpg"),
                 url: format!("https://images.igdb.com/{index}.jpg"),
+                category: WallpaperCategory::Cover,
+                size: None,
             });
             assert!(registry.get(&id).is_some());
         }
@@ -3074,12 +3315,16 @@ mod tests {
             title: "first".into(),
             thumbnail_url: "https://a.example/first-thumb.jpg".into(),
             url: "https://a.example/first.jpg".into(),
+            category: WallpaperCategory::Cover,
+            size: None,
         });
         registry.insert(WallpaperCandidate {
             id,
             title: "second".into(),
             thumbnail_url: "https://a.example/second-thumb.jpg".into(),
             url: "https://a.example/second.jpg".into(),
+            category: WallpaperCategory::Cover,
+            size: None,
         });
         assert_eq!(
             registry.get("wp:keep").unwrap().url,
@@ -3143,6 +3388,7 @@ mod tests {
                     "thumb.jpg".to_owned(),
                     "https://a.example/1.jpg".to_owned(),
                 ),
+                Some((1600, 900)),
             ),
             (
                 WallpaperSource::SteamStore,
@@ -3151,6 +3397,7 @@ mod tests {
                     "//a.example/2t.jpg".to_owned(),
                     "//a.example/2.jpg".to_owned(),
                 ),
+                None,
             ),
             (
                 WallpaperSource::Openverse,
@@ -3159,10 +3406,12 @@ mod tests {
                     String::new(),
                     "https://a.example/1.jpg".to_owned(),
                 ),
+                None,
             ),
             (
                 WallpaperSource::Openverse,
                 ("D".to_owned(), String::new(), "not-a-url.jpg".to_owned()),
+                None,
             ),
         ];
         let built = to_candidates(WallpaperCategory::Cover, entries.clone());
@@ -3172,6 +3421,10 @@ mod tests {
         assert_eq!(built[0].thumbnail_url, "https://a.example/1.jpg");
         assert_eq!(built[1].url, "https://a.example/2.jpg");
         assert_eq!(built[1].thumbnail_url, "https://a.example/2t.jpg");
+        // The reported size and the row both ride along to the import.
+        assert_eq!(built[0].size, Some((1600, 900)));
+        assert_eq!(built[1].size, None);
+        assert_eq!(built[0].category, WallpaperCategory::Cover);
         let other_row = to_candidates(WallpaperCategory::Background, entries);
         assert_eq!(other_row[0].url, built[0].url);
         assert_ne!(other_row[0].id, built[0].id);
@@ -3183,10 +3436,14 @@ mod tests {
     fn an_empty_row_says_which_row_is_empty() {
         let messages = ALL_CATEGORIES
             .iter()
-            .map(|category| category.empty_message())
+            .map(|category| category.empty_message(false))
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(messages.len(), ALL_CATEGORIES.len());
-        assert!(WallpaperCategory::Cover.empty_message().contains("cover"));
+        assert!(
+            WallpaperCategory::Cover
+                .empty_message(false)
+                .contains("cover")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3265,7 +3522,11 @@ mod tests {
         screenshot.title = "Elden Ring gameplay screenshot".into();
         let mut key_art = sized("https://a.example/k.jpg", 1920, 1080);
         key_art.title = "Elden Ring key art".into();
-        let ranked = rank_for_category(vec![screenshot, key_art], WallpaperCategory::Landscape);
+        let ranked = rank_for_category(
+            vec![screenshot, key_art],
+            WallpaperCategory::Landscape,
+            false,
+        );
         assert_eq!(ranked[0].title, "Elden Ring key art");
         assert_eq!(ranked[1].title, "Elden Ring gameplay screenshot");
 
@@ -3278,7 +3539,8 @@ mod tests {
         assert_eq!(
             rank_for_category(
                 vec![big_screenshot, small_art],
-                WallpaperCategory::Background
+                WallpaperCategory::Background,
+                false
             )[0]
             .title,
             "Elden Ring artwork"
@@ -3286,32 +3548,289 @@ mod tests {
     }
 
     /// The width floor is the one rule a typed endpoint does not get to bypass,
-    /// because "backgrounds in 4K only" would mean nothing if the sources that
-    /// know their own shape could ignore it.
+    /// because "4K only" would mean nothing if the sources that know their own
+    /// shape could ignore it. Off, the background row's floor is 1920.
     #[test]
-    fn the_background_row_takes_four_k_from_every_source_alike() {
-        // Steam's 1920x620 hero and SteamGridDB's 1920x620 one are both typed,
-        // both correctly shaped — and both too small for this row.
-        assert!(!admits(
-            &typed(WallpaperSource::SteamStore, "hero", 1920, 620),
-            WallpaperCategory::Background
+    fn the_background_floor_is_1920_and_the_toggle_makes_it_4k() {
+        let steam_hero = typed(WallpaperSource::SteamStore, "hero", 1920, 620);
+        let grid_hero_4k = typed(WallpaperSource::SteamGridDb, "hero 4K", 3840, 1240);
+        let web_4k = sized("https://a.example/w.jpg", 3840, 2160);
+        let web_1080 = sized("https://a.example/w1080.jpg", 1920, 1080);
+        let below = sized("https://a.example/w720.jpg", 1600, 900);
+        let background = WallpaperCategory::Background;
+
+        assert_eq!(background.min_width(false), 1920);
+        assert_eq!(background.min_width(true), 3840);
+        // Default: anything from 1920 up, typed or measured.
+        assert!(admits(&steam_hero, background, false));
+        assert!(admits(&web_1080, background, false));
+        assert!(admits(&grid_hero_4k, background, false));
+        assert!(!admits(&below, background, false));
+        // "4K only": the same entries, typed endpoints included, are cut.
+        assert!(!admits(&steam_hero, background, true));
+        assert!(!admits(&web_1080, background, true));
+        assert!(admits(&grid_hero_4k, background, true));
+        assert!(admits(&web_4k, background, true));
+        // The card rows keep a low floor and ignore the toggle: `header.jpg` at
+        // 460 wide is a real last resort for a game with no library art at all.
+        let header = typed(WallpaperSource::SteamStore, "header", 460, 215);
+        assert!(admits(&header, WallpaperCategory::Landscape, false));
+        assert!(admits(&header, WallpaperCategory::Landscape, true));
+    }
+
+    /// With the floor lowered, a 4K result must still lead the row, whatever
+    /// else would have ordered it first.
+    #[test]
+    fn four_k_backgrounds_sort_first_when_the_toggle_is_off() {
+        let mut typed_1080 = typed(WallpaperSource::SteamGridDb, "hero", 1920, 1080);
+        typed_1080.title = "Game wallpaper".into();
+        let web_4k = sized("https://a.example/4k.jpg", 3840, 2160);
+        let ranked = rank_for_category(
+            vec![typed_1080.clone(), web_4k.clone()],
+            WallpaperCategory::Background,
+            false,
+        );
+        assert_eq!(ranked[0].url, web_4k.url);
+        assert_eq!(ranked[1].url, typed_1080.url);
+        // On, the lower one is gone altogether.
+        let strict = rank_for_category(
+            vec![typed_1080, web_4k.clone()],
+            WallpaperCategory::Background,
+            true,
+        );
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].url, web_4k.url);
+    }
+
+    /// The tile badge needs a real size, so a stand-in must never be reported.
+    #[test]
+    fn a_candidate_reports_its_size_only_when_it_is_real() {
+        let measured = sized("https://a.example/m.jpg", 2560, 1440);
+        assert_eq!(measured.reported_size(), Some((2560, 1440)));
+        assert_eq!(sized("https://a.example/z.jpg", 0, 0).reported_size(), None);
+        // Steam wordmarks are reported at the logo floor as a placeholder.
+        let wordmark = typed(
+            WallpaperSource::SteamStore,
+            "logo",
+            LOGO_MIN_WIDTH,
+            LOGO_MIN_HEIGHT,
+        );
+        assert_eq!(wordmark.reported_size(), None);
+    }
+
+    /// The view the WebView receives carries the size as camelCase numbers, and
+    /// leaves the keys out entirely when unknown.
+    #[test]
+    fn the_candidate_view_exposes_width_and_height_when_known() {
+        let sized_view = WallpaperCandidateView {
+            id: "wp:1".into(),
+            title: "t".into(),
+            thumbnail_url: "https://a.example/t.jpg".into(),
+            category: WallpaperCategory::Background,
+            width: Some(3840),
+            height: Some(2160),
+        };
+        let json = serde_json::to_value(&sized_view).unwrap();
+        assert_eq!(json["width"], 3840);
+        assert_eq!(json["height"], 2160);
+        assert_eq!(json["thumbnailUrl"], "https://a.example/t.jpg");
+        let unknown = WallpaperCandidateView {
+            width: None,
+            height: None,
+            ..sized_view
+        };
+        let json = serde_json::to_value(&unknown).unwrap();
+        assert!(json.get("width").is_none() && json.get("height").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Clean backgrounds
+    // -----------------------------------------------------------------------
+
+    fn background_hit(
+        source: WallpaperSource,
+        title: &str,
+        url: &str,
+        trusted: bool,
+    ) -> SizedCandidate {
+        SizedCandidate {
+            source,
+            title: title.into(),
+            thumbnail_url: url.into(),
+            url: url.into(),
+            width: 3840,
+            height: 2160,
+            trusted_shape: trusted,
+            language: None,
+        }
+    }
+
+    /// A hero is a bare scene and stays; a wordmark and a capsule - the two
+    /// things a screenshot of the picker showed in this row - do not, however
+    /// big they are or whichever source filed them here.
+    #[test]
+    fn a_logo_and_a_capsule_are_rejected_for_background_but_a_hero_is_kept() {
+        let hero = background_hit(
+            WallpaperSource::SteamStore,
+            "Kena — background (4K)",
+            "https://shared.steamstatic.com/store_item_assets/steam/apps/1/library_hero_2x.jpg",
+            true,
+        );
+        let logo = background_hit(
+            WallpaperSource::SteamStore,
+            "Kena — library logo",
+            "https://shared.steamstatic.com/store_item_assets/steam/apps/1/library_logo.png",
+            true,
+        );
+        let capsule = background_hit(
+            WallpaperSource::SteamStore,
+            "Kena — capsule",
+            "https://shared.steamstatic.com/store_item_assets/steam/apps/1/capsule_616x353.jpg",
+            true,
+        );
+        let header = background_hit(
+            WallpaperSource::SteamStore,
+            "Kena — header",
+            "https://shared.steamstatic.com/store_item_assets/steam/apps/1/header.jpg",
+            true,
+        );
+        assert!(is_clean_background(&hero, "Kena"));
+        assert!(!is_clean_background(&logo, "Kena"));
+        assert!(!is_clean_background(&capsule, "Kena"));
+        assert!(!is_clean_background(&header, "Kena"));
+    }
+
+    #[test]
+    fn web_results_that_name_another_role_or_may_be_transparent_are_dropped() {
+        let web = |title: &str, url: &str| {
+            background_hit(WallpaperSource::GoogleImages, title, url, false)
+        };
+        assert!(is_clean_background(
+            &web("Kena wallpaper", "https://a.example/kena-wallpaper.jpg"),
+            "Kena"
         ));
-        assert!(admits(
-            &typed(WallpaperSource::SteamGridDb, "hero 4K", 3840, 1240),
-            WallpaperCategory::Background
+        for (title, url) in [
+            ("Kena logo", "https://a.example/kena.jpg"),
+            ("Kena Bridge of Spirits wordmark", "https://a.example/k.jpg"),
+            ("Kena box art", "https://a.example/k.jpg"),
+            ("Kena poster", "https://a.example/k.jpg"),
+            ("Kena", "https://a.example/kena-cover.jpg"),
+            // The container: PNG is where a transparent wordmark lives.
+            ("Kena wallpaper", "https://a.example/kena-wallpaper.png"),
+            ("Kena wallpaper", "https://a.example/kena.svg?width=3840"),
+        ] {
+            assert!(
+                !is_clean_background(&web(title, url), "Kena"),
+                "{title} {url}"
+            );
+        }
+        // A game whose own name contains a flagged word is not penalised for it.
+        assert!(is_clean_background(
+            &web("Cover Fire wallpaper", "https://a.example/w.jpg"),
+            "Cover Fire"
         ));
-        // A measured 4K wallpaper qualifies too, so the floor is not a
-        // back-door preference for one source.
-        assert!(admits(
-            &sized("https://a.example/w.jpg", 3840, 2160),
-            WallpaperCategory::Background
+        assert!(is_clean_background(
+            &web("Iconoclasts art", "https://a.example/w.jpg"),
+            "Iconoclasts"
         ));
-        // The card rows keep a low floor: `header.jpg` at 460 wide is a real
-        // last resort for a game with no library art at all.
-        assert!(admits(
-            &typed(WallpaperSource::SteamStore, "header", 460, 215),
-            WallpaperCategory::Landscape
-        ));
+        // A typed endpoint is trusted on format - but not on its URL.
+        let typed_png = background_hit(
+            WallpaperSource::SteamGridDb,
+            "Kena - background 1",
+            "https://cdn2.steamgriddb.com/hero/abc.png",
+            true,
+        );
+        assert!(is_clean_background(&typed_png, "Kena"));
+    }
+
+    /// Per category: the endpoints that feed Background hold scenes only.
+    #[test]
+    fn no_source_feeds_the_background_row_from_a_logo_endpoint() {
+        for request in steamgriddb_requests(WallpaperCategory::Background) {
+            assert_eq!(request.kind, "heroes");
+            assert_eq!(request.styles, "alternate");
+        }
+        for asset in steam_category_assets(WallpaperCategory::Background, 1, "Kena") {
+            assert!(asset.url.contains("library_hero"), "{}", asset.url);
+        }
+        assert!(
+            igdb_endpoints(WallpaperCategory::Background)
+                .iter()
+                .all(|endpoint| matches!(*endpoint, "artworks" | "screenshots"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Language
+    // -----------------------------------------------------------------------
+
+    fn logo_in(url: &str, language: Option<&str>, width: u32) -> SizedCandidate {
+        SizedCandidate {
+            source: WallpaperSource::SteamGridDb,
+            title: "Kena - logo".into(),
+            thumbnail_url: url.into(),
+            url: url.into(),
+            width,
+            height: 300,
+            trusted_shape: true,
+            language: language.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn logos_and_covers_prefer_the_users_language_over_size() {
+        let preferred = vec!["fr".to_owned(), "en".to_owned()];
+        let ranked = rank_with_languages(
+            vec![
+                logo_in("https://a.example/ar.png", Some("ar"), 2000),
+                logo_in("https://a.example/en.png", Some("en"), 500),
+                logo_in("https://a.example/fr.png", Some("fr"), 400),
+                logo_in("https://a.example/none.png", None, 900),
+            ],
+            WallpaperCategory::Logo,
+            false,
+            &preferred,
+        );
+        // Arabic is dropped because better exist; the rest go fr, en, undeclared.
+        assert_eq!(
+            ranked.iter().map(|e| e.url.as_str()).collect::<Vec<_>>(),
+            vec![
+                "https://a.example/fr.png",
+                "https://a.example/en.png",
+                "https://a.example/none.png",
+            ]
+        );
+        // Another language is shown when it is all there is.
+        let only_foreign = rank_with_languages(
+            vec![logo_in("https://a.example/ar.png", Some("ar"), 2000)],
+            WallpaperCategory::Logo,
+            false,
+            &preferred,
+        );
+        assert_eq!(only_foreign.len(), 1);
+    }
+
+    #[test]
+    fn language_does_not_reorder_the_wide_rows() {
+        let preferred = vec!["fr".to_owned()];
+        let ranked = rank_with_languages(
+            vec![
+                {
+                    let mut e = logo_in("https://a.example/ar.jpg", Some("ar"), 3840);
+                    e.height = 1240;
+                    e
+                },
+                {
+                    let mut e = logo_in("https://a.example/fr.jpg", Some("fr"), 3840);
+                    e.height = 1240;
+                    e
+                },
+            ],
+            WallpaperCategory::Landscape,
+            false,
+            &preferred,
+        );
+        assert_eq!(ranked.len(), 2);
     }
 
     /// A 3840x1240 hero is 3.1:1, well outside the band a *measured* wide result
@@ -3322,15 +3841,17 @@ mod tests {
     #[test]
     fn a_typed_endpoints_shape_is_trusted_where_a_measured_one_is_not() {
         let hero = typed(WallpaperSource::SteamGridDb, "hero", 3840, 1240);
-        assert!(admits(&hero, WallpaperCategory::Landscape));
+        assert!(admits(&hero, WallpaperCategory::Landscape, false));
 
         let same_shape_from_the_web = SizedCandidate {
             trusted_shape: false,
+            language: None,
             ..hero
         };
         assert!(!admits(
             &same_shape_from_the_web,
-            WallpaperCategory::Landscape
+            WallpaperCategory::Landscape,
+            false
         ));
         assert!(!fits_category(3840, 1240, WallpaperCategory::Landscape));
     }
@@ -3361,6 +3882,7 @@ mod tests {
                 from_the_store,
             ],
             WallpaperCategory::Background,
+            false,
         );
         assert_eq!(ranked.len(), 2, "the repeated URL collapsed to one tile");
         assert!(ranked.iter().all(|entry| entry.trusted_shape));
@@ -3508,11 +4030,10 @@ mod tests {
         assert_eq!(landscape[0].kind, "heroes");
         assert_eq!(landscape[1].kind, "grids");
 
-        // 4K only, so there is one hero dimension the background row can use
-        // and asking for 1920x620 as well would only fetch tiles it discards.
+        // One hero request: 4K first, and 1920x620 for the default floor.
         let background = steamgriddb_requests(WallpaperCategory::Background);
         assert_eq!(background.len(), 1);
-        assert_eq!(background[0].dimensions, "3840x1240");
+        assert_eq!(background[0].dimensions, "3840x1240,1920x620");
     }
 
     /// SteamGridDB reports a refused key inside a 200 body, so an envelope that

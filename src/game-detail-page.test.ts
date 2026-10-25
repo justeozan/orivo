@@ -1214,3 +1214,146 @@ describe("game detail page store media", () => {
     expect(container.querySelector(".gd-hero__title")).not.toBeNull();
   });
 });
+
+describe("wallpaper dialog quality badges and the 4K-only background search", () => {
+  it("badges each tile with the size its source reported, and nothing when unknown", async () => {
+    await openWallpaperDialog({
+      async searchWallpapers(category, query) {
+        const base = candidatesFor(category, 3);
+        const sizes: Array<[number, number] | null> =
+          category === "logo"
+            ? [[800, 300], null, [1200, 400]]
+            : [[3840, 2160], [1920, 1080], null];
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: base.map((candidate, index) => {
+            const size = sizes[index];
+            return size
+              ? { ...candidate, width: size[0], height: size[1] }
+              : candidate;
+          }),
+        };
+      },
+    });
+    const badges = (category: WallpaperCategory): Array<string | null> =>
+      rowTiles(category).map(
+        (tile) =>
+          tile.querySelector(".gd-wallgrid__quality")?.textContent ?? null,
+      );
+    expect(badges("background")).toEqual(["4K", "1080p", null]);
+    expect(badges("cover")).toEqual(["4K", "1080p", null]);
+    // A wordmark is never "1080p": it always shows its pixel size.
+    expect(badges("logo")).toEqual(["800×300", null, "1200×400"]);
+  });
+
+  it("asks the backend for 4K only when the Background toggle is on, and remembers it", async () => {
+    const asked: Array<{ category: WallpaperCategory; only4k?: boolean }> = [];
+    await openWallpaperDialog({
+      async searchWallpapers(category, query, _offset, _signal, options) {
+        asked.push({ category, only4k: options?.only4k });
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 1),
+        };
+      },
+    });
+    // Off by default: nothing asks for 4K only, on any row.
+    expect(asked).toHaveLength(4);
+    expect(asked.every((call) => call.only4k === false)).toBe(true);
+
+    const toggle = (): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>(
+        ".gd-wallrow[data-category='background'] .gd-wallrow__toggle",
+      )!;
+    // Only the Background row carries the toggle.
+    expect(container.querySelectorAll(".gd-wallrow__toggle")).toHaveLength(1);
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+
+    asked.length = 0;
+    toggle().click();
+    await flush();
+    // Only the Background row is refilled, and it asks for 4K only.
+    expect(asked).toEqual([{ category: "background", only4k: true }]);
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    // Closing and reopening the dialog keeps the choice for later searches.
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wallpaper-modal-close']")
+      ?.click();
+    await flush();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    asked.length = 0;
+    toggle().click();
+    await flush();
+    expect(asked).toEqual([{ category: "background", only4k: false }]);
+  });
+
+  it("keeps saved logos and covers out of the Background row", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    const saved = (
+      id: string,
+      title: string,
+      extra: Partial<(typeof detail.media)[number]> = {},
+    ): (typeof detail.media)[number] => ({
+      id,
+      kind: "wallpaper",
+      title,
+      previewUrl: `game-media:${id}.jpg`,
+      origin: "downloaded",
+      selected: false,
+      availableOffline: true,
+      ...extra,
+    });
+    detail.media = [
+      saved("bg", "A Way Out — background (4K)", {
+        role: "background",
+        width: 3840,
+        height: 2160,
+      }),
+      saved("logo-old", "A Way Out — logo"),
+      saved("cover-old", "A Way Out — cover"),
+      saved("capsule-old", "A Way Out — capsule"),
+      saved("logo-new", "Picked", { role: "logo" }),
+    ];
+    await mountWith(detail, {
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: [],
+        };
+      },
+    });
+    container
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    const tiles = rowTiles("background");
+    expect(tiles.map((tile) => tile.getAttribute("aria-label"))).toEqual([
+      "A Way Out — background (4K)",
+    ]);
+    // Saved media shows its quality too, when it is known.
+    expect(tiles[0].querySelector(".gd-wallgrid__quality")?.textContent).toBe(
+      "4K",
+    );
+  });
+});
