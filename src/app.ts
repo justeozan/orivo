@@ -4122,6 +4122,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     list.className = "source-account-list";
     for (const descriptor of CONNECTED_SOURCES) {
       const status = sourceStatus(descriptor.provider);
+      // Xbox and Microsoft Store are one Microsoft sign-in, so they are one
+      // card: Xbox's, wearing both marks. The Store's own row is not drawn.
+      if (descriptor.provider === "microsoft-store" && status.sharesSignInWith.includes("xbox")) {
+        continue;
+      }
+      const pairedStore =
+        descriptor.provider === "xbox" && status.sharesSignInWith.includes("microsoft-store")
+          ? CONNECTED_SOURCES.find((entry) => entry.provider === "microsoft-store")
+          : undefined;
       const busy = state.sourceAccounts.busy.has(descriptor.provider);
       const pending = state.sourceAccounts.pendingDisconnect === descriptor.provider;
       // This store's price-data health rides on the same row as its
@@ -4131,15 +4140,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const health = state.providerStatuses.find(
         (provider) => providerStatusForSource(provider.provider) === descriptor.provider,
       );
-      const { row, mark, actions } = sourceRowElement(
+      const { row, mark, name, actions } = sourceRowElement(
         descriptor.provider,
-        status.label,
+        pairedStore ? "Xbox & Microsoft Store" : status.label,
         // Settings presents each store as itself, in its own colours and at a
         // size where the logo is the logo. The library, the hero badge and the
         // detail page keep the white marks.
-        brandIcon(descriptor.icon),
+        brandIcon(descriptor.icon) + (pairedStore ? brandIcon(pairedStore.icon) : ""),
         status.connected,
       );
+      if (pairedStore) {
+        mark.classList.add("source-account-row__mark--pair");
+        // The one sentence the pair needs, behind an "i" rather than a line.
+        const info = document.createElement("span");
+        info.className = "source-account-row__info";
+        info.tabIndex = 0;
+        info.innerHTML = icon("info");
+        const sentence = "One Microsoft sign-in covers both: connecting or disconnecting one affects the other.";
+        info.title = sentence;
+        info.setAttribute("role", "img");
+        info.setAttribute("aria-label", sentence);
+        name.append(info);
+      }
       const presence = sourcePresenceElement(status.connected, health);
       if (presence) {
         mark.append(presence);
@@ -4231,15 +4253,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         list.append(row);
       }
 
-      // Xbox and Microsoft Store are one Microsoft account. Saying so once,
-      // under the pair, beats letting someone connect twice and wonder why.
-      if (status.sharesSignInWith.length > 0 && descriptor.provider === "microsoft-store") {
-        const shared = document.createElement("p");
-        shared.className = "settings-hint source-account-shared";
-        shared.textContent =
-          "Xbox and Microsoft Store share one Microsoft sign-in: connecting or disconnecting either affects both.";
-        list.append(shared);
-      }
     }
     body.append(list);
 

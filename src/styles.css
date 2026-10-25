@@ -3469,3 +3469,10 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .source-grid .source-account-row__sync { position: absolute; top: 8px; right: 8px; }
 .source-grid .source-account-row__confirm { text-align: center; }
 .source-grid .source-account-entry { display: grid; gap: 8px; }
+
+/* Xbox and Microsoft Store share one card: both marks side by side. */
+.source-account-row__mark--pair { width: auto; display: flex; gap: 8px; }
+.source-account-row__info { display: inline-grid; margin-left: 6px; vertical-align: -2px; color: rgba(244,242,248,.5); cursor: help; }
+.source-account-row__info .icon { width: 14px; height: 14px; }
+.source-account-row__info:hover, .source-account-row__info:focus-visible { color: #fff; }
+.source-grid .source-account-row__name { white-space: normal; }
