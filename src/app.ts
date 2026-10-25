@@ -1054,6 +1054,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.logo.alt = title;
     refs.logo.hidden = false;
     refs.title.hidden = true;
+    // Each new wordmark fades in rather than appearing in one frame.
+    refs.logo.classList.remove("is-arriving");
+    void refs.logo.offsetWidth;
+    refs.logo.classList.add("is-arriving");
   };
 
   const showHeroTitle = (): void => {

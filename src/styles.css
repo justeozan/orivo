@@ -831,6 +831,16 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   filter: drop-shadow(0 2px 10px rgba(6,6,10,.55));
 }
 .hero-content [hidden] { display: none !important; }
+.hero-logo.is-arriving { animation: hero-logo-arrive 520ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes hero-logo-arrive {
+  from { opacity: 0; transform: translateY(6px); filter: drop-shadow(0 2px 10px rgba(6,6,10,.55)) blur(4px); }
+  to { opacity: 1; transform: none; filter: drop-shadow(0 2px 10px rgba(6,6,10,.55)) blur(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .hero-logo.is-arriving { animation-name: hero-logo-fade; animation-duration: 240ms; }
+}
+[data-motion="reduced"] .hero-logo.is-arriving { animation-name: hero-logo-fade; animation-duration: 240ms; }
+@keyframes hero-logo-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* One line under the wordmark, and never more: the genre pill and the studio.
    `nowrap` is the whole point — a second row here is the stack this replaced. */
