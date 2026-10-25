@@ -1556,13 +1556,28 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   scrollbar-width: none;
 }
 .game-cards::-webkit-scrollbar { display: none; }
-/* Once the shelf has scrolled, the cards leaving on the left fade out over
-   the first stretch instead of being cut by the rail's edge. At rest the first
-   card is fully drawn. */
-.game-cards.is-scrolled {
-  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 72px);
-  mask-image: linear-gradient(to right, transparent 0, #000 72px);
+/* Once the shelf has scrolled, the cards leaving on the left melt into a
+   band of blur laid over the edge, instead of being cut by it. It is an
+   overlay on purpose: a mask or an opacity on the shelf itself would make it
+   a backdrop root, and every glass card inside would lose its blur. At rest
+   the first card is fully drawn. */
+.recently-played::before {
+  position: absolute;
+  z-index: 4;
+  top: var(--rail-header-h);
+  bottom: 0;
+  left: -2px;
+  width: 84px;
+  content: "";
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  -webkit-mask-image: linear-gradient(to right, #000 25%, transparent);
+  mask-image: linear-gradient(to right, #000 25%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 240ms ease;
 }
+.recently-played:has(.game-cards.is-scrolled)::before { opacity: 1; }
 /* Walked with the keys or a pad, a card scrolled into view brings its
    neighbour on either side with it, so the next game stays in sight: the shelf
    starts moving at the card before the edge rather than once the edge is
