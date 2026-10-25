@@ -80,6 +80,11 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** A few more ticks, for flows that chain several host calls. */
+async function settleAll(): Promise<void> {
+  for (let tick = 0; tick < 8; tick += 1) await settle();
+}
+
 /**
  * Wait for the detail page's wiring to exist. The shell fetches that page on
  * demand, and a dynamic import resolves over several event-loop turns rather
@@ -343,7 +348,7 @@ describe("application shell", () => {
     expect(portrait.hasAttribute("src")).toBe(false);
     expect(portrait.classList.contains("is-missing")).toBe(true);
     expect(card.classList.contains("is-art-missing")).toBe(true);
-    const fallback = card.querySelector<HTMLElement>(".card-fallback")!;
+    const fallback = card.querySelector<HTMLElement>(".card-fallback__title")!;
     expect(fallback.textContent).toBe(card.getAttribute("aria-label")!.replace(/^Open details for /, ""));
   });
 
@@ -467,6 +472,10 @@ describe("application shell against the desktop backend", () => {
     >,
     /** What `get_installed_runners` reports: the runners panel renders from it. */
     runners: [] as Record<string, unknown>[],
+    /** The installed plugins `get_plugin_catalog` reports. */
+    plugins: [] as Record<string, unknown>[],
+    /** The saved gaming PC. */
+    streamHost: "",
   };
 
   const mount = (): void => {
@@ -495,6 +504,9 @@ describe("application shell against the desktop backend", () => {
     backend.sources = [];
     backend.sourceSync = null;
     backend.providers = [];
+    backend.plugins = [];
+    backend.streamHost = "";
+    backend.runners = [];
     tauri.detailOptions = null;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockImplementation(async (command) => {
@@ -518,9 +530,14 @@ describe("application shell against the desktop backend", () => {
         case "get_installed_runners":
           return backend.runners;
         case "get_gamestream_settings":
-          return { host: "" };
+          return { host: backend.streamHost };
         case "find_stream_clients":
           return [];
+        case "get_plugin_catalog":
+        case "refresh_plugin_registry":
+          return { installed: backend.plugins, available: [] };
+        case "probe_gamestream_host":
+          return { state: "paired", host: backend.streamHost, games: 12 };
         case "get_store_home":
           return { providerStatuses: backend.providers };
         case "sync_source_library":
@@ -557,54 +574,97 @@ describe("application shell against the desktop backend", () => {
     expect(launchedGameIds()).toEqual([alpha.id]);
   });
 
-  // The streaming host card is the runners panel's companion: an address for a
-  // machine nothing streams from is a box with no question behind it, so it
-  // waits for a profile that actually launches streams.
-  const runnerWithProfile = (launchMode: string) => ({
+  // Game streaming has one place: the guided setup behind its plugin's row.
+  // The emulator list never shows it, and nothing else asks for the PC.
+  const gamestreamPlugin = {
     id: "com.orivo.gamestream",
-    name: "Moonlight",
-    version: "0.1.0",
+    name: "Game streaming",
+    version: "0.2.0",
+    extensions: ["runner"],
     state: "ready",
     message: "",
-    profiles: [
-      {
-        id: "runner-1",
-        pluginId: "com.orivo.gamestream",
-        displayName: "Moonlight",
-        status: "valid",
-        statusMessage: null,
-        enabled: true,
-        applicationLabel: "Moonlight.app",
-        launchMode,
-        directories: [],
-        gameCount: 0,
-        importComplete: false,
-        importResumable: false,
-        lastImportedAt: null,
-      },
-    ],
+    trusted: true,
+    rollbackTo: null,
+    rollbackTrusted: null,
+    updateTo: null,
+  };
+  const streamingRunner = (profiles: Record<string, unknown>[]) => ({
+    id: "com.orivo.gamestream",
+    name: "Game streaming",
+    version: "0.2.0",
+    state: "ready",
+    message: "",
+    profiles,
+  });
+  const streamProfile = (overrides: Record<string, unknown> = {}) => ({
+    id: "runner-1",
+    pluginId: "com.orivo.gamestream",
+    displayName: "Game streaming",
+    status: "valid",
+    statusMessage: null,
+    enabled: true,
+    applicationLabel: "Moonlight.app",
+    applicationAvailable: true,
+    launchMode: "stream",
+    directories: [],
+    gameCount: 0,
+    importComplete: false,
+    importResumable: false,
+    lastImportedAt: null,
+    ...overrides,
   });
 
-  it("keeps the game streaming host out of Settings until a profile streams", async () => {
-    backend.runners = [runnerWithProfile("default")];
+  it("opens the game streaming setup from its plugin row and closes it again", async () => {
+    backend.plugins = [gamestreamPlugin];
+    backend.runners = [streamingRunner([])];
     mount();
     await goto("#/settings/plugins");
+    await settleAll();
 
-    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+    const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
+    expect(setup.hidden).toBe(true);
+    // The emulator list has no group for it, and the old host card is gone.
+    expect(root.querySelector("#runners-panel [data-runner-plugin]")).toBeNull();
+    expect(root.querySelector("#gamestream-panel")).toBeNull();
+
+    root.querySelector<HTMLButtonElement>("[data-plugin-open='game-streaming']")!.click();
+    await settleAll();
+
+    expect(setup.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(true);
+    // Nothing found on this machine, so the first step is the active one.
+    expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
+    expect(setup.textContent).toContain("Install Moonlight");
+    expect(setup.textContent).not.toMatch(/emulator|runner profile|granted folder|stream cards|placeholder/i);
+
+    setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
+    await settleAll();
+    expect(setup.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
   });
 
-  it("shows the game streaming host once a profile launches streams", async () => {
-    backend.runners = [runnerWithProfile("stream")];
+  it("shows how a finished game streaming setup stands instead of the wizard", async () => {
+    backend.plugins = [gamestreamPlugin];
+    backend.runners = [streamingRunner([streamProfile({ gameCount: 12 })])];
+    backend.streamHost = "my-pc.local";
     mount();
     await goto("#/settings/plugins");
+    await settleAll();
 
-    const card = root.querySelector<HTMLElement>("#gamestream-panel")!;
-    expect(card.hidden).toBe(false);
-    expect(card.textContent).toContain("Host address");
-    // And the address was read on arrival rather than kept from a last visit.
+    root.querySelector<HTMLButtonElement>("[data-plugin-open='game-streaming']")!.click();
+    await settleAll();
+
+    const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
     expect(
-      tauri.invoke.mock.calls.filter(([command]) => command === "get_gamestream_settings"),
-    ).not.toHaveLength(0);
+      [...setup.querySelectorAll(".gs-step")].map((step) => step.classList.contains("is-done")),
+    ).toEqual([true, true, true, true]);
+    expect(setup.textContent).toContain("Moonlight found (Moonlight)");
+    expect(setup.textContent).toContain("12 games added to your Library");
+    expect(setup.textContent).toContain("Open Library");
+    // The PC was asked about on arrival rather than trusted from last time.
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "probe_gamestream_host"),
+    ).toHaveLength(1);
   });
 
   // A game installed here and streamable from another machine is one game with
@@ -860,6 +920,8 @@ describe("application shell against the desktop backend", () => {
       const probe = probes.find((image) => image.src.includes("alpha-logo"));
       expect(probe, "the wordmark must be decoded off-screen").toBeDefined();
       probe?.onload?.(new Event("load"));
+      // Measuring the mark (logo-fit.ts) answers on the next turn.
+      await settle();
 
       expect(logo.getAttribute("src")).toBe("https://cdn.example/alpha-logo.png");
       expect(logo.hidden).toBe(false);
@@ -1017,7 +1079,8 @@ describe("application shell against the desktop backend", () => {
     const settingsMark = root.querySelector<HTMLElement>(
       "[data-source-row='microsoft-store'] .source-account-row__mark",
     );
-    expect(settingsMark?.innerHTML).toContain("#f25022");
+    // The Microsoft Store's own mark (its bag), in its Settings colour.
+    expect(settingsMark?.innerHTML).toContain('fill="#f4f3f7"');
 
     await goto("#/library");
     // The store's mark belongs to Settings, the rail and the game's own page.
@@ -1132,6 +1195,19 @@ describe("application shell against the desktop backend", () => {
   // this machine. Streaming is the case where they disagree, and the second
   // one wins — "Windows only" printed over a working Play would be the wrong
   // fact about the right game.
+  it("dresses the play button for what it will do", async () => {
+    backend.library = [
+      { ...alpha, id: "runner:emu", title: "Zelda", launchable: true, runner: "com.orivo.ryujinx" },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.dataset.kind).toBe("emulate");
+    expect(play.querySelector(".play-button__label")?.textContent).toBe("Emulate it");
+    expect(play.querySelector(".play-button__icon svg")).not.toBeNull();
+  });
+
   it("plays a game with no build for this machine when something here can still start it", async () => {
     backend.library = [
       {
@@ -1151,7 +1227,9 @@ describe("application shell against the desktop backend", () => {
     await settle();
 
     const play = root.querySelector<HTMLButtonElement>("#play-button")!;
-    expect(play.textContent).toContain("Play");
+    // Streaming is the only way it starts here, and the button says so.
+    expect(play.textContent).toContain("Stream it");
+    expect(play.dataset.kind).toBe("stream");
     expect(play.textContent).not.toContain("Windows only");
     expect(play.hasAttribute("aria-disabled")).toBe(false);
     expect(play.classList.contains("is-blocked")).toBe(false);
@@ -1926,7 +2004,7 @@ describe("the application shell on iOS", () => {
     // Wine starts nothing on an iPhone, and neither does any other runner.
     expect(row("wine").hidden).toBe(true);
     expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
-    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#gamestream-setup-panel")!.hidden).toBe(true);
     expect(row("wallpaper-searcher").hidden).toBe(false);
   });
 
@@ -2191,7 +2269,12 @@ describe("the browse bar's logos", () => {
     runner: "com.orivo.gamestream",
     launchable: true,
   });
-  const library = [streamed("a"), streamed("b"), { id: "c", title: "c", source: "local", launchable: true }];
+  const library = [
+    streamed("a"),
+    streamed("b"),
+    { id: "c", title: "c", source: "local", launchable: true },
+    { id: "steam:7", title: "d", source: "steam", launchable: true },
+  ];
 
   beforeEach(() => {
     window.location.hash = "";
@@ -2234,15 +2317,19 @@ describe("the browse bar's logos", () => {
     throw new Error(`the bar never reached ${label}`);
   };
 
-  it("shows where each game comes from as its logo, and keeps the word as its name", async () => {
+  it("gives a source with no wordmark a standard glyph and its name in the interface's type", async () => {
     await settle();
     await showMode("Source");
 
     const [moonlight, local] = segments();
-    expect(moonlight.classList.contains("has-logo")).toBe(true);
-    expect(moonlight.querySelector("img")!.getAttribute("src")).toBe("/media/brands/moonlight.png");
+    for (const segment of [moonlight, local]) {
+      expect(segment.classList.contains("has-logo")).toBe(false);
+      expect(segment.querySelector("img")!.hidden).toBe(true);
+      expect(segment.querySelector<HTMLElement>(".browse-bar__segment-icon")!.hidden).toBe(false);
+    }
+    expect(moonlight.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("cast");
+    expect(local.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("monitor");
     expect(moonlight.textContent).toBe("Moonlight");
-    expect(local.querySelector("img")!.getAttribute("src")).toBe("/media/brands/local.png");
   });
 
   it("goes back to words where the bar sorts by something with no brand", async () => {
@@ -2261,11 +2348,17 @@ describe("the browse bar's logos", () => {
     await showMode("Source");
     const [moonlight] = segments();
 
-    moonlight.querySelector("img")!.dispatchEvent(new Event("error"));
+    // Moonlight has no wordmark any more, so the logo under test is a store's.
+    void moonlight;
+    const branded = segments().find((segment) => segment.classList.contains("has-logo"));
+    if (!branded) throw new Error("the Steam segment must wear its logo");
+    branded.querySelector("img")!.dispatchEvent(new Event("error"));
     // A repaint, as every selection makes, must not try the same file again.
     await showMode("Activity");
     await showMode("Source");
 
-    expect(segments()[0].classList.contains("has-logo")).toBe(false);
+    expect(
+      segments().find((segment) => segment.dataset.segmentId === branded.dataset.segmentId)?.classList.contains("has-logo"),
+    ).toBe(false);
   });
 });

@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+### Added
+
+- Guided game streaming setup. Settings › Plugins › Game streaming finds Moonlight, connects to your gaming PC, shows the pairing PIN with a button to Sunshine's PIN page, notices by itself when pairing is done, and imports your games into a folder Orivo manages — no folder to pick, no separate host card.
+- Trailers and screenshots on a game's page. The media rail and the slideshow show the game's Steam trailers and screenshots instead of your saved wallpapers; the first trailer plays on its own, with sound, and both are settings (Appearance › Game pages). The arrows and a pad walk the rail, showing each tile as it is reached.
+- Artwork is repaired at launch. Missing covers, backgrounds and logos — including pictures whose file was removed from the cache — are looked for a few seconds after Orivo opens, with a thin progress line along the top of the window; a game with nothing to find is not asked again for three days.
+- Play history. Every launch records when the game was played, and games Orivo starts itself also record how long they ran, so Recently Played, Most Played, Resume and Never Played finally sort your library.
+- A profile menu. The avatar opens a small card to set your name and picture.
+- Wallpaper picker: a quality badge on every image (4K, 1440p, 1080p…), a "4K only" switch for backgrounds, and logos in your own language.
+
+### Changed
+
+- The Play button is frosted glass with drifting light, takes the colour of the game's artwork, and says what it will do: Play, Stream it, Emulate it, Install, Downloading or Unavailable.
+- Games without artwork are panes of glass over one gradient instead of the Orivo ring, with their title, and say "Finding artwork" while it is looked for.
+- Titles read as titles: `the-perfect-pencil` shows as "The Perfect Pencil" and "Kena - Bridge of Spirits" as "Kena: Bridge of Spirits".
+- Wordmarks are trimmed and sized by their proportions, so wide and square logos stand at a similar size, and fade in.
+- Library: cards tilt toward the pointer; cards leaving the shelf fade out; the search rests as a centred magnifier that opens on hover; the navigation's plate slides between pages; real Library, Store and Settings icons; the hero lines up with the first card; the scene's arrows are gone.
+- Settings: plugins and stores are compact card grids with the Libraries button style; Xbox and Microsoft Store share one card; official Epic, GOG, Ubisoft, Steam, Xbox, Microsoft Store and Instant Gaming marks; Local, Moonlight and Wine are plain segments with standard glyphs; Wallpaper Searcher settings are grouped by source; debug controls only show with Beta features on.
+- The game page always shows its Game info, Achievements, Friends, Activity and Related cards, empty when there is nothing to say.
+- An available update lists its highlights as a few short bullets instead of the whole release notes.
+- Store: the mood shelves are gone, and the platform filters show every game available on a platform, not only its exclusives (complete for live games with IGDB keys).
+
+### Fixed
+
+- The Store no longer comes back empty after a few quick filter clicks: refreshes are single-flight, throttled, and a failed one keeps the games it had.
+- Leaving a game's page no longer abandons artwork you chose to save.
+- Epic install progress shows and follows the download to the end (#20); scroll positions survive a repaint on the game page (#21); an older Orivo explains a newer library instead of crashing (#58).
+- Artwork downloads time out instead of hanging, search retries tidier titles, and logos no longer come in another script.
+- Coming back to a game shows its wallpaper again; card art keeps its rounded corners while it animates; no white hairline along the screen edges on macOS.
+- Wine launch messages are in plain words and clear when the game exits.
+- No more keychain password prompts for the plugin compile cache.
+
 ## [0.3.9] - 2026-10-22
 
 ### Added

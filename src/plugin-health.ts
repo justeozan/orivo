@@ -48,7 +48,7 @@ function isTauriRuntime(): boolean {
 }
 
 function assertActive(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("La requête a été annulée.", "AbortError");
+  if (signal.aborted) throw new DOMException("The request was cancelled.", "AbortError");
 }
 
 export function pluginHealthErrorMessage(error: unknown): string {
@@ -119,12 +119,12 @@ export function createDefaultPluginHealthClient(): PluginHealthClient {
 
     async resume(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Reprendre un plugin est réservé à l'application Orivo.");
+        throw new Error("Resuming a plugin needs the Orivo desktop app.");
       }
       assertActive(signal);
       const view = await invoke<unknown>("resume_plugin", { pluginId });
       const [health] = readHealthView(view);
-      if (!health) throw new Error("Orivo n'a pas pu reprendre ce plugin.");
+      if (!health) throw new Error("Orivo could not resume this plugin.");
       return health;
     },
 

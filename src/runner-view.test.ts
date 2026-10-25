@@ -17,6 +17,7 @@ function profile(overrides: Partial<RunnerProfileView> = {}): RunnerProfileView 
     statusMessage: null,
     enabled: true,
     applicationLabel: "Dolphin.app",
+    applicationAvailable: true,
     launchMode: "default",
     directories: [{ id: "games", label: "My ROMs", granted: true }],
     gameCount: 3,
@@ -80,6 +81,29 @@ function createFakeController(
       return { state: "started" as const, pin: "0417", host: "astra.local" };
     },
     streamClients: () => clients,
+    async refreshStreamClients() {
+      calls.push("refreshStreamClients");
+      return clients;
+    },
+    async createStreamProfile(clientId) {
+      calls.push(`createStreamProfile:${clientId ?? "picker"}`);
+      return profile({ launchMode: "stream" });
+    },
+    async probeHost(profileId, host) {
+      calls.push(`probeHost:${profileId}:${host}`);
+      return { state: "paired" as const, host, games: 0 };
+    },
+    async pairingStatus(profileId) {
+      calls.push(`pairingStatus:${profileId}`);
+      return "waiting" as const;
+    },
+    async cancelPairing(profileId) {
+      calls.push(`cancelPairing:${profileId}`);
+    },
+    async prepareLibrary(profileId) {
+      calls.push(`prepareLibrary:${profileId}`);
+      return profile();
+    },
     async deleteProfile(profileId) {
       calls.push(`deleteProfile:${profileId}`);
       return true;
@@ -253,150 +277,45 @@ describe("mountRunnerPanel", () => {
     expect(controller.calls).toEqual(["setLaunchMode:runner-1:stream"]);
   });
 
-  it("renders a streaming profile as the kind of folder it actually has", () => {
+  // Game streaming has one place, with its steps in order. An emulator's
+  // folder picker and "Launches" menu for a PC's game list are a second, worse
+  // way in, so the generic list does not show it at all.
+  it("leaves game streaming to its own setup", () => {
     const controller = createFakeController([
+      runner(),
       runner({
-        profiles: [
-          profile({
-            launchMode: "stream",
-            gameCount: 0,
-            directories: [{ id: "games", label: "Streams", granted: true }],
-          }),
-        ],
+        id: "com.orivo.gamestream",
+        name: "Moonlight / Sunshine",
+        profiles: [profile({ id: "stream-1", pluginId: "com.orivo.gamestream", launchMode: "stream" })],
       }),
     ]);
     mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
 
-    expect(root.querySelector<HTMLSelectElement>("[data-runner-launch-mode='runner-1']")!.value).toBe(
-      "stream",
+    expect(root.querySelectorAll("[data-runner-plugin]")).toHaveLength(1);
+    expect(root.querySelector("[data-runner-plugin='com.orivo.gamestream']")).toBeNull();
+    expect(root.querySelector("[data-runner-profile='stream-1']")).toBeNull();
+    expect(root.textContent).not.toContain("Moonlight");
+  });
+
+  it("says there is nothing to add when game streaming is the only runner", () => {
+    mountRunnerPanel(
+      root,
+      createFakeController([
+        runner({ id: "com.orivo.gamestream", name: "Moonlight / Sunshine", profiles: [] }),
+      ]),
+      { showToast: (message) => toasts.push(message) },
     );
-    expect(root.textContent).toContain("Importing asks the streaming host what it can stream");
-    expect(root.textContent).toContain("Add a folder for its stream cards…");
+    expect(root.textContent).toContain("Install a runner plugin");
   });
 
-  // Pairing reads no credential, so it is offered even when the feed is being
-  // refused — which is exactly when a user goes looking for it.
-  it("offers pairing on a streaming profile and shows the PIN it was given", async () => {
-    const controller = createFakeController([
-      runner({ profiles: [profile({ launchMode: "stream" })] }),
-    ]);
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-
-    const pair = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-      button.textContent?.includes("Pair with this host"),
-    )!;
-    expect(pair).not.toBeUndefined();
-    pair.click();
-    await flush();
-
-    expect(controller.calls).toEqual(["beginPairing:runner-1"]);
-    const panel = root.querySelector<HTMLElement>("[data-runner-pairing='runner-1']")!;
-    expect(panel.querySelector(".runner-pairing__pin")!.textContent).toBe("0417");
-    expect(panel.textContent).toContain("astra.local");
-  });
-
-  // Not on a timer: a PIN that vanished while the user was walking to the other
-  // machine would be the one failure mode worth avoiding.
-  it("keeps the PIN until the user says the attempt is done", async () => {
-    const controller = createFakeController([
-      runner({ profiles: [profile({ launchMode: "stream" })] }),
-    ]);
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-
-    [...root.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.includes("Pair with this host"))!
-      .click();
-    await flush();
-
-    // A re-render for any other reason must not take it away.
-    controller.emit();
-    expect(root.querySelector("[data-runner-pairing='runner-1']")).not.toBeNull();
-
-    [...root.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Done")!
-      .click();
-    await flush();
-    expect(root.querySelector("[data-runner-pairing='runner-1']")).toBeNull();
-  });
-
-  // The defect this shape exists to prevent: a client that is already paired
-  // refuses to start a handshake, so a PIN shown here could only be rejected.
-  it("says a machine is already paired instead of showing a PIN for it", async () => {
-    const controller = createFakeController([
-      runner({ profiles: [profile({ launchMode: "stream" })] }),
-    ]);
-    controller.beginPairing = async () => ({
-      state: "alreadyPaired" as const,
-      host: "astra.local",
-    });
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-
-    [...root.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.includes("Pair with this host"))!
-      .click();
-    await flush();
-
-    const panel = root.querySelector<HTMLElement>("[data-runner-pairing='runner-1']")!;
-    expect(panel.querySelector(".runner-pairing__pin")).toBeNull();
-    expect(panel.textContent).toContain("astra.local is already paired");
-  });
-
-  // A user who streams has the client installed. Making them walk a file
-  // dialog to a bundle Orivo can already see is asking them to do its work.
-  it("offers an application it found before offering the file picker", async () => {
+  it("offers only the picker for an emulator, even when a streaming client is installed", () => {
     const controller = createFakeController([runner({ profiles: [] })], {}, [
       { id: "client-abc", label: "Moonlight" },
     ]);
     mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-
-    const labels = [...root.querySelectorAll<HTMLButtonElement>(".runner-group__adders button")].map(
-      (button) => button.textContent,
-    );
-    expect(labels).toEqual(["+ Add Moonlight", "+ Add an emulator"]);
-
-    root.querySelector<HTMLButtonElement>(".runner-group__adders button")!.click();
-    await flush();
-
-    // The handle is what crosses, never a path, and the application's own name
-    // is what the profile is called.
-    expect(controller.calls).toEqual(["createProfile:com.orivo.dolphin:Moonlight:client-abc"]);
-  });
-
-  it("falls back to the picker alone when nothing was found", () => {
-    const controller = createFakeController([runner({ profiles: [] })]);
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
     expect(
       [...root.querySelectorAll(".runner-group__adders button")].map((button) => button.textContent),
     ).toEqual(["+ Add an emulator"]);
-  });
-
-  it("never offers pairing on a profile that launches game files", () => {
-    const controller = createFakeController([runner()]);
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-    expect(root.textContent).not.toContain("Pair with this host");
-  });
-
-  it("surfaces a refused pairing as a toast and keeps the button", async () => {
-    const controller = createFakeController([
-      runner({ profiles: [profile({ launchMode: "stream" })] }),
-    ]);
-    controller.beginPairing = async () => {
-      throw "No GameStream host is configured yet.";
-    };
-    mountRunnerPanel(root, controller, { showToast: (message) => toasts.push(message) });
-
-    [...root.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.includes("Pair with this host"))!
-      .click();
-    await flush();
-
-    expect(toasts).toEqual(["No GameStream host is configured yet."]);
-    expect(root.querySelector("[data-runner-pairing='runner-1']")).toBeNull();
-    expect(
-      [...root.querySelectorAll<HTMLButtonElement>("button")].some((button) =>
-        button.textContent?.includes("Pair with this host"),
-      ),
-    ).toBe(true);
   });
 
   // Artwork runs after the games are in and takes a request and up to four

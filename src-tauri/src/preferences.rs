@@ -94,6 +94,15 @@ pub struct PreferencesDto {
     /// exist yet, and they crowd out what has actually just come out.
     #[serde(default)]
     pub show_editorial_games: bool,
+    /// A game page starts its first trailer on its own unless this is set.
+    /// Stored as the opt-out so a file written before it existed keeps the
+    /// default, which is to play.
+    #[serde(default)]
+    pub trailer_autoplay_off: bool,
+    /// Opt-out, like the one above: trailers that start on their own play
+    /// with sound unless this is set.
+    #[serde(default)]
+    pub trailer_muted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -107,6 +116,8 @@ pub struct PreferencesUpdate {
     pub debug_sample_social: Option<bool>,
     pub beta_features: Option<bool>,
     pub show_editorial_games: Option<bool>,
+    pub trailer_autoplay_off: Option<bool>,
+    pub trailer_muted: Option<bool>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -182,6 +193,12 @@ impl PreferencesService {
             }
             if let Some(beta_features) = update.beta_features {
                 preferences.beta_features = beta_features;
+            }
+            if let Some(off) = update.trailer_autoplay_off {
+                preferences.trailer_autoplay_off = off;
+            }
+            if let Some(muted) = update.trailer_muted {
+                preferences.trailer_muted = muted;
             }
         }
         self.save_atomically(&preferences)?;
@@ -377,6 +394,8 @@ mod tests {
                 debug_sample_social: Some(true),
                 beta_features: Some(true),
                 show_editorial_games: Some(true),
+                trailer_autoplay_off: Some(true),
+                trailer_muted: Some(true),
                 reset: false,
             })
             .unwrap();

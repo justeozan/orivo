@@ -32,7 +32,9 @@
      whether the hero resolves to a positive height. */
   --hero-top: clamp(196px, 21.6svh, 230px);
   --hero-bottom: 443px;
-  --hero-left: clamp(48px, 10.35vw, 159px);
+  /* The hero's left edge is the first card's: logo, title and Play stand on
+     the same line as the shelf (`.recently-played` + the rail's 3px inset). */
+  --hero-left: calc(var(--edge-left) + 8px);
   --hero-width: min(560px, calc(100vw - 160px));
   --fs-hero-title: clamp(48px, 4.3vw, 66px);
   --play-w: 148px;
@@ -111,6 +113,71 @@ button { border: 0; cursor: pointer; }
    shadow instead of standing on a tint. */
 .hero-image.is-active { opacity: 1; transform: scale(1); }
 
+/* Artwork search progress: a 2px line along the top edge of the window, in
+   the brand's violet, with a soft glow at its head. Fades out once complete. */
+.artwork-progress {
+  position: fixed;
+  z-index: 1000;
+  inset: 0 0 auto;
+  height: 2px;
+  pointer-events: none;
+  transition: opacity 500ms ease 300ms;
+}
+.artwork-progress[hidden] { display: none; }
+.artwork-progress span {
+  display: block;
+  width: var(--artwork-progress, 0%);
+  height: 100%;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(90deg, rgba(122, 140, 255, .55), #b9a8ff);
+  box-shadow: 0 0 10px rgba(185, 168, 255, .6);
+  transition: width 420ms cubic-bezier(.2, .8, .2, 1);
+}
+.artwork-progress.is-done { opacity: 0; }
+
+/* The ground a game stands on when it has no picture: one gradient for every
+   game for now — cyan light top left, violet falling to magenta below, a deep
+   indigo pool between — under a fixed grain. The cards in front of it are
+   glass (.card-fallback), so it is what they refract. */
+.art-ground {
+  background:
+    radial-gradient(38% 30% at 30% 20%, rgba(84, 232, 255, .9) 0%, rgba(84, 232, 255, 0) 100%),
+    radial-gradient(45% 40% at 8% 45%, rgba(24, 92, 255, .85) 0%, rgba(24, 92, 255, 0) 100%),
+    radial-gradient(40% 35% at 85% 18%, rgba(132, 70, 255, .8) 0%, rgba(132, 70, 255, 0) 100%),
+    radial-gradient(42% 36% at 45% 80%, rgba(226, 64, 255, .85) 0%, rgba(226, 64, 255, 0) 100%),
+    radial-gradient(50% 45% at 72% 52%, rgba(38, 10, 92, .95) 0%, rgba(38, 10, 92, 0) 100%),
+    linear-gradient(160deg, #1673ff 0%, #4a3dff 40%, #3a1580 70%, #7a2cf0 100%);
+}
+.art-ground::before,
+.art-ground::after,
+.card-fallback::before,
+.card-fallback::after { position: absolute; inset: 0; content: ""; pointer-events: none; }
+.art-ground::before,
+.card-fallback::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+  mix-blend-mode: overlay;
+  opacity: .32;
+}
+/* While its artwork is being looked for, a slow light crosses the ground. */
+.art-ground::after,
+.card-fallback::after {
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .09) 50%, transparent 70%);
+  background-size: 250% 100%;
+  opacity: 0;
+}
+.art-ground.is-art-pending::after,
+.game-card.is-art-pending .card-fallback::after { animation: art-ground-search 2.4s ease-in-out infinite; opacity: 1; }
+@keyframes art-ground-search { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .art-ground.is-art-pending::after,
+  html:not([data-motion="full"]) .game-card.is-art-pending .card-fallback::after { animation: none; background: rgba(255, 255, 255, .05); }
+}
+[data-motion="reduced"] .art-ground.is-art-pending::after,
+[data-motion="reduced"] .game-card.is-art-pending .card-fallback::after { animation: none; background: rgba(255, 255, 255, .05); }
+.card-fallback::before { opacity: .2; }
+.hero-ground { position: absolute; inset: 0; }
+
 .scene-overlay { z-index: -2; }
 
 /* Legibility without darkness: the text block sits on blurred artwork rather
@@ -148,7 +215,7 @@ button { border: 0; cursor: pointer; }
 /* Glyphs and translucent pills cannot take a text shadow, and their surfaces
    were tuned against the scrims this page no longer has. Over bare artwork they
    carry a little more of their own. */
-.topbar--over-art .search-control { background: rgba(16,15,19,.6); }
+.topbar--over-art .search-control::before { background: rgba(16,15,19,.6); }
 
 .topbar {
   position: absolute;
@@ -344,26 +411,106 @@ button { border: 0; cursor: pointer; }
 .nav-link[hidden] { display: none !important; }
 .nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
 .nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
+/* The page indicator (app.ts `placeNavIndicator`): the active link's plate,
+   lifted out of the link so it can travel. A slight overshoot on the way in
+   is what makes it feel carried rather than teleported. */
+.primary-nav { position: relative; isolation: isolate; }
+.primary-nav > .nav-link { position: relative; z-index: 1; }
+.nav-indicator {
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  left: 0;
+  width: var(--nav-w, 0);
+  height: var(--nav-h, 0);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.03)), rgba(24,22,26,.46);
+  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 6px 18px rgba(0,0,0,.18);
+  -webkit-backdrop-filter: blur(18px) saturate(130%);
+  backdrop-filter: blur(18px) saturate(130%);
+  opacity: 0;
+  transform: translate(var(--nav-x, 0), var(--nav-y, 0));
+  transition:
+    transform 520ms cubic-bezier(.3, 1.3, .4, 1),
+    width 520ms cubic-bezier(.3, 1.3, .4, 1),
+    opacity 200ms ease;
+  pointer-events: none;
+}
+.nav-indicator.is-placed { opacity: 1; }
+.nav-indicator.is-instant { transition: none; }
+/* With the plate travelling, the link itself wears none. */
+.primary-nav.has-indicator .nav-link.is-active { border-color: transparent; background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
+.nav-link .icon { transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1); }
+.nav-link:hover .icon { transform: translateY(-1px) scale(1.06); }
+.nav-link.is-arriving .icon { animation: nav-icon-arrive 520ms cubic-bezier(.3, 1.4, .5, 1); }
+@keyframes nav-icon-arrive {
+  0% { transform: scale(.82); }
+  45% { transform: translateY(-2px) scale(1.14); }
+  100% { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .nav-indicator { transition: opacity 200ms ease; }
+  html:not([data-motion="full"]) .nav-link.is-arriving .icon { animation: none; }
+}
+[data-motion="reduced"] .nav-indicator { transition: opacity 200ms ease; }
+[data-motion="reduced"] .nav-link.is-arriving .icon { animation: none; }
+/* The phone gives every link its own plate; the travelling one stays home. */
+html[data-device="phone"] .nav-indicator { display: none; }
+html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
+  border-color: rgba(255,255,255,.3);
+  background: rgba(255,255,255,.2);
+}
 .nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
+/* Search stays out of the scene's way: at rest it is a magnifier and nothing
+   else. Reaching it — pointer, focus, or a query already typed — opens the
+   glass pill from the magnifier outwards, and the field and its shortcut
+   arrive just behind it. */
 .search-control {
+  position: relative;
+  isolation: isolate;
   width: 100%;
   min-width: 0;
   height: var(--search-h);
   gap: 11px;
   padding: 0 12px 0 16px;
-  border: 1px solid rgba(255,255,255,.15);
+  justify-content: center;
   border-radius: var(--search-r);
-  color: #ede6e2;
+  color: rgba(237,230,226,.62);
+  cursor: text;
+  transition: color 200ms ease;
+}
+.search-control::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: inherit;
   background: rgba(22,20,23,.31);
   box-shadow: 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
   -webkit-backdrop-filter: blur(22px) saturate(130%);
   backdrop-filter: blur(22px) saturate(130%);
-  transition: border-color 160ms ease, background 160ms ease;
+  content: "";
+  opacity: 0;
+  transform: scaleX(.14);
+  transform-origin: 50% 50%;
+  transition: opacity 200ms ease, transform 420ms cubic-bezier(.2,.9,.25,1), border-color 160ms ease, background 160ms ease;
 }
+/* At rest the field and the shortcut take no room, so the magnifier sits in
+   the middle of the bar; opening grows them, which carries the magnifier out
+   to the pill's left edge as the glass widens around it. */
+.search-control input { flex: 0 1 0; width: 0; transition: flex-grow 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
+.search-shortcut { max-width: 0; overflow: hidden; transition: max-width 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
+.search-control > :not(.icon) { opacity: 0; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) input { flex-grow: 1; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) .search-shortcut { max-width: 64px; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) { color: #ede6e2; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)))::before { opacity: 1; transform: none; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; }
 
 .search-control .icon { width: 16px; height: 16px; }
-.search-control input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
+.search-control input { min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
 .search-control input::placeholder { color: #d1c9c5; opacity: .95; }
 .search-shortcut { display: flex; gap: 4px; }
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
@@ -371,19 +518,76 @@ button { border: 0; cursor: pointer; }
 .profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
 .avatar { width: var(--avatar-size); height: var(--avatar-size); border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
 
+/* The profile menu: the picture is the button, and a small glass card under
+   it holds the two things a player sets — a picture and a name. */
+.profile-control { position: relative; flex: none; display: flex; }
+.profile-button { display: grid; padding: 0; place-items: center; border-radius: 50%; background: none; transition: box-shadow 160ms ease, transform 160ms ease; }
+.profile-button:hover,
+.profile-button[data-nav-focus],
+.profile-button[aria-expanded="true"] { box-shadow: 0 0 0 2px rgba(255,255,255,.28); }
+.profile-button:active { transform: scale(.96); }
+.profile-panel {
+  position: absolute;
+  z-index: 22;
+  top: calc(100% + 11px);
+  right: -4px;
+  display: flex;
+  width: 268px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 16px;
+  color: #f4f2f7;
+  background: rgba(22,20,23,.62);
+  box-shadow: 0 18px 44px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.055);
+  -webkit-backdrop-filter: blur(24px) saturate(130%);
+  backdrop-filter: blur(24px) saturate(130%);
+  animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
+}
+.profile-panel[hidden] { display: none; }
+.profile-panel__picture { position: relative; flex: none; width: 52px; height: 52px; overflow: hidden; border-radius: 50%; cursor: pointer; }
+.profile-panel__picture img { width: 100%; height: 100%; object-fit: cover; background: #28242c; }
+/* Hovering the picture says it can be changed. */
+.profile-panel__picture-hint { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; background: rgba(10,10,14,.5); opacity: 0; transition: opacity 160ms ease; }
+.profile-panel__picture-hint .icon { width: 18px; height: 18px; }
+.profile-panel__picture:hover .profile-panel__picture-hint,
+.profile-panel__picture:focus-within .profile-panel__picture-hint { opacity: 1; }
+.profile-panel__fields { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.profile-panel__name {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 9px;
+  outline: 0;
+  color: #f4f2f7;
+  background: rgba(255,255,255,.06);
+  font-size: 13px;
+  font-weight: 560;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.profile-panel__name::placeholder { color: rgba(244,242,247,.42); font-weight: 450; }
+.profile-panel__name:focus { border-color: rgba(185,168,255,.55); background: rgba(255,255,255,.09); }
+.profile-panel__reset { align-self: flex-start; padding: 0; color: rgba(244,242,247,.5); background: none; font-size: 11.5px; }
+.profile-panel__reset:hover { color: #fff; }
+.profile-panel__reset[hidden] { display: none; }
+
 .feedback-button {
   display: grid;
   width: var(--tap-round);
   height: var(--tap-round);
   padding: 0;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.14);
+  border: 1px solid transparent;
   border-radius: 50%;
-  background: rgba(255,255,255,.06);
+  background: transparent;
   color: rgba(255,255,255,.72);
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
-.feedback-button:hover, .feedback-button[data-nav-focus] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+/* Bare at rest, like the search beside them: a glyph on the scene. Reaching
+   one gives it a faint disc so it reads as pressable. */
+.feedback-button:hover, .feedback-button[data-nav-focus] { background: rgba(255,255,255,.1); color: #fff; }
 .feedback-button svg { width: 18px; height: 18px; }
 /* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
    Sentry DSN would still paint the button. */
@@ -399,15 +603,15 @@ button { border: 0; cursor: pointer; }
   height: var(--tap-round);
   padding: 0;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.14);
+  border: 1px solid transparent;
   border-radius: 50%;
   color: rgba(255,255,255,.72);
-  background: rgba(255,255,255,.06);
+  background: transparent;
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
 .notifications-button:hover,
 .notifications-button[data-nav-focus],
-.notifications-button[aria-expanded="true"] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+.notifications-button[aria-expanded="true"] { background: rgba(255,255,255,.1); color: #fff; }
 .notifications-button svg { width: 18px; height: 18px; }
 /* The dot is the count. A number on a 36px circle is unreadable, and there are
    never enough notices for one to matter. */
@@ -533,6 +737,9 @@ button { border: 0; cursor: pointer; }
 }
 .scene-arrow:hover, .scene-arrow[data-nav-focus] { background: rgba(255,255,255,.12); transform: scale(1.05); }
 .scene-arrow .icon { width: 18px; height: 18px; }
+/* Retired: the rail, the keys and the pad already walk the library, and two
+   round buttons over the artwork were in the way of it. */
+.scene-arrow { display: none !important; }
 .scene-arrow--previous { left: 24px; }
 .scene-arrow--next { right: 24px; }
 
@@ -606,8 +813,15 @@ button { border: 0; cursor: pointer; }
    move the metadata under them. Height-bounded rather than width-bounded — a
    wide mark and a tall one have to look like the same piece of furniture. */
 .hero-logo {
+  /* The box every mark is drawn in. A wide mark is drawn shorter than the box
+     (`--logo-scale`, set from its proportions in logo-fit.ts) so a banner and
+     a crest cover a similar area; the room it gives up goes above it, so the
+     mark still sits on the line of metadata under it. */
+  --hero-logo-box: clamp(150px, 22svh, 300px);
+  box-sizing: border-box;
   max-width: min(760px, 100%);
-  height: clamp(150px, 22svh, 300px);
+  height: var(--hero-logo-box);
+  padding-top: calc(var(--hero-logo-box) * (1 - var(--logo-scale, 1)));
   /* Shrinkable, and `object-fit: contain` keeps the aspect: on a window too
      short for the full mark it scales down instead of being cropped at the top
      by the identity block's `overflow: hidden`. */
@@ -615,10 +829,13 @@ button { border: 0; cursor: pointer; }
   flex: 0 1 auto;
   margin: 0 0 14px;
   object-fit: contain;
-  object-position: left center;
+  object-position: left bottom;
   filter: drop-shadow(0 2px 10px rgba(6,6,10,.55));
 }
 .hero-content [hidden] { display: none !important; }
+/* A plain fade: the wordmark is never blurred or moved on its way in. */
+.hero-logo.is-arriving { animation: hero-logo-fade 380ms ease both; }
+@keyframes hero-logo-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* One line under the wordmark, and never more: the genre pill and the studio.
    `nowrap` is the whole point — a second row here is the stack this replaced. */
@@ -634,25 +851,175 @@ button { border: 0; cursor: pointer; }
 /* `flex: none` and a fixed height: the row is the fixed point of the scene, so
    nothing inside it may resize it. */
 .hero-actions { height: var(--play-h); flex: none; gap: 13px; margin-top: 24px; }
-.play-button { display: inline-flex; align-items: center; justify-content: center; width: var(--play-w); min-width: var(--play-w); height: var(--play-h); gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: var(--fs-play); font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
-.play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
-.play-button:active { transform: translateY(1px) scale(.98); }
+/* The Play button is the search bar's glass taken one step further: a dark
+   frosted pill, a rim of light that slowly turns around it, and — when it will
+   actually start something — a field of coloured light drifting inside it.
+   `data-kind` (app.ts) picks the palette, so the button says what it does
+   before its label is read: Play, Stream it, Emulate it, Install, or a quiet
+   Unavailable. */
+@property --play-rim-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.play-button {
+  /* The three lights of the field and the rim's tint, per kind below. */
+  --play-a: #6fe3ff;
+  --play-b: #4d63ff;
+  --play-c: #9a5bff;
+  --play-spark: #ffe28a;
+  --play-rim: #ffe9f7, #a9dcff, #4f7dff, #c6b2ff, #ffe9f7;
+  --play-field: 1;
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--play-w);
+  min-width: var(--play-w);
+  height: var(--play-h);
+  gap: 9px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  /* Glass, not paint: the scene shows through, blurred and saturated, and
+     the colour is only ever reflections drifting across it. */
+  background: linear-gradient(160deg, rgba(255,255,255,.12), rgba(255,255,255,.03) 60%, rgba(255,255,255,.07));
+  box-shadow: 0 10px 30px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.3), inset 0 -8px 18px rgba(255,255,255,.04);
+  -webkit-backdrop-filter: blur(18px) saturate(125%) brightness(1.08);
+  backdrop-filter: blur(18px) saturate(125%) brightness(1.08);
+  font-size: var(--fs-play);
+  font-weight: 600;
+  letter-spacing: .005em;
+  text-shadow: 0 1px 10px rgba(8,6,28,.4);
+  white-space: nowrap;
+  transition: filter 160ms ease, transform 160ms ease, box-shadow 220ms ease;
+}
+/* The rim: a ring of light cut out of a turning conic gradient, above the
+   field so the edge stays crisp over the brightest colour. */
+.play-button::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: conic-gradient(from var(--play-rim-angle), var(--play-rim));
+  content: "";
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: play-rim-turn 7s linear infinite;
+}
+.play-button > :not(.play-button__fill, .play-button__aura) { position: relative; z-index: 1; }
+.play-button__icon { display: inline-flex; }
+.play-button__icon:empty { display: none; }
 .play-button .icon { width: 14px; height: 14px; }
+
+/* The field: three blurred lights inside the pill, each drifting on its own
+   period so the mix never repeats the same frame. */
+.play-button__aura {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: var(--play-field);
+  /* A touch under full colour: the lights glow without shouting. */
+  filter: saturate(.68);
+  transition: opacity 320ms ease;
+  pointer-events: none;
+}
+.play-button__aura i {
+  position: absolute;
+  width: 70%;
+  height: 160%;
+  border-radius: 50%;
+  filter: blur(16px);
+  opacity: .5;
+  mix-blend-mode: screen;
+  /* A new scene's colour arrives as a fade, not a cut. */
+  transition: background-color 700ms ease;
+}
+.play-button__aura i:nth-child(1) { top: -60%; left: -12%; background-color: var(--play-a); animation: play-drift-a 6.5s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(2) { top: -20%; left: 38%; background-color: var(--play-c); animation: play-drift-b 8s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background-color: var(--play-spark); opacity: .3; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
+/* The reflection: a band of light that crosses the glass now and then. */
+.play-button::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 35%, rgba(255,255,255,.28) 48%, rgba(255,255,255,.06) 54%, transparent 64%);
+  background-size: 260% 100%;
+  content: "";
+  pointer-events: none;
+  animation: play-sheen 4.8s cubic-bezier(.45,.05,.25,1) infinite;
+}
+
+@keyframes play-rim-turn { to { --play-rim-angle: 360deg; } }
+@keyframes play-drift-a { to { transform: translate(38%, 18%) scale(1.15); } }
+@keyframes play-drift-b { to { transform: translate(-42%, -12%) scale(.9); } }
+@keyframes play-drift-c { to { transform: translate(120%, 22%) scale(1.3); } }
+@keyframes play-sheen { 0%, 55% { background-position: 130% 0; } 100% { background-position: -130% 0; } }
+
+/* Palettes. Play is the full field; streaming is cooler, emulation warmer. */
+.play-button[data-kind="stream"] { --play-a: #5ff2dc; --play-b: #2f8dff; --play-c: #4b5bff; --play-spark: #b8fff2; --play-rim: #e6fffb, #8ff0ff, #2f8dff, #9fd0ff, #e6fffb; }
+.play-button[data-kind="emulate"] { --play-a: #ff7ac8; --play-b: #8c4dff; --play-c: #ff9a5c; --play-spark: #ffe08a; --play-rim: #fff0f6, #ffb3d9, #9b6bff, #ffc89e, #fff0f6; }
+/* The scene's own colour wins over the kind's palette whenever it could be
+   read (app.ts `updatePlayAmbient`): a red wallpaper gets a red button. A
+   button with nothing to start keeps its grey. */
+.play-button[data-ambient]:not([data-kind="unavailable"], [data-kind="blocked"]) {
+  --play-a: var(--ambient-a);
+  --play-b: var(--ambient-b);
+  --play-c: var(--ambient-c);
+  --play-spark: var(--ambient-spark);
+  --play-rim: var(--ambient-rim);
+}
+/* Install is the dark pill from the reference: glass first, its light held
+   back until the pointer or the pad reaches it. */
+.play-button[data-kind="install"],
+.play-button[data-kind="downloading"] { --play-field: .3; }
+.play-button[data-kind="install"]:hover,
+.play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
+/* Nothing to start: no field, no sheen, a still grey rim. */
+.play-button[data-kind="unavailable"],
+.play-button[data-kind="blocked"] { --play-field: 0; --play-rim: rgba(255,255,255,.2), rgba(255,255,255,.08), rgba(255,255,255,.2); }
+.play-button[data-kind="unavailable"]::before,
+.play-button[data-kind="blocked"]::before { animation: none; }
+.play-button[data-kind="unavailable"]::after,
+.play-button[data-kind="blocked"]::after { display: none; }
+
+.play-button:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 14px 34px rgba(0,0,0,.3), 0 0 26px color-mix(in srgb, var(--play-b) 38%, transparent), inset 0 1px rgba(255,255,255,.16); }
+.play-button:active { transform: translateY(1px) scale(.98); }
 /* `aria-disabled`, not the property: the greyed button still takes focus so the
    arrow keys can walk up to it from the rail and read its label, while a press
    on it stays as quiet as a disabled one. */
-.play-button[aria-disabled='true'] { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
-/* A game with no build for this machine. Grey rather than dimmed-lavender: the
-   button is the only place that fact is stated now, so it has to read as a
-   deliberate answer and not as a Play button that failed to load. */
-.play-button.is-blocked { width: auto; padding: 0 20px; border-color: rgba(255,255,255,.16); background: rgba(26,24,32,.6); color: #b6b0bd; box-shadow: none; opacity: 1; filter: none; }
-.play-button.is-blocked .icon { display: none; }
-/* While Epic transfers, the button *is* the progress bar: a fill behind the
-   label, so nothing moves and nothing has to be taken away when it finishes. */
-.play-button { position: relative; overflow: hidden; }
-.play-button > :not(.play-button__fill) { position: relative; }
-.play-button__fill { position: absolute; inset: 0 auto 0 0; background: rgba(26,24,32,.20); transition: width 400ms ease; pointer-events: none; }
-.play-button.is-downloading[aria-disabled='true'] { opacity: 1; filter: none; }
+.play-button[aria-disabled='true'] { cursor: default; color: #bdb7c4; filter: none; transform: none; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+/* A game with no build for this machine. The button is the only place that
+   fact is stated now, so it reads as a deliberate answer, not a failed load. */
+.play-button.is-blocked { width: auto; padding: 0 20px; }
+/* While Epic transfers, the button *is* the progress bar: the field fills it
+   from the left, so nothing moves and nothing has to be taken away after. */
+.play-button__fill {
+  position: absolute;
+  z-index: 0;
+  inset: 0 auto 0 0;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 32%, transparent), color-mix(in srgb, var(--play-c) 32%, transparent));
+  transition: width 400ms ease;
+  pointer-events: none;
+}
+.play-button.is-downloading[aria-disabled='true'] { color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .play-button::before,
+  html:not([data-motion="full"]) .play-button::after,
+  html:not([data-motion="full"]) .play-button__aura i { animation: none; }
+}
+[data-motion="reduced"] .play-button::before,
+[data-motion="reduced"] .play-button::after,
+[data-motion="reduced"] .play-button__aura i { animation: none; }
 
 
 /* The Steam account surface is a card inside Settings › Libraries & Sources.
@@ -1189,6 +1556,9 @@ button { border: 0; cursor: pointer; }
   scrollbar-width: none;
 }
 .game-cards::-webkit-scrollbar { display: none; }
+/* Cards leaving the shelf on the left fade out (app.ts `syncShelfFade`). The
+   fade is a mask on each departing card, never on the shelf: a mask on the
+   shelf makes it a backdrop root and takes the blur off every glass card. */
 /* Walked with the keys or a pad, a card scrolled into view brings its
    neighbour on either side with it, so the next game stays in sight: the shelf
    starts moving at the card before the edge rather than once the edge is
@@ -1229,10 +1599,35 @@ button { border: 0; cursor: pointer; }
     box-shadow 280ms ease,
     transform 260ms cubic-bezier(.2, .8, .2, 1);
 }
-.game-card:hover {
-  border-color: rgba(255,255,255,.42);
-  transform: translateY(-2px);
+/* Under the pointer the card tilts toward it like a card held in the hand
+   (app.ts sets `--tilt-x/--tilt-y` and the glare's position), and a light
+   catches its face where the pointer is. The follow is quick while the
+   pointer moves and the return is slow, so leaving reads as letting go. */
+.game-card {
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
 }
+.game-card:hover { border-color: rgba(255,255,255,.42); }
+.game-card.is-tilting {
+  transition:
+    flex-basis 560ms cubic-bezier(.22, .74, .2, 1),
+    border-color 220ms ease,
+    box-shadow 280ms ease,
+    transform 90ms linear;
+}
+.card-media::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  background: radial-gradient(circle at var(--glare-x, 50%) var(--glare-y, 50%), rgba(255,255,255,.26) 0%, rgba(255,255,255,.08) 28%, transparent 60%);
+  content: "";
+  mix-blend-mode: soft-light;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 300ms ease;
+}
+.game-card.is-tilting .card-media::after { opacity: 1; }
 
 /*
  * Selected-card focus stack:
@@ -1297,6 +1692,13 @@ button { border: 0; cursor: pointer; }
   animation: cover-glint-orbit 7.2s linear infinite;
 }
 .card-media { position: absolute; inset: 0; z-index: 0; overflow: hidden; border-radius: calc(var(--card-radius) - 1px); background: #17171b; }
+/* `overflow: hidden` alone does not round WebKit's composited layers: while a
+   card widens (and while it tilts) the art is painted on its own layer and
+   showed square corners outside the radius for the length of the animation.
+   A real clip holds for every layer underneath. Not on an artless card: a
+   clip or a mask makes the element a backdrop root, and the glass inside it
+   then had nothing behind it to blur — and it has no art to escape anyway. */
+.game-card:not(.is-art-missing) .card-media { clip-path: inset(0 round calc(var(--card-radius) - 1px)); -webkit-mask-image: -webkit-radial-gradient(white, black); }
 .card-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center top; opacity: 1; transform: scale(1); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1); }
 .card-art--landscape { object-position: center center; opacity: 0; transform: scale(1.025); }
 .game-card.is-selected .card-art--portrait { opacity: 0; transform: scale(1.012); }
@@ -1309,25 +1711,64 @@ button { border: 0; cursor: pointer; }
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
-/* With no picture of the game at all, the card wears its name. */
+/* With no picture of the game at all, the card turns to glass: the scene
+   behind it shows through, frosted and bent, and its name stands on it — no
+   real cover is there to carry the title. The rim and the two inner lights
+   are what make a blur read as a pane of glass rather than a smudge. */
+.game-card.is-art-missing,
+.game-card.is-art-missing .card-media { background: transparent; }
 .card-fallback {
   position: absolute;
   inset: 0;
   display: none;
-  place-items: center;
-  padding: 10px;
+  align-content: end;
+  gap: 6px;
+  padding: 14px 12px;
   overflow: hidden;
-  color: #ddd8e4;
-  background: linear-gradient(160deg, #262330 0%, #16151b 100%);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.25;
-  text-align: center;
-  overflow-wrap: anywhere;
+  border-radius: inherit;
+  color: #f4f1f8;
+  text-align: left;
+  background:
+    radial-gradient(120% 60% at 0% 0%, rgba(255, 255, 255, .14) 0%, rgba(255, 255, 255, 0) 55%),
+    radial-gradient(90% 50% at 100% 100%, rgba(214, 120, 255, .08) 0%, rgba(214, 120, 255, 0) 60%),
+    linear-gradient(155deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015) 55%, rgba(255, 255, 255, .05));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .42),
+    inset 0 0 0 1px rgba(255, 255, 255, .16),
+    inset 1px 0 0 rgba(160, 230, 255, .22),
+    inset 0 -14px 28px rgba(110, 60, 255, .18),
+    inset 14px 0 30px rgba(110, 220, 255, .1);
+  -webkit-backdrop-filter: blur(16px) saturate(145%) brightness(1.1);
+  backdrop-filter: blur(16px) saturate(145%) brightness(1.1);
 }
+.card-fallback__title {
+  position: relative;
+  display: -webkit-box;
+  overflow: hidden;
+  color: #f1d6ff;
+  font-size: 13.5px;
+  font-weight: 760;
+  letter-spacing: -.005em;
+  line-height: 1.12;
+  text-shadow: 0 1px 12px rgba(40, 10, 90, .55);
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+/* Only while the host is still looking: "nothing yet" and "nothing exists"
+   are different answers, and only the first one is temporary. */
+.card-fallback__status {
+  position: relative;
+  display: none;
+  color: rgba(244, 241, 248, .62);
+  font-size: 10.5px;
+  font-weight: 560;
+  letter-spacing: .02em;
+}
+.game-card.is-art-pending .card-fallback__status { display: block; }
 .game-card.is-art-missing:not(:has(.card-art--landscape.is-ready)) .card-fallback,
 .game-card.is-art-missing:not(.is-selected) .card-fallback { display: grid; }
-.game-card:hover .card-art { transform: scale(1.035); }
+
 
 @keyframes cover-glint-orbit { to { --cover-glint-angle: 360deg; } }
 @keyframes hero-title-arrive { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -1394,6 +1835,11 @@ button { border: 0; cursor: pointer; }
 .browse-bar__segments { min-width: 0; flex: 1; justify-content: center; gap: clamp(18px, 2.6vw, 40px); }
 .browse-bar__segment { min-width: 0; flex: none; padding: 0; color: #97929f; background: none; font-size: 12.5px; text-align: center; transition: color 180ms ease; }
 .browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A wordmark-less source (Local, Moonlight, Wine): a standard glyph in the
+   segment's own colour, then its name in the interface's type. */
+.browse-bar__segment-icon { display: inline-flex; margin-right: 6px; }
+.browse-bar__segment-icon[hidden] { display: none; }
+.browse-bar__segment-icon .icon { width: 14px; height: 14px; }
 .browse-bar__segment:hover { color: #ded9e4; }
 .browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
 /* Source and Platform wear the brands' own logos: white, every one the same
@@ -1507,9 +1953,12 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* Bounded in height, not width, like the hero's: a wide mark and a tall one
    read as the same piece of furniture. */
 .launch-splash__logo {
+  --splash-logo-box: clamp(110px, 19svh, 236px);
   display: block;
+  box-sizing: border-box;
   max-width: 100%;
-  height: clamp(110px, 19svh, 236px);
+  height: var(--splash-logo-box);
+  padding-top: calc(var(--splash-logo-box) * (1 - var(--logo-scale, 1)));
   object-fit: contain;
   object-position: left bottom;
   filter: drop-shadow(0 2px 12px rgba(6, 6, 10, .55));
@@ -2035,7 +2484,9 @@ body[data-mood="rage"] { --violet: #f2453c; }
   letter-spacing: .1em;
   text-transform: uppercase;
 }
-.plugins-group__list { display: grid; }
+/* Two columns of integrations, like a connections page: a tile, the name,
+   one line of what it does, one action. */
+.plugins-group__list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); column-gap: 36px; }
 /* The label and the file-install action share the group's first line, so the
    action never pushes the catalogue down by a whole row. */
 .plugins-group__header {
@@ -2062,13 +2513,70 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* The row's grid outranks the UA `[hidden]` rule, so it is restated: an iOS
    build hides the rows it cannot run. */
 .plugin-row[hidden] { display: none; }
-.plugin-row {
+.plugin-row,
+.plugin-catalog-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
-  padding: 14px 0;
+  padding: 12px 0;
 }
+/* Every row keeps a gutter on the right for a chevron, so the one row that
+   has one (a built-in's settings) lines its button up with all the others. */
+.plugin-row, .plugin-catalog-row { position: relative; padding-right: 34px; }
+.plugin-row > .plugin-open-button { position: absolute; top: 50%; right: 0; transform: translateY(-50%); }
+/* Rows sit on the page, not between rules: the tiles already pace the list. */
+.plugins-group__list > .settings-row + .settings-row { border-top: 0; }
+.plugin-tile {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  color: #e9e5ef;
+  background: rgba(255,255,255,.035);
+}
+.plugin-tile .icon { width: 22px; height: 22px; }
+.plugin-row .settings-row__copy,
+.plugin-catalog-row .settings-row__copy { gap: 3px; }
+.plugin-row .settings-row__copy strong,
+.plugin-catalog-row .settings-row__copy strong { font-size: 15px; font-weight: 520; }
+.plugin-row .settings-row__copy small:first-of-type,
+.plugin-catalog-row .settings-row__copy small:first-of-type { overflow: hidden; color: rgba(244,242,248,.5); text-overflow: ellipsis; white-space: nowrap; }
+/* The row's one action, as a bare glyph. */
+/* Plugins wear the Libraries tab's account button. `is-on` is the blue a
+   connected store wears ("Installed"); `is-safe` keeps a non-destructive
+   hover action (Settings) out of the red. */
+.plugin-state-button.is-on,
+.plugin-state-button:has(.source-account-row__account-hover) {
+  color: #dcebfa;
+  border-color: rgba(114,170,232,.78);
+  background: rgba(76,146,222,.14);
+}
+.plugin-state-button.is-on:disabled { cursor: default; opacity: 1; transform: none; }
+/* A built-in's "Installed" is a statement, not a control: its settings sit
+   behind the chevron beside it. */
+.plugin-state-button.is-static,
+.plugin-state-button.is-static:hover { cursor: default; color: #dcebfa; border-color: rgba(114,170,232,.78); background: rgba(76,146,222,.14); transform: none; }
+.plugin-state-button:disabled:not(.is-on) { cursor: default; opacity: .7; transform: none; }
+html:not([data-beta]) .plugins-debug-only { display: none !important; }
+.plugin-row__state[hidden] { display: none; }
+.plugin-action-button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border-radius: 50%;
+  color: #f4f2f8;
+  background: none;
+  transition: background 160ms ease;
+}
+.plugin-action-button:hover:not(:disabled),
+.plugin-action-button[data-nav-focus] { background: rgba(255,255,255,.1); }
+.plugin-action-button:disabled { color: rgba(244,242,248,.45); cursor: default; }
+.plugin-action-button .icon { width: 20px; height: 20px; }
 .plugin-row__state {
   flex: none;
   color: #a9e6b3;
@@ -2154,7 +2662,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .plugins-search__input::placeholder { color: #b3abc6; }
 .plugin-catalog-row { position: relative; }
-.plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.08); }
+
 .plugin-catalog-row__status { color: #c3b5ff !important; }
 .plugin-catalog-row__status--error { color: #f0a3a3 !important; }
 /* The bar rides the bottom edge of its own row: an install has to be locatable
@@ -2203,16 +2711,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .runner-profile-card__toggle { display: flex; align-items: center; gap: 7px; color: #b7b2c1; font-size: 12px; }
 .runner-profile-card__mode { display: flex; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 .runner-group__adders { display: flex; flex-wrap: wrap; gap: 8px; }
-.runner-pairing { display: grid; gap: 6px; justify-items: start; }
-/* The PIN is the one thing in this card the user has to read off a screen and
-   type on another machine, so it is set at a size that survives that walk. */
-.runner-pairing__pin {
-  font-size: 28px;
-  letter-spacing: .22em;
-  font-variant-numeric: tabular-nums;
-  color: #f2eff7;
-  user-select: all;
-}
 .runner-profile-card__mode .settings-select { flex: 1; min-width: 0; }
 .runner-directory-list { display: grid; gap: 4px; }
 .runner-directory-row {
@@ -2227,6 +2725,59 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .runner-directory-row__revoked { color: #f0a3a3; }
 .runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
+
+/* Game streaming setup: four steps, one open at a time. A finished step folds
+   to a line with a tick; the one in front of the person is open; the rest wait,
+   numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
+   so nothing here is a new kind of control. */
+#gamestream-setup-body { padding: 4px 18px 18px; }
+.gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
+.gs-step { display: grid; gap: 10px; padding: 14px 0; }
+.gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }
+.gs-step__head { display: flex; align-items: center; gap: 12px; }
+.gs-step__mark {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 50%;
+  color: #cec8dd;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.gs-step__copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.gs-step__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 560; letter-spacing: -.01em; }
+.gs-step__copy small { overflow: hidden; color: rgba(244,242,248,.52); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.gs-step.is-todo .gs-step__copy strong { color: rgba(244,242,248,.55); }
+.gs-step.is-active .gs-step__mark { border-color: rgba(185,168,255,.8); color: #e7dfff; }
+.gs-step.is-done .gs-step__mark {
+  border-color: rgba(114,170,232,.78);
+  color: #dcebfa;
+  background: rgba(76,146,222,.14);
+}
+.gs-step__body { display: grid; gap: 10px; padding-left: 38px; }
+.gs-step__content { display: grid; gap: 10px; }
+.gs-step__text { margin: 0; color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.gs-step__note, .gs-step__status { margin: 0; color: #9993a7; font-size: 12.5px; line-height: 1.5; }
+.gs-step__error { margin: 0; color: #f0a3a3; font-size: 12.5px; line-height: 1.5; }
+.gs-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.gs-step .credentials-form__field { max-width: 420px; }
+/* The primary actions wear the Libraries tab's account button; it is sized for
+   a short label there, so here it only has to fit its own words. */
+.gs-primary.source-account-row__account { width: auto; min-width: 116px; }
+.gs-primary:disabled { cursor: default; opacity: .6; }
+/* The PIN is the one number read off this screen and typed on another machine,
+   so it is set at a size that survives that walk. */
+.gs-pin {
+  color: #f2eff7;
+  font-size: 40px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: .24em;
+  user-select: all;
+}
 
 .plugin-back-button { height: 32px; padding: 0 12px; }
 .plugin-back-button .icon { width: 14px; height: 14px; }
@@ -2323,6 +2874,14 @@ body[data-mood="rage"] { --violet: #f2453c; }
 
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
+/* Two or three columns of stores, Steam among them. The lists inside are
+   unwrapped so their rows land in the same grid; sentences that are not a
+   row (hints, the shared-sign-in note) take the whole width. */
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); gap: 12px; align-items: stretch; padding-top: 4px; }
+.source-grid .source-accounts-body,
+.source-grid .source-account-list { display: contents; }
+.source-grid .source-accounts-body > :not(.source-account-list),
+.source-grid .source-account-shared { grid-column: 1 / -1; }
 .source-account-entry { display: grid; }
 .source-account-entry .steam-notice { margin: 0 0 14px; }
 /* Every source is one line in the same shape — logo, name, sync, and the
@@ -2621,7 +3180,11 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 
 /* The field is the pill around it, not the bare input. */
-.search-control:has(input[data-nav-focus]) {
+.search-control:has(input[data-nav-focus]) { color: #ede6e2; }
+.search-control:has(input[data-nav-focus]) > :not(.icon) { opacity: 1; transform: none; }
+.search-control:has(input[data-nav-focus])::before {
+  opacity: 1;
+  transform: none;
   border-color: rgba(255,255,255,.34);
   background: rgba(22,20,23,.52);
 }
@@ -2629,15 +3192,12 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* Play is the one control the scene is for: it rises and glows rather than
    brightening by 6%. A greyed Play still says it was reached. */
 .play-button[data-nav-focus] {
-  filter: brightness(1.06);
+  filter: brightness(1.08);
   transform: translateY(-2px) scale(1.04);
-  box-shadow: 0 12px 30px rgba(0,0,0,.26), 0 0 28px rgba(233,228,255,.34);
+  box-shadow: 0 12px 30px rgba(0,0,0,.26), 0 0 30px color-mix(in srgb, var(--play-b) 45%, transparent);
 }
-.play-button[aria-disabled='true'][data-nav-focus] { opacity: .82; filter: saturate(.35) brightness(1.12); transform: scale(1.04); }
-/* Blocked and downloading wear their own full-strength look; focus keeps it. */
-.play-button.is-blocked[data-nav-focus],
-.play-button.is-downloading[data-nav-focus] { opacity: 1; filter: none; }
-.play-button.is-blocked[data-nav-focus] { border-color: rgba(255,255,255,.34); color: #e4dfea; }
+/* A quiet button still says it was reached, with its rim rather than a glow. */
+.play-button[aria-disabled='true'][data-nav-focus] { color: #e4dfea; filter: none; transform: scale(1.04); --play-rim: rgba(255,255,255,.42), rgba(255,255,255,.16), rgba(255,255,255,.42); }
 
 /* A segment is a bare word; focus gives it a pill of light behind it without
    moving the words beside it. */
@@ -2689,7 +3249,7 @@ html[data-form-factor="compact"] {
      with the home indicator and shrinks on a short screen, so a literal here
      would land the button on the cards. 224px on a Pixel 8, as before. */
   --hero-bottom: calc(var(--rail-bottom) + var(--rail-header-h) + 8px + var(--rail-card-height) + var(--rail-focus-bleed) + 16px);
-  --hero-left: max(20px, calc(env(safe-area-inset-left) + 8px));
+  --hero-left: calc(var(--edge-left) + 8px);
   --hero-width: min(430px, calc(100vw - 40px));
   --fs-hero-title: clamp(22px, 7.5svh, 34px);
   --play-w: 120px;
@@ -2751,7 +3311,7 @@ html[data-form-factor="compact"] .hero-meta { display: none; }
    clipped off the top by `.hero-identity`. A long title ends in an ellipsis. */
 html[data-form-factor="compact"] .hero-content h1 { margin: 6px 0 8px; font-size: var(--fs-hero-title); -webkit-line-clamp: 1; }
 html[data-form-factor="compact"] .hero-actions { margin-top: 10px; gap: 10px; }
-html[data-form-factor="compact"] .hero-logo { height: clamp(52px, 18svh, 86px); }
+html[data-form-factor="compact"] .hero-logo { --hero-logo-box: clamp(52px, 18svh, 86px); }
 html[data-form-factor="compact"] .recently-played { bottom: var(--rail-bottom); left: calc(var(--edge-left) + 5px); }
 /* The landscape card keeps the desktop's 2.5:1 as the rail shrinks. */
 html[data-form-factor="compact"] .game-card.is-selected { flex-basis: calc(var(--rail-card-height) * 2.5); }
@@ -2810,7 +3370,7 @@ html[data-form-factor="compact"] .launch-splash__content {
   gap: 10px;
   width: calc(100vw - var(--hero-left) - var(--edge-right));
 }
-html[data-form-factor="compact"] .launch-splash__logo { height: clamp(52px, 20svh, 96px); }
+html[data-form-factor="compact"] .launch-splash__logo { --splash-logo-box: clamp(52px, 20svh, 96px); }
 html[data-form-factor="compact"] .launch-splash__eyebrow { font-size: 13px; }
 html[data-form-factor="compact"] .browse-bar__segment-logo { height: 15px; }
 
@@ -2889,7 +3449,7 @@ html[data-device="phone"] .nav-link.is-active {
 
 html[data-device="phone"] .scene-arrow { display: none; }
 
-html[data-device="phone"] .hero-logo { height: clamp(36px, 12svh, 58px); }
+html[data-device="phone"] .hero-logo { --hero-logo-box: clamp(36px, 12svh, 58px); }
 html[data-device="phone"] .play-button { gap: 7px; }
 html[data-device="phone"] .play-button .icon { width: 12px; height: 12px; }
 /* Scaled with the card, so a smaller card is the same shape and not a
@@ -2901,3 +3461,91 @@ html[data-device="phone"] .browse-bar__segments { gap: 16px; }
 html[data-device="phone"] .browse-bar__segment { font-size: var(--fs-bar); }
 html[data-device="phone"] .browse-bar__segment-logo { height: 12px; }
 html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; padding: 0 12px; font-size: var(--fs-bar); }
+
+/* Wallpaper Searcher settings: one compact block per source. */
+.ws-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px; margin-top: 6px; }
+.ws-source { display: grid; align-content: start; gap: 6px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; background: rgba(255,255,255,.025); }
+.ws-source--recommended { border-color: rgba(185,168,255,.3); }
+.ws-source__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ws-source__head strong { color: #f4f2f8; font-size: 13.5px; font-weight: 600; }
+.ws-source > small, .ws-advanced > small { color: rgba(244,242,248,.52); font-size: 12px; line-height: 1.4; }
+.ws-source code, .ws-advanced code { font-size: 11.5px; color: rgba(244,242,248,.72); }
+.ws-source .credentials-form__input, .ws-advanced .credentials-form__input { width: 100%; min-height: 32px; font-size: 12.5px; }
+.ws-source__pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
+.ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
+.ws-advanced { margin-top: 12px; }
+.ws-advanced summary { cursor: pointer; color: rgba(244,242,248,.72); font-size: 12.5px; font-weight: 560; }
+.ws-advanced[open] summary { margin-bottom: 8px; }
+.ws-advanced__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
+.ws-advanced__grid label { display: grid; gap: 4px; color: rgba(244,242,248,.6); font-size: 11.5px; }
+.ws-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.ws-actions small { color: rgba(244,242,248,.45); font-size: 12px; }
+
+/* An update's highlights: a short, airy list under the version line. */
+.update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.update-status__highlights li { position: relative; padding-left: 16px; color: rgba(244,242,248,.82); font-size: 13px; line-height: 1.4; }
+.update-status__highlights li::before { position: absolute; top: .55em; left: 2px; width: 5px; height: 5px; border-radius: 50%; background: #b9a8ff; content: ""; }
+
+/* Each store is a small card read top to bottom: its logo, its name, then
+   the one decision (Connect, or the account that turns into Disconnect). The
+   sync glyph sits in the card's corner so the stack stays three things. */
+.source-grid .source-account-row,
+.source-grid .steam-source-block .source-account-row {
+  position: relative;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  height: 100%;
+  padding: 16px 12px 14px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.025);
+  text-align: center;
+}
+.source-grid .source-account-row__mark { width: 40px; height: 40px; }
+.source-grid .source-account-row__mark .icon { width: 34px; height: 34px; }
+.source-grid .source-account-row__logo { width: 34px; height: 34px; }
+.source-grid .source-account-row__name { max-width: 100%; font-size: 13.5px; }
+.source-grid .source-account-row__actions { flex-wrap: wrap; justify-content: center; margin: auto 0 0; }
+.source-grid .source-account-row__sync { position: absolute; top: 8px; right: 8px; }
+.source-grid .source-account-row__confirm { text-align: center; }
+.source-grid .source-account-entry { display: grid; gap: 8px; }
+
+/* Xbox and Microsoft Store share one card: both marks side by side. */
+.source-account-row__mark--pair { width: auto; display: flex; gap: 8px; }
+.source-account-row__info { display: inline-grid; margin-left: 6px; vertical-align: -2px; color: rgba(244,242,248,.5); cursor: help; }
+.source-account-row__info .icon { width: 14px; height: 14px; }
+.source-account-row__info:hover, .source-account-row__info:focus-visible { color: #fff; }
+.source-grid .source-account-row__name { white-space: normal; }
+
+/* Centred on every card, the paired marks as a group, whatever wraps them
+   (Steam's row sits one level deeper, inside its own block). */
+.source-grid .steam-source-block,
+.source-grid #steam-source-row { display: block; width: 100%; height: 100%; }
+.source-grid .source-account-row { width: 100%; box-sizing: border-box; }
+.source-grid .source-account-row__mark { align-self: center; margin-inline: auto; place-items: center; justify-content: center; }
+.source-grid .source-account-row__mark .icon,
+.source-grid .source-account-row__mark img { display: block; margin: 0 auto; }
+
+/* The price-data-only stores below the accounts: the same cards, the state
+   where the others have their button. */
+.provider-status-list { grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); gap: 12px; margin-top: 12px; }
+.provider-status-row {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 12px 14px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.025);
+  text-align: center;
+}
+.provider-status-row .source-account-row__mark { width: 40px; height: 40px; margin-inline: auto; }
+.provider-status-row .source-account-row__mark .icon,
+.provider-status-row .source-account-row__mark img { width: 34px; height: 34px; margin: 0 auto; }
+.provider-status-row strong { font-size: 13.5px; }
+.provider-status-row .provider-health { margin: auto 0 0; }
+
+.runner-profile-card__mode[hidden] { display: none; }

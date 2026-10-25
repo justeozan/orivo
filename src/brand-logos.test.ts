@@ -26,13 +26,15 @@ describe("brand logos", () => {
   });
 
   it("covers what the Library files games by", () => {
-    const sources = ["steam", "epic", "gog", "ubisoft", "xbox", "microsoft-store", "local", "wine", "moonlight"];
+    const sources = ["steam", "epic", "gog", "ubisoft", "xbox", "microsoft-store"];
     const runners = ["ryujinx", "retroarch", "ppsspp"];
     const platforms = ["macos", "windows", "linux", "switch", "xbox", "ps5", "psp", "nes", "snes", "gba"];
     for (const id of [...sources, ...runners]) expect(brandLogoFor("source", id), id).not.toBeNull();
     for (const id of platforms) expect(brandLogoFor("platform", id), id).not.toBeNull();
     // No public-domain or CC0 logo to build these from, so they keep their word.
     for (const id of ["instant-gaming", "winlator"]) expect(brandLogoFor("source", id), id).toBeNull();
+    // No wordmark of their own: plain segments with a standard glyph instead.
+    for (const id of ["local", "wine", "moonlight"]) expect(brandLogoFor("source", id), id).toBeNull();
     for (const id of ["gb", "megadrive", "other"]) expect(brandLogoFor("platform", id), id).toBeNull();
   });
 

@@ -8,6 +8,7 @@ import { createFallbackGameDetail } from "./game-detail-model";
 import {
   createGameDetailPage,
   type GameDetailPageClient,
+  type GameDetailPageOptions,
 } from "./game-detail-page";
 import { PageLifecycleHost } from "./page-lifecycle";
 
@@ -52,6 +53,9 @@ function clientWithDetail(
         title: "Test",
         replaced: ["cover", "landscape", "background"] as const,
       };
+    },
+    async getStoreMedia() {
+      return { screenshots: [], movies: [] };
     },
     async selectMedia() {
       return [];
@@ -124,11 +128,13 @@ afterEach(() => {
 async function mountWith(
   detail: ReturnType<typeof createFallbackGameDetail>,
   overrides: Partial<GameDetailPageClient> = {},
+  pageOptions: Partial<GameDetailPageOptions> = {},
 ): Promise<PageLifecycleHost> {
   const page = createGameDetailPage({
     navigate: () => {},
     back: () => {},
     play: () => {},
+    ...pageOptions,
     client: clientWithDetail(detail, overrides),
   });
   host = new PageLifecycleHost(container, page);
@@ -143,11 +149,12 @@ async function mountWith(
  */
 async function openWallpaperDialog(
   overrides: Partial<GameDetailPageClient> = {},
+  pageOptions: Partial<GameDetailPageOptions> = {},
 ): Promise<void> {
   const detail = createFallbackGameDetail(GAME_ID);
   // No saved wallpapers, so each row shows exactly what its own search returned.
   detail.media = [];
-  await mountWith(detail, overrides);
+  await mountWith(detail, overrides, pageOptions);
   // The dialog opens from the "…" menu now: open the menu, then the item.
   container
     .querySelector<HTMLElement>("[data-focus-key='more-actions']")
@@ -185,7 +192,14 @@ describe("game detail page social rendering", () => {
       related({ id: `steam:${i}`, title: `Related ${i}` }),
     );
 
-    await mountWith(detail);
+    await mountWith(detail, {
+      async getStoreMedia() {
+        return {
+          screenshots: [{ thumbUrl: "/shot-t.jpg", fullUrl: "/shot.jpg" }],
+          movies: [],
+        };
+      },
+    });
 
     // Every panel shares one grid now, so the page fits a viewport without
     // hiding a section below a fold.
@@ -261,8 +275,8 @@ describe("game detail page social rendering", () => {
     expect(container.querySelector(".gd-friends")).not.toBeNull();
     expect(container.querySelector(".gd-activity")).not.toBeNull();
     expect(container.querySelector(".gd-related")).not.toBeNull();
-    // The media rail sits inside the hero.
-    expect(container.querySelector(".gd-hero .gd-gallery")).not.toBeNull();
+    // Outside the desktop app there is no store to ask, so no rail either.
+    expect(container.querySelector(".gd-gallery")).toBeNull();
     expect(container.querySelector(".gd-hero__title")?.textContent).toBe(
       "Elden Ring",
     );
@@ -347,17 +361,18 @@ describe("game detail page social rendering", () => {
     ).toBeNull();
   });
 
-  it("omits the social row and its sections when the detail ships no social data", async () => {
+  it("shows the social cards empty when the detail ships no social data", async () => {
     const detail = createFallbackGameDetail(GAME_ID);
     detail.friends = [];
     detail.activity = [];
     detail.relatedGames = [];
+    detail.achievements = null;
 
     await mountWith(detail);
 
-    expect(container.querySelector(".gd-friends")).toBeNull();
-    expect(container.querySelector(".gd-activity")).toBeNull();
-    expect(container.querySelector(".gd-related")).toBeNull();
+    for (const card of [".gd-achievements", ".gd-friends", ".gd-activity", ".gd-related"]) {
+      expect(container.querySelector(`${card} .gd-panel__empty`), card).not.toBeNull();
+    }
   });
 });
 
@@ -595,6 +610,38 @@ describe("wallpaper dialog category rows", () => {
       )?.disabled,
     ).toBe(false);
   });
+
+  it("keeps every inner scroll position across a repaint", async () => {
+    await openWallpaperDialog({
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 30),
+        };
+      },
+    });
+    const scroller = (key: string): HTMLElement =>
+      container.querySelector<HTMLElement>(`[data-scroll-key='${key}']`)!;
+    const feed = scroller("wallgrid-background");
+    const cover = scroller("wallgrid-cover");
+    feed.scrollTop = 420;
+    cover.scrollLeft = 150;
+    scroller("wallpanes-cards").scrollTop = 80;
+
+    // A tick repaints the whole page; the rows are rebuilt from scratch.
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wall-background-0']")
+      ?.click();
+
+    expect(scroller("wallgrid-background")).not.toBe(feed);
+    expect(scroller("wallgrid-background").scrollTop).toBe(420);
+    expect(scroller("wallgrid-cover").scrollLeft).toBe(150);
+    expect(scroller("wallgrid-cover").scrollTop).toBe(0);
+    expect(scroller("wallpanes-cards").scrollTop).toBe(80);
+  });
 });
 
 describe("resetting the covers", () => {
@@ -697,5 +744,643 @@ describe("game detail page on a device that cannot install", () => {
     await flush();
     expect(container.querySelector<HTMLElement>(".gd-store-choices .play-launch-menu")!.hidden).toBe(true);
     expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "steam-page");
+  });
+});
+
+describe("watching an Epic install", () => {
+  const status = (
+    state: "not-installed" | "installing" | "installed",
+    percent = 0,
+  ) => ({
+    appName: "Sugar",
+    state,
+    percent,
+    installedBytes: 0,
+    totalBytes: 0,
+    installPath: null,
+  });
+  const primaryText = (): string | null | undefined =>
+    container.querySelector("[data-focus-key='primary-action']")?.textContent;
+
+  function epicDetail(
+    installState: "not-installed" | "installing" | "installed",
+  ) {
+    const detail = createFallbackGameDetail(GAME_ID);
+    detail.source = "epic";
+    detail.primaryAction =
+      installState === "installed" ? "play" : "install-epic";
+    detail.installState = installState;
+    return detail;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("follows an install from the hand-off to Play without settling early", async () => {
+    const sequence = [
+      status("not-installed"),
+      status("not-installed"),
+      status("installing", 40),
+      status("installed", 100),
+    ];
+    let polls = 0;
+    let installed = false;
+    const detail = epicDetail("not-installed");
+    await mountWith(detail, {
+      async getDetail() {
+        return installed ? epicDetail("installed") : detail;
+      },
+      async epicInstallStatus() {
+        const next = sequence[Math.min(polls, sequence.length - 1)];
+        polls += 1;
+        installed = next.state === "installed";
+        return next;
+      },
+    });
+    vi.useFakeTimers();
+    expect(primaryText()).toContain("Install");
+
+    container
+      .querySelector<HTMLElement>("[data-focus-key='primary-action']")
+      ?.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(primaryText()).toContain("Install");
+
+    // The launcher has not written a manifest yet: still waiting, not done.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Install");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(polls).toBe(2);
+    expect(primaryText()).toContain("Install");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Downloading 40%");
+    expect(
+      container
+        .querySelector("[data-focus-key='primary-action']")
+        ?.getAttribute("aria-valuenow"),
+    ).toBe("40");
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(primaryText()).toContain("Play");
+    // The watch is over: nothing keeps polling a finished install.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(polls).toBe(4);
+  });
+
+  it("gives up on a download that never starts, after the grace period", async () => {
+    let polls = 0;
+    await mountWith(epicDetail("not-installed"), {
+      async epicInstallStatus() {
+        polls += 1;
+        return status("not-installed");
+      },
+    });
+    vi.useFakeTimers();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='primary-action']")
+      ?.click();
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    // Four minutes in, it is still watching.
+    expect(polls).toBeGreaterThan(100);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    const afterDeadline = polls;
+    await vi.advanceTimersByTimeAsync(7_000);
+    expect(polls).toBe(afterDeadline);
+    expect(primaryText()).toContain("Install");
+  });
+
+  it("picks the progress back up when the page opens mid-download", async () => {
+    vi.useFakeTimers();
+    let polls = 0;
+    const page = createGameDetailPage({
+      navigate: () => {},
+      back: () => {},
+      play: () => {},
+      client: clientWithDetail(epicDetail("installing"), {
+        async epicInstallStatus() {
+          polls += 1;
+          return status("installing", 63);
+        },
+      }),
+    });
+    host = new PageLifecycleHost(container, page);
+    await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(polls).toBeGreaterThan(0);
+    expect(primaryText()).toContain("Downloading 63%");
+  });
+});
+
+describe("saving chosen artwork", () => {
+  /** A promise the test settles by hand, to hold a save mid-flight. */
+  function deferred(): { promise: Promise<void>; resolve(): void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  /** A search that offers two tiles per row, and a recording save path. */
+  function savingClient(
+    calls: string[],
+    gate: Promise<void>,
+  ): Partial<GameDetailPageClient> {
+    return {
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 2),
+        };
+      },
+      async importWallpaper(_gameId, candidateId) {
+        calls.push(`import:${candidateId}`);
+        await gate;
+        return [
+          {
+            id: `saved-${candidateId}`,
+            kind: "wallpaper",
+            title: candidateId,
+            previewUrl: `/media/${candidateId}.jpg`,
+            origin: "imported",
+            selected: true,
+            availableOffline: true,
+          },
+        ];
+      },
+      async selectMedia(_gameId, mediaId) {
+        calls.push(`select:${mediaId}`);
+        return [];
+      },
+      async setHomeImage(_gameId, mediaId, role) {
+        calls.push(`home:${mediaId}:${role}`);
+      },
+    };
+  }
+
+  const tick = (key: string): void =>
+    container.querySelector<HTMLElement>(`[data-focus-key='${key}']`)?.click();
+
+  it("finishes the whole chain after the page is left, then refreshes the library", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    const notify = vi.fn();
+    await openWallpaperDialog(savingClient(calls, gate.promise), {
+      onLibraryChanged,
+      notify,
+    });
+
+    tick("wall-cover-0");
+    tick("wall-background-0");
+    tick("wallpaper-apply");
+    await flush();
+    expect(calls).toEqual(["import:cover-0"]);
+
+    // Navigating away aborts the page's own requests, but not this save.
+    host!.deactivate();
+    gate.resolve();
+    await flush();
+
+    expect(calls).toEqual([
+      "import:cover-0",
+      "import:background-0",
+      "select:saved-background-0",
+      "home:saved-cover-0:cover",
+      "home:saved-background-0:background",
+    ]);
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith("2 wallpapers applied to this game.");
+  });
+
+  it("reports a failure after the page is left, and still refreshes the library", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    const notify = vi.fn();
+    await openWallpaperDialog(
+      {
+        ...savingClient(calls, gate.promise),
+        async selectMedia() {
+          throw new Error("The disk is full.");
+        },
+      },
+      { onLibraryChanged, notify },
+    );
+
+    tick("wall-background-0");
+    tick("wallpaper-apply");
+    await flush();
+    host!.deactivate();
+    gate.resolve();
+    await flush();
+
+    expect(calls).toEqual(["import:background-0"]);
+    expect(notify).toHaveBeenCalledWith("The disk is full.");
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the save as in progress when the page is reopened, then reloads the game", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    let loads = 0;
+    await openWallpaperDialog(
+      {
+        ...savingClient(calls, gate.promise),
+        async getDetail() {
+          loads += 1;
+          const detail = createFallbackGameDetail(GAME_ID);
+          detail.media = [];
+          return detail;
+        },
+      },
+      { onLibraryChanged },
+    );
+
+    tick("wall-cover-0");
+    tick("wallpaper-apply");
+    await flush();
+    host!.deactivate();
+    await host!.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await flush();
+
+    expect(container.textContent).toContain("Saving wallpapers…");
+    const loadsWhileSaving = loads;
+
+    gate.resolve();
+    await flush();
+
+    // A lone cover is set as the cover, never selected as the wallpaper.
+    expect(calls).toEqual(["import:cover-0", "home:saved-cover-0:cover"]);
+    expect(container.textContent).not.toContain("Saving wallpapers…");
+    expect(loads).toBeGreaterThan(loadsWhileSaving);
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs two saves of one game one after the other", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork() {
+        calls.push("reset:start");
+        await gate.promise;
+        calls.push("reset:end");
+        return { title: "Test", replaced: ["cover", "landscape", "background"] };
+      },
+      async selectMedia(_gameId, mediaId) {
+        calls.push(`select:${mediaId}`);
+        return [];
+      },
+      async setHomeImage(_gameId, mediaId) {
+        calls.push(`home:${mediaId}`);
+      },
+    });
+
+    container
+      .querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']")!
+      .click();
+    await flush();
+    expect(calls).toEqual(["reset:start"]);
+
+    // A saved wallpaper applied from the picker while the reset is still running.
+    const rail = detail.media.find((item) => item.kind === "wallpaper");
+    expect(rail).toBeDefined();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    container
+      .querySelector<HTMLElement>(`[data-focus-key='wall-${rail!.id}']`)
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wallpaper-apply']")
+      ?.click();
+    await flush();
+    expect(calls).toEqual(["reset:start"]);
+
+    gate.resolve();
+    await flush();
+    expect(calls).toEqual([
+      "reset:start",
+      "reset:end",
+      `select:${rail!.id}`,
+      `home:${rail!.id}`,
+    ]);
+  });
+});
+
+describe("game detail page store media", () => {
+  const storeMedia = {
+    movies: [
+      {
+        title: "Launch Trailer",
+        thumbUrl: "/store/movie-t.jpg",
+        mp4Url: "https://video.akamai.steamstatic.com/movie_max.mp4",
+      },
+    ],
+    screenshots: [
+      { thumbUrl: "/store/s1-t.jpg", fullUrl: "/store/s1.jpg" },
+      { thumbUrl: "/store/s2-t.jpg", fullUrl: "/store/s2.jpg" },
+    ],
+  };
+
+  const tiles = (): HTMLElement[] => [
+    ...container.querySelectorAll<HTMLElement>(".gd-gallery__tile"),
+  ];
+
+  it("lists the trailer first, then the screenshots, and ignores the chosen wallpapers", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    expect(detail.media.some((item) => item.kind === "wallpaper")).toBe(true);
+
+    await mountWith(detail, { getStoreMedia: async () => storeMedia });
+
+    expect(tiles().map((tile) => tile.dataset.mediaKind)).toEqual([
+      "video",
+      "screenshot",
+      "screenshot",
+    ]);
+    expect(tiles()[0]?.querySelector(".gd-gallery__play")).not.toBeNull();
+    expect(
+      tiles()[0]?.querySelector<HTMLImageElement>("img")?.getAttribute("src"),
+    ).toBe("/store/movie-t.jpg");
+    expect(tiles()[1]?.querySelector(".gd-gallery__play")).toBeNull();
+  });
+
+  it("starts the first trailer muted when sound is off in Settings, and with sound when it is clicked", async () => {
+    await mountWith(
+      createFallbackGameDetail(GAME_ID),
+      { getStoreMedia: async () => storeMedia },
+      { trailerSound: () => false },
+    );
+
+    // Opened like a store page: the trailer is already in the hero, muted,
+    // with no play button over it.
+    let video = container.querySelector<HTMLVideoElement>(".gd-hero .gd-hero__video");
+    expect(video?.getAttribute("src")).toBe(
+      "https://video.akamai.steamstatic.com/movie_max.mp4",
+    );
+    expect(video?.controls).toBe(true);
+    expect(video?.autoplay).toBe(true);
+    expect(video?.muted).toBe(true);
+    expect(video?.poster).toContain("/store/movie-t.jpg");
+    expect(container.querySelector<HTMLElement>(".gd-hero__play")?.hidden).toBe(true);
+    expect(tiles()[0]?.classList.contains("gd-gallery__tile--selected")).toBe(true);
+
+    // Clicking the playing tile hands the hero back to the pictures...
+    tiles()[0]?.click();
+    expect(container.querySelector(".gd-hero__video")).toBeNull();
+
+    // ...and choosing it plays it with sound.
+    tiles()[0]?.click();
+    video = container.querySelector<HTMLVideoElement>(".gd-hero .gd-hero__video");
+    expect(video).not.toBeNull();
+    expect(video?.muted).toBe(false);
+  });
+
+  it("plays a trailer that starts on its own with sound by default", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+    expect(container.querySelector<HTMLVideoElement>(".gd-hero__video")?.muted).toBe(false);
+  });
+
+  it("shows each tile as the arrows reach it, without a confirm press", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+
+    const shot = tiles()[1]!;
+    shot.dataset.navFocus = "";
+    shot.focus();
+    await flush();
+
+    expect(container.querySelector(".gd-hero__video")).toBeNull();
+    expect(
+      container.querySelector<HTMLImageElement>(".gd-hero__image")?.getAttribute("src"),
+    ).toBe("/store/s1.jpg");
+  });
+
+  it("shows a clicked screenshot full size in the hero", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+
+    tiles()[2]?.click();
+
+    expect(
+      container
+        .querySelector<HTMLImageElement>(".gd-hero__image")
+        ?.getAttribute("src"),
+    ).toBe("/store/s2.jpg");
+  });
+
+  it("cycles the screenshots in the hero when nothing is picked", async () => {
+    vi.useFakeTimers();
+    try {
+      // A game with a wallpaper applied keeps it; the slideshow is for the rest.
+      const detail = createFallbackGameDetail(GAME_ID);
+      detail.media = [];
+      const page = createGameDetailPage({
+        navigate: () => {},
+        back: () => {},
+        play: () => {},
+        // The trailer would take the hero; this is about the pictures.
+        autoplayTrailers: () => false,
+        client: clientWithDetail(detail, {
+          getStoreMedia: async () => storeMedia,
+        }),
+      });
+      host = new PageLifecycleHost(container, page);
+      await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+      await vi.advanceTimersByTimeAsync(0);
+      const heroSrc = (): string | null | undefined =>
+        container
+          .querySelector<HTMLImageElement>(".gd-hero__image")
+          ?.getAttribute("src");
+      expect(heroSrc()).toBe("/store/s1.jpg");
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(heroSrc()).toBe("/store/s2.jpg");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("paints the page first and adds the rail when the store answers", async () => {
+    let answer: (value: typeof storeMedia) => void = () => {};
+    const pending = new Promise<typeof storeMedia>((resolve) => {
+      answer = resolve;
+    });
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: () => pending,
+    });
+    expect(container.querySelector(".gd-hero__title")).not.toBeNull();
+    expect(container.querySelector(".gd-gallery")).toBeNull();
+
+    answer(storeMedia);
+    await flush();
+    expect(tiles()).toHaveLength(3);
+  });
+
+  it("shows no rail when the store has nothing, or fails", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      async getStoreMedia() {
+        throw new Error("offline");
+      },
+    });
+    expect(container.querySelector(".gd-gallery")).toBeNull();
+    expect(container.querySelector(".gd-hero__title")).not.toBeNull();
+  });
+});
+
+describe("wallpaper dialog quality badges and the 4K-only background search", () => {
+  it("badges each tile with the size its source reported, and nothing when unknown", async () => {
+    await openWallpaperDialog({
+      async searchWallpapers(category, query) {
+        const base = candidatesFor(category, 3);
+        const sizes: Array<[number, number] | null> =
+          category === "logo"
+            ? [[800, 300], null, [1200, 400]]
+            : [[3840, 2160], [1920, 1080], null];
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: base.map((candidate, index) => {
+            const size = sizes[index];
+            return size
+              ? { ...candidate, width: size[0], height: size[1] }
+              : candidate;
+          }),
+        };
+      },
+    });
+    const badges = (category: WallpaperCategory): Array<string | null> =>
+      rowTiles(category).map(
+        (tile) =>
+          tile.querySelector(".gd-wallgrid__quality")?.textContent ?? null,
+      );
+    expect(badges("background")).toEqual(["4K", "1080p", null]);
+    expect(badges("cover")).toEqual(["4K", "1080p", null]);
+    // A wordmark is never "1080p": it always shows its pixel size.
+    expect(badges("logo")).toEqual(["800×300", null, "1200×400"]);
+  });
+
+  it("asks the backend for 4K only when the Background toggle is on, and remembers it", async () => {
+    const asked: Array<{ category: WallpaperCategory; only4k?: boolean }> = [];
+    await openWallpaperDialog({
+      async searchWallpapers(category, query, _offset, _signal, options) {
+        asked.push({ category, only4k: options?.only4k });
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 1),
+        };
+      },
+    });
+    // Off by default: nothing asks for 4K only, on any row.
+    expect(asked).toHaveLength(4);
+    expect(asked.every((call) => call.only4k === false)).toBe(true);
+
+    const toggle = (): HTMLButtonElement =>
+      container.querySelector<HTMLButtonElement>(
+        ".gd-wallrow[data-category='background'] .gd-wallrow__toggle",
+      )!;
+    // Only the Background row carries the toggle.
+    expect(container.querySelectorAll(".gd-wallrow__toggle")).toHaveLength(1);
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+
+    asked.length = 0;
+    toggle().click();
+    await flush();
+    // Only the Background row is refilled, and it asks for 4K only.
+    expect(asked).toEqual([{ category: "background", only4k: true }]);
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    // Closing and reopening the dialog keeps the choice for later searches.
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wallpaper-modal-close']")
+      ?.click();
+    await flush();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    expect(toggle().getAttribute("aria-pressed")).toBe("true");
+
+    asked.length = 0;
+    toggle().click();
+    await flush();
+    expect(asked).toEqual([{ category: "background", only4k: false }]);
+  });
+
+  it("keeps saved logos and covers out of the Background row", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    const saved = (
+      id: string,
+      title: string,
+      extra: Partial<(typeof detail.media)[number]> = {},
+    ): (typeof detail.media)[number] => ({
+      id,
+      kind: "wallpaper",
+      title,
+      previewUrl: `game-media:${id}.jpg`,
+      origin: "downloaded",
+      selected: false,
+      availableOffline: true,
+      ...extra,
+    });
+    detail.media = [
+      saved("bg", "A Way Out — background (4K)", {
+        role: "background",
+        width: 3840,
+        height: 2160,
+      }),
+      saved("logo-old", "A Way Out — logo"),
+      saved("cover-old", "A Way Out — cover"),
+      saved("capsule-old", "A Way Out — capsule"),
+      saved("logo-new", "Picked", { role: "logo" }),
+    ];
+    await mountWith(detail, {
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: [],
+        };
+      },
+    });
+    container
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    const tiles = rowTiles("background");
+    expect(tiles.map((tile) => tile.getAttribute("aria-label"))).toEqual([
+      "A Way Out — background (4K)",
+    ]);
+    // Saved media shows its quality too, when it is known.
+    expect(tiles[0].querySelector(".gd-wallgrid__quality")?.textContent).toBe(
+      "4K",
+    );
   });
 });

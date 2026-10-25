@@ -35,6 +35,8 @@ describe("settings model", () => {
       // is putting the hand-written shelf back in front of the live one.
       betaFeatures: false,
       showEditorialGames: false,
+      trailerAutoplayOff: false,
+      trailerMuted: false,
     });
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
@@ -64,6 +66,8 @@ describe("settings model", () => {
       debugSampleSocial: true,
       betaFeatures: true,
       showEditorialGames: true,
+      trailerAutoplayOff: true,
+      trailerMuted: true,
     } as const;
     expect(applyPreferencesUpdate(current, { reset: true, storeRegion: "de" })).toEqual(
       DEFAULT_PREFERENCES,

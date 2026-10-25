@@ -14,7 +14,7 @@
 
 use crate::game_detail::{
     GameDetailError, GameDetailService, GameMediaAsset, GameMediaKind, GameMediaOrigin,
-    GameMediaView, valid_opaque_file_name, validate_opaque_id,
+    GameMediaRole, GameMediaView, valid_opaque_file_name, validate_opaque_id,
 };
 use futures_util::{Stream, StreamExt};
 use sha2::{Digest, Sha256};
@@ -857,6 +857,9 @@ impl GameMediaService {
             local_file: Some(stored.file_name),
             mime_type: Some(stored.mime_type),
             byte_size: stored.byte_size,
+            role: None,
+            width: None,
+            height: None,
             extra: BTreeMap::new(),
         };
         self.inner.detail.state().register_media(game_id, asset)?;
@@ -869,11 +872,19 @@ impl GameMediaService {
     /// size validation before it is registered as durable wallpaper media. The
     /// import *replaces* the current wallpaper: "Use this wallpaper" downloads
     /// and applies the candidate in one step.
+    ///
+    /// `role` is the row the candidate was picked in. The record's kind is
+    /// `wallpaper` whatever that was, so without the role a logo picked here
+    /// would later be offered as a background. `size` is what the search
+    /// reported, stored so the tile can show its quality without re-measuring;
+    /// `None` when nothing measured it.
     pub async fn download_wallpaper(
         &self,
         game_id: &str,
         url: &str,
         title: &str,
+        role: GameMediaRole,
+        size: Option<(u32, u32)>,
     ) -> Result<Vec<GameMediaView>, GameMediaError> {
         validate_opaque_id("game id", game_id)?;
         if !self.inner.detail.contains(game_id)? {
@@ -902,6 +913,9 @@ impl GameMediaService {
             local_file: Some(stored.file_name),
             mime_type: Some(stored.mime_type),
             byte_size: stored.byte_size,
+            role: Some(role),
+            width: size.map(|(width, _)| width),
+            height: size.map(|(_, height)| height),
             extra: BTreeMap::new(),
         };
         self.inner
@@ -1749,6 +1763,9 @@ mod tests {
             local_file: None,
             mime_type: None,
             byte_size: 0,
+            role: None,
+            width: None,
+            height: None,
             extra: BTreeMap::new(),
         }
     }
@@ -2277,6 +2294,9 @@ mod tests {
             local_file: None,
             mime_type: None,
             byte_size: 0,
+            role: None,
+            width: None,
+            height: None,
             extra: BTreeMap::new(),
         };
         let url = format!("https://{ALLOWED_HOST}/apps/1/cover.png");
@@ -2369,15 +2389,22 @@ mod tests {
         let transport = FakeTransport::with(&url, Reply::body("image/png", vec![png_bytes(64)]));
         let test = harness("import-selects", vec![], transport, MediaLimits::default());
 
-        let views = block_on(
-            test.service
-                .download_wallpaper("local:aaa", &url, "Wallpaper"),
-        )
+        let views = block_on(test.service.download_wallpaper(
+            "local:aaa",
+            &url,
+            "Wallpaper",
+            GameMediaRole::Logo,
+            Some((1920, 1080)),
+        ))
         .unwrap();
         let imported = views
             .iter()
             .find(|view| view.kind == GameMediaKind::Wallpaper)
             .expect("imported view");
+        // The row it was picked in travels with the record, so a logo can later
+        // be told apart from a background although both are `wallpaper` kind.
+        assert_eq!(imported.role, Some(GameMediaRole::Logo));
+        assert_eq!((imported.width, imported.height), (Some(1920), Some(1080)));
         assert!(imported.selected);
         assert!(imported.available_offline);
         assert_eq!(
@@ -2669,6 +2696,9 @@ mod tests {
                     local_file: Some("planted.png".into()),
                     mime_type: Some("image/png".into()),
                     byte_size: 64,
+                    role: None,
+                    width: None,
+                    height: None,
                     extra: BTreeMap::new(),
                 },
             )

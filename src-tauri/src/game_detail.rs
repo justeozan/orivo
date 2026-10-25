@@ -59,6 +59,31 @@ pub struct GameMediaView {
     pub origin: GameMediaOrigin,
     pub selected: bool,
     pub available_offline: bool,
+    /// The card slot this image was picked for, when the record knows. The
+    /// page filters on it so a logo or a cover never shows up as a background.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<GameMediaRole>,
+    /// Pixel size of the stored image, only when something reported it. Never
+    /// guessed: the quality badge on a tile is omitted rather than invented.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
+/// Which card slot a downloaded image was chosen for.
+///
+/// Every image picked in the wallpaper dialog is stored with the `wallpaper`
+/// kind, whatever row it came from, so the kind alone cannot tell a background
+/// from a logo. Recording the row at import time is what lets the background
+/// chooser leave covers and wordmarks out.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GameMediaRole {
+    Cover,
+    Landscape,
+    Background,
+    Logo,
 }
 
 /// Host-owned media metadata. It may contain a provider URL, but never a host
@@ -81,6 +106,15 @@ pub struct GameMediaAsset {
     pub mime_type: Option<String>,
     #[serde(default)]
     pub byte_size: u64,
+    /// See [`GameMediaView::role`]. Absent on records written before it existed;
+    /// the page infers one for those.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<GameMediaRole>,
+    /// Pixel size as reported by the search that found the image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -115,6 +149,9 @@ impl GameMediaAsset {
             origin: self.origin,
             selected,
             available_offline: self.local_file.is_some() || self.origin == GameMediaOrigin::Bundled,
+            role: self.role,
+            width: self.width,
+            height: self.height,
         }
     }
 
@@ -1091,6 +1128,9 @@ fn media_asset(game_id: &str, kind: GameMediaKind, title: &str, url: String) -> 
         local_file: None,
         mime_type: None,
         byte_size: 0,
+        role: None,
+        width: None,
+        height: None,
         extra: BTreeMap::new(),
     }
 }
@@ -1751,6 +1791,9 @@ mod tests {
                 local_file: None,
                 mime_type: Some("image/jpeg".into()),
                 byte_size: 10,
+                role: None,
+                width: None,
+                height: None,
                 extra: BTreeMap::new(),
             }],
             related_games: Vec::new(),
@@ -1985,5 +2028,28 @@ mod tests {
         ] {
             assert!(validate_opaque_id("game id", id).is_err());
         }
+    }
+
+    /// Records written before `role` and the pixel size existed must still load,
+    /// and must not grow the keys back on the next save.
+    #[test]
+    fn media_records_without_a_role_or_size_still_load() {
+        let legacy = r#"{"id":"dl-1","kind":"wallpaper","title":"A Way Out — logo",
+            "origin":"downloaded","localFile":"a.png","byteSize":10}"#;
+        let asset: GameMediaAsset = serde_json::from_str(legacy).unwrap();
+        assert_eq!((asset.role, asset.width, asset.height), (None, None, None));
+        let saved = serde_json::to_value(&asset).unwrap();
+        assert!(saved.get("role").is_none() && saved.get("width").is_none());
+
+        let with_role = GameMediaAsset {
+            role: Some(GameMediaRole::Logo),
+            width: Some(1920),
+            height: Some(1080),
+            ..asset
+        };
+        let saved = serde_json::to_value(&with_role).unwrap();
+        assert_eq!(saved["role"], "logo");
+        let view = serde_json::to_value(with_role.view(false)).unwrap();
+        assert_eq!((&view["role"], &view["width"]), (&"logo".into(), &1920.into()));
     }
 }

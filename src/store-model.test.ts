@@ -10,6 +10,7 @@ import {
   selectStoreGames,
   fitStats,
   matchesCategory,
+  matchesPlatforms,
   storeCategoryLabel,
   STORE_CATEGORIES,
   type StoreBrowsePage,
@@ -468,6 +469,36 @@ describe("selectStoreGames", () => {
   });
 });
 
+describe("matchesPlatforms", () => {
+  // A game sold on Steam has no PlayStation offer even when it ships on
+  // PlayStation, so the filter must read availability, not only offers.
+  it("keeps a Steam-sold game whose availability includes PS5, not only exclusives", () => {
+    const multiPlatform = game({ id: "steam:1", availablePlatforms: ["pc", "playstation"] });
+    const pcOnly = game({ id: "steam:2", availablePlatforms: ["pc"] });
+    const unknown = game({ id: "steam:3" });
+    const exclusive = game({
+      id: "psn:1",
+      supportedPlatforms: [],
+      offers: [offer({ gameId: "psn:1", provider: "playstation" })],
+    });
+
+    expect(matchesPlatforms(multiPlatform, ["playstation"])).toBe(true);
+    expect(matchesPlatforms(multiPlatform, ["pc"])).toBe(true);
+    expect(matchesPlatforms(multiPlatform, ["xbox"])).toBe(false);
+    expect(matchesPlatforms(pcOnly, ["playstation"])).toBe(false);
+    expect(matchesPlatforms(unknown, ["playstation"])).toBe(false);
+    expect(matchesPlatforms(exclusive, ["playstation"])).toBe(true);
+    expect(
+      selectStoreGames(
+        stateWith({
+          home: homeView({ games: [multiPlatform, pcOnly, unknown, exclusive] }),
+          platforms: ["playstation"],
+        }),
+      ).map((entry) => entry.id),
+    ).toEqual(["steam:1", "psn:1"]);
+  });
+});
+
 describe("matchesCategory", () => {
   it("files a game a shop sent by the genres that shop gave it", () => {
     // No editorial entry at all: what the card is filed under has to come from
@@ -520,10 +551,6 @@ describe("storeCategoryLabel", () => {
   it("labels every known category in French", () => {
     expect(STORE_CATEGORIES.map((option) => storeCategoryLabel(option.id))).toEqual([
       "Pour toi",
-      "Bon pour le cerveau",
-      "Courte durée",
-      "Récits forts",
-      "Relaxant",
       "Tous les jeux",
     ]);
   });

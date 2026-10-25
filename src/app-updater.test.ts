@@ -85,7 +85,7 @@ function pendingDownload(overrides: Partial<UpdateHandleStub> = {}): {
   const handle: UpdateHandleStub = {
     version: "0.4.0",
     currentVersion: "0.3.0",
-    body: "Faster store browsing.",
+    body: "### Added\n- Faster store browsing. With more words after.",
     downloadAndInstall: (onEvent) =>
       new Promise<void>((resolve, reject) => {
         emit = onEvent;
@@ -196,7 +196,10 @@ describe("About panel updater wiring", () => {
 
     await press();
     expect(statusLabel()).toBe("Version 0.4.0 is available");
-    expect(statusDetail()).toBe("Faster store browsing.");
+    expect(statusDetail()).toBe("Orivo installs it and restarts once to finish.");
+    expect(
+      [...root.querySelectorAll(".update-status__highlights li")].map((item) => item.textContent),
+    ).toEqual(["Faster store browsing"]);
     expect(button().textContent).toBe("Download and install");
 
     await press();

@@ -46,6 +46,17 @@ use tauri::State;
 /// can still be made to agree, and the reference fixture's own slot is passed in
 /// explicitly by the tests that use it.
 pub const DEFAULT_DIRECTORY_SLOT: &str = "games";
+/// The game-streaming plugin. The guided setup is the only place a profile for
+/// it is made, and there is only ever one: a person streams from one set of
+/// machines through one client, so a second profile would be a second copy of
+/// every game rather than a second capability.
+pub const GAMESTREAM_PLUGIN_ID: &str = "com.orivo.gamestream";
+/// What the one stream profile is called. Nothing shows it: the setup is
+/// "Game streaming", and the profile is how Orivo remembers it.
+const GAMESTREAM_PROFILE_NAME: &str = "Game streaming";
+/// The folder under Orivo's own data where Orivo keeps what it writes for
+/// profiles it manages, one sub-folder per profile id.
+const MANAGED_LIBRARY_DIRECTORY: &str = "streaming";
 /// Short enough that `<profile id>:<slot>` still fits the grant-scope grammar,
 /// and longer than any name a component would hard-code.
 const MAX_DIRECTORY_SLOT_LENGTH: usize = 96;
@@ -82,6 +93,10 @@ pub struct RunnerProfileView {
     pub enabled: bool,
     /// The application's own name, never where it lives.
     pub application_label: String,
+    /// Whether the application can be started right now. The guided setup needs
+    /// to tell "Moonlight was uninstalled" from "Moonlight is fine", and a name
+    /// alone cannot.
+    pub application_available: bool,
     /// Which launch shape this profile authorises. It is the user's own
     /// permission, so the panel both shows it and sets it; the plugin is never
     /// asked about it and can never widen it.
@@ -105,6 +120,62 @@ pub struct RunnerProfileView {
 pub enum GameStreamPairing {
     AlreadyPaired { host: String },
     Started { host: String, pin: String },
+}
+
+/// Where a pairing attempt stands, as the setup shows it.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PairingProgress {
+    /// The machine accepts this client. Done.
+    Paired,
+    /// The PIN is on screen and the machine has not accepted it yet.
+    Waiting,
+    /// The attempt ended without pairing — a wrong PIN, a timeout, a closed
+    /// window. A new attempt needs a new PIN.
+    Failed,
+    /// The machine stopped answering while the attempt was open.
+    Unreachable,
+    /// Moonlight is gone, so there is nothing to pair with.
+    ClientMissing,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingStatusView {
+    pub state: PairingProgress,
+}
+
+/// What the client's `pair` process is doing, as far as a poll can see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairProcess {
+    /// Nothing was started by this run of Orivo, or it was already put away.
+    None,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+/// Decide what the user is told from the machine's answer and the pair
+/// process. Pure, so each combination is stated once and tested without a
+/// network or a process.
+///
+/// The machine's answer wins: if it lists, this client is paired whatever the
+/// process looks like. Only when it does not is the process consulted — and a
+/// process that has *failed* is what lets the setup say "didn't finish" at once
+/// rather than after the full wait. One that exited cleanly is not a failure:
+/// the machine's certificate may simply not be readable yet, and the next poll
+/// will see it.
+pub fn pairing_progress(machine: crate::gamestream::HostState, process: PairProcess) -> PairingProgress {
+    use crate::gamestream::HostState;
+    match machine {
+        HostState::Paired => PairingProgress::Paired,
+        HostState::Unreachable => PairingProgress::Unreachable,
+        HostState::ClientMissing => PairingProgress::ClientMissing,
+        HostState::NotPaired => match process {
+            PairProcess::Running | PairProcess::Succeeded => PairingProgress::Waiting,
+            PairProcess::Failed | PairProcess::None => PairingProgress::Failed,
+        },
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -181,6 +252,27 @@ pub struct ThirdPartyRunnerService {
     /// placeholders into a stream profile's granted folder. Present in
     /// production; absent in tests that do not touch stream profiles.
     gamestream: Option<Arc<crate::gamestream::GameStreamService>>,
+    /// Orivo's own data directory: the one place the host will make a folder
+    /// for a profile and grant it without asking the user to pick it. Unset
+    /// where there is no such directory, in which case nothing is ever
+    /// auto-granted.
+    managed_root: Option<PathBuf>,
+    /// The `pair` process of the attempt in flight, per profile. Kept so that a
+    /// new attempt, a cancel, a finished pairing or a deleted profile can end
+    /// the old one instead of leaving it waiting on a PIN nobody will type.
+    pairings: Mutex<BTreeMap<String, std::process::Child>>,
+}
+
+impl Drop for ThirdPartyRunnerService {
+    fn drop(&mut self) {
+        // A pairing left open would outlive the app that showed its PIN.
+        if let Ok(mut pairings) = self.pairings.lock() {
+            for (_, mut child) in std::mem::take(&mut *pairings) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
 }
 
 impl ThirdPartyRunnerService {
@@ -198,7 +290,16 @@ impl ThirdPartyRunnerService {
             import_limits: RunnerImportLimits::default(),
             runtime: None,
             gamestream: None,
+            managed_root: None,
+            pairings: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Name Orivo's own data directory, which is what makes
+    /// [`Self::prepare_stream_library`] possible.
+    pub fn with_managed_root(mut self, root: PathBuf) -> Self {
+        self.managed_root = Some(root);
+        self
     }
 
     /// Attach the GameStream service. Called by `setup` in production; by tests
@@ -425,8 +526,284 @@ impl ThirdPartyRunnerService {
     pub fn delete_profile(&self, profile_id: &str) -> Result<bool, RunnerHostError> {
         let revoked_at = unix_millis();
         self.cancel_jobs_for_profile(profile_id);
+        self.stop_pairing(profile_id);
         self.store
             .commit(|catalog| catalog.remove_runner_profile(profile_id, revoked_at))
+    }
+
+    /// Point a profile at a different application — the streaming client was
+    /// reinstalled somewhere else, or uninstalled and put back.
+    ///
+    /// Checked the way a new profile's is: the application has to be startable
+    /// before anything is stored, so a bad pick never replaces a good one. The
+    /// profile keeps its folders, its games and its mode; the plugin is asked
+    /// about it again because the application is half of what it is shown.
+    pub fn set_profile_application(
+        &self,
+        profile_id: &str,
+        application: &Path,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        let catalog = self.store.snapshot()?;
+        let profile = catalog
+            .runner_profile(profile_id)
+            .ok_or(RunnerHostError::UnknownProfile)?;
+        let package = self.package(&profile.plugin_id)?;
+        let application = std::fs::canonicalize(application)
+            .map_err(|_| RunnerHostError::ApplicationUnavailable)?;
+        let updated = RunnerProfile {
+            application,
+            ..profile.clone()
+        };
+        resolve_application(&updated)?;
+        self.commit_profile(updated)?;
+        self.revalidate_profile(&package, profile_id)
+    }
+
+    /// The one game-streaming profile, made if it does not exist yet and always
+    /// left authorising streams.
+    ///
+    /// Idempotent on purpose: the setup can be walked again — after a failed
+    /// step, from another window, after a reinstall — and each walk should land
+    /// on the same profile rather than add a second set of every game. The
+    /// application is replaced when one already exists, because someone who
+    /// comes back and chooses a client has just told Orivo which one to use.
+    pub fn create_stream_profile(
+        &self,
+        application: &Path,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        self.create_stream_profile_for(GAMESTREAM_PLUGIN_ID, application)
+    }
+
+    /// [`Self::create_stream_profile`] for any plugin id, so the idempotence
+    /// can be tested against the reference runner rather than a build of the
+    /// real plugin.
+    fn create_stream_profile_for(
+        &self,
+        plugin_id: &str,
+        application: &Path,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        let existing = self
+            .store
+            .snapshot()?
+            .runner_profiles_for_plugin(plugin_id)
+            .first()
+            .map(|profile| profile.id.clone());
+        let profile_id = match existing {
+            Some(id) => {
+                self.set_profile_application(&id, application)?;
+                id
+            }
+            None => {
+                self.create_profile(plugin_id, GAMESTREAM_PROFILE_NAME, application)?
+                    .id
+            }
+        };
+        // The mode is set at creation, not offered afterwards: a profile made
+        // by this setup has no other meaning, and a person who has never heard
+        // of launch modes should not be asked which one they want.
+        self.set_profile_launch_mode(&profile_id, RunnerLaunchMode::Stream)
+    }
+
+    // -----------------------------------------------------------------------
+    // A folder Orivo keeps itself
+    // -----------------------------------------------------------------------
+
+    /// The folder Orivo keeps for one profile's streamed games:
+    /// `<app data>/streaming/<profile id>`. Made if it is not there.
+    ///
+    /// The profile id is the only variable part, and it is held to the opaque
+    /// grammar — no separators, no leading dot — before it is joined, so it
+    /// cannot spell a path that leaves `streaming`.
+    pub fn managed_library_directory(
+        &self,
+        profile_id: &str,
+    ) -> Result<PathBuf, RunnerHostError> {
+        let root = self
+            .managed_root
+            .as_ref()
+            .ok_or(RunnerHostError::ManagedFolderUnavailable)?;
+        if !opaque(profile_id) || profile_id.contains(['/', '\\', ':']) {
+            return Err(RunnerHostError::ManagedFolderUnavailable);
+        }
+        let directory = root.join(MANAGED_LIBRARY_DIRECTORY).join(profile_id);
+        std::fs::create_dir_all(&directory)
+            .map_err(|_| RunnerHostError::ManagedFolderUnavailable)?;
+        Ok(directory)
+    }
+
+    /// Grant a folder Orivo itself owns, with no picker.
+    ///
+    /// This is the only way a folder reaches a profile without the user
+    /// choosing it, so it is the only place the rule is enforced: the folder,
+    /// *after* symbolic links are resolved, has to be strictly inside
+    /// `<app data>/streaming`. A path outside it — or one that gets outside by
+    /// way of `..` or a link someone planted — is refused, because a grant
+    /// that Orivo made on its own initiative for anywhere else would be Orivo
+    /// choosing what a plugin may read.
+    pub fn grant_managed_directory(
+        &self,
+        profile_id: &str,
+        slot: Option<&str>,
+        directory: &Path,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        let root = self
+            .managed_root
+            .as_ref()
+            .ok_or(RunnerHostError::ManagedFolderUnavailable)?;
+        let allowed = std::fs::canonicalize(root.join(MANAGED_LIBRARY_DIRECTORY))
+            .map_err(|_| RunnerHostError::ManagedFolderUnavailable)?;
+        let directory = std::fs::canonicalize(directory)
+            .map_err(|_| RunnerHostError::ManagedFolderUnavailable)?;
+        if directory == allowed || !directory.starts_with(&allowed) || !directory.is_dir() {
+            return Err(RunnerHostError::ManagedFolderUnavailable);
+        }
+        self.grant_directory(profile_id, slot, &directory)
+    }
+
+    /// Make this stream profile's folder and grant it. Safe to repeat: the
+    /// setup runs it before every import, so a folder someone deleted, or a
+    /// grant that was revoked, is quietly put back.
+    pub fn prepare_stream_library(
+        &self,
+        profile_id: &str,
+    ) -> Result<RunnerProfileView, RunnerHostError> {
+        let mode = self
+            .store
+            .snapshot()?
+            .runner_profile(profile_id)
+            .map(|profile| profile.settings.launch_mode)
+            .ok_or(RunnerHostError::UnknownProfile)?;
+        if mode != RunnerLaunchMode::Stream {
+            return Err(RunnerHostError::LaunchModeMismatch);
+        }
+        let directory = self.managed_library_directory(profile_id)?;
+        self.grant_managed_directory(profile_id, None, &directory)
+    }
+
+    // -----------------------------------------------------------------------
+    // Is the machine there?
+    // -----------------------------------------------------------------------
+
+    /// Ask a PC whether it is on and whether it knows `application`.
+    ///
+    /// An empty `host_input` means the saved one. Nothing is saved here: the
+    /// setup keeps an address only once the machine has answered for it, and
+    /// that decision is the caller's.
+    pub fn probe_host(
+        &self,
+        host_input: &str,
+        application: &Path,
+    ) -> Result<crate::gamestream::HostStatusView, RunnerHostError> {
+        let host = self.host_to_probe(host_input)?;
+        Ok(crate::gamestream::probe_host(application, &host))
+    }
+
+    fn host_to_probe(&self, host_input: &str) -> Result<String, RunnerHostError> {
+        let typed = host_input.trim();
+        let source = if typed.is_empty() {
+            self.gamestream
+                .as_ref()
+                .map(|gamestream| gamestream.settings().host)
+                .unwrap_or_default()
+        } else {
+            typed.to_owned()
+        };
+        crate::gamestream::normalise_host(&source).map_err(RunnerHostError::StreamFeed)
+    }
+
+    /// The application a profile would start, or nothing if it is gone.
+    pub fn profile_application(&self, profile_id: &str) -> Result<PathBuf, RunnerHostError> {
+        let catalog = self.store.snapshot()?;
+        let profile = catalog
+            .runner_profile(profile_id)
+            .ok_or(RunnerHostError::UnknownProfile)?;
+        resolve_application(profile)
+    }
+
+    // -----------------------------------------------------------------------
+    // The pairing process
+    // -----------------------------------------------------------------------
+
+    /// Remember the `pair` process of this profile's attempt, ending any
+    /// earlier one first: a second attempt has a second PIN, and the first
+    /// process is waiting for a number nobody is going to type.
+    fn track_pairing(&self, profile_id: &str, child: std::process::Child) {
+        if let Ok(mut pairings) = self.pairings.lock() {
+            if let Some(mut previous) = pairings.insert(profile_id.to_owned(), child) {
+                let _ = previous.kill();
+                let _ = previous.wait();
+            }
+        }
+    }
+
+    /// End this profile's pairing attempt, if one is open.
+    pub fn stop_pairing(&self, profile_id: &str) {
+        if let Ok(mut pairings) = self.pairings.lock() {
+            if let Some(mut child) = pairings.remove(profile_id) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn pair_process(&self, profile_id: &str) -> PairProcess {
+        let Ok(mut pairings) = self.pairings.lock() else {
+            return PairProcess::None;
+        };
+        let Some(child) = pairings.get_mut(profile_id) else {
+            return PairProcess::None;
+        };
+        match child.try_wait() {
+            Ok(None) => PairProcess::Running,
+            Ok(Some(status)) if status.success() => PairProcess::Succeeded,
+            Ok(Some(_)) | Err(_) => PairProcess::Failed,
+        }
+    }
+
+    /// Has the attempt worked yet? The setup asks every couple of seconds
+    /// while the PIN is on screen.
+    ///
+    /// The machine is the authority, not the process: the client's own `pair`
+    /// can exit before or after its certificate is usable, and "it listed my
+    /// games" is the only fact that means it works. The process is read only to
+    /// tell a still-open attempt from one that has already ended.
+    pub fn pairing_status(&self, profile_id: &str) -> Result<PairingStatusView, RunnerHostError> {
+        self.pairing_status_with(profile_id, crate::gamestream::host_is_reachable)
+    }
+
+    fn pairing_status_with(
+        &self,
+        profile_id: &str,
+        reachable: impl FnOnce(&str) -> bool,
+    ) -> Result<PairingStatusView, RunnerHostError> {
+        let application = match self.profile_application(profile_id) {
+            Ok(application) => application,
+            Err(RunnerHostError::ApplicationUnavailable) => {
+                self.stop_pairing(profile_id);
+                return Ok(PairingStatusView {
+                    state: PairingProgress::ClientMissing,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let host = self.host_to_probe("")?;
+        let machine = crate::gamestream::probe_host_with(
+            &application,
+            &host,
+            reachable,
+            crate::gamestream::PROBE_LIST_TIMEOUT,
+        )
+        .state;
+        let state = pairing_progress(machine, self.pair_process(profile_id));
+        // Done, or never going to be: either way the process has nothing left
+        // to wait for, and an old `pair` should not outlive the answer.
+        if matches!(
+            state,
+            PairingProgress::Paired | PairingProgress::Failed | PairingProgress::ClientMissing
+        ) {
+            self.stop_pairing(profile_id);
+        }
+        Ok(PairingStatusView { state })
     }
 
     /// Record a folder on a profile and put the permission to read it in force.
@@ -623,7 +1000,12 @@ impl ThirdPartyRunnerService {
         // skipped when no host is configured — that is the manual mode the
         // plugin documents — and surfaces any other feed error as a failed
         // import so the message the feed carries reaches the user.
+        let mut no_host = false;
         if profile.settings.launch_mode == RunnerLaunchMode::Stream {
+            no_host = self
+                .gamestream
+                .as_ref()
+                .is_some_and(|service| service.settings().host.trim().is_empty());
             // The *first* folder the profile still has access to, and only it.
             // One host's library written into two folders would be the same
             // game twice, so a second folder on a stream profile is somewhere
@@ -646,20 +1028,33 @@ impl ThirdPartyRunnerService {
             let client = resolve_application(profile)?;
             if let (Some(destination), Some(service)) = (destination, self.gamestream.as_ref()) {
                 match service.refresh_placeholders(&client, &destination) {
+                    Ok(_) => {}
                     // Manual placeholders remain and are imported as-is.
-                    Err(crate::gamestream::GameStreamFeedError::NotConfigured) | Ok(_) => {}
+                    Err(crate::gamestream::GameStreamFeedError::NotConfigured) => no_host = true,
                     Err(error) => return Err(RunnerHostError::StreamFeed(error)),
                 }
             }
         }
-        import_runner_games(
+        let outcome = import_runner_games(
             &package,
             &self.store,
             profile_id,
             self.import_limits,
             cancelled,
             &mut on_progress,
-        )
+        )?;
+        // Manual mode that found nothing is not "imported 0 games": there is no
+        // folder of the user's own to blame and no PC to ask, so the one thing
+        // missing is the PC.
+        if no_host
+            && !outcome.cancelled
+            && outcome.progress.imported + outcome.progress.refreshed == 0
+        {
+            return Err(RunnerHostError::StreamFeed(
+                crate::gamestream::GameStreamFeedError::NotConfigured,
+            ));
+        }
+        Ok(outcome)
     }
 
     pub fn start_import(self: &Arc<Self>, profile_id: &str) -> Result<String, RunnerHostError> {
@@ -761,18 +1156,40 @@ impl ThirdPartyRunnerService {
 
     /// Resolve and start one third-party runner game. Returns the title the
     /// plugin's inventory recorded, which is what the player sees start.
+    #[cfg(test)]
     pub fn launch(
         &self,
         plugin_id: &str,
         profile_id: &str,
         game_ref: &str,
     ) -> Result<String, RunnerHostError> {
+        self.launch_owned(plugin_id, profile_id, game_ref)
+            .map(|(title, _child)| title)
+    }
+
+    /// `launch`, keeping the process: the host owns it, so the caller can tell
+    /// when the session ends.
+    pub fn launch_owned(
+        &self,
+        plugin_id: &str,
+        profile_id: &str,
+        game_ref: &str,
+    ) -> Result<(String, std::process::Child), RunnerHostError> {
         let package = self.package(plugin_id)?;
         let catalog = self.store.snapshot()?;
+        let streams = catalog
+            .runner_profile(profile_id)
+            .is_some_and(|profile| profile.settings.launch_mode == RunnerLaunchMode::Stream);
         let cancelled = AtomicBool::new(false);
-        let prepared = prepare_runner_launch(&package, &catalog, profile_id, game_ref, &cancelled)?;
-        prepared.spawn()?;
-        Ok(prepared.title().to_owned())
+        let launched = prepare_runner_launch(&package, &catalog, profile_id, game_ref, &cancelled)
+            .and_then(|prepared| prepared.spawn().map(|child| (prepared, child)));
+        match launched {
+            Ok((prepared, child)) => Ok((prepared.title().to_owned(), child)),
+            // Someone launching a streamed game never set up an emulator, so
+            // the emulator-shaped refusals are said in streaming words instead.
+            Err(error) if streams => Err(error.in_streaming_words()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Start pairing this profile's client with the configured machine, and
@@ -797,8 +1214,9 @@ impl ThirdPartyRunnerService {
     /// Once started, the process is left running on purpose. `pair` blocks
     /// until the machine confirms or the attempt times out, so returning as
     /// soon as it has started is the only way to show the PIN while it is
-    /// still worth typing; a thread reaps the child so repeated attempts do
-    /// not pile up.
+    /// still worth typing. The service keeps the child, so the next attempt,
+    /// a cancel, a successful pairing or a deleted profile can end it
+    /// ([`Self::pairing_status`] is what notices the result).
     pub fn begin_pairing(&self, profile_id: &str) -> Result<GameStreamPairing, RunnerHostError> {
         let catalog = self.store.snapshot()?;
         let profile = catalog
@@ -825,13 +1243,13 @@ impl ThirdPartyRunnerService {
             return Ok(GameStreamPairing::AlreadyPaired { host });
         }
         let pin = pairing_pin()?;
+        // A retry gets a new PIN, so the process that is still waiting for the
+        // old one is ended before the new one starts.
+        self.stop_pairing(profile_id);
         let child = pairing_command(&application, &host, &pin)
             .spawn()
             .map_err(|_| RunnerHostError::ApplicationUnavailable)?;
-        thread::spawn(move || {
-            let mut child = child;
-            let _ = child.wait();
-        });
+        self.track_pairing(profile_id, child);
         Ok(GameStreamPairing::Started { host, pin })
     }
 
@@ -948,6 +1366,7 @@ fn profile_view(catalog: &Catalog, profile: &RunnerProfile) -> RunnerProfileView
         status_message: profile.status_message.clone(),
         enabled: profile.enabled,
         application_label: safe_label(&profile.application, "Emulator"),
+        application_available: resolve_application(profile).is_ok(),
         launch_mode: profile.settings.launch_mode,
         directories: profile
             .game_directories
@@ -1182,6 +1601,107 @@ pub async fn begin_gamestream_pairing(
         .map_err(|error| error.to_string())
 }
 
+/// Make the game-streaming profile, or point the existing one at a different
+/// client. `client_id` is a handle from `find_stream_clients`; without one the
+/// operating system's picker opens, as it does for any other application. The
+/// profile comes back already authorising streams.
+#[tauri::command]
+pub async fn create_gamestream_profile(
+    client_id: Option<String>,
+    service: Service<'_>,
+) -> Result<RunnerProfileView, String> {
+    if client_id.as_deref().is_some_and(|id| !opaque(id)) {
+        return Err("That application is no longer available.".into());
+    }
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || {
+        let application = match client_id {
+            Some(id) => crate::gamestream::client_for_id(&id)
+                .ok_or_else(|| "That application is no longer available.".to_string())?,
+            None => pick_stream_client()?,
+        };
+        service
+            .create_stream_profile(&application)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "Setting up game streaming did not finish. Try again.".to_string())?
+}
+
+/// Ask a PC whether it is on and whether this client is paired with it. Saves
+/// nothing: the setup keeps the address once the machine has answered for it.
+#[tauri::command]
+pub async fn probe_gamestream_host(
+    profile_id: String,
+    host: String,
+    service: Service<'_>,
+) -> Result<crate::gamestream::HostStatusView, String> {
+    if !opaque(&profile_id) {
+        return Err("Game streaming isn't set up yet.".into());
+    }
+    let service = Arc::clone(&service);
+    // Connecting and running the client can take seconds on a PC that is off.
+    tauri::async_runtime::spawn_blocking(move || {
+        match service.profile_application(&profile_id) {
+            Ok(application) => service.probe_host(&host, &application),
+            Err(RunnerHostError::ApplicationUnavailable) => {
+                Ok(crate::gamestream::HostStatusView {
+                    state: crate::gamestream::HostState::ClientMissing,
+                    host: String::new(),
+                    games: 0,
+                })
+            }
+            Err(error) => Err(error),
+        }
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "Checking your PC did not finish. Try again.".to_string())?
+}
+
+/// Whether the pairing attempt in flight has worked yet.
+#[tauri::command]
+pub async fn gamestream_pairing_status(
+    profile_id: String,
+    service: Service<'_>,
+) -> Result<PairingStatusView, String> {
+    if !opaque(&profile_id) {
+        return Err("Game streaming isn't set up yet.".into());
+    }
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || service.pairing_status(&profile_id))
+        .await
+        .map_err(|_| "Checking the pairing did not finish. Try again.".to_string())?
+        .map_err(|error| error.to_string())
+}
+
+/// End the pairing attempt in flight: the user went back, or closed the setup.
+#[tauri::command]
+pub fn cancel_gamestream_pairing(profile_id: String, service: Service<'_>) -> Result<(), String> {
+    if !opaque(&profile_id) {
+        return Err("Game streaming isn't set up yet.".into());
+    }
+    service.stop_pairing(&profile_id);
+    Ok(())
+}
+
+/// Make the folder Orivo keeps for this profile's games and grant it. There is
+/// no picker and no path in either direction.
+#[tauri::command]
+pub async fn prepare_gamestream_library(
+    profile_id: String,
+    service: Service<'_>,
+) -> Result<RunnerProfileView, String> {
+    if !opaque(&profile_id) {
+        return Err("Game streaming isn't set up yet.".into());
+    }
+    let service = Arc::clone(&service);
+    tauri::async_runtime::spawn_blocking(move || service.prepare_stream_library(&profile_id))
+        .await
+        .map_err(|_| "Preparing your games folder did not finish. Try again.".to_string())?
+        .map_err(|error| error.to_string())
+}
+
 /// Allow one folder for a profile. Like the application, the folder comes from
 /// a native picker opened by Rust; `slot` is the opaque grant id the plugin will
 /// name it by, never a path.
@@ -1273,6 +1793,22 @@ fn pick_application() -> Result<PathBuf, String> {
 #[cfg(mobile)]
 fn pick_application() -> Result<PathBuf, String> {
     Err("Third-party runners cannot be configured on this device yet.".into())
+}
+
+/// The same picker, worded for someone setting up game streaming rather than an
+/// emulator. The refusal text is matched by the setup (`PICKER_CANCELLED` in
+/// `gamestream-setup.ts`) so closing the dialog is silent.
+#[cfg(desktop)]
+fn pick_stream_client() -> Result<PathBuf, String> {
+    rfd::FileDialog::new()
+        .set_title("Choose Moonlight")
+        .pick_file()
+        .ok_or_else(|| "No app was chosen.".to_string())
+}
+
+#[cfg(mobile)]
+fn pick_stream_client() -> Result<PathBuf, String> {
+    Err("Game streaming cannot be set up on this device yet.".into())
 }
 
 #[cfg(desktop)]
@@ -1390,7 +1926,8 @@ mod tests {
                     PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Threaded)
                         .unwrap(),
                 )
-                .with_import_limits(limits),
+                .with_import_limits(limits)
+                .with_managed_root(plugin_root.with_file_name("appdata")),
             )
         }
 
@@ -2263,7 +2800,8 @@ mod tests {
             .with_runtime(
                 PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Threaded).unwrap(),
             )
-            .with_gamestream(gamestream),
+            .with_gamestream(gamestream)
+            .with_managed_root(harness.root.join("appdata")),
         )
     }
 
@@ -2375,6 +2913,529 @@ mod tests {
                 "astra.local".into()
             )),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The guided setup
+    // -----------------------------------------------------------------------
+
+    /// Each combination of what the machine said and what the pair process is
+    /// doing has exactly one meaning for the person looking at the PIN.
+    #[test]
+    fn pairing_progress_follows_the_machine_and_reads_the_process_second() {
+        use crate::gamestream::HostState::{ClientMissing, NotPaired, Paired, Unreachable};
+        use PairProcess::{Failed, None as NoProcess, Running, Succeeded};
+        use PairingProgress as Progress;
+
+        // The machine listing is the only proof, whatever the process looks like.
+        for process in [NoProcess, Running, Succeeded, Failed] {
+            assert_eq!(pairing_progress(Paired, process), Progress::Paired);
+            assert_eq!(pairing_progress(Unreachable, process), Progress::Unreachable);
+            assert_eq!(pairing_progress(ClientMissing, process), Progress::ClientMissing);
+        }
+        // Not paired yet: waiting while an attempt is open — including one that
+        // exited cleanly a moment before the machine's answer caught up —
+        // and finished the moment the attempt is over without it.
+        assert_eq!(pairing_progress(NotPaired, Running), Progress::Waiting);
+        assert_eq!(pairing_progress(NotPaired, Succeeded), Progress::Waiting);
+        assert_eq!(pairing_progress(NotPaired, Failed), Progress::Failed);
+        assert_eq!(pairing_progress(NotPaired, NoProcess), Progress::Failed);
+    }
+
+    /// The managed folder is made under Orivo's data and granted with no picker
+    /// and no path from the caller: the profile id is all that goes in.
+    #[test]
+    fn a_stream_profiles_folder_is_made_and_granted_without_a_picker() {
+        let harness = Harness::new("managed", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+
+        let view = harness.service.prepare_stream_library(ACCEPTED_PROFILE_ID).unwrap();
+
+        let folder = harness
+            .root
+            .join("appdata")
+            .join("streaming")
+            .join(ACCEPTED_PROFILE_ID);
+        assert!(folder.is_dir());
+        let granted = harness.catalog().runner_profile(ACCEPTED_PROFILE_ID).unwrap().clone();
+        assert!(
+            granted.granted_directory(DEFAULT_DIRECTORY_SLOT).is_some_and(|directory| {
+                directory.path == fs::canonicalize(&folder).unwrap()
+            }),
+            "{granted:?}"
+        );
+        let managed = view
+            .directories
+            .iter()
+            .find(|directory| directory.id == DEFAULT_DIRECTORY_SLOT)
+            .expect("the folder is on the profile");
+        assert!(managed.granted);
+        // A label, never the location.
+        assert_eq!(managed.label, ACCEPTED_PROFILE_ID);
+        // Running it again is harmless: the setup does so before every import.
+        harness.service.prepare_stream_library(ACCEPTED_PROFILE_ID).unwrap();
+    }
+
+    #[test]
+    fn only_a_stream_profile_gets_a_managed_folder() {
+        let harness = Harness::new("managed-mode", THREE_ROMS);
+        harness.configured_profile();
+        assert_eq!(
+            harness
+                .service
+                .prepare_stream_library(ACCEPTED_PROFILE_ID)
+                .unwrap_err(),
+            RunnerHostError::LaunchModeMismatch
+        );
+        assert_eq!(
+            harness.service.prepare_stream_library("no-such-profile").unwrap_err(),
+            RunnerHostError::UnknownProfile
+        );
+    }
+
+    /// The rule that makes a grant without a picker acceptable: the folder has
+    /// to be inside `<app data>/streaming` once links are resolved. Everything
+    /// else — the user's games, Orivo's own files, the streaming root itself,
+    /// a `..` that climbs out, a link planted inside that leads out — is
+    /// refused, and none of it leaves a grant behind.
+    #[test]
+    fn a_folder_outside_the_streaming_area_is_never_auto_granted() {
+        let harness = Harness::new("managed-escape", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let streaming = harness.root.join("appdata").join("streaming");
+        fs::create_dir_all(streaming.join("inside")).unwrap();
+
+        let outside = [
+            harness.games.clone(),
+            harness.root.clone(),
+            harness.root.join("appdata"),
+            streaming.clone(),
+            streaming.join("inside").join("..").join(".."),
+            streaming.join("missing"),
+        ];
+        for directory in outside {
+            assert_eq!(
+                harness
+                    .service
+                    .grant_managed_directory(ACCEPTED_PROFILE_ID, None, &directory)
+                    .unwrap_err(),
+                RunnerHostError::ManagedFolderUnavailable,
+                "{directory:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let escape = streaming.join("escape");
+            std::os::unix::fs::symlink(&harness.games, &escape).unwrap();
+            assert_eq!(
+                harness
+                    .service
+                    .grant_managed_directory(ACCEPTED_PROFILE_ID, None, &escape)
+                    .unwrap_err(),
+                RunnerHostError::ManagedFolderUnavailable
+            );
+        }
+        // Only the folder the fixture was given by hand is on the profile.
+        let profile = harness.catalog().runner_profile(ACCEPTED_PROFILE_ID).unwrap().clone();
+        assert!(profile.granted_directory(DEFAULT_DIRECTORY_SLOT).is_none(), "{profile:?}");
+
+        // And the one that belongs there is accepted.
+        harness
+            .service
+            .grant_managed_directory(ACCEPTED_PROFILE_ID, None, &streaming.join("inside"))
+            .unwrap();
+    }
+
+    /// A profile id is the only part of the path that varies, so it must not be
+    /// able to spell a way out of `streaming`.
+    #[test]
+    fn a_profile_id_cannot_spell_another_folder() {
+        let harness = Harness::new("managed-id", THREE_ROMS);
+        for id in ["../escape", "a/b", "a\\b", "..", ".hidden", "c:evil", ""] {
+            assert_eq!(
+                harness.service.managed_library_directory(id).unwrap_err(),
+                RunnerHostError::ManagedFolderUnavailable,
+                "{id:?}"
+            );
+        }
+        assert!(!harness.root.join("escape").exists());
+        assert!(
+            harness.service.managed_library_directory("runner-0123abcd").is_ok(),
+            "an ordinary id is fine"
+        );
+    }
+
+    #[test]
+    fn nothing_is_auto_granted_where_orivo_has_no_data_directory() {
+        let harness = Harness::new("managed-none", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let store = crate::runner_host::CatalogStore::new(
+            Arc::new(RwLock::new(harness.catalog())),
+            harness.catalog_path.clone(),
+            Arc::new(Mutex::new(())),
+        );
+        let service = ThirdPartyRunnerService::new(
+            store,
+            harness.plugin_root.clone(),
+            HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
+        )
+        .with_runtime(PluginRuntime::with_limits(PluginLimits::default(), EpochMode::Threaded).unwrap());
+        assert_eq!(
+            service.prepare_stream_library(ACCEPTED_PROFILE_ID).unwrap_err(),
+            RunnerHostError::ManagedFolderUnavailable
+        );
+    }
+
+    /// The setup can be walked twice. Each walk lands on the same profile, still
+    /// streaming, with the application the user just chose.
+    #[test]
+    fn making_the_stream_profile_twice_makes_one() {
+        let harness = Harness::new("stream-profile-twice", THREE_ROMS);
+
+        let first = harness
+            .service
+            .create_stream_profile_for(FIXTURE_PLUGIN_ID, &harness.emulator)
+            .unwrap();
+        assert_eq!(first.launch_mode, RunnerLaunchMode::Stream);
+        assert!(first.application_available);
+
+        let again = harness
+            .service
+            .create_stream_profile_for(FIXTURE_PLUGIN_ID, &harness.emulator)
+            .unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.launch_mode, RunnerLaunchMode::Stream);
+        assert_eq!(
+            harness
+                .catalog()
+                .runner_profiles_for_plugin(FIXTURE_PLUGIN_ID)
+                .len(),
+            1
+        );
+    }
+
+    /// A bad pick never replaces a good one, and a client that has gone away is
+    /// something the view can say.
+    #[test]
+    fn choosing_the_client_again_checks_it_first() {
+        let harness = Harness::new("set-application", THREE_ROMS);
+        harness.configured_profile();
+        let gone = harness.root.join("Moonlight Was Here");
+
+        assert_eq!(
+            harness
+                .service
+                .set_profile_application(ACCEPTED_PROFILE_ID, &gone)
+                .unwrap_err(),
+            RunnerHostError::ApplicationUnavailable
+        );
+        assert!(harness.service.profile_view(ACCEPTED_PROFILE_ID).unwrap().application_available);
+
+        // A folder is not something that can be started.
+        assert_eq!(
+            harness
+                .service
+                .set_profile_application(ACCEPTED_PROFILE_ID, &harness.games)
+                .unwrap_err(),
+            RunnerHostError::ApplicationUnavailable
+        );
+
+        fs::remove_file(&harness.emulator).unwrap();
+        assert!(!harness.service.profile_view(ACCEPTED_PROFILE_ID).unwrap().application_available);
+    }
+
+    /// Someone who streams never set up an emulator, so a launch that cannot
+    /// start the client says where Moonlight is chosen, in those words.
+    #[test]
+    fn a_stream_launch_that_cannot_start_the_client_speaks_plainly() {
+        let message = RunnerHostError::ApplicationUnavailable
+            .in_streaming_words()
+            .to_string();
+        assert_eq!(
+            message,
+            "Moonlight isn't installed anymore. Reinstall it or choose it again in Settings › Plugins › Game streaming."
+        );
+        for error in [
+            RunnerHostError::GrantMissing,
+            RunnerHostError::DirectoryUnavailable,
+            RunnerHostError::InventoryMissing,
+            RunnerHostError::ProfileNeedsRevalidation,
+            RunnerHostError::ProfileNotUsable,
+            RunnerHostError::ProfileRefused(None),
+            RunnerHostError::StreamPlaceholder,
+            RunnerHostError::LaunchModeMismatch,
+        ] {
+            let text = error.clone().in_streaming_words().to_string();
+            assert!(text.contains("Settings › Plugins"), "{error:?}: {text}");
+            for jargon in ["emulator", "profile", "folder", "granted", "placeholder", "stream card"] {
+                assert!(!text.to_lowercase().contains(jargon), "{error:?} says {jargon:?}: {text}");
+            }
+        }
+        // Not ours to reword: the user's own cancel and a plugin's own words.
+        assert_eq!(
+            RunnerHostError::Cancelled.in_streaming_words(),
+            RunnerHostError::Cancelled
+        );
+    }
+
+    #[test]
+    fn a_launch_through_a_stream_profile_reports_in_streaming_words() {
+        let harness = Harness::new("stream-launch-words", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        plant_entry(&harness, "fixture:ok", "alpha.rom");
+        fs::remove_file(&harness.emulator).unwrap();
+
+        // The mode check would also refuse this entry, but the missing client
+        // is reached first and is the one the person can act on.
+        let error = launch_error(&harness.service, "fixture:ok");
+        assert_eq!(
+            error,
+            RunnerHostError::Streaming(
+                "Moonlight isn't installed anymore. Reinstall it or choose it again in Settings › Plugins › Game streaming."
+            )
+        );
+    }
+
+    /// With no PC to ask, an import has nothing to say about games. It says what
+    /// is missing instead of reporting a successful import of none.
+    #[test]
+    fn importing_with_no_pc_says_to_add_one() {
+        let harness = Harness::new("stream-nohost", &[]);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let service = stream_service(&harness, "");
+
+        let cancelled = AtomicBool::new(false);
+        let error = service
+            .import_now(ACCEPTED_PROFILE_ID, &cancelled, |_| {})
+            .unwrap_err();
+        assert_eq!(error.to_string(), "Add your gaming PC first.");
+    }
+
+    /// A stand-in client for pairing. `list` succeeds once `paired` exists;
+    /// `pair` stays open, as the real one does while it waits for the PIN, and
+    /// records its process id so a test can tell whether it was ended.
+    #[cfg(unix)]
+    fn use_pairing_client(harness: &Harness) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = harness.root.join("Pairing Client");
+        let paired = harness.root.join("paired");
+        let pids = harness.root.join("pair.pids");
+        fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = list ]; then\n  if [ -f '{paired}' ]; then echo Desktop; exit 0; fi\n  exit 1\nfi\necho $$ >> '{pids}'\nexec sleep 30\n",
+                paired = paired.display(),
+                pids = pids.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let application = fs::canonicalize(&path).unwrap();
+        harness
+            .service
+            .store_for_tests()
+            .commit(|catalog| {
+                let mut profile = catalog
+                    .runner_profile(ACCEPTED_PROFILE_ID)
+                    .expect("the configured profile")
+                    .clone();
+                profile.application = application.clone();
+                catalog.upsert_runner_profile(profile)
+            })
+            .unwrap();
+        (paired, pids)
+    }
+
+    #[cfg(unix)]
+    fn process_is_alive(pid: &str) -> bool {
+        Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn recorded_pids(pids: &Path, expected: usize) -> Vec<String> {
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        loop {
+            let lines: Vec<String> = fs::read_to_string(pids)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            if lines.len() >= expected || SystemTime::now() >= deadline {
+                return lines;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The whole life of an attempt as the poll sees it: waiting while the PIN
+    /// is on screen, paired once the machine lists, and nothing left running.
+    #[cfg(unix)]
+    #[test]
+    fn pairing_is_noticed_from_the_machine_and_ends_the_attempt() {
+        let harness = Harness::new("pair-poll", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let (paired, pids) = use_pairing_client(&harness);
+        let service = stream_service(&harness, "my-pc.local");
+
+        let GameStreamPairing::Started { .. } = service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap()
+        else {
+            panic!("an unpaired machine is given a PIN");
+        };
+        let pid = recorded_pids(&pids, 1).remove(0);
+
+        let state = |reachable: bool| {
+            service
+                .pairing_status_with(ACCEPTED_PROFILE_ID, move |_| reachable)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state(true), PairingProgress::Waiting);
+        assert!(process_is_alive(&pid));
+        // The machine going quiet is its own answer, and the attempt stays open
+        // for when it comes back.
+        assert_eq!(state(false), PairingProgress::Unreachable);
+        assert!(process_is_alive(&pid));
+
+        fs::write(&paired, b"").unwrap();
+        assert_eq!(state(true), PairingProgress::Paired);
+        assert_eq!(service.pair_process(ACCEPTED_PROFILE_ID), PairProcess::None);
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        while process_is_alive(&pid) && SystemTime::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_is_alive(&pid), "pairing left its process running");
+    }
+
+    /// A retry has a new PIN, so the process waiting for the old one must not
+    /// outlive it; and an attempt that ended on its own is a failure at once.
+    #[cfg(unix)]
+    #[test]
+    fn a_retry_ends_the_previous_attempt_and_a_cancel_ends_it_too() {
+        let harness = Harness::new("pair-retry", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let (_paired, pids) = use_pairing_client(&harness);
+        let service = stream_service(&harness, "my-pc.local");
+
+        service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap();
+        let first = recorded_pids(&pids, 1).remove(0);
+        service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap();
+        let second = recorded_pids(&pids, 2).remove(1);
+
+        assert_ne!(first, second);
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        while process_is_alive(&first) && SystemTime::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_is_alive(&first), "the old attempt is still waiting");
+        assert!(process_is_alive(&second));
+
+        service.stop_pairing(ACCEPTED_PROFILE_ID);
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        while process_is_alive(&second) && SystemTime::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!process_is_alive(&second), "cancelling left the attempt open");
+        // With nothing open and nothing paired, the honest answer is that the
+        // attempt is over.
+        assert_eq!(
+            service
+                .pairing_status_with(ACCEPTED_PROFILE_ID, |_| true)
+                .unwrap()
+                .state,
+            PairingProgress::Failed
+        );
+    }
+
+    /// A client that quits by itself — a wrong PIN, or its own timeout — is
+    /// reported as failed on the next poll rather than after the full wait.
+    #[cfg(unix)]
+    #[test]
+    fn an_attempt_that_ends_without_pairing_is_reported_as_failed() {
+        let harness = Harness::new("pair-failed", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        // Refuses `list` and `pair` alike, and exits at once.
+        use_stream_client(&harness, "", 1);
+        let service = stream_service(&harness, "my-pc.local");
+
+        service.begin_pairing(ACCEPTED_PROFILE_ID).unwrap();
+        let deadline = SystemTime::now() + std::time::Duration::from_secs(5);
+        let state = loop {
+            let state = service
+                .pairing_status_with(ACCEPTED_PROFILE_ID, |_| true)
+                .unwrap()
+                .state;
+            if state != PairingProgress::Waiting || SystemTime::now() >= deadline {
+                break state;
+            }
+            thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(state, PairingProgress::Failed);
+    }
+
+    /// A client that was uninstalled mid-attempt is not "waiting".
+    #[test]
+    fn a_missing_client_is_reported_rather_than_waited_on() {
+        let harness = Harness::new("pair-no-client", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let service = stream_service(&harness, "my-pc.local");
+        fs::remove_file(&harness.emulator).unwrap();
+
+        assert_eq!(
+            service
+                .pairing_status_with(ACCEPTED_PROFILE_ID, |_| true)
+                .unwrap()
+                .state,
+            PairingProgress::ClientMissing
+        );
+    }
+
+    /// Probing takes whatever was pasted, and falls back to the saved PC when
+    /// the box is empty.
+    #[cfg(unix)]
+    #[test]
+    fn probing_tidies_what_was_typed_and_defaults_to_the_saved_pc() {
+        let harness = Harness::new("probe-host", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let client = use_stream_client(&harness, "Desktop\n", 0);
+        let service = stream_service(&harness, "saved.local");
+
+        // The port and path a pasted Sunshine address carries are not passed on.
+        assert_eq!(
+            service.host_to_probe("https://my-pc.local:47990/pin").unwrap(),
+            "my-pc.local"
+        );
+        assert_eq!(service.host_to_probe("").unwrap(), "saved.local");
+        assert_eq!(
+            service.host_to_probe("not a host").unwrap_err(),
+            RunnerHostError::StreamFeed(crate::gamestream::GameStreamFeedError::HostInvalid)
+        );
+        // Nothing was saved by asking.
+        assert_eq!(
+            service
+                .gamestream
+                .as_ref()
+                .map(|gamestream| gamestream.settings().host)
+                .as_deref(),
+            Some("saved.local")
+        );
+        // The client is started only against a tidy host, whatever machine
+        // answers (here none does, so the closed ports say so).
+        let view = service.probe_host("127.0.0.1:47990", &client).unwrap();
+        assert_eq!(view.host, "127.0.0.1");
     }
 
     // -----------------------------------------------------------------------

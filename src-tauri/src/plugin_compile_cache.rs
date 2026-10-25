@@ -142,10 +142,6 @@ const HEADER_BYTES: usize = ARTIFACT_MAGIC.len() + TAG_BYTES;
 const TAG_DOMAIN: &[u8] = b"orivo:plugin-compile-cache:artifact:v1";
 const SLOT_DOMAIN: &[u8] = b"orivo:plugin-compile-cache:slot:v1";
 
-/// Versioned, so a change to how the key is stored cannot make an older entry
-/// decode into something it never meant.
-const KEYRING_SERVICE: &str = "io.orivo.desktop.plugin-compile-cache.v1";
-const KEYRING_ACCOUNT: &str = "artifact-key";
 const KEY_BYTES: usize = 32;
 
 /// How much of the engine fingerprint a slot name carries. Not a security
@@ -792,22 +788,25 @@ trait KeyStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct KeyStoreUnavailable;
 
-struct SystemKeyStore;
-
-impl SystemKeyStore {
-    fn entry(&self) -> Result<keyring::Entry, KeyStoreUnavailable> {
-        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|_| KeyStoreUnavailable)
-    }
+/// The install key, kept in a file of its own beside Orivo's data.
+///
+/// It used to live in the system keychain. On macOS every rebuild of an
+/// ad-hoc-signed Orivo is code the keychain has never seen, so each one asked
+/// for the keychain password — for a cache whose every entry is regenerable.
+/// The file is readable by its owner only (0600) and lives in the app data
+/// directory, not the cache directory it authenticates, so clearing or
+/// corrupting the cache cannot also forge its key. Anyone who can read this
+/// user's application data could already replace the plugins themselves.
+struct FileKeyStore {
+    path: PathBuf,
 }
 
-impl KeyStore for SystemKeyStore {
+impl KeyStore for FileKeyStore {
     fn read(&self) -> Result<Option<String>, KeyStoreUnavailable> {
-        match self.entry()?.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+        match fs::read_to_string(&self.path) {
+            Ok(value) => Ok(Some(value.trim().to_owned())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => {
-                // The value is never logged. That it could not be read is enough
-                // to explain a locked keychain or a denied ACL.
                 eprintln!("orivo: the plugin compile cache key could not be read ({error})");
                 Err(KeyStoreUnavailable)
             }
@@ -815,15 +814,33 @@ impl KeyStore for SystemKeyStore {
     }
 
     fn write(&self, value: &str) -> Result<(), KeyStoreUnavailable> {
-        self.entry()?.set_password(value).map_err(|error| {
+        let fail = |error: std::io::Error| {
             eprintln!("orivo: the plugin compile cache key could not be stored ({error})");
             KeyStoreUnavailable
-        })
+        };
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).map_err(fail)?;
+        }
+        let temporary = self.path.with_extension("key.tmp");
+        {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(fail)?;
+            std::io::Write::write_all(&mut file, value.as_bytes()).map_err(fail)?;
+            file.sync_all().map_err(fail)?;
+        }
+        fs::rename(&temporary, &self.path).map_err(fail)
     }
 
     fn delete(&self) -> Result<(), KeyStoreUnavailable> {
-        match self.entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(KeyStoreUnavailable),
         }
     }
@@ -843,7 +860,10 @@ impl KeyStore for SystemKeyStore {
 /// for a cache the user did not ask about.
 fn install_key() -> Option<[u8; KEY_BYTES]> {
     static KEY: OnceLock<Option<[u8; KEY_BYTES]>> = OnceLock::new();
-    *KEY.get_or_init(|| read_or_create_key(&SystemKeyStore))
+    *KEY.get_or_init(|| {
+        let path = KEY_FILE.get()?.clone();
+        read_or_create_key(&FileKeyStore { path })
+    })
 }
 
 fn read_or_create_key(store: &impl KeyStore) -> Option<[u8; KEY_BYTES]> {
@@ -921,6 +941,13 @@ fn create_key(store: &impl KeyStore) -> Option<[u8; KEY_BYTES]> {
 // ---------------------------------------------------------------------------
 
 static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+static KEY_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Names the install key's file, once, from `lib.rs` during setup. Like
+/// [`configure`], nothing is read or created here.
+pub fn configure_key_file(path: PathBuf) {
+    let _ = KEY_FILE.set(path);
+}
 static PERMITTED: AtomicBool = AtomicBool::new(false);
 
 /// Names the cache directory, once, from `lib.rs` during setup.
@@ -1055,6 +1082,26 @@ fn purge_directory(directory: &Path) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_key_file_round_trips_and_is_private() {
+        let directory = std::env::temp_dir().join(format!("orivo-key-file-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let store = FileKeyStore { path: directory.join("plugin-compile-cache.key") };
+
+        assert_eq!(store.read(), Ok(None));
+        let key = read_or_create_key(&store).expect("a key is created on first use");
+        assert_eq!(read_or_create_key(&store), Some(key), "the same key on the next run");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        store.delete().unwrap();
+        assert_eq!(store.read(), Ok(None));
+        let _ = fs::remove_dir_all(&directory);
+    }
     use crate::plugin_runtime::{EpochMode, PluginLimits, PluginRuntime};
     use std::sync::{Arc, atomic::AtomicUsize};
 

@@ -1,4 +1,5 @@
 mod android_games;
+mod artwork_backfill;
 mod catalog;
 mod console_runner;
 mod console_saf;
@@ -54,6 +55,7 @@ mod steam;
 mod steam_account;
 mod store;
 mod store_choices;
+mod store_media;
 mod wallpaper_credentials;
 mod wallpaper_search;
 mod wine_runner;
@@ -153,6 +155,15 @@ const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT: &str = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT: &str = "source-library-synced";
 /// Carries how many games a games-folder scan just added.
 const GAME_FOLDER_SCANNED_EVENT: &str = "game-folder-scanned";
+/// A game's last-played date or play time just changed. It carries nothing: the
+/// WebView pulls the library again, which is what the Activity shelves read.
+const GAME_PLAY_RECORDED_EVENT: &str = "game-play-recorded";
+/// A session shorter than this is a start that failed (a crash on the splash, a
+/// launcher that handed off and quit), not time the player spent in the game.
+const MIN_RECORDED_SESSION: Duration = Duration::from_secs(10);
+/// Progress of an artwork search over a batch of games: one event when it
+/// starts, then one per game as it finishes.
+const GAME_ARTWORK_PROGRESS_EVENT: &str = "game-artwork-progress";
 /// The record of the chosen games folder, kept beside the catalog.
 const GAME_FOLDER_RECORD: &str = "game-folder.json";
 const GAME_FOLDER_FIRST_SCAN_DELAY: Duration = Duration::from_secs(5);
@@ -680,7 +691,15 @@ impl AppState {
         let wine_prefix_root = app_data.join(WINE_PREFIXES_DIRECTORY);
         // The game-state document is re-keyed with the catalog it belongs to,
         // before `GameStateStore` reads it during setup.
-        let mut catalog = load_or_migrate_catalog(&catalog_path, &app_data.join(GAME_STATE_FILE))?;
+        let mut catalog =
+            match load_or_migrate_catalog(&catalog_path, &app_data.join(GAME_STATE_FILE)) {
+                Ok(catalog) => catalog,
+                // Propagating this with `?` would make Tauri panic inside the
+                // setup callback, which on macOS is a Cocoa callback that
+                // cannot unwind: the process aborts with a SIGABRT and the
+                // user never learns why. Say it, leave the file alone, exit.
+                Err(error) => exit_with_startup_failure(&startup_catalog_failure_message(&*error)),
+            };
 
         // Imported artwork is copied once into the app cache. That keeps the
         // browser's asset protocol tightly scoped and means a moved source
@@ -899,10 +918,18 @@ pub fn run() {
             // on the next turn of the main queue, after this, and moved the
             // screen-sized window 12 points left of the display.
             #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
-                && let Err(error) = window.set_simple_fullscreen(true)
-            {
-                eprintln!("[macos] could not cover the screen: {error}");
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                // A borderless window still gets macOS's window shadow, and
+                // with it the one-point light rim it draws around every
+                // window — on a window that covers the screen, a white hairline
+                // along the display's edges. Nothing sits behind Orivo to cast
+                // a shadow on, so there is nothing to lose.
+                if let Err(error) = window.set_shadow(false) {
+                    eprintln!("[macos] could not drop the window rim: {error}");
+                }
+                if let Err(error) = window.set_simple_fullscreen(true) {
+                    eprintln!("[macos] could not cover the screen: {error}");
+                }
             }
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
@@ -965,13 +992,19 @@ pub fn run() {
                     state.plugin_root.clone(),
                     HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
                 )
-                .with_gamestream(gamestream),
+                .with_gamestream(gamestream)
+                // The one place Orivo makes a folder for a profile and grants
+                // it without the user picking it (`prepare_stream_library`).
+                .with_managed_root(app_data.clone()),
             );
             app.manage(Arc::clone(&runners));
             app.manage(state);
             spawn_game_folder_watch(app.handle().clone());
+            // Strengthen thin artwork a little after the first paint, quietly.
+            tauri::async_runtime::spawn(artwork_backfill::run(app.handle().clone()));
             app.manage(detail);
             app.manage(media);
+            app.manage(store_media::StoreMediaCache::default());
             // Which stores are connected is answered from this secret-free
             // directory. Without it, merely opening Settings would read every
             // keychain item and macOS would ask for the keychain password once
@@ -992,6 +1025,8 @@ pub fn run() {
                     .unwrap_or_else(|_| app_data.clone())
                     .join(plugin_compile_cache::CACHE_DIRECTORY),
             );
+            // Its key sits with the app's data, away from the cache it vouches for.
+            plugin_compile_cache::configure_key_file(app_data.join("plugin-compile-cache.key"));
             // Phones are the only platforms whose URL hand-off runs through a
             // Tauri plugin, so they need the handle the `UrlOpener` seam omits.
             #[cfg(mobile)]
@@ -1105,6 +1140,7 @@ pub fn run() {
             choose_game_folder,
             fetch_game_artwork,
             reset_game_artwork,
+            game_store_media,
             remove_game,
             set_game_hidden,
             set_home_image,
@@ -1128,6 +1164,7 @@ pub fn run() {
             get_runner_plugins,
             gamestream::get_gamestream_settings,
             gamestream::update_gamestream_settings,
+            gamestream::open_gamestream_link,
             purge_plugin_compile_cache,
             get_wine_runner_status,
             begin_wine_profile_setup,
@@ -1206,6 +1243,11 @@ pub fn run() {
             runner_commands::set_runner_profile_enabled,
             runner_commands::set_runner_profile_launch_mode,
             runner_commands::begin_gamestream_pairing,
+            runner_commands::create_gamestream_profile,
+            runner_commands::probe_gamestream_host,
+            runner_commands::gamestream_pairing_status,
+            runner_commands::cancel_gamestream_pairing,
+            runner_commands::prepare_gamestream_library,
             runner_commands::find_stream_clients,
             fetch_runner_profile_artwork,
             runner_commands::delete_runner_profile,
@@ -4159,7 +4201,7 @@ async fn ensure_dxvk_macos_for_automatic_game(
         WineLaunchStatusEvent {
             game_id: game_id.to_string(),
             phase: "preparing",
-            message: "Téléchargement et vérification de DXVK-macOS pour ce jeu…".into(),
+            message: "Getting this game ready to run on your Mac…".into(),
         },
     );
     install_verified_dxvk_macos_for_profile(
@@ -5043,13 +5085,56 @@ async fn reset_game_artwork(
             .ok_or_else(|| "This game is no longer in your library.".to_string())?
     };
 
-    apply_resolved_artwork(&app, &state, &credentials, &game_id, title).await
+    apply_resolved_artwork(&app, &state, &credentials, &game_id, title, ArtworkWrite::Everything)
+        .await
+}
+
+/// The trailers and screenshots Steam's store shows for a game.
+///
+/// The detail page asks after it has painted, so this never delays the page;
+/// a game without a Steam page, or an offline machine, answers with empty lists
+/// rather than an error because the gallery is optional.
+#[tauri::command]
+async fn game_store_media(
+    state: State<'_, AppState>,
+    cache: State<'_, store_media::StoreMediaCache>,
+    game_id: String,
+) -> Result<store_media::StoreMedia, String> {
+    // A game outside the library (a Store card) can still be a Steam app by id.
+    let (title, app_id) = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        match catalog.games.iter().find(|game| game.id == game_id) {
+            Some(game) => (game.title.clone(), store_media::steam_app_id_of(game)),
+            None => (String::new(), store_media::steam_app_id_of_id(&game_id)),
+        }
+    };
+    Ok(store_media::fetch(&cache, &game_id, &title, app_id).await)
 }
 
 /// How many cards one call will try to fill. An import can bring in a library,
 /// and each card is a lookup and up to four downloads; the caller is told what
 /// is left so it can come back rather than being held for an unbounded run.
-const MAX_ARTWORK_FILLS_PER_CALL: usize = 40;
+const MAX_ARTWORK_FILLS_PER_CALL: usize = 200;
+/// Cards searched at once. Each runs a lookup and up to four concurrent
+/// downloads, so a handful in flight keeps a big import quick without opening
+/// hundreds of connections to the artwork hosts.
+const MAX_CONCURRENT_ARTWORK_FILLS: usize = 4;
+
+/// What the library hears while a batch is searched, so cards can show
+/// "looking for artwork" and swap to the real image as each one lands.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameArtworkProgressEvent {
+    /// Games whose search has not finished yet. Empty on the last event.
+    pending: Vec<String>,
+    /// The game that just finished; `None` on the opening event.
+    game_id: Option<String>,
+    /// Whether that game's artwork was written.
+    found: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5103,16 +5188,92 @@ async fn fetch_runner_profile_artwork(
             .collect()
     };
     let remaining = artless.len().saturating_sub(MAX_ARTWORK_FILLS_PER_CALL);
-    let mut filled = 0;
-    for (game_id, title) in artless.into_iter().take(MAX_ARTWORK_FILLS_PER_CALL) {
-        if apply_resolved_artwork(&app, &state, &credentials, &game_id, title)
+    let batch = artless
+        .into_iter()
+        .take(MAX_ARTWORK_FILLS_PER_CALL)
+        .collect::<Vec<_>>();
+    if batch.is_empty() {
+        return Ok(ArtworkFillResult { filled: 0, remaining });
+    }
+
+    let emit_progress = |event: GameArtworkProgressEvent| {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_ARTWORK_PROGRESS_EVENT, event);
+    };
+    let mut pending = batch
+        .iter()
+        .map(|(game_id, _)| game_id.clone())
+        .collect::<Vec<_>>();
+    emit_progress(GameArtworkProgressEvent {
+        pending: pending.clone(),
+        game_id: None,
+        found: false,
+    });
+
+    let app_ref = &app;
+    let state_ref = &*state;
+    let credentials_ref = &**credentials;
+    let mut results = futures_util::stream::iter(batch.into_iter().map(
+        |(game_id, title)| async move {
+            let found = apply_resolved_artwork(
+                app_ref,
+                state_ref,
+                credentials_ref,
+                &game_id,
+                title,
+                ArtworkWrite::Everything,
+            )
             .await
-            .is_ok()
-        {
+            .is_ok();
+            (game_id, found)
+        },
+    ))
+    .buffer_unordered(MAX_CONCURRENT_ARTWORK_FILLS);
+
+    let mut filled = 0;
+    while let Some((game_id, found)) = results.next().await {
+        if found {
             filled += 1;
         }
+        pending.retain(|id| id != &game_id);
+        emit_progress(GameArtworkProgressEvent {
+            pending: pending.clone(),
+            game_id: Some(game_id),
+            found,
+        });
     }
     Ok(ArtworkFillResult { filled, remaining })
+}
+
+/// Which of a game's artwork slots an artwork search may write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArtworkWrite {
+    /// Every role, replacing whatever is there: the player asked for a reset,
+    /// or the card has nothing worth keeping.
+    Everything,
+    /// Only these roles, and only while their slot is still empty when the
+    /// result lands. The background top-up uses this so it can never replace
+    /// art a store published or the player chose, even one chosen while the
+    /// search was running.
+    GapsOnly(Vec<game_artwork::ArtworkRole>),
+}
+
+impl ArtworkWrite {
+    fn roles(&self) -> Vec<game_artwork::ArtworkRole> {
+        match self {
+            Self::Everything => game_artwork::ArtworkRole::all().to_vec(),
+            Self::GapsOnly(roles) => roles.clone(),
+        }
+    }
+
+    /// Whether `role` may be written into `game` as it is right now.
+    fn allows(&self, role: game_artwork::ArtworkRole, game: &Game) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::GapsOnly(roles) => {
+                roles.contains(&role) && artwork_backfill::missing_roles(game).contains(&role)
+            }
+        }
+    }
 }
 
 /// Find artwork for one game and write it into its card.
@@ -5120,61 +5281,82 @@ async fn fetch_runner_profile_artwork(
 /// Split out of the command so the same work can be done for a game the user
 /// never asked about by name: a library import brings in cards with no artwork
 /// at all, and filling them is the same four roles, the same trusted hosts and
-/// the same cache.
+/// the same cache. `write` narrows that to the empty slots for the launch-time
+/// top-up.
 async fn apply_resolved_artwork(
     app: &AppHandle,
     state: &AppState,
     credentials: &wallpaper_credentials::WallpaperCredentialsService,
     game_id: &str,
     title: String,
+    write: ArtworkWrite,
 ) -> Result<ArtworkResetResponse, String> {
     let artwork = game_artwork::resolve(&title, credentials.steamgriddb_api_key().as_deref()).await;
-    if artwork.is_empty() {
+    let wanted = write.roles();
+    if wanted.iter().all(|role| artwork.for_role(*role).is_empty()) {
         return Err(format!("No artwork was found for \u{201c}{title}\u{201d}."));
     }
 
     let cache_dir = media_cache_dir(app).map_err(|error| error.to_string())?;
     fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
     let stem = cache_stem(game_id);
-    let mut downloaded = Vec::new();
-    for role in game_artwork::ArtworkRole::all() {
-        // Candidates are ordered best-first; the first one that actually
-        // exists wins. A publisher who never uploaded a library hero is a
-        // normal case, not an error.
-        for url in artwork.for_role(role) {
-            if !game_artwork::is_trusted_artwork_url(url) {
-                continue;
+    // The roles are independent, so they download side by side: a slow host
+    // costs one role's time, not the sum of all of them.
+    let replaces = write == ArtworkWrite::Everything;
+    let downloads = wanted.iter().copied().map(|role| {
+        let cache_dir = &cache_dir;
+        let stem = &stem;
+        let candidates = artwork.for_role(role);
+        async move {
+            // Candidates are ordered best-first; the first one that actually
+            // exists wins. A publisher who never uploaded a library hero is a
+            // normal case, not an error.
+            for url in candidates {
+                if !game_artwork::is_trusted_artwork_url(url) {
+                    continue;
+                }
+                let Ok(bytes) = download_artwork_bytes(url).await else {
+                    continue;
+                };
+                let extension = if url
+                    .split('?')
+                    .next()
+                    .unwrap_or(url)
+                    .to_ascii_lowercase()
+                    .ends_with(".png")
+                {
+                    "png"
+                } else {
+                    "jpg"
+                };
+                let prefix = match role {
+                    game_artwork::ArtworkRole::Cover => "usercover",
+                    game_artwork::ArtworkRole::Landscape => "landscape",
+                    game_artwork::ArtworkRole::Background => "home",
+                    game_artwork::ArtworkRole::Logo => "logo",
+                };
+                // A fresh filename each time, so the WebView repaints instead of
+                // serving its cached copy of a stable path.
+                // A top-up writes into an empty slot, and the player may fill it
+                // while the search runs; a sweep of the prefix could delete the
+                // file they just picked.
+                if replaces {
+                    remove_cached_artwork(cache_dir, &format!("{stem}-{prefix}-"));
+                }
+                let path =
+                    cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
+                if fs::write(&path, &bytes).is_ok() {
+                    return Some((role, path));
+                }
             }
-            let Ok(bytes) = download_artwork_bytes(url).await else {
-                continue;
-            };
-            let extension = if url
-                .split('?')
-                .next()
-                .unwrap_or(url)
-                .to_ascii_lowercase()
-                .ends_with(".png")
-            {
-                "png"
-            } else {
-                "jpg"
-            };
-            let prefix = match role {
-                game_artwork::ArtworkRole::Cover => "usercover",
-                game_artwork::ArtworkRole::Landscape => "landscape",
-                game_artwork::ArtworkRole::Background => "home",
-                game_artwork::ArtworkRole::Logo => "logo",
-            };
-            // A fresh filename each time, so the WebView repaints instead of
-            // serving its cached copy of a stable path.
-            remove_cached_artwork(&cache_dir, &format!("{stem}-{prefix}-"));
-            let path = cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
-            if fs::write(&path, &bytes).is_ok() {
-                downloaded.push((role, path));
-                break;
-            }
+            None
         }
-    }
+    });
+    let downloaded = futures_util::future::join_all(downloads)
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     if downloaded.is_empty() {
         return Err(format!(
@@ -5202,6 +5384,10 @@ async fn apply_resolved_artwork(
                 return Err("This game is no longer in your library.".to_string());
             };
             for (role, path) in downloaded {
+                if !write.allows(role, game) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
                 match role {
                     game_artwork::ArtworkRole::Cover => {
                         game.cover_path = Some(path.clone());
@@ -5226,6 +5412,10 @@ async fn apply_resolved_artwork(
                 replaced.push(role.token().to_string());
             }
         }
+        // A top-up whose every slot was filled meanwhile has nothing to save.
+        if replaced.is_empty() {
+            return Ok(ArtworkResetResponse { title, replaced });
+        }
         persist_catalog(&next_catalog, &state.catalog_path).map_err(|error| error.to_string())?;
         let mut catalog = state
             .catalog
@@ -5247,9 +5437,10 @@ struct ArtworkResetResponse {
 
 async fn download_artwork_bytes(url: &str) -> Result<Vec<u8>, String> {
     const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|_| "The artwork download could not be started.".to_string())?;
+    // The shared artwork client carries the timeouts: this one used to have
+    // none, so a stalled CDN held the whole fill for as long as it liked.
+    let client = game_artwork::download_client()
+        .ok_or_else(|| "The artwork download could not be started.".to_string())?;
     let response = client
         .get(url)
         .send()
@@ -7235,14 +7426,129 @@ async fn disconnect_source_account(
     Ok(removed as u32)
 }
 
+/// `seconds` since the Unix epoch as an RFC 3339 UTC timestamp.
+///
+/// The Library's Activity shelves parse `lastPlayedAt` with `Date.parse`
+/// (`lastPlayedTime` in `library-browse.ts`), which reads exactly this form.
+/// Written by hand because the host carries no calendar crate for one format;
+/// the day count is Howard Hinnant's `civil_from_days`.
+fn rfc3339_utc(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let rest = seconds % 86_400;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
+}
+
+fn now_rfc3339() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    rfc3339_utc(seconds)
+}
+
+/// The seconds a finished session adds to a game's play time, or none when it
+/// was too short to be a session at all (see `MIN_RECORDED_SESSION`).
+fn countable_session_seconds(elapsed: Duration) -> Option<u64> {
+    (elapsed >= MIN_RECORDED_SESSION).then(|| elapsed.as_secs())
+}
+
+/// Stamp one game as played at `played_at` and, when a session ended, add its
+/// length to the play time. Reports whether the game was found.
+fn apply_play_record(
+    catalog: &mut Catalog,
+    game_id: &str,
+    played_at: &str,
+    session_seconds: Option<u64>,
+) -> bool {
+    let Some(game) = catalog.games.iter_mut().find(|game| game.id == game_id) else {
+        return false;
+    };
+    game.last_played_at = Some(played_at.to_string());
+    if let Some(seconds) = session_seconds {
+        game.play_time_seconds = game.play_time_seconds.saturating_add(seconds);
+    }
+    true
+}
+
+/// Persist a play record the way every other catalog edit is: under the
+/// mutation lock, on a clone, swapped in only once it is on disk. Then tell the
+/// WebView, which is what makes the shelves move without a restart.
+///
+/// Best effort on purpose: a game that has already started must never fail
+/// because its bookkeeping could not be written.
+fn record_play(app: &AppHandle, game_id: &str, session_seconds: Option<u64>) {
+    let state = app.state::<AppState>();
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return;
+    };
+    let Ok(mut next) = state.catalog.read().map(|catalog| catalog.clone()) else {
+        return;
+    };
+    if !apply_play_record(&mut next, game_id, &now_rfc3339(), session_seconds) {
+        return;
+    }
+    if persist_catalog(&next, &state.catalog_path).is_err() {
+        return;
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+    let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_PLAY_RECORDED_EVENT, ());
+}
+
+/// A game Orivo started has just been handed over: it was played now. Where
+/// Orivo does not own the process (Steam, Epic, streaming, an Android intent)
+/// this is all that is known, and no play time is invented.
+fn record_launch(app: &AppHandle, game_id: &str) {
+    record_play(app, game_id, None);
+}
+
+/// A process Orivo owns has just ended: add the time it ran.
+fn record_session(app: &AppHandle, game_id: &str, started: Instant) {
+    let Some(seconds) = countable_session_seconds(started.elapsed()) else {
+        return;
+    };
+    record_play(app, game_id, Some(seconds));
+}
+
+/// Wait for a game process Orivo started and record how long it ran. This also
+/// reaps it, so a direct launch no longer leaves a zombie behind.
+fn watch_game_session(app: AppHandle, game_id: String, mut child: std::process::Child) {
+    let started = Instant::now();
+    thread::spawn(move || {
+        let _ = child.wait();
+        record_session(&app, &game_id, started);
+    });
+}
+
 fn monitor_wine_startup(
     app: AppHandle,
     game_id: String,
     graphics_label: &'static str,
     mut child: std::process::Child,
 ) {
+    let started = Instant::now();
     thread::spawn(move || {
-        let deadline = Instant::now() + WINE_EARLY_EXIT_WINDOW;
+        let deadline = started + WINE_EARLY_EXIT_WINDOW;
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => {
@@ -7252,7 +7558,7 @@ fn monitor_wine_startup(
                         WineLaunchStatusEvent {
                             game_id,
                             phase: "failed",
-                            message: "Wine stopped before this game finished starting. Retry in compatibility mode from Orivo."
+                            message: "The game closed before it finished starting. Try again in compatibility mode."
                                 .into(),
                         },
                     );
@@ -7265,7 +7571,7 @@ fn monitor_wine_startup(
                         WineLaunchStatusEvent {
                             game_id,
                             phase: "failed",
-                            message: "Wine could not confirm this game started. Retry in compatibility mode from Orivo."
+                            message: "Orivo couldn't tell whether the game started. Try again in compatibility mode."
                                 .into(),
                         },
                     );
@@ -7276,16 +7582,29 @@ fn monitor_wine_startup(
                         MAIN_WINDOW_LABEL,
                         WINE_LAUNCH_STATUS_EVENT,
                         WineLaunchStatusEvent {
-                            game_id,
+                            game_id: game_id.clone(),
                             phase: "started",
-                            message: format!(
-                                "Wine-Staging is running this game with {graphics_label}."
-                            ),
+                            // Plain words: which translation layer and which
+                            // renderer run the game is not the player's
+                            // business (`graphics_label` is kept for logs).
+                            message: "Running".into(),
                         },
                     );
+                    eprintln!("[wine] {game_id} running with {graphics_label}");
                     // Reap the direct Wine process once it exits, but do not
-                    // turn a normal end-of-session into a launch failure.
+                    // turn a normal end-of-session into a launch failure; say
+                    // that it ended, so the "running" line goes away.
                     let _ = child.wait();
+                    record_session(&app, &game_id, started);
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        WINE_LAUNCH_STATUS_EVENT,
+                        WineLaunchStatusEvent {
+                            game_id,
+                            phase: "ended",
+                            message: String::new(),
+                        },
+                    );
                     return;
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(75)),
@@ -7294,8 +7613,29 @@ fn monitor_wine_startup(
     });
 }
 
+/// Start a game, and remember that it was started.
+///
+/// `launch_game_inner` has many branches and early returns, and every `Ok` it
+/// gives back is a game that was handed over: the install-on-phone choice
+/// answers with an error, and installs have their own commands. Recording here,
+/// once, keeps a new branch from forgetting to.
 #[tauri::command]
 async fn launch_game(
+    app: AppHandle,
+    game_id: String,
+    launch_option: Option<String>,
+    state: State<'_, AppState>,
+    runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
+) -> Result<LaunchResult, String> {
+    let result =
+        launch_game_inner(app.clone(), game_id.clone(), launch_option, state, runners).await;
+    if result.is_ok() {
+        record_launch(&app, &game_id);
+    }
+    result
+}
+
+async fn launch_game_inner(
     app: AppHandle,
     game_id: String,
     // Which of the game's own ways of starting to use, as offered by its view.
@@ -7478,12 +7818,14 @@ async fn launch_game(
         // Loading and probing the component, asking it to prepare the launch and
         // resolving the game file are all blocking work, and none of it may run
         // on the command executor.
-        let resolved_title = tauri::async_runtime::spawn_blocking(move || {
-            service.launch(&runner_id, &profile_id, &game_ref)
+        let (resolved_title, child) = tauri::async_runtime::spawn_blocking(move || {
+            service.launch_owned(&runner_id, &profile_id, &game_ref)
         })
         .await
         .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
         .map_err(|error| error.to_string())?;
+        // The emulator is Orivo's own child here, so its session is timed.
+        watch_game_session(app.clone(), game.id.clone(), child);
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title}"),
             handoff: Some(LaunchHandoff::Process),
@@ -7770,10 +8112,16 @@ async fn launch_game(
     // `/usr/bin/open` can briefly wait while macOS checks whether the Steam
     // bundle accepted the URI. Keep that confirmation off the command/UI
     // executor, while direct launches still return once their process starts.
-    tauri::async_runtime::spawn_blocking(move || launcher::launch(&game))
+    let game_id_for_session = game.id.clone();
+    let child = tauri::async_runtime::spawn_blocking(move || launcher::launch_owned(&game))
         .await
         .map_err(|error| format!("Launch request did not finish: {error}"))?
         .map_err(|error| error.to_string())?;
+    // Only a direct launch leaves a process of Orivo's own to time; a store
+    // client's hand-off ends when the client has accepted the request.
+    if let Some(child) = child {
+        watch_game_session(app.clone(), game_id_for_session, child);
+    }
     Ok(LaunchResult {
         status: format!("Launching {title}"),
         handoff: Some(handoff),
@@ -8293,6 +8641,42 @@ fn resolved_catalog_path(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
         return Ok(PathBuf::from(path));
     }
     Ok(app.path().app_data_dir()?.join(CATALOG_FILE))
+}
+
+/// What to tell the user when the catalog cannot be loaded at startup.
+///
+/// A catalog written by a newer Orivo is refused on purpose: an older build
+/// must not rewrite a format it does not understand. The person only needs to
+/// know that, and what to do about it. Any other failure (unreadable or
+/// corrupt file) has no such single remedy, so the underlying error is shown.
+fn startup_catalog_failure_message(error: &(dyn std::error::Error + 'static)) -> String {
+    match error.downcast_ref::<catalog::CatalogError>() {
+        Some(catalog::CatalogError::UnsupportedSchema { .. }) => "Your library was saved by a \
+             newer version of Orivo. Install the latest version of Orivo to open it. Your \
+             library has not been changed."
+            .to_string(),
+        _ => format!(
+            "Orivo could not open your library.\n\n{error}\n\nYour library has not been \
+             changed."
+        ),
+    }
+}
+
+/// Shows a blocking native message, then ends the process.
+///
+/// Startup has no window yet, so there is nowhere else to say it. It exits
+/// instead of returning an error because an error out of `setup` becomes a
+/// panic in a callback that cannot unwind (see `AppState::load`).
+fn exit_with_startup_failure(message: &str) -> ! {
+    eprintln!("{message}");
+    #[cfg(desktop)]
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Orivo cannot start")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    std::process::exit(1)
 }
 
 /// A migration that rewrites game ids also has to move the wishlist, media
@@ -9229,32 +9613,27 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
     }
 
     // A local record with no discovered or fetched artwork borrows the bundled
-    // plate whose title matches its own (case-insensitive, loose), and
-    // otherwise wears the neutral placeholder. This is presentation-only: the
-    // stored record keeps its empty slots, so the post-import artwork search
-    // still sees the gap and can fill it with real art.
+    // plate whose title matches its own (case-insensitive, loose). One with no
+    // match keeps its empty slots, so the frontend draws its own generated
+    // per-game fallback instead of every such card sharing one image. This is
+    // presentation-only: the stored record is untouched, so the post-import
+    // artwork search still sees the gap and can fill it with real art.
     for game in &mut presentation.games {
         if game.source != GameSource::Local
             || (game.cover_path.is_some() && game.artwork_path.is_some())
         {
             continue;
         }
-        let matched = bundled_artwork_for_title(&game.title);
-        let cover = matched.and_then(|entry| entry.cover.clone());
-        let hero = matched.and_then(|entry| entry.hero.clone());
+        let Some(matched) = bundled_artwork_for_title(&game.title) else {
+            continue;
+        };
+        let cover = matched.cover.clone();
+        let hero = matched.hero.clone();
         if game.cover_path.is_none() {
-            game.cover_path = Some(PathBuf::from(
-                cover
-                    .clone()
-                    .or_else(|| hero.clone())
-                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
-            ));
+            game.cover_path = cover.clone().or_else(|| hero.clone()).map(PathBuf::from);
         }
         if game.artwork_path.is_none() {
-            game.artwork_path = Some(PathBuf::from(
-                hero.or(cover)
-                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
-            ));
+            game.artwork_path = hero.or(cover).map(PathBuf::from);
         }
     }
 
@@ -9440,11 +9819,6 @@ fn game_key(title: &str) -> String {
 /// The bundled IGDB artwork manifest shipped with the app. It names the titles
 /// whose covers and heroes exist as `/media/igdb` public assets.
 const BUNDLED_ARTWORK_MANIFEST: &str = include_str!("../../assets/igdb/sources.json");
-
-/// A neutral bundled brand image for games whose artwork was not found. An
-/// unknown game must never wear another game's art (this used to fall through
-/// to the Elden Ring plates).
-const NEUTRAL_ARTWORK_PLACEHOLDER: &str = "/media/orivo-ring-icon.png";
 
 /// One bundled title from the manifest, keyed by its normalized title.
 struct BundledArtwork {
@@ -9702,6 +10076,64 @@ pub(crate) mod tests {
         ));
         assert!(set_or_remove_extra(&mut game, "k", None));
         assert!(!set_or_remove_extra(&mut game, "k", None));
+    }
+
+    /// The Activity shelves hand `lastPlayedAt` to `Date.parse`, so the only
+    /// thing that matters is that the host writes the form it reads.
+    #[test]
+    fn a_launch_timestamp_is_rfc3339_utc() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339_utc(1_792_000_000), "2026-10-14T17:46:40Z");
+        assert_eq!(rfc3339_utc(4_102_444_799), "2099-12-31T23:59:59Z");
+        let now = now_rfc3339();
+        assert_eq!(now.len(), 20);
+        assert!(now.ends_with('Z') && now.as_bytes()[10] == b'T');
+    }
+
+    #[test]
+    fn a_session_shorter_than_ten_seconds_is_a_failed_start() {
+        assert_eq!(countable_session_seconds(Duration::from_secs(0)), None);
+        assert_eq!(countable_session_seconds(Duration::from_millis(9_999)), None);
+        assert_eq!(countable_session_seconds(Duration::from_secs(10)), Some(10));
+        assert_eq!(
+            countable_session_seconds(Duration::from_millis(3_600_900)),
+            Some(3_600)
+        );
+    }
+
+    #[test]
+    fn a_play_record_stamps_the_date_and_adds_only_session_time() {
+        let mut played = Game::from_executable("/bin/sh").unwrap();
+        played.play_time_seconds = 600;
+        let mut other = Game::from_executable("/bin/ls").unwrap();
+        other.play_time_seconds = 42;
+        let id = played.id.clone();
+        let mut catalog = Catalog::default();
+        catalog.games.push(played);
+        catalog.games.push(other);
+
+        // A launch alone dates the game and leaves its time as it was.
+        assert!(apply_play_record(&mut catalog, &id, "2026-10-25T10:00:00Z", None));
+        assert_eq!(
+            catalog.games[0].last_played_at.as_deref(),
+            Some("2026-10-25T10:00:00Z")
+        );
+        assert_eq!(catalog.games[0].play_time_seconds, 600);
+
+        // A finished session adds to what is there.
+        assert!(apply_play_record(&mut catalog, &id, "2026-10-25T11:00:00Z", Some(3_000)));
+        assert_eq!(
+            catalog.games[0].last_played_at.as_deref(),
+            Some("2026-10-25T11:00:00Z")
+        );
+        assert_eq!(catalog.games[0].play_time_seconds, 3_600);
+
+        // The other game, and an id that is not in the catalog, are untouched.
+        assert!(catalog.games[1].last_played_at.is_none());
+        assert_eq!(catalog.games[1].play_time_seconds, 42);
+        assert!(!apply_play_record(&mut catalog, "missing", "2026-10-25T12:00:00Z", Some(5)));
     }
 
     #[test]
@@ -10258,6 +10690,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_newer_catalog_is_explained_and_left_untouched() {
+        let root = temporary_directory("catalog-newer-schema");
+        let catalog_path = root.join("catalog.json");
+        let contents = format!(
+            r#"{{"schema_version":{},"games":[]}}"#,
+            catalog::CURRENT_SCHEMA_VERSION + 1
+        );
+        fs::write(&catalog_path, &contents).unwrap();
+
+        let error = load_or_migrate_catalog(&catalog_path, &root.join(GAME_STATE_FILE))
+            .expect_err("a newer schema must be refused");
+
+        assert!(matches!(
+            error.downcast_ref::<catalog::CatalogError>(),
+            Some(catalog::CatalogError::UnsupportedSchema { .. })
+        ));
+        assert!(startup_catalog_failure_message(&*error).contains("newer version of Orivo"));
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), contents);
+    }
+
+    #[test]
+    fn an_unreadable_catalog_failure_message_carries_the_error() {
+        let error = catalog::CatalogError::Invalid("broken".into());
+
+        assert!(startup_catalog_failure_message(&error).contains("invalid catalog: broken"));
+    }
+
+    #[test]
     fn a_later_migration_never_clobbers_an_earlier_backup() {
         let root = temporary_directory("catalog-backup-versions");
         let catalog_path = root.join("catalog.json");
@@ -10463,7 +10923,7 @@ pub(crate) mod tests {
 
     /// A freshly imported local game must never wear another game's art: a
     /// title matching a bundled plate borrows that plate, and an unknown title
-    /// gets the neutral placeholder rather than the Elden Ring fallback.
+    /// keeps empty slots rather than wearing another game's art.
     #[test]
     fn local_games_without_artwork_get_bundled_or_neutral_presentation_art() {
         let mut stored = Catalog::default();
@@ -10495,14 +10955,10 @@ pub(crate) mod tests {
             .iter()
             .find(|game| game.id == "local-hozy")
             .unwrap();
-        assert_eq!(
-            unknown.cover_path.as_deref(),
-            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
-        );
-        assert_eq!(
-            unknown.artwork_path.as_deref(),
-            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
-        );
+        // No slot is filled for an unknown title, so the frontend draws its own
+        // generated fallback for it instead of a shared image.
+        assert!(unknown.cover_path.is_none());
+        assert!(unknown.artwork_path.is_none());
         // Presentation enrichment must stay out of the stored catalog so the
         // post-import artwork search still sees the gap.
         assert!(stored.games.iter().all(|game| game.cover_path.is_none()));

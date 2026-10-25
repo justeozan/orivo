@@ -8,10 +8,6 @@ import type {
 
 const storeCategories = new Set<StoreCategory>([
   "for-you",
-  "good-for-brain",
-  "short-sessions",
-  "strong-stories",
-  "relaxing",
   "all-games",
 ]);
 const storePlatforms = new Set<StorePlatform>([

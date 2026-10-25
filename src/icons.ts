@@ -26,6 +26,9 @@ export type IconName =
   | "refresh"
   | "folder"
   | "monitor"
+  | "cast"
+  | "plus"
+  | "wine"
   | "alert"
   | "star"
   | "thumbs-up"
@@ -59,6 +62,7 @@ export type IconName =
   | "gog"
   | "ubisoft"
   | "microsoft"
+  | "microsoft-store"
   | "instant-gaming"
   | "sun"
   | "cover"
@@ -74,13 +78,16 @@ const paths: Record<IconName, string> = {
   orivo:
     '<path fill="currentColor" stroke="none" d="M 2 28 C 4 18 7 8 13 3 C 15 1 18 1 20 3 C 26 8 29 18 30 28 L 23 28 C 22 21 20 15 17 12 C 14 14 11 20 10 28 Z M 12 21 C 14 19 18 19 20 21 L 21 25 L 11 25 Z" />',
   home: '<path d="M3 10.5 12 3l9 7.5M5.5 9V20h13V9" />',
+  // Library, Store and Settings are Lucide's ("library-big", "store",
+  // "settings"; ISC licence, https://lucide.dev): the navigation's three
+  // marks are the most-seen glyphs in the app and deserve drawn ones.
   library:
-    '<path d="M4 5h6v14H4zM14 5h6v14h-6zM7 8h.01M17 8h.01" />',
+    '<rect width="8" height="18" x="3" y="3" rx="1" /><path d="M7 3v18" /><path d="M20.4 18.9c.2.5-.1 1.1-.6 1.3l-1.9.7c-.5.2-1.1-.1-1.3-.6L11.1 5.1c-.2-.5.1-1.1.6-1.3l1.9-.7c.5-.2 1.1.1 1.3.6Z" />',
   collections: '<rect x="4" y="4" width="16" height="16" rx="1" /><path d="M4 9h16M9 4v16" />',
   store:
-    '<path d="M4 8h16l-1.5 12h-13zM8 8V6a4 4 0 0 1 8 0v2" />',
+    '<path d="M15 21v-5a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v5" /><path d="M17.774 10.31a1.12 1.12 0 0 0-1.549 0 2.5 2.5 0 0 1-3.451 0 1.12 1.12 0 0 0-1.548 0 2.5 2.5 0 0 1-3.452 0 1.12 1.12 0 0 0-1.549 0 2.5 2.5 0 0 1-3.77-3.248l2.889-4.184A2 2 0 0 1 7 2h10a2 2 0 0 1 1.653.873l2.895 4.192a2.5 2.5 0 0 1-3.774 3.244" /><path d="M4 10.95V19a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8.05" />',
   settings:
-    '<circle cx="12" cy="12" r="3.5" /><path d="M4 12h2M18 12h2M12 4v2M12 18v2M6.35 6.35l1.4 1.4M16.25 16.25l1.4 1.4M17.65 6.35l-1.4 1.4M7.75 16.25l-1.4 1.4" />',
+    '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" />',
   search: '<circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" />',
   bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 8-3 10h18c0-2-3-3-3-10M10 22h4" />',
   // Two half-links, open in the middle: the "connect a library" step reads as a
@@ -111,7 +118,12 @@ const paths: Record<IconName, string> = {
   close: '<path d="m6 6 12 12M18 6 6 18" />',
   refresh: '<path d="M20 11a8 8 0 1 0 1.2 4.2M20 5v6h-6" />',
   folder: '<path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />',
-  monitor: '<rect x="3" y="4" width="18" height="13" rx="1" /><path d="M8 21h8M12 17v4" />',
+  // Lucide's "monitor", "cast" and "wine" (ISC licence): the Source row's
+  // glyphs for Local, Moonlight streaming and Wine, which have no wordmark.
+  monitor: '<rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" />',
+  plus: '<path d="M5 12h14" /><path d="M12 5v14" />',
+  cast: '<path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><path d="M2 12a9 9 0 0 1 8 8" /><path d="M2 16a5 5 0 0 1 4 4" /><line x1="2" x2="2.01" y1="20" y2="20" />',
+  wine: '<path d="M8 22h8" /><path d="M7 10h10" /><path d="M12 15v7" /><path d="M12 15a5 5 0 0 0 5-5c0-2-.5-4-2-8H9c-1.5 4-2 6-2 8a5 5 0 0 0 5 5Z" />',
   alert: '<circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5M12 16h.01" />',
   star:
     '<path d="m12 3.6 2.55 5.16 5.7.83-4.12 4.02.97 5.67L12 16.9l-5.07 2.68.97-5.67-4.12-4.02 5.7-.83z" />',
@@ -164,7 +176,7 @@ const paths: Record<IconName, string> = {
   playstation:
     '<path d="M8.8 3.6v16.8" /><path d="M8.8 3.6c4 1 6 2.7 6 5.1 0 2.1-1.5 3.2-3.6 3.2H8.8M8.8 16.2c-1.2 1-2.4 1.4-3.4 1.2M15.4 16.5h4" />',
   xbox:
-    '<circle cx="12" cy="12" r="8.5" /><path d="M6.6 5.9c2.6 1.1 4.4 3 5.4 5 1-2 2.8-3.9 5.4-5" /><path d="M6.6 18.1c1.5-3.6 3.3-6.2 5.4-7.8 2.1 1.6 3.9 4.2 5.4 7.8" />',
+    '<path fill="currentColor" stroke="none" d="M4.102 21.033C6.211 22.881 8.977 24 12 24c3.026 0 5.789-1.119 7.902-2.967 1.877-1.912-4.316-8.709-7.902-11.417-3.582 2.708-9.779 9.505-7.898 11.417zm11.16-14.406c2.5 2.961 7.484 10.313 6.076 12.912C23.002 17.48 24 14.861 24 12.004c0-3.34-1.365-6.362-3.57-8.536 0 0-.027-.022-.082-.042-.063-.022-.152-.045-.281-.045-.592 0-1.985.434-4.805 3.246zM3.654 3.426c-.057.02-.082.041-.086.042C1.365 5.642 0 8.664 0 12.004c0 2.854.998 5.473 2.661 7.533-1.401-2.605 3.579-9.951 6.08-12.91-2.82-2.813-4.216-3.245-4.806-3.245-.131 0-.223.021-.281.046v-.002zM12 3.551S9.055 1.828 6.755 1.746c-.903-.033-1.454.295-1.521.339C7.379.646 9.659 0 11.984 0H12c2.334 0 4.605.646 6.766 2.085-.068-.046-.615-.372-1.52-.339C14.946 1.828 12 3.545 12 3.545v.006z" />',
   switch:
     '<rect x="3.6" y="3.6" width="7" height="16.8" rx="3" /><rect x="13.4" y="3.6" width="7" height="16.8" rx="3" /><circle cx="7.1" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="16.9" cy="16" r="1.1" fill="currentColor" stroke="none" />',
   emulator:
@@ -187,29 +199,22 @@ const paths: Record<IconName, string> = {
   info: '<circle cx="12" cy="12" r="10" /><path d="M12 16v-4" /><path d="M12 8h.01" />',
   sync:
     '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" /><path d="M8 16H3v5" />',
-  // Connected-store marks, drawn as the recognisable brand shapes so a card
-  // reads at a glance. These are solid, filled marks rather than the outline
-  // style above, because that is what makes a store logo legible at 20px.
-  // Epic: the launcher's shield, drawn as an outline with a solid "E".
-  // A filled shield turns into a white blob at 20px, which is exactly what it
-  // looked like on the library badge; the outline keeps the silhouette while
-  // letting the letter carry the mark.
+  // Connected-store marks. Epic, GOG and Ubisoft are their official marks
+  // from simple-icons (CC0, https://simpleicons.org), filled, which is what
+  // keeps a store logo legible at 20px.
   epic:
-    '<path d="M5.9 3.2h12.2c.8 0 1.4.6 1.4 1.4v9.7c0 1.3-.5 1.8-1.4 2.3l-5.8 3c-.2.1-.4.1-.6 0l-5.8-3c-.9-.5-1.4-1-1.4-2.3V4.6c0-.8.6-1.4 1.4-1.4Z" stroke-width="1.6" /><path fill="currentColor" stroke="none" d="M9.2 6.9h5.6v1.6h-3.8v1.7h3v1.6h-3v1.8h3.9v1.6H9.2z" />',
-  // GOG: the round mark carrying its "G". The stepped inner counters of the
-  // full wordmark collapse into an unreadable "20" at this size, so the circle
-  // is drawn as an outline and the letter carries the mark.
+    '<path fill="currentColor" stroke="none" d="M3.537 0C2.165 0 1.66.506 1.66 1.879V18.44a4.262 4.262 0 00.02.433c.031.3.037.59.316.92.027.033.311.245.311.245.153.075.258.13.43.2l8.335 3.491c.433.199.614.276.928.27h.002c.314.006.495-.071.928-.27l8.335-3.492c.172-.07.277-.124.43-.2 0 0 .284-.211.311-.243.28-.33.285-.621.316-.92a4.261 4.261 0 00.02-.434V1.879c0-1.373-.506-1.88-1.878-1.88zm13.366 3.11h.68c1.138 0 1.688.553 1.688 1.696v1.88h-1.374v-1.8c0-.369-.17-.54-.523-.54h-.235c-.367 0-.537.17-.537.539v5.81c0 .369.17.54.537.54h.262c.353 0 .523-.171.523-.54V8.619h1.373v2.143c0 1.144-.562 1.71-1.7 1.71h-.694c-1.138 0-1.7-.566-1.7-1.71V4.82c0-1.144.562-1.709 1.7-1.709zm-12.186.08h3.114v1.274H6.117v2.603h1.648v1.275H6.117v2.774h1.74v1.275h-3.14zm3.816 0h2.198c1.138 0 1.7.564 1.7 1.708v2.445c0 1.144-.562 1.71-1.7 1.71h-.799v3.338h-1.4zm4.53 0h1.4v9.201h-1.4zm-3.13 1.235v3.392h.575c.354 0 .523-.171.523-.54V4.965c0-.368-.17-.54-.523-.54zm-3.74 10.147a1.708 1.708 0 01.591.108 1.745 1.745 0 01.49.299l-.452.546a1.247 1.247 0 00-.308-.195.91.91 0 00-.363-.068.658.658 0 00-.28.06.703.703 0 00-.224.163.783.783 0 00-.151.243.799.799 0 00-.056.299v.008a.852.852 0 00.056.31.7.7 0 00.157.245.736.736 0 00.238.16.774.774 0 00.303.058.79.79 0 00.445-.116v-.339h-.548v-.565H7.37v1.255a2.019 2.019 0 01-.524.307 1.789 1.789 0 01-.683.123 1.642 1.642 0 01-.602-.107 1.46 1.46 0 01-.478-.3 1.371 1.371 0 01-.318-.455 1.438 1.438 0 01-.115-.58v-.008a1.426 1.426 0 01.113-.57 1.449 1.449 0 01.312-.46 1.418 1.418 0 01.474-.309 1.58 1.58 0 01.598-.111 1.708 1.708 0 01.045 0zm11.963.008a2.006 2.006 0 01.612.094 1.61 1.61 0 01.507.277l-.386.546a1.562 1.562 0 00-.39-.205 1.178 1.178 0 00-.388-.07.347.347 0 00-.208.052.154.154 0 00-.07.127v.008a.158.158 0 00.022.084.198.198 0 00.076.066.831.831 0 00.147.06c.062.02.14.04.236.061a3.389 3.389 0 01.43.122 1.292 1.292 0 01.328.17.678.678 0 01.207.24.739.739 0 01.071.337v.008a.865.865 0 01-.081.382.82.82 0 01-.229.285 1.032 1.032 0 01-.353.18 1.606 1.606 0 01-.46.061 2.16 2.16 0 01-.71-.116 1.718 1.718 0 01-.593-.346l.43-.514c.277.223.578.335.9.335a.457.457 0 00.236-.05.157.157 0 00.082-.142v-.008a.15.15 0 00-.02-.077.204.204 0 00-.073-.066.753.753 0 00-.143-.062 2.45 2.45 0 00-.233-.062 5.036 5.036 0 01-.413-.113 1.26 1.26 0 01-.331-.16.72.72 0 01-.222-.243.73.73 0 01-.082-.36v-.008a.863.863 0 01.074-.359.794.794 0 01.214-.283 1.007 1.007 0 01.34-.185 1.423 1.423 0 01.448-.066 2.006 2.006 0 01.025 0zm-9.358.025h.742l1.183 2.81h-.825l-.203-.499H8.623l-.198.498h-.81zm2.197.02h.814l.663 1.08.663-1.08h.814v2.79h-.766v-1.602l-.711 1.091h-.016l-.707-1.083v1.593h-.754zm3.469 0h2.235v.658h-1.473v.422h1.334v.61h-1.334v.442h1.493v.658h-2.255zm-5.3.897l-.315.793h.624zm-1.145 5.19h8.014l-4.09 1.348z" />',
   gog:
-    '<circle cx="12" cy="12" r="8.7" stroke-width="1.6" /><path fill="currentColor" stroke="none" d="M12.2 7.3c1.4 0 2.6.5 3.5 1.4l-1.3 1.3a3.1 3.1 0 1 0-2.2 5.3 3.1 3.1 0 0 0 2.8-1.7h-2.8v-1.8h4.8v1a4.9 4.9 0 1 1-4.8-5.5Z" />',
-  // Ubisoft: the open spiral of the Ubisoft mark.
+    '<path fill="currentColor" stroke="none" d="M7.15 15.24H4.36a.4.4 0 0 0-.4.4v2c0 .21.18.4.4.4h2.8v1.32h-3.5c-.56 0-1.02-.46-1.02-1.03v-3.39c0-.56.46-1.02 1.03-1.02h3.48v1.32zM8.16 11.54c0 .58-.47 1.05-1.05 1.05H2.63v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4H4.39a.4.4 0 0 0-.41.4v2.02c0 .23.18.4.4.4H6v1.35H3.68c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04H7.1c.58 0 1.05.47 1.05 1.04v5.86zM21.36 19.36h-1.32v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.12h-.93a.4.4 0 0 0-.4.4v3.72h-1.33v-4.42c0-.56.46-1.02 1.03-1.02h5.61v5.44zM21.37 11.54c0 .58-.47 1.05-1.05 1.05h-4.48v-1.35h3.78a.4.4 0 0 0 .4-.4V6.39a.4.4 0 0 0-.4-.4h-2.03a.4.4 0 0 0-.4.4v2.02c0 .23.18.4.4.4h1.62v1.35H16.9c-.58 0-1.05-.46-1.05-1.04V5.68c0-.57.47-1.04 1.05-1.04h3.43c.58 0 1.05.47 1.05 1.04v5.86zM13.72 4.64h-3.44c-.58 0-1.04.47-1.04 1.04v3.44c0 .58.46 1.04 1.04 1.04h3.44c.57 0 1.04-.46 1.04-1.04V5.68c0-.57-.47-1.04-1.04-1.04m-.3 1.75v2.02a.4.4 0 0 1-.4.4h-2.03a.4.4 0 0 1-.4-.4V6.4c0-.22.17-.4.4-.4H13c.23 0 .4.18.4.4zM12.63 13.92H9.24c-.57 0-1.03.46-1.03 1.02v3.39c0 .57.46 1.03 1.03 1.03h3.39c.57 0 1.03-.46 1.03-1.03v-3.39c0-.56-.46-1.02-1.03-1.02m-.3 1.72v2a.4.4 0 0 1-.4.4v-.01H9.94a.4.4 0 0 1-.4-.4v-1.99c0-.22.18-.4.4-.4h2c.22 0 .4.18.4.4zM23.49 1.1a1.74 1.74 0 0 0-1.24-.52H1.75A1.74 1.74 0 0 0 0 2.33v19.34a1.74 1.74 0 0 0 1.75 1.75h20.5A1.74 1.74 0 0 0 24 21.67V2.33c0-.48-.2-.92-.51-1.24m0 20.58a1.23 1.23 0 0 1-1.24 1.24H1.75A1.23 1.23 0 0 1 .5 21.67V2.33a1.23 1.23 0 0 1 1.24-1.24h20.5a1.24 1.24 0 0 1 1.24 1.24v19.34z" />',
   ubisoft:
-    '<path fill="currentColor" stroke="none" d="M12 2.6c-4 0-7.4 2.6-8.7 6.2l1.7.6C6.1 6.5 8.8 4.4 12 4.4a7.6 7.6 0 0 1 0 15.2c-2.7 0-5-1.4-6.3-3.6l-1.6.9A9.4 9.4 0 1 0 12 2.6Zm0 4.5a4.9 4.9 0 0 0-4.7 3.5l1.8.5A3 3 0 1 1 12 15a3 3 0 0 1-2.3-1.1l-1.4 1.2A4.9 4.9 0 1 0 12 7.1Z" />',
-  // Microsoft: the four-square mark, shared by Xbox's PC library.
+    '<path fill="currentColor" stroke="none" d="M23.561 11.988C23.301-.304 6.954-4.89.656 6.634c.282.206.661.477.943.672a11.747 11.747 0 00-.976 3.067 11.885 11.885 0 00-.184 2.071C.439 18.818 5.621 24 12.005 24c6.385 0 11.556-5.17 11.556-11.556v-.455zm-20.27 2.06c-.152 1.246-.054 1.636-.054 1.788l-.282.098c-.108-.206-.37-.932-.488-1.908C2.163 10.308 4.7 6.96 8.57 6.33c3.544-.52 6.937 1.68 7.728 4.758l-.282.098c-.087-.087-.228-.336-.77-.878-4.281-4.281-11.002-2.32-11.956 3.74zm11.002 2.081a3.145 3.145 0 01-2.59 1.355 3.15 3.15 0 01-3.155-3.155 3.159 3.159 0 012.927-3.144c1.018-.043 1.972.51 2.416 1.398a2.58 2.58 0 01-.455 2.95c.293.205.575.4.856.595zm6.58.12c-1.669 3.782-5.106 5.766-8.77 5.712-7.034-.347-9.083-8.466-4.38-11.393l.207.206c-.076.108-.358.325-.791 1.182-.51 1.041-.672 2.081-.607 2.732.369 5.67 8.314 6.83 11.045 1.214C21.057 8.217 11.822.401 3.626 6.374l-.184-.184C5.599 2.808 9.816 1.3 13.837 2.309c6.147 1.55 9.453 7.956 7.035 13.94z" />',
+  "microsoft-store":
+    '<path fill="currentColor" stroke="none" d="M11.4 9.6v4.2H7.2V9.6h4.2zm0 9.6V15H7.2v4.2h4.2zm5.4-9.6v4.2h-4.2V9.6h4.2zm0 9.6V15h-4.2v4.2h4.2zM7.2 5.4V2.7c0-1.16.94-2.1 2.1-2.1h5.4c1.16 0 2.1.94 2.1 2.1v2.7h6.3a.9.9 0 0 1 .9.9v13.8a3.3 3.3 0 0 1-3.3 3.3H3.3A3.3 3.3 0 0 1 0 20.1V6.3a.9.9 0 0 1 .9-.9h6.3zM9 2.7v2.7h6V2.7a.3.3 0 0 0-.3-.3H9.3a.3.3 0 0 0-.3.3zM1.8 20.1a1.5 1.5 0 0 0 1.5 1.5h17.4a1.5 1.5 0 0 0 1.5-1.5V7.2H1.8v12.9z" />',
   microsoft:
     '<path fill="currentColor" stroke="none" d="M3 3h8.4v8.4H3zM12.6 3H21v8.4h-8.4zM3 12.6h8.4V21H3zM12.6 12.6H21V21h-8.4z" />',
-  // Instant Gaming sells keys, so its mark is a key rather than a storefront.
+  // Instant Gaming's own emblem, from its site's logo file.
   "instant-gaming":
-    '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M8.6 6.4a5.6 5.6 0 1 0 0 11.2 5.6 5.6 0 0 0 5.3-3.8h1.6v2.4h2.3v-2.4h1.1v2.4h2.3v-4.6h-7.3A5.6 5.6 0 0 0 8.6 6.4Zm0 3.6a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z" />',
+    '<g stroke="none" transform="translate(1.9 1) scale(0.0632)"><g transform="matrix(1.013953 0 0 1.013953 .002702 -4.857437)"><path fill="currentColor" d="M50.082 4.795a16.72 16.72 0 0 0-7.939 2.242L8.391 26.51C.368 31.137-2.383 41.393 2.248 49.414c3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.375-2.248l33.752-19.472c8.023-4.627 10.774-14.884 6.143-22.904-3.186-5.513-9.032-8.533-14.982-8.379zm84.151 48.289c-2.896 0-5.793.749-8.389 2.246L8.389 123.092c-8.025 4.63-10.774 14.884-6.141 22.904 3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.373-2.248l109.063-62.922 134.232 77.443L33.556 302.176v-58.082l1.859-1.073-24.527-24.581-2.5 1.454c-5.192 2.995-8.389 8.531-8.389 14.521v96.801c0 5.991 3.197 11.526 8.389 14.521 2.596 1.498 5.493 2.246 8.391 2.246a16.77 16.77 0 0 0 8.389-2.246L310.41 181.172a16.77 16.77 0 0 0 8.391-14.52c.002-5.992-3.199-11.525-8.391-14.52l-83.609-48.236c-.179-.108-.36-.212-.543-.312L142.621 55.33a16.78 16.78 0 0 0-8.389-2.246z" /></g></g>',
 };
 
 /**
@@ -220,23 +225,24 @@ const paths: Record<IconName, string> = {
  * above, which inherit `currentColor` and therefore read white on the artwork.
  */
 const brandPaths: Partial<Record<IconName, string>> = {
-  steam: '<circle cx="12" cy="12" r="11.2" fill="#1b2838" />' + paths.steam.replace('fill="currentColor"', 'fill="#ffffff"'),
-  // Epic's mark as it is presented on a dark surface: a light shield carrying
-  // the dark "E", rather than the outline the white library badge uses.
-  epic:
-    '<path fill="#f4f3f7" stroke="none" d="M5.9 3.2h12.2c.8 0 1.4.6 1.4 1.4v9.7c0 1.3-.5 1.8-1.4 2.3l-5.8 3c-.2.1-.4.1-.6 0l-5.8-3c-.9-.5-1.4-1-1.4-2.3V4.6c0-.8.6-1.4 1.4-1.4Z" />' +
-    '<path fill="#2a2a2a" stroke="none" d="M9.2 6.9h5.6v1.6h-3.8v1.7h3v1.6h-3v1.8h3.9v1.6H9.2z" />',
-  gog: paths.gog.replace('fill="currentColor"', 'fill="#a04ff5"'),
-  ubisoft: paths.ubisoft.replace('fill="currentColor"', 'fill="#0b7fda"'),
-  xbox: '<circle cx="12" cy="12" r="9.4" fill="#107c10" stroke="none" />' +
-    '<path d="M6.6 5.9c2.6 1.1 4.4 3 5.4 5 1-2 2.8-3.9 5.4-5" stroke="#ffffff" /><path d="M6.6 18.1c1.5-3.6 3.3-6.2 5.4-7.8 2.1 1.6 3.9 4.2 5.4 7.8" stroke="#ffffff" />',
+  steam: paths.steam.replace('fill="currentColor"', 'fill="#f4f3f7"'),
+  // The official marks (simple-icons, CC0): Epic and Ubisoft in white, as they
+  // present themselves on a dark surface; GOG in its own purple.
+  epic: paths.epic.replace('fill="currentColor"', 'fill="#f4f3f7"'),
+  gog: paths.gog.replace('fill="currentColor"', 'fill="#b25fd6"'),
+  ubisoft: paths.ubisoft.replace('fill="currentColor"', 'fill="#f4f3f7"'),
+  xbox: paths.xbox.replace('fill="currentColor"', 'fill="#107c10"'),
+  // The Store's bag with Microsoft's four windows, as it appears in colour.
+  "microsoft-store":
+    '<path fill="#f4f3f7" stroke="none" d="M7.2 5.4V2.7c0-1.16.94-2.1 2.1-2.1h5.4c1.16 0 2.1.94 2.1 2.1v2.7h6.3a.9.9 0 0 1 .9.9v13.8a3.3 3.3 0 0 1-3.3 3.3H3.3A3.3 3.3 0 0 1 0 20.1V6.3a.9.9 0 0 1 .9-.9h6.3zM9 2.7v2.7h6V2.7a.3.3 0 0 0-.3-.3H9.3a.3.3 0 0 0-.3.3zM1.8 20.1a1.5 1.5 0 0 0 1.5 1.5h17.4a1.5 1.5 0 0 0 1.5-1.5V7.2H1.8v12.9z" /><path fill="#f25022" stroke="none" d="M7.2 9.6h4.2v4.2H7.2z" /><path fill="#7fba00" stroke="none" d="M12.6 9.6h4.2v4.2h-4.2z" /><path fill="#00a4ef" stroke="none" d="M7.2 15h4.2v4.2H7.2z" /><path fill="#ffb900" stroke="none" d="M12.6 15h4.2v4.2h-4.2z" />',
   // The Microsoft mark is the one case where the colours carry the identity.
   microsoft:
     '<path fill="#f25022" stroke="none" d="M3 3h8.4v8.4H3z" />' +
     '<path fill="#7fba00" stroke="none" d="M12.6 3H21v8.4h-8.4z" />' +
     '<path fill="#00a4ef" stroke="none" d="M3 12.6h8.4V21H3z" />' +
     '<path fill="#ffb900" stroke="none" d="M12.6 12.6H21V21h-8.4z" />',
-  "instant-gaming": paths["instant-gaming"].replace('fill="currentColor"', 'fill="#f76b15"'),
+  "instant-gaming":
+    '<defs><linearGradient id="ig-a" x1="-.005" y1="347.983" x2="319.1" y2="166.653" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff8a15"/><stop offset="1" stop-color="#ff3131"/></linearGradient><linearGradient id="ig-b" x1="10.889" y1="218.57" x2="97.001" y2="72.088" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff771b"/><stop offset="1" stop-color="#ff452b" stop-opacity="0"/></linearGradient></defs><g stroke="none" transform="translate(1.9 1) scale(0.0632)"><g transform="matrix(1.013953 0 0 1.013953 .002702 -4.857437)"><path fill="url(#ig-a)" d="M50.082 4.795a16.72 16.72 0 0 0-7.939 2.242L8.391 26.51C.368 31.137-2.383 41.393 2.248 49.414c3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.375-2.248l33.752-19.472c8.023-4.627 10.774-14.884 6.143-22.904-3.186-5.513-9.032-8.533-14.982-8.379zm84.151 48.289c-2.896 0-5.793.749-8.389 2.246L8.389 123.092c-8.025 4.63-10.774 14.884-6.141 22.904 3.108 5.379 8.748 8.385 14.547 8.385a16.72 16.72 0 0 0 8.373-2.248l109.063-62.922 134.232 77.443L33.556 302.176v-58.082l1.859-1.073-24.527-24.581-2.5 1.454c-5.192 2.995-8.389 8.531-8.389 14.521v96.801c0 5.991 3.197 11.526 8.389 14.521 2.596 1.498 5.493 2.246 8.391 2.246a16.77 16.77 0 0 0 8.389-2.246L310.41 181.172a16.77 16.77 0 0 0 8.391-14.52c.002-5.992-3.199-11.525-8.391-14.52l-83.609-48.236c-.179-.108-.36-.212-.543-.312L142.621 55.33a16.78 16.78 0 0 0-8.389-2.246z" /><path fill="url(#ig-b)" d="M184.481 118.255L15.633 215.661l-6.096 3.57 24.019 24.863 184.483-106.478z" /></g></g>',
 };
 
 export function icon(name: IconName, className = "", label?: string): string {

@@ -245,22 +245,22 @@ describe("Store page filtering", () => {
 
     // Every assertion below runs before the browse each click starts can
     // resolve: the shelf repaints from what the page already holds.
-    byFocusKey(mounted.container, "category-short-sessions").click();
-    expect(cardTitles(mounted.container)).toEqual(["Unrailed", "Astro Duel 2"]);
+    byFocusKey(mounted.container, "category-all-games").click();
+    expect(cardTitles(mounted.container)).toEqual(["Unrailed", "Astro Duel 2", "Baldur's Gate 3"]);
 
     byFocusKey(mounted.container, "platform-playstation").click();
     expect(cardTitles(mounted.container)).toEqual(["Astro Duel 2"]);
 
-    expect(byFocusKey(mounted.container, "category-short-sessions").getAttribute("aria-pressed")).toBe("true");
+    expect(byFocusKey(mounted.container, "category-all-games").getAttribute("aria-pressed")).toBe("true");
     expect(byFocusKey(mounted.container, "platform-playstation").getAttribute("aria-pressed")).toBe("true");
     expect(mounted.navigations.at(-1)).toEqual({
       page: "store",
-      category: "short-sessions",
+      category: "all-games",
       platforms: ["playstation"],
       query: "",
     });
     expect(fake.browseRequests.at(-1)).toEqual({
-      category: "short-sessions",
+      category: "all-games",
       platforms: ["playstation"],
       query: "",
       cursor: null,
@@ -305,13 +305,10 @@ describe("Store page request ordering", () => {
     await mounted.host.activate(storeRoute());
     await flush();
 
-    byFocusKey(mounted.container, "category-short-sessions").click();
     byFocusKey(mounted.container, "category-all-games").click();
+    byFocusKey(mounted.container, "platform-playstation").click();
 
-    expect(fake.browseRequests.map((request) => request.category)).toEqual([
-      "short-sessions",
-      "all-games",
-    ]);
+    expect(fake.browseRequests.map((request) => request.platforms)).toEqual([[], ["playstation"]]);
 
     second.resolve(browsePage({ games: [game({ id: "b", title: "Second Result" })] }));
     await flush();
@@ -386,9 +383,8 @@ describe("Store page degraded sources", () => {
       '.store-more-panel__item[data-provider="ubisoft"]',
     );
     expect(ubisoft?.dataset.health).toBe("unavailable");
-    expect(ubisoft?.querySelector(".store-more-panel__message")?.textContent).toBe(
-      "No authorized catalog feed is configured.",
-    );
+    // The reason is a hover away, not a paragraph in the panel.
+    expect(ubisoft?.title).toBe("No authorized catalog feed is configured.");
     expect(
       mounted.container.querySelector<HTMLElement>('.store-more-panel__item[data-provider="steam"]')
         ?.dataset.health,
@@ -603,7 +599,7 @@ describe("Store page lifecycle", () => {
     });
     const mounted = mountStore(fake.client);
     const route = storeRoute({
-      category: "short-sessions",
+      category: "all-games",
       platforms: ["pc"],
       query: "unrailed",
     });
@@ -613,32 +609,32 @@ describe("Store page lifecycle", () => {
 
     const root = pageRoot(mounted.container);
     Object.defineProperty(root, "scrollTop", { configurable: true, writable: true, value: 240 });
-    byFocusKey(mounted.container, "category-relaxing").focus();
+    byFocusKey(mounted.container, "category-for-you").focus();
 
     const restoreState = mounted.host.deactivate();
     expect(restoreState).toEqual({
       scrollTop: 240,
-      focusKey: "category-relaxing",
+      focusKey: "category-for-you",
       query: "unrailed",
-      filters: ["short-sessions", "pc"],
+      filters: ["all-games", "pc"],
     });
 
     await mounted.host.activate(route, restoreState);
     await flush();
 
-    expect(byFocusKey(mounted.container, "category-short-sessions").getAttribute("aria-pressed")).toBe("true");
+    expect(byFocusKey(mounted.container, "category-all-games").getAttribute("aria-pressed")).toBe("true");
     expect(byFocusKey(mounted.container, "platform-pc").getAttribute("aria-pressed")).toBe("true");
     // The query has no field of its own any more: it rides the route, and the
     // restored page asks the backend for it again.
     expect(fake.browseRequests.at(-1)).toEqual({
-      category: "short-sessions",
+      category: "all-games",
       platforms: ["pc"],
       query: "unrailed",
       cursor: null,
       limit: 30,
     });
     expect(pageRoot(mounted.container).scrollTop).toBe(240);
-    expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("category-relaxing");
+    expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("category-for-you");
     expect(cardTitles(mounted.container)).toEqual(["Unrailed"]);
   });
 

@@ -25,6 +25,7 @@ function profile(overrides: Partial<RunnerProfileView> = {}): RunnerProfileView 
     statusMessage: null,
     enabled: true,
     applicationLabel: "Dolphin.app",
+    applicationAvailable: true,
     launchMode: "default",
     directories: [{ id: "games", label: "My ROMs", granted: true }],
     gameCount: 3,
@@ -98,6 +99,34 @@ function createFakeRunnerManager(overrides: Partial<RunnerManagerClient> = {}): 
       return overrides.beginPairing
         ? overrides.beginPairing(profileId, signal)
         : { state: "started" as const, pin: "0417", host: "astra.local" };
+    },
+    async createStreamProfile(clientId, signal) {
+      calls.push(`createStreamProfile:${clientId ?? "picker"}`);
+      return overrides.createStreamProfile
+        ? overrides.createStreamProfile(clientId, signal)
+        : profile({ pluginId: "com.orivo.gamestream", launchMode: "stream" });
+    },
+    async probeHost(profileId, host, signal) {
+      calls.push(`probeHost:${profileId}:${host}`);
+      return overrides.probeHost
+        ? overrides.probeHost(profileId, host, signal)
+        : { state: "paired" as const, host, games: 12 };
+    },
+    async pairingStatus(profileId, signal) {
+      calls.push(`pairingStatus:${profileId}`);
+      return overrides.pairingStatus
+        ? overrides.pairingStatus(profileId, signal)
+        : ("waiting" as const);
+    },
+    async cancelPairing(profileId, signal) {
+      calls.push(`cancelPairing:${profileId}`);
+      if (overrides.cancelPairing) await overrides.cancelPairing(profileId, signal);
+    },
+    async prepareLibrary(profileId, signal) {
+      calls.push(`prepareLibrary:${profileId}`);
+      return overrides.prepareLibrary
+        ? overrides.prepareLibrary(profileId, signal)
+        : profile({ id: profileId });
     },
     async fetchProfileArtwork(profileId, signal) {
       calls.push(`fetchProfileArtwork:${profileId}`);

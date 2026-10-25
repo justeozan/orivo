@@ -35,7 +35,7 @@ affiliated with Orivo.
 | `ryujinx.svg` | Wikimedia Commons, [Ryujinx.svg](https://commons.wikimedia.org/wiki/File:Ryujinx.svg) | Public domain |
 | `moonlight.svg` | Drawn for Orivo from the geometry of Moonlight's mark — a ring and an eight-spoke star. The project's own file lives in a GPL-3.0 repository, so it was described rather than copied. | Orivo |
 | `microsoft-squares.svg` | Drawn for Orivo: the four squares. | Orivo |
-| `local-folder.svg` | Orivo's own folder glyph from `src/icons.ts`. | Orivo |
+| `local-computer.svg` | Drawn for Orivo: a desktop display on its stand, in the stroke of the glyphs in `src/icons.ts`. | Orivo |
 
 The names beside the marks for Epic Games, Microsoft Store, Local, Wine,
 Moonlight, Ryujinx, Linux and PPSSPP are set in the system font at build time;

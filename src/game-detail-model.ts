@@ -13,6 +13,8 @@ import type {
   WallpaperSearchView,
 } from "./contracts";
 import { WALLPAPER_CATEGORIES } from "./contracts";
+import { displayTitle } from "./game-title";
+import { backgroundMedia } from "./media-role";
 import type { IconName } from "./icons";
 
 /* -------------------------------------------------------------------------- */
@@ -85,6 +87,13 @@ export interface WallpaperSearchState {
    * once, so there is nothing left to choose between.
    */
   focus: WallpaperCategory | null;
+  /**
+   * The Background row's "4K only" toggle. Off by default (the row then takes
+   * anything from 1920 wide, 4K first). It lives here, and survives switching
+   * games, so the choice holds for the whole session instead of resetting every
+   * time the picker opens.
+   */
+  backgroundOnly4k: boolean;
   categories: Record<WallpaperCategory, WallpaperCategoryState>;
   /** The slide currently shown in the dialog: a candidate id or a media id. */
   activeId: string | null;
@@ -184,6 +193,7 @@ export type GameDetailPageAction =
   | { type: "wallpaper-search-closed" }
   | { type: "wallpaper-search-query-changed"; query: string }
   | { type: "wallpaper-search-focus-changed"; focus: WallpaperCategory | null }
+  | { type: "wallpaper-background-4k-changed"; only4k: boolean }
   | {
       type: "wallpaper-search-started";
       category: WallpaperCategory;
@@ -356,6 +366,71 @@ function oneOf<T extends string>(
     : fallback;
 }
 
+/** A screenshot from the game's store page. */
+export interface StoreScreenshotView {
+  thumbUrl: string;
+  fullUrl: string;
+}
+
+/**
+ * A store-page trailer. Any of the three files may be missing: Steam does not
+ * publish the same formats for every title, so playback picks what exists.
+ */
+export interface StoreMovieView {
+  title: string;
+  thumbUrl: string;
+  mp4Url?: string;
+  webmUrl?: string;
+  hlsUrl?: string;
+}
+
+/** What the game's store page shows: trailers and screenshots, in store order. */
+export interface StoreMediaView {
+  screenshots: StoreScreenshotView[];
+  movies: StoreMovieView[];
+}
+
+/** A store answer is optional decoration, so anything unreadable is dropped. */
+export function normaliseStoreMedia(value: unknown): StoreMediaView {
+  if (!isRecord(value)) return { screenshots: [], movies: [] };
+  const screenshots: StoreScreenshotView[] = [];
+  if (Array.isArray(value.screenshots)) {
+    for (const entry of value.screenshots) {
+      if (!isRecord(entry)) continue;
+      const fullUrl = text(entry.fullUrl);
+      if (!fullUrl) continue;
+      screenshots.push({ fullUrl, thumbUrl: text(entry.thumbUrl, fullUrl) });
+    }
+  }
+  const movies: StoreMovieView[] = [];
+  if (Array.isArray(value.movies)) {
+    for (const entry of value.movies) {
+      if (!isRecord(entry)) continue;
+      const movie: StoreMovieView = {
+        title: text(entry.title, "Trailer"),
+        thumbUrl: text(entry.thumbUrl),
+      };
+      const mp4Url = optionalText(entry.mp4Url);
+      const webmUrl = optionalText(entry.webmUrl);
+      const hlsUrl = optionalText(entry.hlsUrl);
+      if (mp4Url) movie.mp4Url = mp4Url;
+      if (webmUrl) movie.webmUrl = webmUrl;
+      if (hlsUrl) movie.hlsUrl = hlsUrl;
+      if (!storeMovieSource(movie)) continue;
+      movies.push(movie);
+    }
+  }
+  return { screenshots, movies };
+}
+
+/**
+ * The file a trailer plays. MP4 first: every WebView plays it. WebM next, and
+ * HLS last because only WebKit plays it natively.
+ */
+export function storeMovieSource(movie: StoreMovieView): string | null {
+  return movie.mp4Url ?? movie.webmUrl ?? movie.hlsUrl ?? null;
+}
+
 export function normaliseGameMedia(value: unknown): GameMediaView[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();
@@ -383,6 +458,20 @@ export function normaliseGameMedia(value: unknown): GameMediaView[] {
     };
     const posterUrl = optionalText(entry.posterUrl);
     if (posterUrl) item.posterUrl = posterUrl;
+    // Absent on records saved before the role and size were stored; an unknown
+    // value is dropped rather than guessed at.
+    if (
+      typeof entry.role === "string" &&
+      (WALLPAPER_CATEGORIES as readonly string[]).includes(entry.role)
+    ) {
+      item.role = entry.role as WallpaperCategory;
+    }
+    const mediaWidth = wholeNumber(entry.width);
+    const mediaHeight = wholeNumber(entry.height);
+    if (mediaWidth > 0 && mediaHeight > 0) {
+      item.width = mediaWidth;
+      item.height = mediaHeight;
+    }
     media.push(item);
   }
   return media;
@@ -408,14 +497,22 @@ function normaliseWallpaperCandidates(
     const thumbnailUrl = text(entry.thumbnailUrl);
     if (!id || !thumbnailUrl || seen.has(id)) continue;
     seen.add(id);
-    candidates.push({
+    const candidate: WallpaperCandidateView = {
       id,
       title: text(entry.title, "Wallpaper"),
       thumbnailUrl,
       // A candidate inherits the row it was fetched for unless it says
       // otherwise, so a backend that omits the field still lands correctly.
       category: normaliseWallpaperCategory(entry.category, category),
-    });
+    };
+    // Both or neither: half a size cannot name a quality.
+    const width = wholeNumber(entry.width);
+    const height = wholeNumber(entry.height);
+    if (width > 0 && height > 0) {
+      candidate.width = width;
+      candidate.height = height;
+    }
+    candidates.push(candidate);
   }
   return candidates;
 }
@@ -453,7 +550,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
   );
   return {
     id,
-    title: text(value.title, "Untitled game"),
+    title: displayTitle(text(value.title, "Untitled game")),
     source: oneOf(
       value.source,
       [
@@ -712,9 +809,9 @@ export function heroImageUrl(state: GameDetailPageState): string {
     if (preview.kind === "wallpaper" || preview.kind === "cover")
       return preview.previewUrl;
   }
-  const wallpaper = mediaForKind(state.media, "wallpaper").find(
-    (item) => item.selected,
-  );
+  // A selected wallpaper that was really picked as a logo or a cover must not
+  // be painted full-bleed behind the page.
+  const wallpaper = backgroundMedia(state.media).find((item) => item.selected);
   return (
     wallpaper?.previewUrl ??
     state.detail?.heroUrl ??
@@ -901,8 +998,9 @@ export function resolvePrimaryAction(
     case "install-epic": {
       // A download already running is not a second install to offer. The button
       // becomes the progress bar instead — which is why the status row no
-      // longer carries a "Downloading 42%" chip.
-      if (detail.installState === "installing") {
+      // longer carries a "Downloading 42%" chip. A live measurement counts as
+      // proof on its own: the detail was loaded before the download began.
+      if (detail.installState === "installing" || liveInstallPercent !== null) {
         const percent = liveInstallPercent ?? detail.installPercent;
         return {
           ...base,
@@ -1416,6 +1514,7 @@ export function createInitialGameDetailState(): GameDetailPageState {
       open: false,
       query: "",
       focus: null,
+      backgroundOnly4k: false,
       categories: createWallpaperCategories(),
       activeId: null,
     },
@@ -1475,8 +1574,13 @@ export function reduceGameDetailState(
     case "activate": {
       const sameGame = state.gameId === action.gameId && state.detail !== null;
       const base = sameGame ? state : createInitialGameDetailState();
+      // The "4K only" choice outlives the game it was made on.
       return {
         ...base,
+        wallpaperSearch: {
+          ...base.wallpaperSearch,
+          backgroundOnly4k: state.wallpaperSearch.backgroundOnly4k,
+        },
         gameId: action.gameId,
         from: action.from,
         phase: action.online ? (sameGame ? base.phase : "loading") : "offline",
@@ -1588,7 +1692,7 @@ export function reduceGameDetailState(
         mediaError: action.message,
       };
     case "wallpaper-search-opened": {
-      const wallpapers = mediaForKind(state.media, "wallpaper");
+      const wallpapers = backgroundMedia(state.media);
       const preview = findMedia(state.media, state.previewMediaId);
       return {
         ...state,
@@ -1618,6 +1722,16 @@ export function reduceGameDetailState(
         ...state,
         wallpaperSearch: { ...state.wallpaperSearch, open: false },
       };
+    case "wallpaper-background-4k-changed":
+      return state.wallpaperSearch.backgroundOnly4k === action.only4k
+        ? state
+        : {
+            ...state,
+            wallpaperSearch: {
+              ...state.wallpaperSearch,
+              backgroundOnly4k: action.only4k,
+            },
+          };
     case "wallpaper-search-query-changed":
       return {
         ...state,

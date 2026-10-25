@@ -25,7 +25,7 @@ export const CONNECTED_SOURCES: readonly ConnectedSourceDescriptor[] = [
   { provider: "gog", label: "GOG", icon: "gog" },
   { provider: "ubisoft", label: "Ubisoft Connect", icon: "ubisoft" },
   { provider: "xbox", label: "Xbox", icon: "xbox" },
-  { provider: "microsoft-store", label: "Microsoft Store", icon: "microsoft" },
+  { provider: "microsoft-store", label: "Microsoft Store", icon: "microsoft-store" },
   { provider: "instant-gaming", label: "Instant Gaming", icon: "instant-gaming" },
 ] as const;
 
@@ -69,7 +69,7 @@ export function sourceBadge(
     case "xbox":
       return { label: "Xbox", icon: "xbox" };
     case "microsoft-store":
-      return { label: "Microsoft Store", icon: "microsoft" };
+      return { label: "Microsoft Store", icon: "microsoft-store" };
     case "instant-gaming":
       return { label: "Instant Gaming", icon: "instant-gaming" };
     case "android":

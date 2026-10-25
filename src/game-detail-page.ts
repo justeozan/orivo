@@ -27,23 +27,32 @@ import {
   formatRelativeTime,
   formatReleaseDate,
   heroImageUrl,
-  mediaForKind,
   normaliseGameDetail,
   normaliseGameMedia,
+  normaliseStoreMedia,
   normaliseWallpaperSearch,
   platformLabels,
   statusChips,
   previewedMedia,
   reduceGameDetailState,
   resolvePrimaryAction,
+  storeMovieSource,
   shouldOfferAboutToggle,
   shouldRenderSection,
   toGameDetailRestoreState,
   withSampleSocialData,
   type GameDetailPageAction,
   type GameDetailViewModel,
+  type StoreMediaView,
 } from "./game-detail-model";
 import { hostDeviceLabel } from "./host-device";
+import { imageQualityLabel } from "./image-quality";
+import { backgroundMedia } from "./media-role";
+import {
+  enqueueMediaSave,
+  isMediaSaving,
+  whenMediaSaveSettled,
+} from "./media-save-queue";
 import { fillStoreChoiceMenu, type StoreChoice, type StoreChoicesClient } from "./store-choices";
 
 export interface GameDetailPageClient {
@@ -80,6 +89,7 @@ export interface GameDetailPageClient {
     query: string,
     offset: number,
     signal: AbortSignal,
+    options?: WallpaperSearchOptions,
   ): Promise<WallpaperSearchView>;
   importWallpaper(
     gameId: string,
@@ -103,6 +113,11 @@ export interface GameDetailPageClient {
     gameId: string,
     signal: AbortSignal,
   ): Promise<ArtworkResetResult>;
+  /**
+   * The trailers and screenshots of the game's store page. Empty, never an
+   * error, when the game has none or the store cannot be reached.
+   */
+  getStoreMedia(gameId: string, signal: AbortSignal): Promise<StoreMediaView>;
   /** Remove a game from the library (does not touch the game's own files). */
   removeGame(gameId: string, signal: AbortSignal): Promise<void>;
   setGameHidden(
@@ -117,6 +132,15 @@ export interface GameDetailPageClient {
     role: WallpaperRole,
     signal: AbortSignal,
   ): Promise<void>;
+}
+
+/**
+ * Optional knobs on a wallpaper search. Only the Background row reads
+ * `only4k`: on, the backend takes 3840 wide or more; off (the default), it
+ * takes anything from 1920 with 4K first.
+ */
+export interface WallpaperSearchOptions {
+  only4k?: boolean;
 }
 
 /** Which library card slot a chosen wallpaper fills. */
@@ -156,6 +180,14 @@ const HERO_SLIDE_MS = 7000;
  * honest without turning progress into disk churn.
  */
 const EPIC_PROGRESS_INTERVAL_MS = 2000;
+/**
+ * How long a watch tolerates "not installed" before concluding no download is
+ * running. The launcher writes its manifest only once it has opened and, often,
+ * once the user has confirmed an install location, so a cold start plus a human
+ * decision routinely outlasts a few polls. Five minutes covers that; any longer
+ * and a dismissed dialog would keep a poll alive for nothing.
+ */
+const EPIC_START_GRACE_MS = 5 * 60_000;
 
 /** Confirmation toasts per role. */
 const WALLPAPER_ROLE_APPLIED: Record<WallpaperRole, string> = {
@@ -193,11 +225,26 @@ export interface GameDetailPageOptions {
   /** Launching stays owned by the application shell. */
   play(gameId: string): void;
   /**
+   * Whether the first trailer starts on its own when the page opens (a
+   * Settings choice, on by default). Absent means yes.
+   */
+  autoplayTrailers?(): boolean;
+  /**
+   * Whether a trailer that starts on its own plays its sound (a Settings
+   * choice, on by default). Absent means yes. A chosen trailer always does.
+   */
+  trailerSound?(): boolean;
+  /**
    * Notifies the shell that a catalog change (new home art, refetched cover,
    * or a removed game) means the Library needs to reload so its cards and hero
    * reflect the change.
    */
   onLibraryChanged?(): void;
+  /**
+   * Says something to the user when the page cannot: a save that finished (or
+   * failed) after they left it. Without it the outcome goes to the console.
+   */
+  notify?(message: string): void;
   /**
    * Debug-only: when this returns true, a loaded game is overlaid with sample
    * achievements, friends and activity for any section it ships empty. Wired to
@@ -275,12 +322,12 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("cancel_game_media_download", { gameId }, signal);
     },
-    async searchWallpapers(category, query, offset, signal) {
+    async searchWallpapers(category, query, offset, signal, options) {
       if (!isTauriRuntime())
         return createFallbackWallpaperSearch(category, query, offset);
       return invokeWhileActive<WallpaperSearchView>(
         "search_wallpapers",
-        { category, query, offset },
+        { category, query, offset, only4k: options?.only4k === true },
         signal,
       );
     },
@@ -338,6 +385,12 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
         signal,
       );
     },
+    async getStoreMedia(gameId, signal) {
+      if (!isTauriRuntime()) return { screenshots: [], movies: [] };
+      return normaliseStoreMedia(
+        await invokeWhileActive<unknown>("game_store_media", { gameId }, signal),
+      );
+    },
     async removeGame(gameId, signal) {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("remove_game", { gameId }, signal);
@@ -358,6 +411,25 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
 }
 
 type FocusableElement = HTMLElement & { dataset: DOMStringMap };
+
+/** The line an empty card shows in place of its content. */
+function emptyNote(text: string): HTMLElement {
+  return element("p", "gd-panel__empty", text);
+}
+
+/**
+ * Whether focus arrived from the keyboard or a pad rather than a pointer.
+ * Spatial navigation marks what it reaches with `data-nav-focus`; otherwise
+ * the browser's own `:focus-visible` heuristic answers.
+ */
+function isKeyboardFocus(node: HTMLElement): boolean {
+  if (node.hasAttribute("data-nav-focus")) return true;
+  try {
+    return node.matches(":focus-visible");
+  } catch {
+    return false;
+  }
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -436,9 +508,34 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const wallpaperSelection = new Set<string>();
   /** Which card role a single ticked wallpaper is applied to. */
   /** The hero media rail's current page (three tiles per page). */
-  /** Index into the hero's auto-cycling backgrounds, and its timer. */
+  /** Index into the hero's auto-cycling screenshots, and its timer. */
   let heroSlide = 0;
   let heroTimer: number | null = null;
+  /**
+   * The store page's trailers and screenshots. They live beside the page state
+   * rather than in it: they are decoration fetched after the first paint, with
+   * no part in saving, restoring or the wallpaper flow.
+   */
+  let storeMedia: StoreMediaView = { screenshots: [], movies: [] };
+  /** The game `storeMedia` was requested for, so a reload does not re-ask. */
+  let storeMediaGameId: string | null = null;
+  /** The rail tile shown in the hero; null lets the slideshow run. */
+  let storeSelection: {
+    kind: "movie" | "screenshot";
+    index: number;
+    /** Started by the page rather than by a click: plays muted. */
+    auto?: boolean;
+  } | null = null;
+  /**
+   * The trailer player, kept across repaints. `render()` rebuilds the page,
+   * and a fresh <video> each time restarted the trailer — or, detached but
+   * not paused, left its sound playing under the next one.
+   */
+  let heroPlayer: { src: string; player: HTMLVideoElement; play: HTMLElement } | null = null;
+  const stopHeroPlayer = (): void => {
+    heroPlayer?.player.pause();
+    heroPlayer = null;
+  };
   /** Ticks the Epic download percentage while one is running; null otherwise. */
   let epicProgressTimer: ReturnType<typeof setTimeout> | null = null;
   /** The percentage the poll last measured, so the hero chip moves with it. */
@@ -484,10 +581,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   /**
    * Poll the launcher while a download runs. Epic never calls back, so the only
    * honest progress is a re-read; once it finishes, the detail is reloaded so
-   * the button becomes Play instead of Install.
+   * the button becomes Play instead of Install. "Not installed" is not a verdict
+   * on its own: the launcher reports it until its manifest exists, so it only
+   * ends the watch after `EPIC_START_GRACE_MS` without a download in sight.
    */
   const trackEpicInstall = (context: PageActivation, gameId: string): void => {
     stopEpicProgress();
+    /** When a download was last seen running, or when the watch began. */
+    let lastActiveAt = Date.now();
     const tick = async (): Promise<void> => {
       if (!isFresh(context, gameId)) return stopEpicProgress();
       let status: EpicInstallStatus;
@@ -499,14 +600,20 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         return stopEpicProgress();
       }
       if (!isFresh(context, gameId)) return stopEpicProgress();
-      // Any settled state ends the watch: this same loop follows an uninstall,
-      // where "not installed" is the successful outcome rather than a failure.
-      if (status.state !== "installing") {
+      const settled =
+        status.state === "installed" ||
+        (status.state === "not-installed" &&
+          Date.now() - lastActiveAt > EPIC_START_GRACE_MS);
+      if (settled) {
         stopEpicProgress();
-        void loadDetail(context, gameId);
+        void loadDetail(context, gameId).then(() => {
+          if (isFresh(context, gameId)) clearTransientStatus();
+        });
         return;
       }
       if (status.state === "installing") {
+        lastActiveAt = Date.now();
+        epicProgressPercent = status.percent;
         dispatch({
           type: "status-changed",
           message: `Downloading… ${status.percent}%`,
@@ -538,6 +645,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (detail && options.sampleSocialEnabled?.())
         detail = withSampleSocialData(detail);
       dispatch({ type: "detail-loaded", requestId, detail });
+      // After the first paint and not awaited: the page never waits on Steam.
+      if (detail) void loadStoreMedia(context, gameId);
     } catch (error) {
       if (!isFresh(context, gameId)) return;
       const message = requestErrorMessage(
@@ -551,6 +660,34 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         message,
         offline: typeof navigator !== "undefined" && !navigator.onLine,
       });
+    }
+  };
+
+  const loadStoreMedia = async (
+    context: PageActivation,
+    gameId: string,
+  ): Promise<void> => {
+    if (storeMediaGameId === gameId) return;
+    storeMediaGameId = gameId;
+    storeSelection = null;
+    try {
+      const media = await client.getStoreMedia(gameId, context.signal);
+      if (!isFresh(context, gameId)) return;
+      storeMedia = media;
+      // Like a store page: the first trailer plays on its own, muted, unless
+      // the player turned that off in Settings. (`previewMediaId` is not a
+      // reason to hold back: it already names the saved wallpaper on open.)
+      if (
+        media.movies.length > 0 &&
+        storeSelection === null &&
+        (options.autoplayTrailers?.() ?? true)
+      ) {
+        storeSelection = { kind: "movie", index: 0, auto: true };
+      }
+      render();
+    } catch {
+      // The rail is optional. Forget the attempt so the next load tries again.
+      if (storeMediaGameId === gameId) storeMediaGameId = null;
     }
   };
 
@@ -651,6 +788,41 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
+   * A save that outlived its page has no screen to report on. Success is a
+   * short note and failure says why; the caller refreshes the library either
+   * way, and the console keeps a trace when the shell gave no way to speak.
+   */
+  const reportSavedAfterLeaving = (message: string): void => {
+    options.notify?.(message);
+  };
+  const reportFailedAfterLeaving = (message: string): void => {
+    if (!message) return;
+    if (options.notify) options.notify(message);
+    else console.warn(`[game-detail] ${message}`);
+  };
+
+  /**
+   * A page opened while its game is still being saved cannot see the job (it
+   * belongs to the page that started it), so it shows the save as in progress
+   * and reads the catalog again once the queue drains.
+   */
+  const resumePendingSave = async (
+    context: PageActivation,
+    gameId: string,
+  ): Promise<void> => {
+    if (!isMediaSaving(gameId)) return;
+    dispatch({ type: "media-busy-changed", busy: true });
+    await whenMediaSaveSettled(gameId);
+    if (!isFresh(context, gameId)) return;
+    await loadDetail(context, gameId);
+    if (!isFresh(context, gameId)) return;
+    // The dialog that started the save may still be open on this page.
+    wallpaperSelection.clear();
+    dispatch({ type: "media-busy-changed", busy: false });
+    dispatch({ type: "wallpaper-search-closed" });
+  };
+
+  /**
    * Refill all three artwork roles — portrait cover, landscape cover and
    * background — from a reliable high-resolution source, then repaint.
    *
@@ -664,9 +836,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (!isActive(context) || !gameId) return;
     showTransientStatus("Fetching fresh covers…");
     try {
-      const result = await client.resetArtwork(gameId, context.signal);
-      if (!isFresh(context, gameId)) return;
+      const result = await enqueueMediaSave(gameId, (signal) =>
+        client.resetArtwork(gameId, signal),
+      );
       options.onLibraryChanged?.();
+      if (!isFresh(context, gameId)) {
+        reportSavedAfterLeaving("Fresh covers saved.");
+        return;
+      }
       await loadDetail(context, gameId);
       if (!isFresh(context, gameId)) return;
       // A partial result is stated rather than hidden: a game whose publisher
@@ -682,10 +859,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         );
       }
     } catch (error) {
-      if (!isFresh(context, gameId) || isUserCancellation(error)) return;
-      showTransientStatus(
-        requestErrorMessage(error, "No covers were found for this game."),
+      const message = requestErrorMessage(
+        error,
+        "No covers were found for this game.",
       );
+      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
+      if (isUserCancellation(error)) return;
+      showTransientStatus(message);
     }
   };
 
@@ -775,44 +955,6 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * A click on a rail wallpaper chooses it as the game's home (Library)
-   * background — it previews in the hero at once, persists the selection, and
-   * refreshes the library. This is the reference's "the wallpaper you pick here
-   * is the one the home screen paints" behaviour.
-   */
-  const handleChooseWallpaper = async (mediaId: string): Promise<void> => {
-    const context = activation;
-    const gameId = state.gameId;
-    if (!isActive(context) || !gameId || !mediaId || state.mediaBusy) return;
-    // Immediate feedback in the detail hero.
-    dispatch({ type: "media-previewed", mediaId });
-    dispatch({ type: "media-busy-changed", busy: true });
-    try {
-      const media = await client.selectMedia(gameId, mediaId, context.signal);
-      if (!isFresh(context, gameId)) return;
-      const committed = normaliseGameMedia(media);
-      // The browser fallback returns nothing; keep the preview rather than
-      // wiping the rail.
-      if (committed.length > 0)
-        dispatch({ type: "media-committed", media: committed });
-      else dispatch({ type: "media-busy-changed", busy: false });
-      await client.setHomeImage(gameId, mediaId, "background", context.signal);
-      if (!isFresh(context, gameId)) return;
-      options.onLibraryChanged?.();
-      showTransientStatus("Wallpaper set as your home background.");
-    } catch (error) {
-      if (!isFresh(context, gameId)) return;
-      dispatch({
-        type: "media-failed",
-        message: requestErrorMessage(
-          error,
-          "That wallpaper could not be set as your background.",
-        ),
-      });
-    }
-  };
-
-  /**
    * Fills one row. The category travels all the way to the backend, so the
    * response is already scoped to that shape; nothing is filtered client-side.
    */
@@ -838,6 +980,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         query,
         offset,
         context.signal,
+        {
+          only4k:
+            category === "background" && state.wallpaperSearch.backgroundOnly4k,
+        },
       );
       if (!isFresh(context, gameId)) return;
       dispatch({
@@ -875,6 +1021,20 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
   };
 
+  /**
+   * Flips the Background row's "4K only" filter and refills that row alone: the
+   * other three rows do not depend on it. Ignored while the row is still
+   * answering, because its in-flight request was made under the old setting.
+   */
+  const toggleBackgroundOnly4k = (): void => {
+    if (state.wallpaperSearch.categories.background.busy) return;
+    dispatch({
+      type: "wallpaper-background-4k-changed",
+      only4k: !state.wallpaperSearch.backgroundOnly4k,
+    });
+    void handleWallpaperSearch("background");
+  };
+
   /** Chips and "Voir tout" share one state: narrowing to a row, or clearing it. */
   const setWallpaperFocus = (focus: WallpaperCategory | null): void => {
     dispatch({ type: "wallpaper-search-focus-changed", focus });
@@ -902,75 +1062,60 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (chosen.length === 0) return;
     dispatch({ type: "media-busy-changed", busy: true });
     try {
-      // Download every chosen search result so several are saved in one go,
-      // keeping each saved id paired with the slot its row asked for.
-      const saved: Array<{ mediaId: string; role: WallpaperRole }> = [];
-      for (const slide of chosen) {
-        const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
-        if (slide.candidate) {
-          const media = await client.importWallpaper(
-            gameId,
-            slide.id,
-            context.signal,
-          );
-          if (!isFresh(context, gameId)) return;
-          const normalised = normaliseGameMedia(media);
-          if (normalised.length > 0)
-            dispatch({ type: "media-imported", media: normalised });
-          const stored =
-            normalised.find((item) => item.selected) ??
-            normalised[normalised.length - 1];
-          if (stored) saved.push({ mediaId: stored.id, role });
-        } else {
-          saved.push({ mediaId: slide.id, role });
+      await enqueueMediaSave(gameId, async (signal) => {
+        // Download every chosen search result so several are saved in one go,
+        // keeping each saved id paired with the slot its row asked for.
+        const saved: Array<{ mediaId: string; role: WallpaperRole }> = [];
+        for (const slide of chosen) {
+          const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
+          if (slide.candidate) {
+            const media = await client.importWallpaper(gameId, slide.id, signal);
+            const normalised = normaliseGameMedia(media);
+            if (normalised.length > 0 && isFresh(context, gameId))
+              dispatch({ type: "media-imported", media: normalised });
+            const stored =
+              normalised.find((item) => item.selected) ??
+              normalised[normalised.length - 1];
+            if (stored) saved.push({ mediaId: stored.id, role });
+          } else {
+            saved.push({ mediaId: slide.id, role });
+          }
         }
-      }
-      // The background pick (or a lone pick of any shape) is what the hero and
-      // the Library card paint, so that one is also the committed selection.
-      const home =
-        saved.find((entry) => entry.role === "background") ?? saved[0];
-      if (home) {
-        const media = await client.selectMedia(
-          gameId,
-          home.mediaId,
-          context.signal,
-        );
-        if (!isFresh(context, gameId)) return;
-        const committed = normaliseGameMedia(media);
-        if (committed.length > 0)
-          dispatch({ type: "media-committed", media: committed });
+        // Only a background pick becomes the selected wallpaper. A logo or a
+        // cover chosen on its own used to be committed as one, which is how
+        // wordmarks ended up offered back as backgrounds.
+        const home = saved.find((entry) => entry.role === "background");
+        if (home) {
+          const media = await client.selectMedia(gameId, home.mediaId, signal);
+          const committed = normaliseGameMedia(media);
+          if (committed.length > 0 && isFresh(context, gameId))
+            dispatch({ type: "media-committed", media: committed });
+        }
         for (const entry of saved) {
-          await client.setHomeImage(
-            gameId,
-            entry.mediaId,
-            entry.role,
-            context.signal,
-          );
-          if (!isFresh(context, gameId)) return;
+          await client.setHomeImage(gameId, entry.mediaId, entry.role, signal);
         }
-      } else {
-        dispatch({ type: "media-busy-changed", busy: false });
-      }
-      if (!isFresh(context, gameId)) return;
+      });
       options.onLibraryChanged?.();
-      wallpaperSelection.clear();
-      dispatch({ type: "wallpaper-search-closed" });
-      showTransientStatus(
+      const done =
         chosen.length > 1
           ? `${chosen.length} wallpapers applied to this game.`
           : WALLPAPER_ROLE_APPLIED[
               WALLPAPER_ROLE_FOR_CATEGORY[chosen[0].category]
-            ],
-      );
+            ];
+      if (!isFresh(context, gameId)) return reportSavedAfterLeaving(done);
+      wallpaperSelection.clear();
+      dispatch({ type: "media-busy-changed", busy: false });
+      dispatch({ type: "wallpaper-search-closed" });
+      showTransientStatus(done);
     } catch (error) {
-      if (!isFresh(context, gameId)) return;
-      dispatch({
-        type: "media-failed",
-        message: requestErrorMessage(
-          error,
-          "Those wallpapers could not be saved.",
-        ),
-      });
+      const message = requestErrorMessage(
+        error,
+        "Those wallpapers could not be saved.",
+      );
+      // Steps that finished before the failure are already in the catalog.
+      options.onLibraryChanged?.();
+      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
+      dispatch({ type: "media-failed", message });
     }
   };
 
@@ -1378,49 +1523,124 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     return wrap;
   };
 
-  const renderHeroMedia = (detail: GameDetailViewModel): HTMLElement => {
-    const frame = element("div", "gd-hero__media");
-    const preview = previewedMedia(state);
-    if (preview && preview.kind === "video") {
-      const video = document.createElement("video");
-      video.className = "gd-hero__video";
-      video.controls = true;
-      video.preload = "metadata";
-      video.playsInline = true;
-      video.autoplay = false;
-      video.src = preview.previewUrl;
-      if (preview.posterUrl) video.poster = preview.posterUrl;
-      video.setAttribute(
-        "aria-label",
-        `${preview.title} trailer for ${detail.title}`,
-      );
-      const play = element("button", "gd-hero__play");
-      play.type = "button";
-      play.dataset.focusKey = "hero-play";
-      play.setAttribute("aria-label", `Play ${preview.title}`);
-      play.append(iconElement("play"));
-      play.addEventListener("click", () => {
-        play.hidden = true;
-        // Explicit user intent only: nothing here ever autoplays.
-        void video.play().catch(() => {
-          play.hidden = false;
-        });
-      });
-      video.addEventListener("pause", () => {
-        play.hidden = false;
-      });
-      frame.append(video, play);
+  /**
+   * One trailer in the hero frame. Never autoplays: the user starts it, with
+   * the browser's own controls to pause, seek and unmute.
+   */
+  const renderHeroVideo = (
+    frame: HTMLElement,
+    video: {
+      src: string;
+      poster?: string;
+      title: string;
+      label: string;
+      onError?: () => void;
+    },
+  ): HTMLElement => {
+    // The same trailer survives a repaint: its element is moved, not rebuilt.
+    if (heroPlayer?.src === video.src) {
+      frame.append(heroPlayer.player, heroPlayer.play);
       return frame;
     }
+    stopHeroPlayer();
+    const player = document.createElement("video");
+    player.className = "gd-hero__video";
+    player.controls = true;
+    player.preload = "auto";
+    player.playsInline = true;
+    // Chosen by a click, it plays with sound; started by the page, it follows
+    // the Settings choice. If the WebView refuses to start it with sound, it
+    // starts muted rather than not at all (below).
+    player.muted = storeSelection?.auto === true && !(options.trailerSound?.() ?? true);
+    player.autoplay = true;
+    player.src = video.src;
+    if (video.poster) player.poster = video.poster;
+    player.setAttribute("aria-label", video.label);
+    if (video.onError) player.addEventListener("error", video.onError);
+    const play = element("button", "gd-hero__play");
+    play.type = "button";
+    play.dataset.focusKey = "hero-play";
+    play.setAttribute("aria-label", `Play ${video.title}`);
+    play.append(iconElement("play"));
+    // The big button is only there while nothing plays.
+    play.hidden = true;
+    play.addEventListener("click", () => {
+      void player.play().catch(() => {
+        play.hidden = false;
+      });
+    });
+    player.addEventListener("playing", () => {
+      play.hidden = true;
+    });
+    player.addEventListener("pause", () => {
+      play.hidden = false;
+    });
+    player.addEventListener("ended", () => {
+      play.hidden = false;
+    });
+    void player.play()?.catch(() => {
+      if (player.muted) {
+        play.hidden = false;
+        return;
+      }
+      player.muted = true;
+      void player.play()?.catch(() => {
+        play.hidden = false;
+      });
+    });
+    heroPlayer = { src: video.src, player, play };
+    frame.append(player, play);
+    return frame;
+  };
+
+  const renderHeroMedia = (detail: GameDetailViewModel): HTMLElement => {
+    const frame = element("div", "gd-hero__media");
+    const movie =
+      storeSelection?.kind === "movie"
+        ? storeMedia.movies[storeSelection.index]
+        : undefined;
+    const movieSource = movie ? storeMovieSource(movie) : null;
+    if (movie && movieSource) {
+      return renderHeroVideo(frame, {
+        src: movieSource,
+        poster: movie.thumbUrl,
+        title: movie.title,
+        label: `${movie.title} for ${detail.title}`,
+        // A file the WebView cannot decode (HLS outside WebKit) must not leave
+        // a dead player on the hero.
+        onError: () => {
+          storeSelection = null;
+          showTransientStatus("That trailer could not be played here.");
+        },
+      });
+    }
+    const preview = previewedMedia(state);
+    if (!storeSelection && preview && preview.kind === "video") {
+      return renderHeroVideo(frame, {
+        src: preview.previewUrl,
+        poster: preview.posterUrl,
+        title: preview.title,
+        label: `${preview.title} trailer for ${detail.title}`,
+      });
+    }
+    // The shared ground, under the picture: what stands when it has none yet,
+    // the same one the Library's scene shows.
+    const ground = element("div", "gd-hero__ground art-ground");
+    frame.append(ground);
     const image = element("img", "gd-hero__image");
     image.decoding = "async";
     image.setAttribute("aria-hidden", "true");
-    // A background the user is previewing or has applied wins outright; with
-    // none chosen, the hero cycles the game's backgrounds on its own.
+    // A screenshot picked from the rail wins; then a background the user is
+    // previewing or has applied; with none chosen, the hero cycles the game's
+    // store screenshots on its own.
+    const picked =
+      storeSelection?.kind === "screenshot"
+        ? storeMedia.screenshots[storeSelection.index]
+        : undefined;
     attachImage(
       frame,
       image,
-      heroSlideshowUrl() ?? heroImageUrl(state),
+      picked?.fullUrl ?? heroSlideshowUrl() ?? heroImageUrl(state),
       "gd-hero__media--missing",
     );
     frame.append(image);
@@ -1428,16 +1648,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * The auto-cycling hero background. It only runs when the user has not
-   * singled one out — previewing or applying a wallpaper is an explicit choice,
-   * and rotating away from it a second later would undo their intent.
+   * The auto-cycling hero picture: the game's store screenshots. It only runs
+   * when the user has not singled something out — a rail tile, or previewing or
+   * applying a wallpaper, is an explicit choice, and rotating away from it a
+   * second later would undo their intent.
    */
   const heroSlideshowUrl = (): string | null => {
-    if (state.previewMediaId || state.appliedMediaId) return null;
-    const backgrounds = galleryMedia();
-    if (backgrounds.length < 2) return null;
-    const item = backgrounds[heroSlide % backgrounds.length];
-    return item?.previewUrl ?? item?.posterUrl ?? null;
+    if (storeSelection || state.previewMediaId || state.appliedMediaId)
+      return null;
+    const shots = storeMedia.screenshots;
+    if (shots.length < 2) return null;
+    return shots[heroSlide % shots.length]?.fullUrl ?? null;
   };
 
   const startHeroSlideshow = (): void => {
@@ -1459,64 +1680,95 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * The hero rail shows backgrounds only. It is the picker for the art painted
-   * behind the hero, so covers and trailers — which can never fill that slot —
-   * would only be noise to scroll past.
-   */
-  const galleryMedia = (): GameMediaView[] =>
-    state.media.filter((item) => item.kind === "wallpaper");
-
-  /**
-   * The vertical rail overlapping the hero's top-right: every saved background,
-   * scrolled rather than paged. Adding a wallpaper now lives in the "…" menu, so
-   * a game with no backgrounds yet has no rail at all.
+   * The vertical rail overlapping the hero's top-right: what the game's store
+   * page shows, trailers first and then screenshots, scrolled rather than
+   * paged. It is not the wallpaper picker — chosen backgrounds are managed from
+   * the "…" menu — so a game the store knows nothing about has no rail.
    */
   const renderGalleryRail = (): HTMLElement | null => {
-    const items = galleryMedia();
-    if (items.length === 0) return null;
+    const { movies, screenshots } = storeMedia;
+    if (movies.length + screenshots.length === 0) return null;
 
     const rail = element("aside", "gd-gallery");
-    rail.setAttribute("aria-label", "Wallpapers");
+    rail.dataset.scrollKey = "gallery";
+    rail.setAttribute("aria-label", "Trailers and screenshots");
     const track = element("div", "gd-gallery__track");
+    track.dataset.scrollKey = "gallery-track";
     track.setAttribute("role", "group");
-    track.setAttribute("aria-label", "Backgrounds");
-    for (const item of items) track.append(renderGalleryTile(item));
+    track.setAttribute("aria-label", "Store media");
+    movies.forEach((movie, index) =>
+      track.append(
+        renderGalleryTile({
+          kind: "movie",
+          index,
+          label: `${movie.title} — trailer`,
+          imageUrl: movie.thumbUrl,
+        }),
+      ),
+    );
+    screenshots.forEach((shot, index) =>
+      track.append(
+        renderGalleryTile({
+          kind: "screenshot",
+          index,
+          label: `Screenshot ${index + 1}`,
+          imageUrl: shot.thumbUrl,
+        }),
+      ),
+    );
     rail.append(track);
     return rail;
   };
 
-  /** One tile in the hero rail: previews on click; a trailer keeps its play cue. */
-  const renderGalleryTile = (item: GameMediaView): HTMLElement => {
-    const selected = state.previewMediaId === item.id;
+  /** One tile in the hero rail: shows its trailer or screenshot in the hero. */
+  const renderGalleryTile = (item: {
+    kind: "movie" | "screenshot";
+    index: number;
+    label: string;
+    imageUrl: string;
+  }): HTMLElement => {
+    const selected =
+      storeSelection?.kind === item.kind && storeSelection.index === item.index;
     const tile = element("button", "gd-gallery__tile");
     tile.type = "button";
-    tile.dataset.focusKey = `media-${item.id}`;
-    tile.dataset.mediaKind = item.kind;
+    tile.dataset.focusKey = `store-${item.kind}-${item.index}`;
+    tile.dataset.mediaKind = item.kind === "movie" ? "video" : "screenshot";
     tile.classList.toggle("gd-gallery__tile--selected", selected);
-    tile.setAttribute(
-      "aria-label",
-      `${item.title}${item.availableOffline ? "" : " — needs a download"}`,
-    );
+    tile.setAttribute("aria-label", item.label);
+    tile.setAttribute("aria-pressed", String(selected));
     const image = element("img", "gd-gallery__tile-image");
     image.loading = "lazy";
     image.decoding = "async";
-    attachImage(
-      tile,
-      image,
-      item.posterUrl ?? item.previewUrl,
-      "gd-gallery__tile--missing",
-    );
+    attachImage(tile, image, item.imageUrl, "gd-gallery__tile--missing");
     tile.append(image);
-    if (item.kind === "video") {
+    if (item.kind === "movie") {
       const play = element("span", "gd-gallery__play");
       play.setAttribute("aria-hidden", "true");
       play.append(iconElement("play"));
       tile.append(play);
     }
-    // A wallpaper click chooses the home background; a trailer just previews.
+    // Choosing the tile that is already showing lets the slideshow resume.
     tile.addEventListener("click", () => {
-      if (item.kind === "wallpaper") void handleChooseWallpaper(item.id);
-      else dispatch({ type: "media-previewed", mediaId: item.id });
+      storeSelection = selected ? null : { kind: item.kind, index: item.index };
+      if (!storeSelection || storeSelection.kind !== "movie") stopHeroPlayer();
+      else if (heroPlayer) stopHeroPlayer();
+      render();
+    });
+    // Walking the rail with the arrows or a pad shows each tile as it is
+    // reached, like a store's media strip: no confirm press. A mouse focus is
+    // left to the click above, and reaching the tile already shown does
+    // nothing — the repaint puts focus back on it, which must not loop.
+    tile.addEventListener("focus", () => {
+      // Spatial navigation marks the tile right after focusing it, so the
+      // question is asked once the move that focused it has finished.
+      queueMicrotask(() => {
+        if (!tile.isConnected || document.activeElement !== tile) return;
+        if (!isKeyboardFocus(tile)) return;
+        if (storeSelection?.kind === item.kind && storeSelection.index === item.index) return;
+        stopHeroPlayer();
+        storeSelection = { kind: item.kind, index: item.index };
+        render();
+      });
     });
     return tile;
   };
@@ -1528,6 +1780,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     candidate: boolean;
     /** The row it was ticked in, which is also the card slot it fills. */
     category: WallpaperCategory;
+    /** Pixel size, when known, for the quality badge. */
+    width?: number;
+    height?: number;
   }
 
   /** The candidates one row shows, in the order they were fetched. */
@@ -1540,17 +1795,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       url: candidate.thumbnailUrl,
       candidate: true,
       category,
+      width: candidate.width,
+      height: candidate.height,
     }));
-    // Wallpapers already saved on this game are backgrounds — that is what the
-    // kind means — so they join the Background row and no other.
+    // Saved wallpapers join the Background row and no other — but only the ones
+    // that were picked as a background. Every picked image is stored with the
+    // `wallpaper` kind, so a logo or a cover chosen earlier would otherwise be
+    // offered here as if it were a background.
     if (category === "background") {
-      for (const item of mediaForKind(state.media, "wallpaper")) {
+      for (const item of backgroundMedia(state.media)) {
         slides.push({
           id: item.id,
           title: item.title,
           url: item.posterUrl ?? item.previewUrl,
           candidate: false,
           category: "background",
+          width: item.width,
+          height: item.height,
         });
       }
     }
@@ -1587,6 +1848,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     check.setAttribute("aria-hidden", "true");
     check.append(iconElement("check"));
     tile.append(image, check);
+    // The size the source reported, so a 4K picture can be told from a 720p one
+    // without opening it. No badge when nothing measured it.
+    const quality = imageQualityLabel(slide.width, slide.height, slide.category);
+    if (quality) {
+      const badge = element("span", "gd-wallgrid__quality", quality);
+      badge.setAttribute("aria-hidden", "true");
+      tile.append(badge);
+      tile.title = `${slide.title} · ${quality}`;
+    }
     tile.addEventListener("click", () => {
       // One pick per row, because a row *is* a slot. Ticking a second image in
       // the same row queued both and the page applied them in turn, so the card
@@ -1704,6 +1974,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = element("h3", "gd-wallrow__title", meta.label);
     title.id = `gd-wallrow-${category}`;
     header.append(iconElement(meta.icon, "gd-wallrow__icon"), title);
+    if (category === "background") {
+      const only4k = state.wallpaperSearch.backgroundOnly4k;
+      const toggle = element("button", "gd-wallrow__toggle", "4K only");
+      toggle.type = "button";
+      toggle.dataset.focusKey = "wallpaper-background-4k";
+      toggle.classList.toggle("gd-wallrow__toggle--on", only4k);
+      toggle.setAttribute("aria-pressed", String(only4k));
+      toggle.disabled = row.busy;
+      toggle.addEventListener("click", toggleBackgroundOnly4k);
+      header.append(toggle);
+    }
     // Paging is the one control a scroller cannot replace: the tiles it would
     // reveal have not been fetched yet.
     if (row.phase === "ready" && row.hasMore && !row.busy) {
@@ -1720,6 +2001,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
 
     const grid = element("div", "gd-wallgrid");
     grid.dataset.category = category;
+    grid.dataset.scrollKey = `wallgrid-${category}`;
     grid.setAttribute("role", "group");
     grid.setAttribute("aria-labelledby", title.id);
     for (const slide of slides) grid.append(renderWallpaperTile(slide));
@@ -1767,6 +2049,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       "div",
       "gd-modal__dialog gd-modal__dialog--wallpapers",
     );
+    dialog.dataset.scrollKey = "wallpaper-dialog";
 
     // The header is the whole set of controls: which shape to look at, and what
     // to look for. There is no source picker — every provider is asked at once,
@@ -1819,6 +2102,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const panes = element("div", "gd-wallpanes");
     panes.classList.toggle("gd-wallpanes--single", search.focus !== null);
     const cards = element("div", "gd-wallpanes__cards");
+    cards.dataset.scrollKey = "wallpanes-cards";
     const feed = element("div", "gd-wallpanes__feed");
     for (const category of WALLPAPER_CATEGORIES) {
       if (search.focus && search.focus !== category) continue;
@@ -2026,16 +2310,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       ],
       ["Genre", detail.genres.length > 0 ? detail.genres.join(", ") : null],
     ];
+    // Every row stands even when its source said nothing: a card of one line
+    // read as broken, and the same rows in the same places on every game are
+    // what make the panel scannable. An unknown is a quiet dash.
     for (const [label, value] of rows) {
-      if (!value) continue;
       list.append(
         element("dt", "gd-info__term", label),
-        element("dd", "gd-info__value", value),
+        value
+          ? element("dd", "gd-info__value", value)
+          : element("dd", "gd-info__value gd-info__value--unknown", "—"),
       );
     }
     // Platform renders as brand glyphs, matching the reference's Windows mark.
-    if (detail.supportedPlatforms.length > 0) {
-      list.append(element("dt", "gd-info__term", "Platform"));
+    list.append(element("dt", "gd-info__term", "Platform"));
+    if (detail.supportedPlatforms.length === 0) {
+      list.append(element("dd", "gd-info__value gd-info__value--unknown", "—"));
+    } else {
       const value = element("dd", "gd-info__value gd-info__value--icons");
       for (const platform of detail.supportedPlatforms) {
         const glyph = iconElement(platformIcon(platform), "gd-info__platform");
@@ -2117,6 +2407,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         list.append(chip);
       }
       section.append(list);
+    } else if (!progress) {
+      section.append(emptyNote("No achievements to show for this game."));
     }
     return section;
   };
@@ -2150,7 +2442,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       more.setAttribute("aria-label", `${friends.length - 4} more friends`);
       list.append(more);
     }
-    section.append(list);
+    section.append(friends.length > 0 ? list : emptyNote("None of your friends play this yet."));
     return section;
   };
 
@@ -2183,7 +2475,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (relative) item.append(element("p", "gd-activity__time", relative));
       list.append(item);
     }
-    section.append(list);
+    section.append(
+      list.childElementCount > 0 ? list : emptyNote("No recent activity."),
+    );
     return section;
   };
 
@@ -2220,7 +2514,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const list = element("ul", "gd-related__list");
     for (const game of detail.relatedGames.slice(0, 8))
       list.append(renderRelatedCard(game));
-    section.append(list);
+    section.append(
+      list.childElementCount > 0 ? list : emptyNote("No related games yet."),
+    );
     return section;
   };
 
@@ -2243,15 +2539,21 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       facts.append(renderFeatures(detail));
     if (facts.childElementCount > 0) body.append(facts);
     const trophies = element("div", "gd-infocard gd-infocard--achievements");
-    if (shouldRenderSection(detail, "achievements"))
-      trophies.append(renderAchievements(detail));
+    // The social cards always stand, empty or not: the page has the same
+    // shape for every game, and an empty card says "nothing yet" where a
+    // missing one read as a layout that failed to load.
+    trophies.append(renderAchievements(detail));
     if (trophies.childElementCount > 0) body.append(trophies);
-    if (shouldRenderSection(detail, "friends"))
-      body.append(renderFriends(detail));
-    if (shouldRenderSection(detail, "activity"))
-      body.append(renderActivity(detail));
-    if (shouldRenderSection(detail, "related"))
-      body.append(renderRelated(detail));
+    body.append(renderFriends(detail));
+    body.append(renderActivity(detail));
+    body.append(renderRelated(detail));
+    // Each panel scrolls on its own (`.gd-body > *`). Their classes tell them
+    // apart, which stays true when a neighbouring panel appears or goes.
+    for (const panel of body.children) {
+      if (panel instanceof HTMLElement) {
+        panel.dataset.scrollKey = `panel-${panel.className.split(" ").join("-")}`;
+      }
+    }
     if (body.childElementCount > 0) fragment.append(body);
 
     const modal = renderWallpaperModal();
@@ -2288,6 +2590,37 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (container) container.scrollTop = value;
   };
 
+  /**
+   * The inner scrollers (`data-scroll-key`) are rebuilt with the page, so their
+   * offsets are lifted out of the old tree and put back by key on the new one.
+   */
+  const readInnerScrolls = (): Map<string, { top: number; left: number }> => {
+    const offsets = new Map<string, { top: number; left: number }>();
+    const nodes = pageRoot?.querySelectorAll<HTMLElement>("[data-scroll-key]");
+    for (const node of nodes ?? []) {
+      if (node.scrollTop || node.scrollLeft) {
+        offsets.set(node.dataset.scrollKey ?? "", {
+          top: node.scrollTop,
+          left: node.scrollLeft,
+        });
+      }
+    }
+    return offsets;
+  };
+
+  const writeInnerScrolls = (
+    offsets: Map<string, { top: number; left: number }>,
+  ): void => {
+    if (offsets.size === 0) return;
+    const nodes = pageRoot?.querySelectorAll<HTMLElement>("[data-scroll-key]");
+    for (const node of nodes ?? []) {
+      const offset = offsets.get(node.dataset.scrollKey ?? "");
+      if (!offset) continue;
+      node.scrollTop = offset.top;
+      node.scrollLeft = offset.left;
+    }
+  };
+
   const render = (): void => {
     if (!pageRoot) return;
     // A repaint discards the menu DOM, so drop its document listeners first.
@@ -2295,6 +2628,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     moreMenuCleanup = null;
     const restoreFocusKey = currentFocusKey();
     const scrollTop = readScrollTop();
+    const innerScrolls = readInnerScrolls();
     const fragment = document.createDocumentFragment();
     // With a loaded game the back control floats inside the hero; the standalone
     // top bar is only for the loading, error and empty states below.
@@ -2335,6 +2669,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     pageRoot.classList.toggle("gd-page--fit", Boolean(state.detail));
     pageRoot.replaceChildren(fragment);
     writeScrollTop(scrollTop);
+    writeInnerScrolls(innerScrolls);
+    // The activity feed alone fades at its foot, and only once it is longer
+    // than its card (game-detail-page.css `.gd-panel--overflowing`).
+    for (const panel of pageRoot.querySelectorAll<HTMLElement>(".gd-body > .gd-activity")) {
+      panel.classList.toggle("gd-panel--overflowing", panel.scrollHeight > panel.clientHeight + 1);
+    }
     focusByKey(restoreFocusKey);
   };
 
@@ -2372,6 +2712,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       heroSlide = 0;
       startHeroSlideshow();
       const gameId = context.route.gameId;
+      // Coming back to the same game keeps what the store already gave; a
+      // different game must not flash the last one's trailers.
+      if (storeMediaGameId !== gameId) {
+        storeMedia = { screenshots: [], movies: [] };
+        storeMediaGameId = null;
+        storeSelection = null;
+      }
       dispatch({
         type: "activate",
         gameId,
@@ -2382,11 +2729,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState();
       });
+      void resumePendingSave(context, gameId);
       void loadDetail(context, gameId).then(() => {
         if (isActive(context)) restorePageState();
+        // Reopening the page mid-download: the catalog snapshot is already
+        // stale, so pick the live measurement back up.
+        if (
+          isFresh(context, gameId) &&
+          state.detail?.source === "epic" &&
+          state.detail.installState === "installing"
+        ) {
+          trackEpicInstall(context, gameId);
+        }
       });
     },
     deactivate() {
+      stopHeroPlayer();
       if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
       stopEpicProgress();

@@ -45,6 +45,7 @@ use std::{
     collections::BTreeSet,
     fs,
     io::{self, Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
@@ -295,37 +296,34 @@ pub enum GameStreamFeedError {
 impl std::fmt::Display for GameStreamFeedError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotConfigured => write!(
-                formatter,
-                "No game streaming host is configured yet. Add one in Settings, under Plugins & Runners."
-            ),
+            Self::NotConfigured => write!(formatter, "Add your gaming PC first."),
             Self::HostInvalid => write!(
                 formatter,
-                "That host address is not one Orivo can use. Try something like astra.local."
+                "That doesn't look like a PC name or address. Try something like my-pc.local or 192.168.1.20."
             ),
             Self::ClientUnavailable => write!(
                 formatter,
-                "Orivo could not start this profile's streaming client. Check that it is still installed, then set the profile up again."
+                "Moonlight isn't installed anymore. Reinstall it or choose it again in Settings › Plugins › Game streaming."
             ),
             Self::Unreachable(host) => write!(
                 formatter,
-                "{host} did not answer. Is the machine awake, on this network, and running its streaming host?"
+                "Can't reach {host}. Check it's on, on the same network, and running Sunshine or Apollo."
             ),
             Self::NotPaired(host) => write!(
                 formatter,
-                "{host} refused the request. Pair with it first — the button is on this profile."
+                "{host} hasn't accepted this computer yet. Pair with it in Settings › Plugins › Game streaming."
             ),
             Self::Unreadable => write!(
                 formatter,
-                "The streaming client answered with something Orivo could not read as a list of games."
+                "Your PC answered, but Orivo couldn't read its list of games."
             ),
             Self::DirectoryUnavailable => write!(
                 formatter,
-                "The folder for this stream profile is not available right now. Reconnect it and import again."
+                "Orivo's folder for your streamed games isn't available right now. Open Settings › Plugins › Game streaming and refresh your games."
             ),
             Self::WriteFailed => write!(
                 formatter,
-                "Orivo could not write the stream descriptions into this profile's folder."
+                "Orivo couldn't save your PC's game list. Check there is free space on this computer, then refresh your games."
             ),
         }
     }
@@ -917,8 +915,195 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), GameStreamFeedError> {
 }
 
 // ---------------------------------------------------------------------------
+// Is the machine there, and does it know this client?
+// ---------------------------------------------------------------------------
+
+/// The ports a Sunshine or Apollo host answers a client on, whatever its web
+/// interface does: GameStream's HTTP and HTTPS endpoints. Pairing, listing and
+/// streaming all start with a request to one of them, so a machine that
+/// accepts a connection on neither cannot be paired with or streamed from.
+const HOST_PROBE_PORTS: [u16; 2] = [47989, 47984];
+/// How long one connection attempt may take. Short on purpose: a PC that is
+/// switched off should read as "no answer" in a moment, not after the twenty
+/// seconds `moonlight list` would wait for it.
+const REACH_TIMEOUT: Duration = Duration::from_secs(3);
+/// `list` once the machine is known to be there. A paired host answers in well
+/// under a second; this only has to outlast a cold one.
+pub(crate) const PROBE_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reduce whatever a person pasted into the box to something that can be a
+/// host: no scheme, no path, no query, no credentials. The port is left for
+/// [`parse_endpoint`] to drop.
+///
+/// People copy this out of Sunshine's own web address — what is in their
+/// browser's bar is `https://my-pc.local:47990/pin` — so explaining ports and
+/// paths to them would be asking them to do this function's work.
+pub fn tidy_host_input(input: &str) -> String {
+    let mut text = input.trim();
+    for scheme in ["https://", "http://"] {
+        if text.len() >= scheme.len()
+            && text.is_char_boundary(scheme.len())
+            && text[..scheme.len()].eq_ignore_ascii_case(scheme)
+        {
+            text = &text[scheme.len()..];
+            break;
+        }
+    }
+    if let Some(end) = text.find(['/', '?', '#']) {
+        text = &text[..end];
+    }
+    if let Some(at) = text.rfind('@') {
+        text = &text[at + 1..];
+    }
+    text.trim().to_owned()
+}
+
+/// The machine a pasted address names — what the client is given, and what is
+/// saved. The same grammar as the feed's, applied after [`tidy_host_input`].
+pub fn normalise_host(input: &str) -> Result<String, GameStreamFeedError> {
+    parse_endpoint(&tidy_host_input(input)).map(|endpoint| endpoint.stream_host)
+}
+
+/// What a machine said when asked, in the four words the setup needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HostState {
+    /// It answered the client's `list`: this client is accepted.
+    Paired,
+    /// It is there and refused the question. Overwhelmingly: not paired yet.
+    NotPaired,
+    /// Nothing answered on the machine's ports, or `list` never came back.
+    Unreachable,
+    /// The client itself could not be started, so nothing was asked.
+    ClientMissing,
+}
+
+/// What Settings is told about a probe: the state, the machine as it was
+/// understood, and how many games it listed if it listed any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostStatusView {
+    pub state: HostState,
+    pub host: String,
+    pub games: usize,
+}
+
+/// Decide the state from the two facts that were gathered. Pure, so that what
+/// each outcome means is stated once and tested without a network.
+///
+/// Reachability is asked separately from `list` because `list` cannot tell the
+/// two failures apart: a machine that is off makes it wait and a machine that
+/// has not paired this client makes it exit non-zero, and the user has to be
+/// told which, since one needs a PIN and the other a power button.
+pub fn host_state(reachable: bool, listing: &Result<Vec<String>, GameStreamFeedError>) -> HostState {
+    if !reachable {
+        return HostState::Unreachable;
+    }
+    match listing {
+        // An answer that could not be read was still an answer: the machine
+        // accepted this client, and the import says what it could not parse.
+        Ok(_) | Err(GameStreamFeedError::Unreadable) => HostState::Paired,
+        Err(GameStreamFeedError::ClientUnavailable) => HostState::ClientMissing,
+        // The machine accepted a connection and then `list` did not come back:
+        // from the user's chair that is a machine that is not answering.
+        Err(GameStreamFeedError::Unreachable(_)) => HostState::Unreachable,
+        Err(_) => HostState::NotPaired,
+    }
+}
+
+/// Whether anything on `host` accepts a connection on one of `ports`.
+///
+/// A refused connection counts as "no": a machine that is on but has nothing
+/// listening is a machine whose Sunshine or Apollo is not running, which is
+/// the thing the user is told to check.
+fn host_reachable(host: &str, ports: &[u16], timeout: Duration) -> bool {
+    let name = host.trim_start_matches('[').trim_end_matches(']');
+    for port in ports {
+        let Ok(addresses) = (name, *port).to_socket_addrs() else {
+            continue;
+        };
+        for address in addresses {
+            if TcpStream::connect_timeout(&address, timeout).is_ok() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// [`host_reachable`] on the ports a real host listens on.
+pub fn host_is_reachable(host: &str) -> bool {
+    host_reachable(host, &HOST_PROBE_PORTS, REACH_TIMEOUT)
+}
+
+/// Ask a machine whether it is there and whether it knows this client.
+///
+/// `reachable` is a parameter so a test can stand a fake machine up without
+/// opening the real ports, and so the pairing poll can reuse the reading.
+pub(crate) fn probe_host_with(
+    client: &Path,
+    host: &str,
+    reachable: impl FnOnce(&str) -> bool,
+    list_timeout: Duration,
+) -> HostStatusView {
+    let reached = reachable(host);
+    // Not asked at all when nothing answered: `list` would only wait.
+    let listing = if reached {
+        list_apps_within(client, host, list_timeout)
+    } else {
+        Err(GameStreamFeedError::Unreachable(host.to_owned()))
+    };
+    HostStatusView {
+        state: host_state(reached, &listing),
+        host: host.to_owned(),
+        games: listing.as_ref().map(Vec::len).unwrap_or_default(),
+    }
+}
+
+/// [`probe_host_with`] against the real network.
+pub fn probe_host(client: &Path, host: &str) -> HostStatusView {
+    probe_host_with(client, host, host_is_reachable, PROBE_LIST_TIMEOUT)
+}
+
+/// The page on a Sunshine or Apollo host where the PIN is typed. Both serve
+/// their web interface on 47990, with a certificate they made themselves —
+/// which is why the setup says the browser will warn.
+pub fn pin_page_url(stream_host: &str) -> String {
+    format!("https://{stream_host}:47990/pin")
+}
+
+/// Where Moonlight is downloaded from. A fixed address: the setup opens it for a
+/// person who has no client, and nothing the WebView says becomes part of it.
+pub const MOONLIGHT_DOWNLOAD_URL: &str = "https://moonlight-stream.org";
+
+// ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
+
+/// The address behind one of the two links the setup offers. A closed set of
+/// names rather than a URL: the WebView says which page it wants and Orivo
+/// builds the address, so nothing it sends can become somewhere to browse to.
+pub fn link_for(target: &str, configured_host: &str) -> Result<String, String> {
+    match target {
+        "moonlight" => Ok(MOONLIGHT_DOWNLOAD_URL.to_owned()),
+        "sunshine-pin" => normalise_host(configured_host)
+            .map(|host| pin_page_url(&host))
+            .map_err(|error| error.to_string()),
+        _ => Err("Orivo doesn't know that link.".to_owned()),
+    }
+}
+
+/// Open Moonlight's download page, or the PIN page of the saved PC, in the
+/// user's browser.
+#[tauri::command]
+pub fn open_gamestream_link(
+    target: String,
+    service: tauri::State<'_, std::sync::Arc<GameStreamService>>,
+) -> Result<(), String> {
+    use crate::store::UrlOpener;
+    let url = link_for(&target, &service.settings().host)?;
+    crate::store::SystemUrlOpener.open(&url)
+}
 
 #[tauri::command]
 pub fn get_gamestream_settings(
@@ -1090,7 +1275,7 @@ mod tests {
                 host: Some("a host with spaces".into()),
             })
             .expect_err("spaces are not a host");
-        assert!(error.contains("astra.local"), "{error}");
+        assert!(error.contains("my-pc.local"), "{error}");
         assert_eq!(service.settings().host, "");
     }
 
@@ -1437,5 +1622,141 @@ mod tests {
                 crate::catalog::resolve_executable(&client.path).expect("a startable program");
             assert!(resolved.is_file(), "{client:?} -> {resolved:?}");
         }
+    }
+
+    // -- the guided setup ----------------------------------------------------
+
+    /// People paste what is in their browser's bar. Explaining ports and paths
+    /// to them would be asking them to do the host's work, so all of it goes.
+    #[test]
+    fn a_pasted_address_is_reduced_to_the_machine() {
+        for (input, expected) in [
+            ("my-pc.local", "my-pc.local"),
+            ("  my-pc.local  ", "my-pc.local"),
+            ("https://my-pc.local:47990/pin", "my-pc.local"),
+            ("HTTPS://my-pc.local:47990", "my-pc.local"),
+            ("http://192.168.1.20/", "192.168.1.20"),
+            ("192.168.1.20:47990", "192.168.1.20"),
+            ("https://[fd00::1]:47990/", "[fd00::1]"),
+            (
+                "https://admin:secret@my-pc.local:47990/pin?x=1#top",
+                "my-pc.local",
+            ),
+        ] {
+            assert_eq!(normalise_host(input).unwrap(), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn what_is_not_an_address_stays_refused_after_tidying() {
+        assert_eq!(
+            normalise_host("   ").unwrap_err(),
+            GameStreamFeedError::NotConfigured
+        );
+        for bad in [
+            "file:///etc/passwd",
+            "ftp://my-pc.local",
+            "my pc",
+            "-my-pc",
+            "fd00::1",
+        ] {
+            assert_eq!(
+                normalise_host(bad).unwrap_err(),
+                GameStreamFeedError::HostInvalid,
+                "{bad:?}"
+            );
+        }
+        // Said in words a person can use, with an example to copy.
+        let message = GameStreamFeedError::HostInvalid.to_string();
+        assert!(message.contains("my-pc.local"), "{message}");
+    }
+
+    /// The four states the setup branches on, each from the two facts that
+    /// decide it. Reachability comes first: `list` waits on a machine that is
+    /// off and exits non-zero on one that has not paired, and only the second
+    /// of those is a reason to show a PIN.
+    #[test]
+    fn what_a_machine_said_maps_to_one_state() {
+        let listing = Ok(vec!["Desktop".to_owned()]);
+        let refused: Result<Vec<String>, _> =
+            Err(GameStreamFeedError::NotPaired("my-pc.local".into()));
+        let waited: Result<Vec<String>, _> =
+            Err(GameStreamFeedError::Unreachable("my-pc.local".into()));
+        let no_client: Result<Vec<String>, _> = Err(GameStreamFeedError::ClientUnavailable);
+        let garbled: Result<Vec<String>, _> = Err(GameStreamFeedError::Unreadable);
+
+        assert_eq!(host_state(true, &listing), HostState::Paired);
+        assert_eq!(host_state(true, &refused), HostState::NotPaired);
+        assert_eq!(host_state(true, &waited), HostState::Unreachable);
+        assert_eq!(host_state(true, &no_client), HostState::ClientMissing);
+        // It answered; reading the answer is the import's problem.
+        assert_eq!(host_state(true, &garbled), HostState::Paired);
+        // Nothing listening: whatever `list` would have said is beside the point.
+        assert_eq!(host_state(false, &listing), HostState::Unreachable);
+        assert_eq!(host_state(false, &refused), HostState::Unreachable);
+    }
+
+    #[test]
+    fn a_machine_accepting_connections_is_reachable_and_a_closed_port_is_not() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let open = listener.local_addr().unwrap().port();
+        let closed = {
+            let spare = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            spare.local_addr().unwrap().port()
+        };
+        let wait = Duration::from_secs(2);
+        assert!(host_reachable("127.0.0.1", &[open], wait));
+        // Either port being open is enough: a host may serve only one.
+        assert!(host_reachable("127.0.0.1", &[closed, open], wait));
+        // On, with nothing listening: Sunshine is not running.
+        assert!(!host_reachable("127.0.0.1", &[closed], wait));
+        assert!(!host_reachable("no-such-host.invalid", &[open], wait));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_asks_the_client_only_when_the_machine_answered() {
+        let root = TestRoot::new("probe");
+        let paired = root.client("paired", "Desktop\nCeleste\n", 0);
+        let refusing = root.client("refusing", "", 1);
+        let wait = Duration::from_secs(5);
+
+        let view = probe_host_with(&paired, "my-pc.local", |_| true, wait);
+        assert_eq!(view.state, HostState::Paired);
+        assert_eq!(view.games, 2);
+        assert_eq!(view.host, "my-pc.local");
+        assert_eq!(root.client_args("paired"), vec!["list", "my-pc.local"]);
+
+        let view = probe_host_with(&refusing, "my-pc.local", |_| true, wait);
+        assert_eq!(view.state, HostState::NotPaired);
+
+        // No answer from the machine: the client is not even started.
+        let view = probe_host_with(&paired, "other.local", |_| false, wait);
+        assert_eq!(view.state, HostState::Unreachable);
+        assert_eq!(root.client_args("paired"), vec!["list", "my-pc.local"]);
+
+        let missing = root.path.join("not-installed");
+        let view = probe_host_with(&missing, "my-pc.local", |_| true, wait);
+        assert_eq!(view.state, HostState::ClientMissing);
+    }
+
+    /// The links are a closed set the host builds: nothing the WebView sends
+    /// becomes an address.
+    #[test]
+    fn only_the_two_known_links_can_be_opened() {
+        assert_eq!(
+            link_for("moonlight", "").unwrap(),
+            "https://moonlight-stream.org"
+        );
+        assert_eq!(
+            link_for("sunshine-pin", "https://my-pc.local:47990/").unwrap(),
+            "https://my-pc.local:47990/pin"
+        );
+        assert_eq!(
+            link_for("sunshine-pin", "").unwrap_err(),
+            "Add your gaming PC first."
+        );
+        assert!(link_for("https://evil.example", "my-pc.local").is_err());
+        assert!(link_for("", "my-pc.local").is_err());
     }
 }
