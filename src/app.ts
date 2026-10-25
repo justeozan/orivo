@@ -2780,11 +2780,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // the plugin is and offers what to do with it.
     const debug = state.preferences.betaFeatures;
     const details = document.createElement("small");
+    // The subtitle is the version, and the newer one when there is one; the
+    // Update button beside it is how to get it.
     details.textContent =
       [
-        debug && plugin.version ? `v${plugin.version}` : "",
+        plugin.version ? `v${plugin.version}` : "",
+        plugin.updateTo ? `v${plugin.updateTo} available` : "",
         debug ? plugin.extensions.join(", ") : "",
-        plugin.message,
+        debug ? plugin.message : "",
       ]
         .filter(Boolean)
         .join(" · ") || "Third-party plugin";
