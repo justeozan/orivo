@@ -3410,3 +3410,23 @@ html[data-device="phone"] .browse-bar__segments { gap: 16px; }
 html[data-device="phone"] .browse-bar__segment { font-size: var(--fs-bar); }
 html[data-device="phone"] .browse-bar__segment-logo { height: 12px; }
 html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; padding: 0 12px; font-size: var(--fs-bar); }
+
+/* Wallpaper Searcher settings: one compact block per source. */
+.ws-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px; margin-top: 6px; }
+.ws-source { display: grid; align-content: start; gap: 6px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; background: rgba(255,255,255,.025); }
+.ws-source--recommended { border-color: rgba(185,168,255,.3); }
+.ws-source__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ws-source__head strong { color: #f4f2f8; font-size: 13.5px; font-weight: 600; }
+.ws-source > small, .ws-advanced > small { color: rgba(244,242,248,.52); font-size: 12px; line-height: 1.4; }
+.ws-source code, .ws-advanced code { font-size: 11.5px; color: rgba(244,242,248,.72); }
+.ws-source .credentials-form__input, .ws-advanced .credentials-form__input { width: 100%; min-height: 32px; font-size: 12.5px; }
+.ws-source__pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
+.ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
+.ws-advanced { margin-top: 12px; }
+.ws-advanced summary { cursor: pointer; color: rgba(244,242,248,.72); font-size: 12.5px; font-weight: 560; }
+.ws-advanced[open] summary { margin-bottom: 8px; }
+.ws-advanced__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
+.ws-advanced__grid label { display: grid; gap: 4px; color: rgba(244,242,248,.6); font-size: 11.5px; }
+.ws-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
+.ws-actions small { color: rgba(244,242,248,.45); font-size: 12px; }

@@ -5554,6 +5554,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.wallpaperSearchTermLandscape.value = state.wallpaperCredentials.searchTermLandscape;
     refs.wallpaperSearchTermBackground.value = state.wallpaperCredentials.searchTermBackground;
     refs.wallpaperSearchTermLogo.value = state.wallpaperCredentials.searchTermLogo;
+    // Each source says whether it is usable with what is saved.
+    const credentials = state.wallpaperCredentials;
+    const ready: Record<string, boolean> = {
+      steamgriddb: Boolean(credentials.steamgriddbApiKey.trim()),
+      igdb: Boolean(credentials.igdbClientId.trim() && credentials.igdbClientSecret.trim()),
+      google: Boolean(credentials.googleApiKey.trim() && credentials.googleCseId.trim()),
+    };
+    for (const pill of refs.wallpaperPluginPanel.querySelectorAll<HTMLElement>("[data-ws-status]")) {
+      const on = ready[pill.dataset.wsStatus ?? ""] === true;
+      pill.textContent = on ? "Connected" : "Needs a key";
+      pill.classList.toggle("ws-pill--on", on);
+    }
     refs.wallpaperCredentialsSave.disabled = state.wallpaperCredentialsSaving;
     refs.wallpaperCredentialsSave.textContent = state.wallpaperCredentialsSaving
       ? "Saving…"
@@ -8415,63 +8427,63 @@ function shell(): string {
                   <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
                   <div class="settings-card__copy">
                     <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
-                    <small>Wallpaper search built into Orivo</small>
+                    <small>Where Orivo looks for covers, backgrounds and logos</small>
                   </div>
                 </header>
-                <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>How it works</strong>
-                    <small>Adds a search panel to the detail page media picker that finds real game artwork from Steam Store, then downloads your choice through Orivo's media pipeline. Steam Store, Wikimedia Commons and Openverse work without any keys; IGDB and Google Images use the keys below.</small>
+                <!-- One block per source: what it brings, what it needs, and
+                     whether it is ready. Keyword tuning is tucked away. -->
+                <div class="ws-sources">
+                  <div class="ws-source">
+                    <div class="ws-source__head">
+                      <strong>Steam, Wikimedia Commons, Openverse</strong>
+                      <span class="ws-pill ws-pill--on">Ready</span>
+                    </div>
+                    <small>Official store art and free-licence images. No key needed.</small>
+                  </div>
+                  <div class="ws-source ws-source--recommended">
+                    <div class="ws-source__head">
+                      <strong>SteamGridDB</strong>
+                      <span class="ws-pill" data-ws-status="steamgriddb"></span>
+                    </div>
+                    <small>Recommended. Art without the title painted on it, and 4K backgrounds. Free key at <code>steamgriddb.com/profile/preferences/api</code>.</small>
+                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="SteamGridDB API key" />
+                  </div>
+                  <div class="ws-source">
+                    <div class="ws-source__head">
+                      <strong>IGDB</strong>
+                      <span class="ws-pill" data-ws-status="igdb"></span>
+                    </div>
+                    <small>Covers and screenshots for most games. Create a Twitch app at <code>dev.twitch.tv/console/apps</code>.</small>
+                    <div class="ws-source__pair">
+                      <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Client ID" aria-label="IGDB client ID" />
+                      <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Client secret" aria-label="IGDB client secret" />
+                    </div>
+                  </div>
+                  <div class="ws-source">
+                    <div class="ws-source__head">
+                      <strong>Google Images</strong>
+                      <span class="ws-pill" data-ws-status="google"></span>
+                    </div>
+                    <small>Searches the whole web. Needs a Google Cloud key and a Programmable Search Engine.</small>
+                    <div class="ws-source__pair">
+                      <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="Google API key" />
+                      <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Search engine ID" aria-label="Google search engine ID" />
+                    </div>
                   </div>
                 </div>
-                <div class="credentials-form">
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-igdb-client-id">IGDB Client ID</label>
-                    <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Twitch application client ID" />
-                    <small>Optional, but IGDB needs both this and the secret below. Register an application at dev.twitch.tv/console/apps to get the pair.</small>
+                <details class="ws-advanced">
+                  <summary>Advanced: search terms</summary>
+                  <small>Used by Google, Wikimedia and Openverse only. <code>{name}</code> becomes the game. Leave empty for Orivo's default.</small>
+                  <div class="ws-advanced__grid">
+                    <label>Cover<input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' /></label>
+                    <label>Key art<input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' /></label>
+                    <label>Background<input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' /></label>
+                    <label>Logo<input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' /></label>
                   </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-igdb-client-secret">IGDB Client Secret</label>
-                    <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Twitch application client secret" />
-                    <small>The other half of the pair. A secret on its own cannot request a token.</small>
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-google-api-key">Google API Key</label>
-                    <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Google Cloud API key" />
-                    <small>Optional. Enables the Google Custom Search source.</small>
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-google-cse-id">Google Search Engine ID</label>
-                    <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Custom search engine ID" />
-                    <small>Optional. The programmatic search engine used with the API key.</small>
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-steamgriddb-api-key">SteamGridDB API Key</label>
-                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="From steamgriddb.com/profile/preferences/api" />
-                    <small>Optional, and the one worth adding. It is the only source that can be asked for artwork <em>without</em> the game's title painted across it, and the only one publishing 4K key art. With a key, “Reset the covers” uses it for every format; without one it falls back to Steam's official art.</small>
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-search-term-cover">Cover search term</label>
-                    <input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' />
-                    <small>Used by the keyword sources (Google, Wikimedia, Openverse). <code>{name}</code> becomes the game. Leave a box empty to keep Orivo's default. Quoting the name is what stops a search for “Doom” answering with Doom Eternal; the noun after it is what separates box art from gameplay.</small>
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-search-term-landscape">Key art search term</label>
-                    <input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' />
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-search-term-background">Background search term</label>
-                    <input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' />
-                  </div>
-                  <div class="credentials-form__field">
-                    <label for="wallpaper-search-term-logo">Logo search term</label>
-                    <input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' />
-                    <small>Steam Store, SteamGridDB and IGDB ignore these boxes: they resolve the game first and then ask a typed endpoint, so no keyword is involved and nothing has to be guessed.</small>
-                  </div>
-                  <div class="credentials-form__actions">
-                    <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
-                    <small>Saved keys are picked up immediately — no restart needed.</small>
-                  </div>
+                </details>
+                <div class="ws-actions">
+                  <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
+                  <small>Applied at once, no restart.</small>
                 </div>
               </section>
 
