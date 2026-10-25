@@ -27,6 +27,7 @@ export type IconName =
   | "folder"
   | "monitor"
   | "cast"
+  | "plus"
   | "wine"
   | "alert"
   | "star"
@@ -119,6 +120,7 @@ const paths: Record<IconName, string> = {
   // Lucide's "monitor", "cast" and "wine" (ISC licence): the Source row's
   // glyphs for Local, Moonlight streaming and Wine, which have no wordmark.
   monitor: '<rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" />',
+  plus: '<path d="M5 12h14" /><path d="M12 5v14" />',
   cast: '<path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><path d="M2 12a9 9 0 0 1 8 8" /><path d="M2 16a5 5 0 0 1 4 4" /><line x1="2" x2="2.01" y1="20" y2="20" />',
   wine: '<path d="M8 22h8" /><path d="M7 10h10" /><path d="M12 15v7" /><path d="M12 15a5 5 0 0 0 5-5c0-2-.5-4-2-8H9c-1.5 4-2 6-2 8a5 5 0 0 0 5 5Z" />',
   alert: '<circle cx="12" cy="12" r="8.5" /><path d="M12 7.5v5M12 16h.01" />',

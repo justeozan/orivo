@@ -2484,7 +2484,9 @@ body[data-mood="rage"] { --violet: #f2453c; }
   letter-spacing: .1em;
   text-transform: uppercase;
 }
-.plugins-group__list { display: grid; }
+/* Two columns of integrations, like a connections page: a tile, the name,
+   one line of what it does, one action. */
+.plugins-group__list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); column-gap: 36px; }
 /* The label and the file-install action share the group's first line, so the
    action never pushes the catalogue down by a whole row. */
 .plugins-group__header {
@@ -2511,13 +2513,49 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* The row's grid outranks the UA `[hidden]` rule, so it is restated: an iOS
    build hides the rows it cannot run. */
 .plugin-row[hidden] { display: none; }
-.plugin-row {
+.plugin-row,
+.plugin-catalog-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 14px;
-  padding: 14px 0;
+  padding: 12px 0;
 }
+/* Rows sit on the page, not between rules: the tiles already pace the list. */
+.plugins-group__list > .settings-row + .settings-row { border-top: 0; }
+.plugin-tile {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px;
+  color: #e9e5ef;
+  background: rgba(255,255,255,.035);
+}
+.plugin-tile .icon { width: 22px; height: 22px; }
+.plugin-row .settings-row__copy,
+.plugin-catalog-row .settings-row__copy { gap: 3px; }
+.plugin-row .settings-row__copy strong,
+.plugin-catalog-row .settings-row__copy strong { font-size: 15px; font-weight: 520; }
+.plugin-row .settings-row__copy small:first-of-type,
+.plugin-catalog-row .settings-row__copy small:first-of-type { overflow: hidden; color: rgba(244,242,248,.5); text-overflow: ellipsis; white-space: nowrap; }
+/* The row's one action, as a bare glyph. */
+.plugin-action-button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border-radius: 50%;
+  color: #f4f2f8;
+  background: none;
+  transition: background 160ms ease;
+}
+.plugin-action-button:hover:not(:disabled),
+.plugin-action-button[data-nav-focus] { background: rgba(255,255,255,.1); }
+.plugin-action-button:disabled { color: rgba(244,242,248,.45); cursor: default; }
+.plugin-action-button .icon { width: 20px; height: 20px; }
 .plugin-row__state {
   flex: none;
   color: #a9e6b3;
@@ -2603,7 +2641,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .plugins-search__input::placeholder { color: #b3abc6; }
 .plugin-catalog-row { position: relative; }
-.plugin-catalog-row + .plugin-catalog-row { border-top: 1px solid rgba(255,255,255,.08); }
+
 .plugin-catalog-row__status { color: #c3b5ff !important; }
 .plugin-catalog-row__status--error { color: #f0a3a3 !important; }
 /* The bar rides the bottom edge of its own row: an install has to be locatable

@@ -464,6 +464,32 @@ const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 // date or play time, which is what the Activity shelves are built from.
 const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
 
+/**
+ * The tile a plugin row opens with. Plugins ship no icon of their own, so the
+ * glyph is chosen from what the plugin is (its id, else its name).
+ */
+function pluginTile(id: string, name: string): HTMLElement {
+  const key = `${id} ${name}`.toLocaleLowerCase();
+  const glyph: IconName = key.includes("wine")
+    ? "wine"
+    : key.includes("stream") || key.includes("moonlight")
+      ? "cast"
+      : key.includes("winlator") || key.includes("android")
+        ? "android"
+        : key.includes("ryujinx") || key.includes("retroarch") || key.includes("ppsspp") || key.includes("emul")
+          ? "gamepad"
+          : key.includes("wallpaper")
+            ? "landscape"
+            : key.includes("quiky") || key.includes("install")
+              ? "download"
+              : "puzzle";
+  const tile = document.createElement("span");
+  tile.className = "plugin-tile";
+  tile.setAttribute("aria-hidden", "true");
+  tile.innerHTML = icon(glyph);
+  return tile;
+}
+
 /** Glyphs for the Source row's segments that have no brand wordmark. */
 const SOURCE_GLYPHS: Readonly<Record<string, IconName>> = {
   local: "monitor",
@@ -2694,11 +2720,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     install.disabled = busy || installed;
     const label = formatInstallLabel(progress, { ...entry, installed });
     install.setAttribute("aria-label", `${label} ${entry.name}`);
-    install.innerHTML = `${icon(installed ? "check" : "download")}<span></span>`;
-    // The label is host copy and plugin names are third-party: neither goes
-    // through innerHTML.
-    install.lastElementChild!.textContent = label;
-    row.append(copy, install);
+    // One glyph, the way an integrations list reads: "+" to add it, a tick once
+    // it is in. The words stay as the button's name and its tooltip.
+    install.className = "plugin-action-button";
+    install.innerHTML = icon(installed ? "check" : busy ? "download" : "plus");
+    install.title = label;
+    row.append(pluginTile(entry.id, entry.name), copy, install);
 
     if (busy) {
       const track = document.createElement("div");
@@ -2818,7 +2845,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     remove.textContent = "Uninstall";
     actions.append(remove);
 
-    row.append(copy, state, actions);
+    row.append(pluginTile(plugin.id, plugin.name), copy, state, actions);
 
     if (openPluginLogId === plugin.id) {
       row.append(renderPluginLogPanel(plugin.id));
@@ -3047,7 +3074,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         const state = document.createElement("span");
         state.className = "plugin-row__state plugin-row__state--soon";
         state.textContent = "Soon";
-        row.append(copy, state);
+        row.append(pluginTile(entry.name, entry.name), copy, state);
         return row;
       });
   };
@@ -8276,6 +8303,7 @@ function shell(): string {
                   <p class="plugins-group__label">Installed</p>
                   <div id="plugins-installed-list" class="plugins-group__list">
                     <div class="settings-row plugin-row">
+                      <span class="plugin-tile" aria-hidden="true">${icon("wine")}</span>
                       <div class="settings-row__copy">
                         <strong>Wine</strong>
                         <small>Wine-Staging runner and isolated profiles</small>
@@ -8284,6 +8312,7 @@ function shell(): string {
                       <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
                     </div>
                     <div class="settings-row plugin-row">
+                      <span class="plugin-tile" aria-hidden="true">${icon("landscape")}</span>
                       <div class="settings-row__copy">
                         <strong>Wallpaper Searcher</strong>
                         <small>Finds wallpaper artwork from IGDB and Google Images</small>
