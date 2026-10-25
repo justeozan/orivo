@@ -488,6 +488,26 @@ function pluginStateButton(options: { idle: string; hover?: string }): HTMLButto
 }
 
 /**
+ * What a plugin is for, in two words, for its row's subtitle. Plugins ship a
+ * name and a sentence-long summary but nothing this short, so it is read from
+ * what the plugin is, falling back on the kind of extension it provides.
+ */
+function pluginPurpose(id: string, name: string, extensions: readonly string[]): string {
+  const key = `${id} ${name}`.toLocaleLowerCase();
+  if (key.includes("stream") || key.includes("moonlight")) return "Game streaming";
+  if (key.includes("ryujinx") || key.includes("switch")) return "Switch games";
+  if (key.includes("ppsspp") || key.includes("psp")) return "PSP games";
+  if (key.includes("retroarch")) return "Retro consoles";
+  if (key.includes("winlator") || key.includes("wine")) return "Windows games";
+  if (key.includes("quiky")) return "Game installs";
+  if (key.includes("wallpaper") || key.includes("artwork")) return "Artwork search";
+  const kinds = extensions.join(" ").toLocaleLowerCase();
+  if (kinds.includes("runner")) return "Game launcher";
+  if (kinds.includes("source") || kinds.includes("library")) return "Game library";
+  return "";
+}
+
+/**
  * The tile a plugin row opens with. Plugins ship no icon of their own, so the
  * glyph is chosen from what the plugin is (its id, else its name).
  */
@@ -2784,6 +2804,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // Update button beside it is how to get it.
     details.textContent =
       [
+        pluginPurpose(plugin.id, plugin.name, plugin.extensions),
         plugin.version ? `v${plugin.version}` : "",
         plugin.updateTo ? `v${plugin.updateTo} available` : "",
         debug ? plugin.extensions.join(", ") : "",
