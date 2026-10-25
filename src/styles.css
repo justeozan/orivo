@@ -2831,6 +2831,14 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
+/* Two or three columns of stores, Steam among them. The lists inside are
+   unwrapped so their rows land in the same grid; sentences that are not a
+   row (hints, the shared-sign-in note) take the whole width. */
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); column-gap: 32px; align-items: start; }
+.source-grid .source-accounts-body,
+.source-grid .source-account-list { display: contents; }
+.source-grid .source-accounts-body > :not(.source-account-list),
+.source-grid .source-account-shared { grid-column: 1 / -1; }
 .source-account-entry { display: grid; }
 .source-account-entry .steam-notice { margin: 0 0 14px; }
 /* Every source is one line in the same shape — logo, name, sync, and the

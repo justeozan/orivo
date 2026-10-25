@@ -8353,6 +8353,9 @@ function shell(): string {
                   <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">Refresh all libraries</button>
                 </header>
 
+                <!-- Steam and every other store share one grid of two or three
+                     columns: to the reader they are all the same kind of row. -->
+                <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
                   <div id="steam-account-panel" class="steam-inline-panel" aria-labelledby="steam-account-title" hidden>
@@ -8362,6 +8365,7 @@ function shell(): string {
                 </div>
 
                 <div id="source-accounts-body" class="source-accounts-body"></div>
+                </div>
                 <div class="source-providers">
                   <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
