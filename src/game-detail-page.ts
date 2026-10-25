@@ -30,18 +30,21 @@ import {
   mediaForKind,
   normaliseGameDetail,
   normaliseGameMedia,
+  normaliseStoreMedia,
   normaliseWallpaperSearch,
   platformLabels,
   statusChips,
   previewedMedia,
   reduceGameDetailState,
   resolvePrimaryAction,
+  storeMovieSource,
   shouldOfferAboutToggle,
   shouldRenderSection,
   toGameDetailRestoreState,
   withSampleSocialData,
   type GameDetailPageAction,
   type GameDetailViewModel,
+  type StoreMediaView,
 } from "./game-detail-model";
 import { hostDeviceLabel } from "./host-device";
 import {
@@ -108,6 +111,11 @@ export interface GameDetailPageClient {
     gameId: string,
     signal: AbortSignal,
   ): Promise<ArtworkResetResult>;
+  /**
+   * The trailers and screenshots of the game's store page. Empty, never an
+   * error, when the game has none or the store cannot be reached.
+   */
+  getStoreMedia(gameId: string, signal: AbortSignal): Promise<StoreMediaView>;
   /** Remove a game from the library (does not touch the game's own files). */
   removeGame(gameId: string, signal: AbortSignal): Promise<void>;
   setGameHidden(
@@ -356,6 +364,12 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
         signal,
       );
     },
+    async getStoreMedia(gameId, signal) {
+      if (!isTauriRuntime()) return { screenshots: [], movies: [] };
+      return normaliseStoreMedia(
+        await invokeWhileActive<unknown>("game_store_media", { gameId }, signal),
+      );
+    },
     async removeGame(gameId, signal) {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("remove_game", { gameId }, signal);
@@ -454,9 +468,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const wallpaperSelection = new Set<string>();
   /** Which card role a single ticked wallpaper is applied to. */
   /** The hero media rail's current page (three tiles per page). */
-  /** Index into the hero's auto-cycling backgrounds, and its timer. */
+  /** Index into the hero's auto-cycling screenshots, and its timer. */
   let heroSlide = 0;
   let heroTimer: number | null = null;
+  /**
+   * The store page's trailers and screenshots. They live beside the page state
+   * rather than in it: they are decoration fetched after the first paint, with
+   * no part in saving, restoring or the wallpaper flow.
+   */
+  let storeMedia: StoreMediaView = { screenshots: [], movies: [] };
+  /** The game `storeMedia` was requested for, so a reload does not re-ask. */
+  let storeMediaGameId: string | null = null;
+  /** The rail tile shown in the hero; null lets the slideshow run. */
+  let storeSelection: {
+    kind: "movie" | "screenshot";
+    index: number;
+  } | null = null;
   /** Ticks the Epic download percentage while one is running; null otherwise. */
   let epicProgressTimer: ReturnType<typeof setTimeout> | null = null;
   /** The percentage the poll last measured, so the hero chip moves with it. */
@@ -566,6 +593,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (detail && options.sampleSocialEnabled?.())
         detail = withSampleSocialData(detail);
       dispatch({ type: "detail-loaded", requestId, detail });
+      // After the first paint and not awaited: the page never waits on Steam.
+      if (detail) void loadStoreMedia(context, gameId);
     } catch (error) {
       if (!isFresh(context, gameId)) return;
       const message = requestErrorMessage(
@@ -579,6 +608,24 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         message,
         offline: typeof navigator !== "undefined" && !navigator.onLine,
       });
+    }
+  };
+
+  const loadStoreMedia = async (
+    context: PageActivation,
+    gameId: string,
+  ): Promise<void> => {
+    if (storeMediaGameId === gameId) return;
+    storeMediaGameId = gameId;
+    storeSelection = null;
+    try {
+      const media = await client.getStoreMedia(gameId, context.signal);
+      if (!isFresh(context, gameId)) return;
+      storeMedia = media;
+      render();
+    } catch {
+      // The rail is optional. Forget the attempt so the next load tries again.
+      if (storeMediaGameId === gameId) storeMediaGameId = null;
     }
   };
 
@@ -843,48 +890,6 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     pageRoot
       ?.querySelector<HTMLElement>("[data-focus-key='more-actions']")
       ?.focus();
-  };
-
-  /**
-   * A click on a rail wallpaper chooses it as the game's home (Library)
-   * background — it previews in the hero at once, persists the selection, and
-   * refreshes the library. This is the reference's "the wallpaper you pick here
-   * is the one the home screen paints" behaviour.
-   */
-  const handleChooseWallpaper = async (mediaId: string): Promise<void> => {
-    const context = activation;
-    const gameId = state.gameId;
-    if (!isActive(context) || !gameId || !mediaId || state.mediaBusy) return;
-    // Immediate feedback in the detail hero.
-    dispatch({ type: "media-previewed", mediaId });
-    dispatch({ type: "media-busy-changed", busy: true });
-    try {
-      await enqueueMediaSave(gameId, async (signal) => {
-        const media = await client.selectMedia(gameId, mediaId, signal);
-        if (isFresh(context, gameId)) {
-          const committed = normaliseGameMedia(media);
-          // The browser fallback returns nothing; keep the preview rather than
-          // wiping the rail.
-          if (committed.length > 0)
-            dispatch({ type: "media-committed", media: committed });
-          else dispatch({ type: "media-busy-changed", busy: false });
-        }
-        await client.setHomeImage(gameId, mediaId, "background", signal);
-      });
-      options.onLibraryChanged?.();
-      const done = "Wallpaper set as your home background.";
-      if (!isFresh(context, gameId)) return reportSavedAfterLeaving(done);
-      showTransientStatus(done);
-    } catch (error) {
-      const message = requestErrorMessage(
-        error,
-        "That wallpaper could not be set as your background.",
-      );
-      // Steps that finished before the failure are already in the catalog.
-      options.onLibraryChanged?.();
-      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
-      dispatch({ type: "media-failed", message });
-    }
   };
 
   /**
@@ -1438,39 +1443,78 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     return wrap;
   };
 
-  const renderHeroMedia = (detail: GameDetailViewModel): HTMLElement => {
-    const frame = element("div", "gd-hero__media");
-    const preview = previewedMedia(state);
-    if (preview && preview.kind === "video") {
-      const video = document.createElement("video");
-      video.className = "gd-hero__video";
-      video.controls = true;
-      video.preload = "metadata";
-      video.playsInline = true;
-      video.autoplay = false;
-      video.src = preview.previewUrl;
-      if (preview.posterUrl) video.poster = preview.posterUrl;
-      video.setAttribute(
-        "aria-label",
-        `${preview.title} trailer for ${detail.title}`,
-      );
-      const play = element("button", "gd-hero__play");
-      play.type = "button";
-      play.dataset.focusKey = "hero-play";
-      play.setAttribute("aria-label", `Play ${preview.title}`);
-      play.append(iconElement("play"));
-      play.addEventListener("click", () => {
-        play.hidden = true;
-        // Explicit user intent only: nothing here ever autoplays.
-        void video.play().catch(() => {
-          play.hidden = false;
-        });
-      });
-      video.addEventListener("pause", () => {
+  /**
+   * One trailer in the hero frame. Never autoplays: the user starts it, with
+   * the browser's own controls to pause, seek and unmute.
+   */
+  const renderHeroVideo = (
+    frame: HTMLElement,
+    video: {
+      src: string;
+      poster?: string;
+      title: string;
+      label: string;
+      onError?: () => void;
+    },
+  ): HTMLElement => {
+    const player = document.createElement("video");
+    player.className = "gd-hero__video";
+    player.controls = true;
+    player.preload = "metadata";
+    player.playsInline = true;
+    player.autoplay = false;
+    player.src = video.src;
+    if (video.poster) player.poster = video.poster;
+    player.setAttribute("aria-label", video.label);
+    if (video.onError) player.addEventListener("error", video.onError);
+    const play = element("button", "gd-hero__play");
+    play.type = "button";
+    play.dataset.focusKey = "hero-play";
+    play.setAttribute("aria-label", `Play ${video.title}`);
+    play.append(iconElement("play"));
+    play.addEventListener("click", () => {
+      play.hidden = true;
+      // Explicit user intent only: nothing here ever autoplays.
+      void player.play().catch(() => {
         play.hidden = false;
       });
-      frame.append(video, play);
-      return frame;
+    });
+    player.addEventListener("pause", () => {
+      play.hidden = false;
+    });
+    frame.append(player, play);
+    return frame;
+  };
+
+  const renderHeroMedia = (detail: GameDetailViewModel): HTMLElement => {
+    const frame = element("div", "gd-hero__media");
+    const movie =
+      storeSelection?.kind === "movie"
+        ? storeMedia.movies[storeSelection.index]
+        : undefined;
+    const movieSource = movie ? storeMovieSource(movie) : null;
+    if (movie && movieSource) {
+      return renderHeroVideo(frame, {
+        src: movieSource,
+        poster: movie.thumbUrl,
+        title: movie.title,
+        label: `${movie.title} for ${detail.title}`,
+        // A file the WebView cannot decode (HLS outside WebKit) must not leave
+        // a dead player on the hero.
+        onError: () => {
+          storeSelection = null;
+          showTransientStatus("That trailer could not be played here.");
+        },
+      });
+    }
+    const preview = previewedMedia(state);
+    if (!storeSelection && preview && preview.kind === "video") {
+      return renderHeroVideo(frame, {
+        src: preview.previewUrl,
+        poster: preview.posterUrl,
+        title: preview.title,
+        label: `${preview.title} trailer for ${detail.title}`,
+      });
     }
     // The shared ground, under the picture: what stands when it has none yet,
     // the same one the Library's scene shows.
@@ -1479,12 +1523,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const image = element("img", "gd-hero__image");
     image.decoding = "async";
     image.setAttribute("aria-hidden", "true");
-    // A background the user is previewing or has applied wins outright; with
-    // none chosen, the hero cycles the game's backgrounds on its own.
+    // A screenshot picked from the rail wins; then a background the user is
+    // previewing or has applied; with none chosen, the hero cycles the game's
+    // store screenshots on its own.
+    const picked =
+      storeSelection?.kind === "screenshot"
+        ? storeMedia.screenshots[storeSelection.index]
+        : undefined;
     attachImage(
       frame,
       image,
-      heroSlideshowUrl() ?? heroImageUrl(state),
+      picked?.fullUrl ?? heroSlideshowUrl() ?? heroImageUrl(state),
       "gd-hero__media--missing",
     );
     frame.append(image);
@@ -1492,16 +1541,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * The auto-cycling hero background. It only runs when the user has not
-   * singled one out — previewing or applying a wallpaper is an explicit choice,
-   * and rotating away from it a second later would undo their intent.
+   * The auto-cycling hero picture: the game's store screenshots. It only runs
+   * when the user has not singled something out — a rail tile, or previewing or
+   * applying a wallpaper, is an explicit choice, and rotating away from it a
+   * second later would undo their intent.
    */
   const heroSlideshowUrl = (): string | null => {
-    if (state.previewMediaId || state.appliedMediaId) return null;
-    const backgrounds = galleryMedia();
-    if (backgrounds.length < 2) return null;
-    const item = backgrounds[heroSlide % backgrounds.length];
-    return item?.previewUrl ?? item?.posterUrl ?? null;
+    if (storeSelection || state.previewMediaId || state.appliedMediaId)
+      return null;
+    const shots = storeMedia.screenshots;
+    if (shots.length < 2) return null;
+    return shots[heroSlide % shots.length]?.fullUrl ?? null;
   };
 
   const startHeroSlideshow = (): void => {
@@ -1523,66 +1573,77 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
-   * The hero rail shows backgrounds only. It is the picker for the art painted
-   * behind the hero, so covers and trailers — which can never fill that slot —
-   * would only be noise to scroll past.
-   */
-  const galleryMedia = (): GameMediaView[] =>
-    state.media.filter((item) => item.kind === "wallpaper");
-
-  /**
-   * The vertical rail overlapping the hero's top-right: every saved background,
-   * scrolled rather than paged. Adding a wallpaper now lives in the "…" menu, so
-   * a game with no backgrounds yet has no rail at all.
+   * The vertical rail overlapping the hero's top-right: what the game's store
+   * page shows, trailers first and then screenshots, scrolled rather than
+   * paged. It is not the wallpaper picker — chosen backgrounds are managed from
+   * the "…" menu — so a game the store knows nothing about has no rail.
    */
   const renderGalleryRail = (): HTMLElement | null => {
-    const items = galleryMedia();
-    if (items.length === 0) return null;
+    const { movies, screenshots } = storeMedia;
+    if (movies.length + screenshots.length === 0) return null;
 
     const rail = element("aside", "gd-gallery");
     rail.dataset.scrollKey = "gallery";
-    rail.setAttribute("aria-label", "Wallpapers");
+    rail.setAttribute("aria-label", "Trailers and screenshots");
     const track = element("div", "gd-gallery__track");
     track.dataset.scrollKey = "gallery-track";
     track.setAttribute("role", "group");
-    track.setAttribute("aria-label", "Backgrounds");
-    for (const item of items) track.append(renderGalleryTile(item));
+    track.setAttribute("aria-label", "Store media");
+    movies.forEach((movie, index) =>
+      track.append(
+        renderGalleryTile({
+          kind: "movie",
+          index,
+          label: `${movie.title} — trailer`,
+          imageUrl: movie.thumbUrl,
+        }),
+      ),
+    );
+    screenshots.forEach((shot, index) =>
+      track.append(
+        renderGalleryTile({
+          kind: "screenshot",
+          index,
+          label: `Screenshot ${index + 1}`,
+          imageUrl: shot.thumbUrl,
+        }),
+      ),
+    );
     rail.append(track);
     return rail;
   };
 
-  /** One tile in the hero rail: previews on click; a trailer keeps its play cue. */
-  const renderGalleryTile = (item: GameMediaView): HTMLElement => {
-    const selected = state.previewMediaId === item.id;
+  /** One tile in the hero rail: shows its trailer or screenshot in the hero. */
+  const renderGalleryTile = (item: {
+    kind: "movie" | "screenshot";
+    index: number;
+    label: string;
+    imageUrl: string;
+  }): HTMLElement => {
+    const selected =
+      storeSelection?.kind === item.kind && storeSelection.index === item.index;
     const tile = element("button", "gd-gallery__tile");
     tile.type = "button";
-    tile.dataset.focusKey = `media-${item.id}`;
-    tile.dataset.mediaKind = item.kind;
+    tile.dataset.focusKey = `store-${item.kind}-${item.index}`;
+    tile.dataset.mediaKind = item.kind === "movie" ? "video" : "screenshot";
     tile.classList.toggle("gd-gallery__tile--selected", selected);
-    tile.setAttribute(
-      "aria-label",
-      `${item.title}${item.availableOffline ? "" : " — needs a download"}`,
-    );
+    tile.setAttribute("aria-label", item.label);
+    tile.setAttribute("aria-pressed", String(selected));
     const image = element("img", "gd-gallery__tile-image");
     image.loading = "lazy";
     image.decoding = "async";
-    attachImage(
-      tile,
-      image,
-      item.posterUrl ?? item.previewUrl,
-      "gd-gallery__tile--missing",
-    );
+    attachImage(tile, image, item.imageUrl, "gd-gallery__tile--missing");
     tile.append(image);
-    if (item.kind === "video") {
+    if (item.kind === "movie") {
       const play = element("span", "gd-gallery__play");
       play.setAttribute("aria-hidden", "true");
       play.append(iconElement("play"));
       tile.append(play);
     }
-    // A wallpaper click chooses the home background; a trailer just previews.
+    // Choosing the tile that is already showing lets the slideshow resume.
     tile.addEventListener("click", () => {
-      if (item.kind === "wallpaper") void handleChooseWallpaper(item.id);
-      else dispatch({ type: "media-previewed", mediaId: item.id });
+      storeSelection = selected ? null : { kind: item.kind, index: item.index };
+      render();
     });
     return tile;
   };
@@ -2481,6 +2542,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       heroSlide = 0;
       startHeroSlideshow();
       const gameId = context.route.gameId;
+      // Coming back to the same game keeps what the store already gave; a
+      // different game must not flash the last one's trailers.
+      if (storeMediaGameId !== gameId) {
+        storeMedia = { screenshots: [], movies: [] };
+        storeMediaGameId = null;
+        storeSelection = null;
+      }
       dispatch({
         type: "activate",
         gameId,

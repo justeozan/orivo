@@ -54,6 +54,9 @@ function clientWithDetail(
         replaced: ["cover", "landscape", "background"] as const,
       };
     },
+    async getStoreMedia() {
+      return { screenshots: [], movies: [] };
+    },
     async selectMedia() {
       return [];
     },
@@ -189,7 +192,14 @@ describe("game detail page social rendering", () => {
       related({ id: `steam:${i}`, title: `Related ${i}` }),
     );
 
-    await mountWith(detail);
+    await mountWith(detail, {
+      async getStoreMedia() {
+        return {
+          screenshots: [{ thumbUrl: "/shot-t.jpg", fullUrl: "/shot.jpg" }],
+          movies: [],
+        };
+      },
+    });
 
     // Every panel shares one grid now, so the page fits a viewport without
     // hiding a section below a fold.
@@ -265,8 +275,8 @@ describe("game detail page social rendering", () => {
     expect(container.querySelector(".gd-friends")).not.toBeNull();
     expect(container.querySelector(".gd-activity")).not.toBeNull();
     expect(container.querySelector(".gd-related")).not.toBeNull();
-    // The media rail sits inside the hero.
-    expect(container.querySelector(".gd-hero .gd-gallery")).not.toBeNull();
+    // Outside the desktop app there is no store to ask, so no rail either.
+    expect(container.querySelector(".gd-gallery")).toBeNull();
     expect(container.querySelector(".gd-hero__title")?.textContent).toBe(
       "Elden Ring",
     );
@@ -835,7 +845,7 @@ describe("watching an Epic install", () => {
     expect(polls).toBeGreaterThan(100);
     await vi.advanceTimersByTimeAsync(2 * 60_000);
     const afterDeadline = polls;
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(7_000);
     expect(polls).toBe(afterDeadline);
     expect(primaryText()).toContain("Install");
   });
@@ -1041,11 +1051,21 @@ describe("saving chosen artwork", () => {
     await flush();
     expect(calls).toEqual(["reset:start"]);
 
-    // A wallpaper chosen from the rail while the reset is still running.
+    // A saved wallpaper applied from the picker while the reset is still running.
     const rail = detail.media.find((item) => item.kind === "wallpaper");
     expect(rail).toBeDefined();
     container
-      .querySelector<HTMLElement>(`[data-focus-key='media-${rail!.id}']`)
+      .querySelector<HTMLElement>("[data-focus-key='more-actions']")
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='menu-wallpaper']")
+      ?.click();
+    await flush();
+    container
+      .querySelector<HTMLElement>(`[data-focus-key='wall-${rail!.id}']`)
+      ?.click();
+    container
+      .querySelector<HTMLElement>("[data-focus-key='wallpaper-apply']")
       ?.click();
     await flush();
     expect(calls).toEqual(["reset:start"]);
@@ -1058,5 +1078,139 @@ describe("saving chosen artwork", () => {
       `select:${rail!.id}`,
       `home:${rail!.id}`,
     ]);
+  });
+});
+
+describe("game detail page store media", () => {
+  const storeMedia = {
+    movies: [
+      {
+        title: "Launch Trailer",
+        thumbUrl: "/store/movie-t.jpg",
+        mp4Url: "https://video.akamai.steamstatic.com/movie_max.mp4",
+      },
+    ],
+    screenshots: [
+      { thumbUrl: "/store/s1-t.jpg", fullUrl: "/store/s1.jpg" },
+      { thumbUrl: "/store/s2-t.jpg", fullUrl: "/store/s2.jpg" },
+    ],
+  };
+
+  const tiles = (): HTMLElement[] => [
+    ...container.querySelectorAll<HTMLElement>(".gd-gallery__tile"),
+  ];
+
+  it("lists the trailer first, then the screenshots, and ignores the chosen wallpapers", async () => {
+    const detail = createFallbackGameDetail(GAME_ID);
+    expect(detail.media.some((item) => item.kind === "wallpaper")).toBe(true);
+
+    await mountWith(detail, { getStoreMedia: async () => storeMedia });
+
+    expect(tiles().map((tile) => tile.dataset.mediaKind)).toEqual([
+      "video",
+      "screenshot",
+      "screenshot",
+    ]);
+    expect(tiles()[0]?.querySelector(".gd-gallery__play")).not.toBeNull();
+    expect(
+      tiles()[0]?.querySelector<HTMLImageElement>("img")?.getAttribute("src"),
+    ).toBe("/store/movie-t.jpg");
+    expect(tiles()[1]?.querySelector(".gd-gallery__play")).toBeNull();
+  });
+
+  it("puts a controlled, non-autoplaying video in the hero when the trailer is clicked", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+    expect(container.querySelector(".gd-hero__video")).toBeNull();
+
+    tiles()[0]?.click();
+
+    const video = container.querySelector<HTMLVideoElement>(
+      ".gd-hero .gd-hero__video",
+    );
+    expect(video).not.toBeNull();
+    expect(video?.getAttribute("src")).toBe(
+      "https://video.akamai.steamstatic.com/movie_max.mp4",
+    );
+    expect(video?.controls).toBe(true);
+    expect(video?.autoplay).toBe(false);
+    expect(video?.poster).toContain("/store/movie-t.jpg");
+    expect(tiles()[0]?.classList.contains("gd-gallery__tile--selected")).toBe(
+      true,
+    );
+
+    // Clicking the same tile again hands the hero back to the pictures.
+    tiles()[0]?.click();
+    expect(container.querySelector(".gd-hero__video")).toBeNull();
+  });
+
+  it("shows a clicked screenshot full size in the hero", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+
+    tiles()[2]?.click();
+
+    expect(
+      container
+        .querySelector<HTMLImageElement>(".gd-hero__image")
+        ?.getAttribute("src"),
+    ).toBe("/store/s2.jpg");
+  });
+
+  it("cycles the screenshots in the hero when nothing is picked", async () => {
+    vi.useFakeTimers();
+    try {
+      // A game with a wallpaper applied keeps it; the slideshow is for the rest.
+      const detail = createFallbackGameDetail(GAME_ID);
+      detail.media = [];
+      const page = createGameDetailPage({
+        navigate: () => {},
+        back: () => {},
+        play: () => {},
+        client: clientWithDetail(detail, {
+          getStoreMedia: async () => storeMedia,
+        }),
+      });
+      host = new PageLifecycleHost(container, page);
+      await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+      await vi.advanceTimersByTimeAsync(0);
+      const heroSrc = (): string | null | undefined =>
+        container
+          .querySelector<HTMLImageElement>(".gd-hero__image")
+          ?.getAttribute("src");
+      expect(heroSrc()).toBe("/store/s1.jpg");
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(heroSrc()).toBe("/store/s2.jpg");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("paints the page first and adds the rail when the store answers", async () => {
+    let answer: (value: typeof storeMedia) => void = () => {};
+    const pending = new Promise<typeof storeMedia>((resolve) => {
+      answer = resolve;
+    });
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: () => pending,
+    });
+    expect(container.querySelector(".gd-hero__title")).not.toBeNull();
+    expect(container.querySelector(".gd-gallery")).toBeNull();
+
+    answer(storeMedia);
+    await flush();
+    expect(tiles()).toHaveLength(3);
+  });
+
+  it("shows no rail when the store has nothing, or fails", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      async getStoreMedia() {
+        throw new Error("offline");
+      },
+    });
+    expect(container.querySelector(".gd-gallery")).toBeNull();
+    expect(container.querySelector(".gd-hero__title")).not.toBeNull();
   });
 });

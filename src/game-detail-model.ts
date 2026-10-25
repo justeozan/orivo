@@ -357,6 +357,71 @@ function oneOf<T extends string>(
     : fallback;
 }
 
+/** A screenshot from the game's store page. */
+export interface StoreScreenshotView {
+  thumbUrl: string;
+  fullUrl: string;
+}
+
+/**
+ * A store-page trailer. Any of the three files may be missing: Steam does not
+ * publish the same formats for every title, so playback picks what exists.
+ */
+export interface StoreMovieView {
+  title: string;
+  thumbUrl: string;
+  mp4Url?: string;
+  webmUrl?: string;
+  hlsUrl?: string;
+}
+
+/** What the game's store page shows: trailers and screenshots, in store order. */
+export interface StoreMediaView {
+  screenshots: StoreScreenshotView[];
+  movies: StoreMovieView[];
+}
+
+/** A store answer is optional decoration, so anything unreadable is dropped. */
+export function normaliseStoreMedia(value: unknown): StoreMediaView {
+  if (!isRecord(value)) return { screenshots: [], movies: [] };
+  const screenshots: StoreScreenshotView[] = [];
+  if (Array.isArray(value.screenshots)) {
+    for (const entry of value.screenshots) {
+      if (!isRecord(entry)) continue;
+      const fullUrl = text(entry.fullUrl);
+      if (!fullUrl) continue;
+      screenshots.push({ fullUrl, thumbUrl: text(entry.thumbUrl, fullUrl) });
+    }
+  }
+  const movies: StoreMovieView[] = [];
+  if (Array.isArray(value.movies)) {
+    for (const entry of value.movies) {
+      if (!isRecord(entry)) continue;
+      const movie: StoreMovieView = {
+        title: text(entry.title, "Trailer"),
+        thumbUrl: text(entry.thumbUrl),
+      };
+      const mp4Url = optionalText(entry.mp4Url);
+      const webmUrl = optionalText(entry.webmUrl);
+      const hlsUrl = optionalText(entry.hlsUrl);
+      if (mp4Url) movie.mp4Url = mp4Url;
+      if (webmUrl) movie.webmUrl = webmUrl;
+      if (hlsUrl) movie.hlsUrl = hlsUrl;
+      if (!storeMovieSource(movie)) continue;
+      movies.push(movie);
+    }
+  }
+  return { screenshots, movies };
+}
+
+/**
+ * The file a trailer plays. MP4 first: every WebView plays it. WebM next, and
+ * HLS last because only WebKit plays it natively.
+ */
+export function storeMovieSource(movie: StoreMovieView): string | null {
+  return movie.mp4Url ?? movie.webmUrl ?? movie.hlsUrl ?? null;
+}
+
 export function normaliseGameMedia(value: unknown): GameMediaView[] {
   if (!Array.isArray(value)) return [];
   const seen = new Set<string>();

@@ -55,6 +55,7 @@ mod steam;
 mod steam_account;
 mod store;
 mod store_choices;
+mod store_media;
 mod wallpaper_credentials;
 mod wallpaper_search;
 mod wine_runner;
@@ -986,6 +987,7 @@ pub fn run() {
             tauri::async_runtime::spawn(artwork_backfill::run(app.handle().clone()));
             app.manage(detail);
             app.manage(media);
+            app.manage(store_media::StoreMediaCache::default());
             // Which stores are connected is answered from this secret-free
             // directory. Without it, merely opening Settings would read every
             // keychain item and macOS would ask for the keychain password once
@@ -1119,6 +1121,7 @@ pub fn run() {
             choose_game_folder,
             fetch_game_artwork,
             reset_game_artwork,
+            game_store_media,
             remove_game,
             set_game_hidden,
             set_home_image,
@@ -5059,6 +5062,31 @@ async fn reset_game_artwork(
 
     apply_resolved_artwork(&app, &state, &credentials, &game_id, title, ArtworkWrite::Everything)
         .await
+}
+
+/// The trailers and screenshots Steam's store shows for a game.
+///
+/// The detail page asks after it has painted, so this never delays the page;
+/// a game without a Steam page, or an offline machine, answers with empty lists
+/// rather than an error because the gallery is optional.
+#[tauri::command]
+async fn game_store_media(
+    state: State<'_, AppState>,
+    cache: State<'_, store_media::StoreMediaCache>,
+    game_id: String,
+) -> Result<store_media::StoreMedia, String> {
+    // A game outside the library (a Store card) can still be a Steam app by id.
+    let (title, app_id) = {
+        let catalog = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        match catalog.games.iter().find(|game| game.id == game_id) {
+            Some(game) => (game.title.clone(), store_media::steam_app_id_of(game)),
+            None => (String::new(), store_media::steam_app_id_of_id(&game_id)),
+        }
+    };
+    Ok(store_media::fetch(&cache, &game_id, &title, app_id).await)
 }
 
 /// How many cards one call will try to fill. An import can bring in a library,

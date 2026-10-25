@@ -1429,6 +1429,7 @@ function stubClient(
       title: "Test",
       replaced: ["cover", "landscape", "background"] as WallpaperRole[],
     }),
+    getStoreMedia: async () => ({ screenshots: [], movies: [] }),
     removeGame: async () => undefined,
     setGameHidden: async () => undefined,
     setHomeImage: async () => undefined,
@@ -1500,10 +1501,9 @@ describe("game detail page lifecycle", () => {
     expect(host.querySelector(".gd-primary-action")?.textContent).toContain(
       "Play",
     );
-    expect(
-      host.querySelectorAll(".gd-gallery__tile:not(.gd-gallery__tile--empty)")
-        .length,
-    ).toBe(2);
+    // The rail shows the store's media, never the saved wallpapers: with the
+    // store silent there is no rail even though two wallpapers exist.
+    expect(host.querySelector(".gd-gallery")).toBeNull();
     // Adding a wallpaper lives in the "…" menu now, not on the rail.
     expect(
       host.querySelector("[data-focus-key='menu-wallpaper']"),
@@ -1566,57 +1566,26 @@ describe("game detail page lifecycle", () => {
     const { page, host } = mountPage(stubClient());
     await page.activate(activationFor(gameRoute).activation);
     host
-      .querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")
-      ?.click();
-    host
       .querySelector<HTMLButtonElement>("[data-focus-key='more-actions']")
       ?.focus();
     const restore = page.deactivate();
     expect(restore).toMatchObject({
       focusKey: "more-actions",
       selectedGameId: "game_1",
-      filters: ["kind:wallpaper", "media:w2"],
     });
 
+    // A previewed wallpaper comes back with the page: the hero paints it.
     await page.activate(
-      activationFor(gameRoute, { restoreState: restore }).activation,
+      activationFor(gameRoute, {
+        restoreState: {
+          ...restore!,
+          filters: ["kind:wallpaper", "media:w2"],
+        },
+      }).activation,
     );
     expect(
-      host
-        .querySelector("[data-focus-key='media-w2']")
-        ?.classList.contains("gd-gallery__tile--selected"),
-    ).toBe(true);
-  });
-
-  it("chooses a rail wallpaper as the home background and commits it on click", async () => {
-    const selectMedia = vi.fn(async () => [
-      media("w1", "wallpaper"),
-      media("w2", "wallpaper", true),
-    ]);
-    const setHomeImage = vi.fn(async () => undefined);
-    const { page, host } = mountPage(stubClient({ selectMedia, setHomeImage }));
-    await page.activate(activationFor(gameRoute).activation);
-
-    // Clicking a rail wallpaper chooses it as the home (Library) background: it
-    // persists the selection and promotes the media, with opaque ids only.
-    host
-      .querySelector<HTMLButtonElement>("[data-focus-key='media-w2']")
-      ?.click();
-    await vi.waitFor(() =>
-      expect(selectMedia).toHaveBeenCalledWith(
-        "game_1",
-        "w2",
-        expect.anything(),
-      ),
-    );
-    await vi.waitFor(() =>
-      expect(setHomeImage).toHaveBeenCalledWith(
-        "game_1",
-        "w2",
-        "background",
-        expect.anything(),
-      ),
-    );
+      host.querySelector<HTMLImageElement>(".gd-hero__image")?.getAttribute("src"),
+    ).toBe("/media/w2.png");
   });
 
   it("commits and promotes a ticked wallpaper as the home background", async () => {

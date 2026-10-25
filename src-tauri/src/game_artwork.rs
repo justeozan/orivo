@@ -297,7 +297,7 @@ async fn steam_search(client: &reqwest::Client, term: &str) -> Option<Vec<SteamS
 /// pass above the game when the title is short. Failing that, the top result
 /// of the first variant that found anything is the answer, but only once every
 /// variant has had its chance at an exact match.
-async fn steam_app_id_for_title(client: &reqwest::Client, queries: &[String]) -> Option<u64> {
+pub(crate) async fn steam_app_id_for_title(client: &reqwest::Client, queries: &[String]) -> Option<u64> {
     let mut first_hit = None;
     for query in queries {
         let Some(items) = steam_search(client, query).await else {
@@ -641,7 +641,7 @@ fn strip_edition_suffix(value: &str) -> Option<&str> {
 ///
 /// A colon is dropped from the queries because Steam's search treats it as
 /// noise at best. Empty and duplicate queries are skipped.
-fn query_variants(title: &str) -> Vec<String> {
+pub(crate) fn query_variants(title: &str) -> Vec<String> {
     let tidy = tidy_title(title);
     let collapse = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
 
