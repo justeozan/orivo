@@ -155,6 +155,16 @@ pub enum RunnerHostError {
     /// written. Propagated to the import as a failed profile so the message the
     /// `GameStreamFeedError` carries reaches the user.
     StreamFeed(crate::gamestream::GameStreamFeedError),
+    /// A stream profile's problem, said the way a person who only wants to play
+    /// a streamed game can act on it. The other arms are written for an
+    /// emulator setup — "the emulator this profile points at" — and a streaming
+    /// user has neither an emulator nor a profile, so a launch of a stream
+    /// profile rewrites its refusals into one of these
+    /// ([`RunnerHostError::in_streaming_words`]).
+    Streaming(&'static str),
+    /// Orivo could not make the folder it keeps for a profile's games, or the
+    /// folder it was asked to use is not one of its own.
+    ManagedFolderUnavailable,
     /// The user cancelled, or the host cancelled on their behalf.
     Cancelled,
     /// The plugin's own refusal, or a ceiling it ran into.
@@ -241,11 +251,16 @@ impl std::fmt::Display for RunnerHostError {
             ),
             Self::LaunchModeMismatch => write!(
                 formatter,
-                "This profile and its plugin disagree about how this game launches. Update the plugin, or set the profile up again."
+                "Orivo and this plugin disagree about how this game starts. Check for plugin updates in Settings › Plugins, then set it up again."
             ),
             Self::StreamPlaceholder => write!(
                 formatter,
-                "This game's stream description is missing or unreadable. Import this profile again to refresh it."
+                "This streamed game needs refreshing. Open Settings › Plugins › Game streaming and press Refresh games."
+            ),
+            Self::Streaming(message) => write!(formatter, "{message}"),
+            Self::ManagedFolderUnavailable => write!(
+                formatter,
+                "Orivo couldn't prepare a folder for your streamed games. Try again, or restart Orivo."
             ),
             Self::StreamFeed(error) => write!(formatter, "{error}"),
             Self::Cancelled => write!(formatter, "The runner operation was cancelled."),
@@ -266,6 +281,39 @@ impl std::fmt::Display for RunnerHostError {
                 "This plugin repeated a discovery cursor, so Orivo stopped the import."
             ),
             Self::Catalog(_) => write!(formatter, "The game catalog is temporarily unavailable."),
+        }
+    }
+}
+
+impl RunnerHostError {
+    /// Say this refusal the way a streaming user can act on it.
+    ///
+    /// A stream profile is not something the person set up by hand — they went
+    /// through "Game streaming" — so "choose the emulator again" and "allow its
+    /// folders again" name things they never saw. Each cause that has a
+    /// streaming-specific remedy is rewritten to it, and every one of them ends
+    /// at the same place: Settings › Plugins › Game streaming, which reads the
+    /// state and offers the fix. Anything else is already plain and is left
+    /// alone, so a plugin's own words and the placeholder refusals survive.
+    pub fn in_streaming_words(self) -> Self {
+        const SET_UP: &str = "Game streaming isn't set up properly. Open Settings › Plugins › Game streaming to finish setting it up.";
+        const REFRESH: &str = "Orivo can't find this game's details. Open Settings › Plugins › Game streaming and press Refresh games.";
+        match self {
+            Self::ApplicationUnavailable => Self::Streaming(
+                "Moonlight isn't installed anymore. Reinstall it or choose it again in Settings › Plugins › Game streaming.",
+            ),
+            Self::ProfileNotUsable
+            | Self::ProfileNeedsRevalidation
+            | Self::ProfileRefused(_)
+            | Self::NotReady(_) => Self::Streaming(SET_UP),
+            Self::GrantMissing
+            | Self::GrantStale
+            | Self::GrantRefused
+            | Self::DirectoryUnavailable
+            | Self::InventoryMissing
+            | Self::GameUnresolvable
+            | Self::GameOutsideScope => Self::Streaming(REFRESH),
+            other => other,
         }
     }
 }
