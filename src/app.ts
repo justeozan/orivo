@@ -8099,7 +8099,7 @@ function shell(): string {
 
         <label class="search-control" id="topbar-search-control">
           ${icon("search")}
-          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search games…" aria-label="Search games" />
+          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search games…" aria-label="Search games" data-nav-reveal />
           <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
         </label>
 

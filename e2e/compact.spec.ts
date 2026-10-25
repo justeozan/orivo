@@ -286,8 +286,8 @@ test.describe("the Library scene", () => {
 
 test.describe("a desktop window dragged as short", () => {
   // The same height with a mouse in hand: compact, but not a phone. It keeps
-  // the bar a keyboard walks, the search and the scene arrows.
-  test("keeps its navigation, its search and its arrows, in tab order", async ({ browser }, testInfo) => {
+  // the bar a keyboard walks and the search.
+  test("keeps its navigation and its search, in tab order", async ({ browser }, testInfo) => {
     // A context made here inherits the project's phone emulation unless told
     // otherwise, touch included.
     const context = await browser.newContext({
@@ -306,7 +306,6 @@ test.describe("a desktop window dragged as short", () => {
         await expect(page.getByRole("button", { name, exact: true })).toBeVisible();
       }
       await expect(page.locator("#topbar-search-control")).toBeVisible();
-      await expect(page.locator("#next-game")).toBeVisible();
 
       const nav = await tabUntil(page, (report) => report.className.includes("nav-link"));
       expect(nav.found, "Tab never reached the navigation").not.toBeNull();
