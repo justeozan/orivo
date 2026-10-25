@@ -802,8 +802,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
      the colour is only ever reflections drifting across it. */
   background: linear-gradient(160deg, rgba(255,255,255,.12), rgba(255,255,255,.03) 60%, rgba(255,255,255,.07));
   box-shadow: 0 10px 30px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.3), inset 0 -8px 18px rgba(255,255,255,.04);
-  -webkit-backdrop-filter: blur(18px) saturate(180%) brightness(1.08);
-  backdrop-filter: blur(18px) saturate(180%) brightness(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(145%) brightness(1.08);
+  backdrop-filter: blur(18px) saturate(145%) brightness(1.08);
   font-size: var(--fs-play);
   font-weight: 600;
   letter-spacing: .005em;
@@ -841,6 +841,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   overflow: hidden;
   border-radius: inherit;
   opacity: var(--play-field);
+  /* A touch under full colour: the lights glow without shouting. */
+  filter: saturate(.82);
   transition: opacity 320ms ease;
   pointer-events: none;
 }
@@ -1641,8 +1643,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
     inset 1px 0 0 rgba(160, 230, 255, .22),
     inset 0 -14px 28px rgba(110, 60, 255, .18),
     inset 14px 0 30px rgba(110, 220, 255, .1);
-  -webkit-backdrop-filter: blur(16px) saturate(180%) brightness(1.1);
-  backdrop-filter: blur(16px) saturate(180%) brightness(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(145%) brightness(1.1);
+  backdrop-filter: blur(16px) saturate(145%) brightness(1.1);
 }
 .card-fallback__title {
   position: relative;
