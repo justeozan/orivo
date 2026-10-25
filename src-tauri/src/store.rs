@@ -2837,15 +2837,27 @@ pub async fn refresh_store_sources(
     app: AppHandle,
     credentials: State<'_, std::sync::Arc<crate::wallpaper_credentials::WallpaperCredentialsService>>,
 ) -> Result<(), String> {
+    // One refresh at a time. Every Store activation asks for one, and a chip
+    // click is an activation: a few quick clicks used to fire a burst of full
+    // refreshes at Steam, which throttled them and left the shelf empty.
+    static REFRESHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let Ok(_running) = REFRESHING.try_lock() else {
+        return Ok(());
+    };
     let directory = app_data_dir(&app)?;
     let config = RefreshConfig {
         region: resolve_region(&directory),
     };
-    let http = ReqwestStoreHttp::new()?;
     let cache = StoreCache::new(&directory);
-    let previous = cache.read().games;
+    let previous_document = cache.read();
     let now_ms = now_epoch_ms();
+    if refreshed_recently(&previous_document, now_ms) {
+        return Ok(());
+    }
+    let http = ReqwestStoreHttp::new()?;
+    let previous = previous_document.games.clone();
     let mut document = refresh_all(&http, &config, now_ms).await;
+    keep_live_games_when_refresh_failed(&mut document, &previous_document);
     carry_platform_availability(&mut document.games, &previous);
     // Prices first: the Store is served from this write, and the platform
     // lookup below is a second, optional pass that must never hold it up.
@@ -2856,6 +2868,41 @@ pub async fn refresh_store_sources(
         cache.write(&document)?;
     }
     Ok(())
+}
+
+/// How long a healthy refresh is good for. Prices move daily, not by the
+/// minute, and asking Steam again on every visit is what gets a client throttled.
+const STORE_REFRESH_INTERVAL_MS: u64 = 10 * 60 * 1000;
+
+/// Whether the cache is fresh enough to skip a refresh: written within the
+/// interval, with Steam answering at the time. A degraded refresh is retried.
+fn refreshed_recently(document: &StoreCacheDocument, now_ms: u64) -> bool {
+    let Some(at) = document.refreshed_at_epoch_ms else {
+        return false;
+    };
+    let steam_ok = document
+        .provider_statuses
+        .iter()
+        .any(|status| status.provider == StoreProviderId::Steam && status.health == ProviderHealth::Available);
+    steam_ok && now_ms.saturating_sub(at) < STORE_REFRESH_INTERVAL_MS
+}
+
+/// A refresh that could not reach the storefronts must not throw away the
+/// live games the last good one found: it keeps them (their prices are then
+/// marked unverified by the statuses) instead of shrinking the shelf to the
+/// handful a failed fetch returns.
+fn keep_live_games_when_refresh_failed(
+    document: &mut StoreCacheDocument,
+    previous: &StoreCacheDocument,
+) {
+    let live = |games: &[CachedGame]| games.iter().filter(|game| game.curation.is_none()).count();
+    let steam_failed = document
+        .provider_statuses
+        .iter()
+        .any(|status| status.provider == StoreProviderId::Steam && status.health != ProviderHealth::Available);
+    if steam_failed && live(&previous.games) > live(&document.games) {
+        document.games = previous.games.clone();
+    }
 }
 
 /// The WebView passes an opaque identifier. The destination is resolved and
@@ -5216,6 +5263,52 @@ mod tests {
         steam_new_release_from_payload(id, &payload, "FR", NOW_MS)
             .expect("a game")
             .0
+    }
+
+    fn steam_status(health: ProviderHealth) -> CachedProviderStatus {
+        CachedProviderStatus {
+            provider: StoreProviderId::Steam,
+            health,
+            message: String::new(),
+            refreshed_at_epoch_ms: Some(NOW_MS),
+        }
+    }
+
+    #[test]
+    fn a_healthy_refresh_is_not_repeated_within_the_interval() {
+        let mut document = StoreCacheDocument {
+            refreshed_at_epoch_ms: Some(NOW_MS),
+            provider_statuses: vec![steam_status(ProviderHealth::Available)],
+            ..StoreCacheDocument::default()
+        };
+        assert!(refreshed_recently(&document, NOW_MS + 60_000));
+        assert!(!refreshed_recently(&document, NOW_MS + STORE_REFRESH_INTERVAL_MS));
+        // A refresh Steam did not answer is tried again straight away.
+        document.provider_statuses = vec![steam_status(ProviderHealth::Degraded)];
+        assert!(!refreshed_recently(&document, NOW_MS + 60_000));
+    }
+
+    #[test]
+    fn a_failed_refresh_keeps_the_live_games_the_last_one_found() {
+        let previous = StoreCacheDocument {
+            games: vec![live_game("1"), live_game("2"), live_game("3")],
+            ..StoreCacheDocument::default()
+        };
+        let mut failed = StoreCacheDocument {
+            games: vec![live_game("1")],
+            provider_statuses: vec![steam_status(ProviderHealth::Degraded)],
+            ..StoreCacheDocument::default()
+        };
+        keep_live_games_when_refresh_failed(&mut failed, &previous);
+        assert_eq!(failed.games.len(), 3);
+
+        let mut healthy = StoreCacheDocument {
+            games: vec![live_game("1")],
+            provider_statuses: vec![steam_status(ProviderHealth::Available)],
+            ..StoreCacheDocument::default()
+        };
+        keep_live_games_when_refresh_failed(&mut healthy, &previous);
+        assert_eq!(healthy.games.len(), 1);
     }
 
     #[test]

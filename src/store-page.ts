@@ -830,6 +830,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
       chip.dataset.focusKey = `category-${option.id}`;
       chip.dataset.category = option.id;
       chip.addEventListener("click", () => {
+        // The shelf already shown: nothing to change, nothing to ask for.
+        if (state.category === option.id) return;
         dispatch({ type: "category-changed", category: option.id });
         navigateWithCurrentFilters();
         if (activation) void browse(activation, null, false);
