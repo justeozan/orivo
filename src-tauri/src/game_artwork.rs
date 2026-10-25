@@ -194,7 +194,13 @@ pub async fn resolve(title: &str, steamgriddb_key: Option<&str>) -> ArtworkSet {
         None => ArtworkSet::default(),
     };
     if let Some(app_id) = steam_app_id {
-        set.fill_gaps_from(steam_artwork(app_id));
+        let steam = steam_artwork(app_id);
+        // The publisher's own wordmark, as Steam serves it by default, is the
+        // one to try first; the community's uploads follow it.
+        let mut logo = steam.logo.clone();
+        logo.extend(std::mem::take(&mut set.logo));
+        set.logo = logo;
+        set.fill_gaps_from(steam);
     }
     set
 }
@@ -337,6 +343,75 @@ struct GridDbAsset {
     url: String,
     #[serde(default)]
     width: u32,
+    /// ISO 639-1 code of the text in the picture, when it has any.
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// The languages artwork text should be in, best first: the system's own,
+/// then English, which is what almost every publisher ships.
+///
+/// SteamGridDB carries every regional wordmark there is, and "widest first"
+/// alone handed a French player Kena's Arabic logo. Read once per run.
+fn preferred_languages() -> &'static [String] {
+    static LANGUAGES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    LANGUAGES.get_or_init(|| {
+        let mut languages = Vec::new();
+        if let Some(code) = system_language() {
+            languages.push(code);
+        }
+        if !languages.iter().any(|code| code == "en") {
+            languages.push("en".to_owned());
+        }
+        languages
+    })
+}
+
+/// The two-letter code of the system language, from the locale variables a
+/// shell sets, or on macOS from the user's language list (a GUI app is started
+/// without `LANG`).
+fn system_language() -> Option<String> {
+    let from_env = ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.is_empty() && value != "C" && value != "POSIX");
+    #[cfg(target_os = "macos")]
+    let from_env = from_env.or_else(|| {
+        std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleLanguages"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|list| {
+                list.split('"')
+                    .nth(1)
+                    .map(str::to_owned)
+                    .or_else(|| list.split_whitespace().nth(1).map(|word| word.trim_matches(',').to_owned()))
+            })
+    });
+    language_code(&from_env?)
+}
+
+/// "fr_FR.UTF-8", "fr-FR" or "fr" → "fr".
+fn language_code(locale: &str) -> Option<String> {
+    let code: String = locale
+        .chars()
+        .take_while(|character| character.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    (code.len() == 2).then_some(code)
+}
+
+/// Where an asset's language ranks: a preferred language by its position, an
+/// asset that declares none just after them, any other language last.
+fn language_rank(language: Option<&str>, preferred: &[String]) -> usize {
+    match language.map(str::to_ascii_lowercase) {
+        Some(code) => preferred
+            .iter()
+            .position(|wanted| *wanted == code)
+            .unwrap_or(preferred.len() + 1),
+        None => preferred.len(),
+    }
 }
 
 /// The `styles` filter is the reason artwork comes back clean — but the
@@ -474,9 +549,25 @@ async fn griddb_assets(
     let Some(mut assets) = griddb_get::<Vec<GridDbAsset>>(client, &url, key).await else {
         return Vec::new();
     };
-    assets.sort_by(|left, right| right.width.cmp(&left.width));
+    let preferred = preferred_languages();
+    // Language before size: a smaller logo you can read beats a larger one in
+    // a script you can't. Another language is only used when nothing else is.
+    assets.sort_by(|left, right| {
+        language_rank(left.language.as_deref(), preferred)
+            .cmp(&language_rank(right.language.as_deref(), preferred))
+            .then(right.width.cmp(&left.width))
+    });
+    let best_rank = assets
+        .first()
+        .map(|asset| language_rank(asset.language.as_deref(), preferred));
     assets
         .into_iter()
+        .filter(|asset| {
+            best_rank.is_none_or(|best| {
+                best > preferred.len()
+                    || language_rank(asset.language.as_deref(), preferred) <= preferred.len()
+            })
+        })
         .map(|asset| asset.url)
         .filter(|url| is_trusted_artwork_url(url))
         .take(4)
@@ -905,6 +996,18 @@ mod tests {
                 .iter()
                 .all(|query| query.chars().count() <= 120)
         );
+    }
+
+    #[test]
+    fn readable_artwork_comes_before_a_bigger_one_in_another_script() {
+        let preferred = vec!["fr".to_owned(), "en".to_owned()];
+        assert_eq!(language_rank(Some("fr"), &preferred), 0);
+        assert_eq!(language_rank(Some("EN"), &preferred), 1);
+        assert_eq!(language_rank(None, &preferred), 2);
+        assert_eq!(language_rank(Some("ar"), &preferred), 3);
+        assert_eq!(language_code("fr_FR.UTF-8").as_deref(), Some("fr"));
+        assert_eq!(language_code("en-GB").as_deref(), Some("en"));
+        assert_eq!(language_code("C"), None);
     }
 
     #[test]
