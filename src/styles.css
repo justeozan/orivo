@@ -740,10 +740,12 @@ button { border: 0; cursor: pointer; }
   border: 0;
   border-radius: 999px;
   color: #fff;
-  background: rgba(16,15,22,.62);
-  box-shadow: 0 10px 30px rgba(0,0,0,.26), inset 0 1px rgba(255,255,255,.12);
-  -webkit-backdrop-filter: blur(22px) saturate(140%);
-  backdrop-filter: blur(22px) saturate(140%);
+  /* Glass, not paint: the scene shows through, blurred and saturated, and
+     the colour is only ever reflections drifting across it. */
+  background: linear-gradient(160deg, rgba(255,255,255,.12), rgba(255,255,255,.03) 60%, rgba(255,255,255,.07));
+  box-shadow: 0 10px 30px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.3), inset 0 -8px 18px rgba(255,255,255,.04);
+  -webkit-backdrop-filter: blur(18px) saturate(180%) brightness(1.08);
+  backdrop-filter: blur(18px) saturate(180%) brightness(1.08);
   font-size: var(--fs-play);
   font-weight: 600;
   letter-spacing: .005em;
@@ -781,7 +783,6 @@ button { border: 0; cursor: pointer; }
   overflow: hidden;
   border-radius: inherit;
   opacity: var(--play-field);
-  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 70%, #12101c), color-mix(in srgb, var(--play-b) 75%, #12101c) 55%, color-mix(in srgb, var(--play-c) 70%, #12101c));
   transition: opacity 320ms ease;
   pointer-events: none;
 }
@@ -790,12 +791,13 @@ button { border: 0; cursor: pointer; }
   width: 70%;
   height: 160%;
   border-radius: 50%;
-  filter: blur(14px);
-  opacity: .9;
+  filter: blur(16px);
+  opacity: .5;
+  mix-blend-mode: screen;
 }
 .play-button__aura i:nth-child(1) { top: -60%; left: -12%; background: var(--play-a); animation: play-drift-a 6.5s ease-in-out infinite alternate; }
 .play-button__aura i:nth-child(2) { top: -20%; left: 38%; background: var(--play-c); animation: play-drift-b 8s ease-in-out infinite alternate; }
-.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background: var(--play-spark); opacity: .55; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background: var(--play-spark); opacity: .3; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
 /* The reflection: a band of light that crosses the glass now and then. */
 .play-button::after {
   position: absolute;
@@ -821,7 +823,7 @@ button { border: 0; cursor: pointer; }
 /* Install is the dark pill from the reference: glass first, its light held
    back until the pointer or the pad reaches it. */
 .play-button[data-kind="install"],
-.play-button[data-kind="downloading"] { --play-field: .16; }
+.play-button[data-kind="downloading"] { --play-field: .3; }
 .play-button[data-kind="install"]:hover,
 .play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
 /* Nothing to start: no field, no sheen, a still grey rim. */
@@ -847,7 +849,7 @@ button { border: 0; cursor: pointer; }
   position: absolute;
   z-index: 0;
   inset: 0 auto 0 0;
-  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 55%, transparent), color-mix(in srgb, var(--play-c) 55%, transparent));
+  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 32%, transparent), color-mix(in srgb, var(--play-c) 32%, transparent));
   transition: width 400ms ease;
   pointer-events: none;
 }
@@ -1521,6 +1523,7 @@ button { border: 0; cursor: pointer; }
    behind it shows through, frosted and bent, and its name stands on it — no
    real cover is there to carry the title. The rim and the two inner lights
    are what make a blur read as a pane of glass rather than a smudge. */
+.game-card.is-art-missing,
 .game-card.is-art-missing .card-media { background: transparent; }
 .card-fallback {
   position: absolute;
@@ -1534,17 +1537,17 @@ button { border: 0; cursor: pointer; }
   color: #f4f1f8;
   text-align: left;
   background:
-    radial-gradient(120% 60% at 0% 0%, rgba(255, 255, 255, .2) 0%, rgba(255, 255, 255, 0) 55%),
-    radial-gradient(90% 50% at 100% 100%, rgba(214, 120, 255, .16) 0%, rgba(214, 120, 255, 0) 60%),
-    linear-gradient(155deg, rgba(120, 200, 255, .14), rgba(40, 20, 110, .22) 55%, rgba(150, 70, 255, .18));
+    radial-gradient(120% 60% at 0% 0%, rgba(255, 255, 255, .14) 0%, rgba(255, 255, 255, 0) 55%),
+    radial-gradient(90% 50% at 100% 100%, rgba(214, 120, 255, .08) 0%, rgba(214, 120, 255, 0) 60%),
+    linear-gradient(155deg, rgba(255, 255, 255, .06), rgba(255, 255, 255, .015) 55%, rgba(255, 255, 255, .05));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, .42),
     inset 0 0 0 1px rgba(255, 255, 255, .16),
     inset 1px 0 0 rgba(160, 230, 255, .22),
     inset 0 -14px 28px rgba(110, 60, 255, .18),
     inset 14px 0 30px rgba(110, 220, 255, .1);
-  -webkit-backdrop-filter: blur(22px) saturate(175%) brightness(1.08) contrast(1.05);
-  backdrop-filter: blur(22px) saturate(175%) brightness(1.08) contrast(1.05);
+  -webkit-backdrop-filter: blur(16px) saturate(180%) brightness(1.1);
+  backdrop-filter: blur(16px) saturate(180%) brightness(1.1);
 }
 .card-fallback__title {
   position: relative;
