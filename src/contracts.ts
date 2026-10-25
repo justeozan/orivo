@@ -89,6 +89,15 @@ export interface GameMediaView {
   origin: "bundled" | "provider" | "imported" | "downloaded";
   selected: boolean;
   availableOffline: boolean;
+  /**
+   * The card slot this image was picked for. Every picked image is stored with
+   * the `wallpaper` kind, so this is what tells a logo from a background.
+   * Absent on records saved before it existed; see `inferMediaRole`.
+   */
+  role?: WallpaperCategory;
+  /** Pixel size, only when the search that found the image reported it. */
+  width?: number;
+  height?: number;
 }
 
 export type WallpaperSearchPhase = "ready" | "error";
@@ -120,6 +129,9 @@ export interface WallpaperCandidateView {
   title: string;
   thumbnailUrl: string;
   category: WallpaperCategory;
+  /** Reported pixel size of the full image; absent when nothing measured it. */
+  width?: number;
+  height?: number;
 }
 
 /**

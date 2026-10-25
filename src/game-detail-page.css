@@ -1532,6 +1532,41 @@
   color: var(--gd-text);
 }
 
+/* The Background row's "4K only" filter: a quiet pill that lights when on. */
+.gd-wallrow__toggle {
+  margin-left: auto;
+  padding: 2px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--gd-r-pill);
+  color: var(--gd-muted);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+  font-weight: 560;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.gd-wallrow__toggle:hover,
+.gd-wallrow__toggle[data-nav-focus] {
+  color: var(--gd-text);
+}
+
+.gd-wallrow__toggle--on {
+  border-color: rgba(185, 174, 242, 0.6);
+  color: var(--gd-text);
+  background: rgba(185, 174, 242, 0.16);
+}
+
+.gd-wallrow__toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.gd-wallrow__toggle + .gd-wallrow__more {
+  margin-left: 10px;
+}
+
 .gd-wallrow__status {
   margin: 2px 0 0;
 }
@@ -1688,6 +1723,33 @@
 .gd-wallgrid__tile--selected .gd-wallgrid__check {
   opacity: 1;
   transform: scale(1);
+}
+
+/*
+ * The image-quality badge ("4K", "1080p", "600x900"): a small glass pill in the
+ * tile's top-right corner. It steps left of the tick when the tile is chosen.
+ */
+.gd-wallgrid__quality {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: var(--gd-r-pill);
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(10, 12, 18, 0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transition: transform 120ms ease;
+}
+
+.gd-wallgrid__tile--selected .gd-wallgrid__quality {
+  transform: translateX(-30px);
 }
 
 /* A subtle badge marks the wallpaper currently painting the home background. */

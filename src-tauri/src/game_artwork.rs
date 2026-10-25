@@ -353,7 +353,7 @@ struct GridDbAsset {
 ///
 /// SteamGridDB carries every regional wordmark there is, and "widest first"
 /// alone handed a French player Kena's Arabic logo. Read once per run.
-fn preferred_languages() -> &'static [String] {
+pub(crate) fn preferred_languages() -> &'static [String] {
     static LANGUAGES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     LANGUAGES.get_or_init(|| {
         let mut languages = Vec::new();
@@ -404,7 +404,7 @@ fn language_code(locale: &str) -> Option<String> {
 
 /// Where an asset's language ranks: a preferred language by its position, an
 /// asset that declares none just after them, any other language last.
-fn language_rank(language: Option<&str>, preferred: &[String]) -> usize {
+pub(crate) fn language_rank(language: Option<&str>, preferred: &[String]) -> usize {
     match language.map(str::to_ascii_lowercase) {
         Some(code) => preferred
             .iter()

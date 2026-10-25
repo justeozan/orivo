@@ -27,7 +27,6 @@ import {
   formatRelativeTime,
   formatReleaseDate,
   heroImageUrl,
-  mediaForKind,
   normaliseGameDetail,
   normaliseGameMedia,
   normaliseStoreMedia,
@@ -47,6 +46,8 @@ import {
   type StoreMediaView,
 } from "./game-detail-model";
 import { hostDeviceLabel } from "./host-device";
+import { imageQualityLabel } from "./image-quality";
+import { backgroundMedia } from "./media-role";
 import {
   enqueueMediaSave,
   isMediaSaving,
@@ -88,6 +89,7 @@ export interface GameDetailPageClient {
     query: string,
     offset: number,
     signal: AbortSignal,
+    options?: WallpaperSearchOptions,
   ): Promise<WallpaperSearchView>;
   importWallpaper(
     gameId: string,
@@ -130,6 +132,15 @@ export interface GameDetailPageClient {
     role: WallpaperRole,
     signal: AbortSignal,
   ): Promise<void>;
+}
+
+/**
+ * Optional knobs on a wallpaper search. Only the Background row reads
+ * `only4k`: on, the backend takes 3840 wide or more; off (the default), it
+ * takes anything from 1920 with 4K first.
+ */
+export interface WallpaperSearchOptions {
+  only4k?: boolean;
 }
 
 /** Which library card slot a chosen wallpaper fills. */
@@ -306,12 +317,12 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       if (!isTauriRuntime()) return;
       await invokeWhileActive("cancel_game_media_download", { gameId }, signal);
     },
-    async searchWallpapers(category, query, offset, signal) {
+    async searchWallpapers(category, query, offset, signal, options) {
       if (!isTauriRuntime())
         return createFallbackWallpaperSearch(category, query, offset);
       return invokeWhileActive<WallpaperSearchView>(
         "search_wallpapers",
-        { category, query, offset },
+        { category, query, offset, only4k: options?.only4k === true },
         signal,
       );
     },
@@ -959,6 +970,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         query,
         offset,
         context.signal,
+        {
+          only4k:
+            category === "background" && state.wallpaperSearch.backgroundOnly4k,
+        },
       );
       if (!isFresh(context, gameId)) return;
       dispatch({
@@ -994,6 +1009,20 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     for (const category of WALLPAPER_CATEGORIES) {
       void handleWallpaperSearch(category);
     }
+  };
+
+  /**
+   * Flips the Background row's "4K only" filter and refills that row alone: the
+   * other three rows do not depend on it. Ignored while the row is still
+   * answering, because its in-flight request was made under the old setting.
+   */
+  const toggleBackgroundOnly4k = (): void => {
+    if (state.wallpaperSearch.categories.background.busy) return;
+    dispatch({
+      type: "wallpaper-background-4k-changed",
+      only4k: !state.wallpaperSearch.backgroundOnly4k,
+    });
+    void handleWallpaperSearch("background");
   };
 
   /** Chips and "Voir tout" share one state: narrowing to a row, or clearing it. */
@@ -1733,6 +1762,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     candidate: boolean;
     /** The row it was ticked in, which is also the card slot it fills. */
     category: WallpaperCategory;
+    /** Pixel size, when known, for the quality badge. */
+    width?: number;
+    height?: number;
   }
 
   /** The candidates one row shows, in the order they were fetched. */
@@ -1745,17 +1777,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       url: candidate.thumbnailUrl,
       candidate: true,
       category,
+      width: candidate.width,
+      height: candidate.height,
     }));
-    // Wallpapers already saved on this game are backgrounds — that is what the
-    // kind means — so they join the Background row and no other.
+    // Saved wallpapers join the Background row and no other — but only the ones
+    // that were picked as a background. Every picked image is stored with the
+    // `wallpaper` kind, so a logo or a cover chosen earlier would otherwise be
+    // offered here as if it were a background.
     if (category === "background") {
-      for (const item of mediaForKind(state.media, "wallpaper")) {
+      for (const item of backgroundMedia(state.media)) {
         slides.push({
           id: item.id,
           title: item.title,
           url: item.posterUrl ?? item.previewUrl,
           candidate: false,
           category: "background",
+          width: item.width,
+          height: item.height,
         });
       }
     }
@@ -1792,6 +1830,15 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     check.setAttribute("aria-hidden", "true");
     check.append(iconElement("check"));
     tile.append(image, check);
+    // The size the source reported, so a 4K picture can be told from a 720p one
+    // without opening it. No badge when nothing measured it.
+    const quality = imageQualityLabel(slide.width, slide.height, slide.category);
+    if (quality) {
+      const badge = element("span", "gd-wallgrid__quality", quality);
+      badge.setAttribute("aria-hidden", "true");
+      tile.append(badge);
+      tile.title = `${slide.title} · ${quality}`;
+    }
     tile.addEventListener("click", () => {
       // One pick per row, because a row *is* a slot. Ticking a second image in
       // the same row queued both and the page applied them in turn, so the card
@@ -1909,6 +1956,17 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = element("h3", "gd-wallrow__title", meta.label);
     title.id = `gd-wallrow-${category}`;
     header.append(iconElement(meta.icon, "gd-wallrow__icon"), title);
+    if (category === "background") {
+      const only4k = state.wallpaperSearch.backgroundOnly4k;
+      const toggle = element("button", "gd-wallrow__toggle", "4K only");
+      toggle.type = "button";
+      toggle.dataset.focusKey = "wallpaper-background-4k";
+      toggle.classList.toggle("gd-wallrow__toggle--on", only4k);
+      toggle.setAttribute("aria-pressed", String(only4k));
+      toggle.disabled = row.busy;
+      toggle.addEventListener("click", toggleBackgroundOnly4k);
+      header.append(toggle);
+    }
     // Paging is the one control a scroller cannot replace: the tiles it would
     // reveal have not been fetched yet.
     if (row.phase === "ready" && row.hasMore && !row.busy) {
