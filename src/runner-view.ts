@@ -142,6 +142,10 @@ export function mountRunnerPanel(
       void withBusy(`mode:${profile.id}`, () => controller.setLaunchMode(profile.id, chosen));
     });
     modeLabel.append(modeText, mode);
+    // Streaming has its own setup now (Settings › Plugins › Game streaming), and
+    // an emulator never streams, so the choice is only offered to a profile left
+    // in stream mode by an older Orivo — to let it come back.
+    modeLabel.hidden = profile.launchMode !== "stream";
 
     const directories = document.createElement("div");
     directories.className = "runner-directory-list";
