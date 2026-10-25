@@ -735,6 +735,9 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 }
 .scene-arrow:hover, .scene-arrow[data-nav-focus] { background: rgba(255,255,255,.12); transform: scale(1.05); }
 .scene-arrow .icon { width: 18px; height: 18px; }
+/* Retired: the rail, the keys and the pad already walk the library, and two
+   round buttons over the artwork were in the way of it. */
+.scene-arrow { display: none !important; }
 .scene-arrow--previous { left: 24px; }
 .scene-arrow--next { right: 24px; }
 
