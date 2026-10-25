@@ -887,8 +887,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
      the colour is only ever reflections drifting across it. */
   background: linear-gradient(160deg, rgba(255,255,255,.12), rgba(255,255,255,.03) 60%, rgba(255,255,255,.07));
   box-shadow: 0 10px 30px rgba(0,0,0,.2), inset 0 1px rgba(255,255,255,.3), inset 0 -8px 18px rgba(255,255,255,.04);
-  -webkit-backdrop-filter: blur(18px) saturate(145%) brightness(1.08);
-  backdrop-filter: blur(18px) saturate(145%) brightness(1.08);
+  -webkit-backdrop-filter: blur(18px) saturate(125%) brightness(1.08);
+  backdrop-filter: blur(18px) saturate(125%) brightness(1.08);
   font-size: var(--fs-play);
   font-weight: 600;
   letter-spacing: .005em;
@@ -927,7 +927,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   border-radius: inherit;
   opacity: var(--play-field);
   /* A touch under full colour: the lights glow without shouting. */
-  filter: saturate(.82);
+  filter: saturate(.68);
   transition: opacity 320ms ease;
   pointer-events: none;
 }
