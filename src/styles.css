@@ -794,10 +794,12 @@ button { border: 0; cursor: pointer; }
   filter: blur(16px);
   opacity: .5;
   mix-blend-mode: screen;
+  /* A new scene's colour arrives as a fade, not a cut. */
+  transition: background-color 700ms ease;
 }
-.play-button__aura i:nth-child(1) { top: -60%; left: -12%; background: var(--play-a); animation: play-drift-a 6.5s ease-in-out infinite alternate; }
-.play-button__aura i:nth-child(2) { top: -20%; left: 38%; background: var(--play-c); animation: play-drift-b 8s ease-in-out infinite alternate; }
-.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background: var(--play-spark); opacity: .3; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(1) { top: -60%; left: -12%; background-color: var(--play-a); animation: play-drift-a 6.5s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(2) { top: -20%; left: 38%; background-color: var(--play-c); animation: play-drift-b 8s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background-color: var(--play-spark); opacity: .3; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
 /* The reflection: a band of light that crosses the glass now and then. */
 .play-button::after {
   position: absolute;
@@ -820,6 +822,16 @@ button { border: 0; cursor: pointer; }
 /* Palettes. Play is the full field; streaming is cooler, emulation warmer. */
 .play-button[data-kind="stream"] { --play-a: #5ff2dc; --play-b: #2f8dff; --play-c: #4b5bff; --play-spark: #b8fff2; --play-rim: #e6fffb, #8ff0ff, #2f8dff, #9fd0ff, #e6fffb; }
 .play-button[data-kind="emulate"] { --play-a: #ff7ac8; --play-b: #8c4dff; --play-c: #ff9a5c; --play-spark: #ffe08a; --play-rim: #fff0f6, #ffb3d9, #9b6bff, #ffc89e, #fff0f6; }
+/* The scene's own colour wins over the kind's palette whenever it could be
+   read (app.ts `updatePlayAmbient`): a red wallpaper gets a red button. A
+   button with nothing to start keeps its grey. */
+.play-button[data-ambient]:not([data-kind="unavailable"], [data-kind="blocked"]) {
+  --play-a: var(--ambient-a);
+  --play-b: var(--ambient-b);
+  --play-c: var(--ambient-c);
+  --play-spark: var(--ambient-spark);
+  --play-rim: var(--ambient-rim);
+}
 /* Install is the dark pill from the reference: glass first, its light held
    back until the pointer or the pad reaches it. */
 .play-button[data-kind="install"],

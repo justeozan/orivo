@@ -14,6 +14,7 @@ import {
   blockedRunsOnLabel,
   isBlockedForHost,
 } from "./game-detail-model";
+import { ambientPalette } from "./ambient-colour";
 import { displayTitle } from "./game-title";
 import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
@@ -1019,6 +1020,38 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.title.hidden = false;
   };
 
+  /**
+   * The Play button takes its lights from the scene behind it (ambient-colour.ts).
+   * Read off the main thread's busy moments, and only applied if the same game
+   * is still selected once the answer comes back; a game with no picture, or
+   * one whose pixels cannot be read, keeps the button's own palette.
+   */
+  const updatePlayAmbient = (game: LibraryGame): void => {
+    const source = heroSourceFor(game);
+    const button = refs.playButton;
+    if (!source) {
+      delete button.dataset.ambient;
+      return;
+    }
+    if (button.dataset.ambient === source) return;
+    const idle = window.requestIdleCallback ?? window.setTimeout;
+    idle(() => {
+      void ambientPalette(source).then((palette) => {
+        if (selectedGame().id !== game.id) return;
+        if (!palette) {
+          delete button.dataset.ambient;
+          return;
+        }
+        button.style.setProperty("--ambient-a", palette.a);
+        button.style.setProperty("--ambient-b", palette.b);
+        button.style.setProperty("--ambient-c", palette.c);
+        button.style.setProperty("--ambient-spark", palette.spark);
+        button.style.setProperty("--ambient-rim", palette.rim);
+        button.dataset.ambient = source;
+      });
+    });
+  };
+
   /** The artwork a game is shown by, and the artwork its colour comes from. */
   const heroSourceFor = (game: LibraryGame): string =>
     game.heroUrl || game.coverUrl || steamAssetUrl(game, "header.jpg");
@@ -1806,6 +1839,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
             : PLAY_BUTTON_LABELS[kind];
     }
     updateHeroImage(game, immediateHero);
+    updatePlayAmbient(game);
     primeNeighbourLogos();
     renderBrowseBar();
     renderCards();
