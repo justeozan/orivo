@@ -170,7 +170,7 @@ describe("the default client outside the desktop shell", () => {
     await expect(client.getHealthReport(["com.orivo.dolphin"], liveSignal())).resolves.toEqual([]);
     await expect(client.getJournal("com.orivo.dolphin", liveSignal())).resolves.toEqual([]);
     await expect(client.resume("com.orivo.dolphin", liveSignal())).rejects.toThrow(
-      "réservé à l'application Orivo",
+      "needs the Orivo desktop app",
     );
   });
 

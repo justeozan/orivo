@@ -992,7 +992,10 @@ pub fn run() {
                     state.plugin_root.clone(),
                     HostCompatibility::v1(env!("CARGO_PKG_VERSION")),
                 )
-                .with_gamestream(gamestream),
+                .with_gamestream(gamestream)
+                // The one place Orivo makes a folder for a profile and grants
+                // it without the user picking it (`prepare_stream_library`).
+                .with_managed_root(app_data.clone()),
             );
             app.manage(Arc::clone(&runners));
             app.manage(state);
@@ -1161,6 +1164,7 @@ pub fn run() {
             get_runner_plugins,
             gamestream::get_gamestream_settings,
             gamestream::update_gamestream_settings,
+            gamestream::open_gamestream_link,
             purge_plugin_compile_cache,
             get_wine_runner_status,
             begin_wine_profile_setup,
@@ -1239,6 +1243,11 @@ pub fn run() {
             runner_commands::set_runner_profile_enabled,
             runner_commands::set_runner_profile_launch_mode,
             runner_commands::begin_gamestream_pairing,
+            runner_commands::create_gamestream_profile,
+            runner_commands::probe_gamestream_host,
+            runner_commands::gamestream_pairing_status,
+            runner_commands::cancel_gamestream_pairing,
+            runner_commands::prepare_gamestream_library,
             runner_commands::find_stream_clients,
             fetch_runner_profile_artwork,
             runner_commands::delete_runner_profile,

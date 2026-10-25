@@ -80,6 +80,11 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+/** A few more ticks, for flows that chain several host calls. */
+async function settleAll(): Promise<void> {
+  for (let tick = 0; tick < 8; tick += 1) await settle();
+}
+
 /**
  * Wait for the detail page's wiring to exist. The shell fetches that page on
  * demand, and a dynamic import resolves over several event-loop turns rather
@@ -467,6 +472,10 @@ describe("application shell against the desktop backend", () => {
     >,
     /** What `get_installed_runners` reports: the runners panel renders from it. */
     runners: [] as Record<string, unknown>[],
+    /** The installed plugins `get_plugin_catalog` reports. */
+    plugins: [] as Record<string, unknown>[],
+    /** The saved gaming PC. */
+    streamHost: "",
   };
 
   const mount = (): void => {
@@ -495,6 +504,9 @@ describe("application shell against the desktop backend", () => {
     backend.sources = [];
     backend.sourceSync = null;
     backend.providers = [];
+    backend.plugins = [];
+    backend.streamHost = "";
+    backend.runners = [];
     tauri.detailOptions = null;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockImplementation(async (command) => {
@@ -518,9 +530,14 @@ describe("application shell against the desktop backend", () => {
         case "get_installed_runners":
           return backend.runners;
         case "get_gamestream_settings":
-          return { host: "" };
+          return { host: backend.streamHost };
         case "find_stream_clients":
           return [];
+        case "get_plugin_catalog":
+        case "refresh_plugin_registry":
+          return { installed: backend.plugins, available: [] };
+        case "probe_gamestream_host":
+          return { state: "paired", host: backend.streamHost, games: 12 };
         case "get_store_home":
           return { providerStatuses: backend.providers };
         case "sync_source_library":
@@ -557,54 +574,97 @@ describe("application shell against the desktop backend", () => {
     expect(launchedGameIds()).toEqual([alpha.id]);
   });
 
-  // The streaming host card is the runners panel's companion: an address for a
-  // machine nothing streams from is a box with no question behind it, so it
-  // waits for a profile that actually launches streams.
-  const runnerWithProfile = (launchMode: string) => ({
+  // Game streaming has one place: the guided setup behind its plugin's row.
+  // The emulator list never shows it, and nothing else asks for the PC.
+  const gamestreamPlugin = {
     id: "com.orivo.gamestream",
-    name: "Moonlight",
-    version: "0.1.0",
+    name: "Game streaming",
+    version: "0.2.0",
+    extensions: ["runner"],
     state: "ready",
     message: "",
-    profiles: [
-      {
-        id: "runner-1",
-        pluginId: "com.orivo.gamestream",
-        displayName: "Moonlight",
-        status: "valid",
-        statusMessage: null,
-        enabled: true,
-        applicationLabel: "Moonlight.app",
-        launchMode,
-        directories: [],
-        gameCount: 0,
-        importComplete: false,
-        importResumable: false,
-        lastImportedAt: null,
-      },
-    ],
+    trusted: true,
+    rollbackTo: null,
+    rollbackTrusted: null,
+    updateTo: null,
+  };
+  const streamingRunner = (profiles: Record<string, unknown>[]) => ({
+    id: "com.orivo.gamestream",
+    name: "Game streaming",
+    version: "0.2.0",
+    state: "ready",
+    message: "",
+    profiles,
+  });
+  const streamProfile = (overrides: Record<string, unknown> = {}) => ({
+    id: "runner-1",
+    pluginId: "com.orivo.gamestream",
+    displayName: "Game streaming",
+    status: "valid",
+    statusMessage: null,
+    enabled: true,
+    applicationLabel: "Moonlight.app",
+    applicationAvailable: true,
+    launchMode: "stream",
+    directories: [],
+    gameCount: 0,
+    importComplete: false,
+    importResumable: false,
+    lastImportedAt: null,
+    ...overrides,
   });
 
-  it("keeps the game streaming host out of Settings until a profile streams", async () => {
-    backend.runners = [runnerWithProfile("default")];
+  it("opens the game streaming setup from its plugin row and closes it again", async () => {
+    backend.plugins = [gamestreamPlugin];
+    backend.runners = [streamingRunner([])];
     mount();
     await goto("#/settings/plugins");
+    await settleAll();
 
-    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+    const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
+    expect(setup.hidden).toBe(true);
+    // The emulator list has no group for it, and the old host card is gone.
+    expect(root.querySelector("#runners-panel [data-runner-plugin]")).toBeNull();
+    expect(root.querySelector("#gamestream-panel")).toBeNull();
+
+    root.querySelector<HTMLButtonElement>("[data-plugin-open='game-streaming']")!.click();
+    await settleAll();
+
+    expect(setup.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(true);
+    // Nothing found on this machine, so the first step is the active one.
+    expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
+    expect(setup.textContent).toContain("Install Moonlight");
+    expect(setup.textContent).not.toMatch(/emulator|runner profile|granted folder|stream cards|placeholder/i);
+
+    setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
+    await settleAll();
+    expect(setup.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
   });
 
-  it("shows the game streaming host once a profile launches streams", async () => {
-    backend.runners = [runnerWithProfile("stream")];
+  it("shows how a finished game streaming setup stands instead of the wizard", async () => {
+    backend.plugins = [gamestreamPlugin];
+    backend.runners = [streamingRunner([streamProfile({ gameCount: 12 })])];
+    backend.streamHost = "my-pc.local";
     mount();
     await goto("#/settings/plugins");
+    await settleAll();
 
-    const card = root.querySelector<HTMLElement>("#gamestream-panel")!;
-    expect(card.hidden).toBe(false);
-    expect(card.textContent).toContain("Host address");
-    // And the address was read on arrival rather than kept from a last visit.
+    root.querySelector<HTMLButtonElement>("[data-plugin-open='game-streaming']")!.click();
+    await settleAll();
+
+    const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
     expect(
-      tauri.invoke.mock.calls.filter(([command]) => command === "get_gamestream_settings"),
-    ).not.toHaveLength(0);
+      [...setup.querySelectorAll(".gs-step")].map((step) => step.classList.contains("is-done")),
+    ).toEqual([true, true, true, true]);
+    expect(setup.textContent).toContain("Moonlight found (Moonlight)");
+    expect(setup.textContent).toContain("12 games added to your Library");
+    expect(setup.textContent).toContain("Open Library");
+    // The PC was asked about on arrival rather than trusted from last time.
+    expect(
+      tauri.invoke.mock.calls.filter(([command]) => command === "probe_gamestream_host"),
+    ).toHaveLength(1);
   });
 
   // A game installed here and streamable from another machine is one game with
@@ -1944,7 +2004,7 @@ describe("the application shell on iOS", () => {
     // Wine starts nothing on an iPhone, and neither does any other runner.
     expect(row("wine").hidden).toBe(true);
     expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
-    expect(root.querySelector<HTMLElement>("#gamestream-panel")!.hidden).toBe(true);
+    expect(root.querySelector<HTMLElement>("#gamestream-setup-panel")!.hidden).toBe(true);
     expect(row("wallpaper-searcher").hidden).toBe(false);
   });
 

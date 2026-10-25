@@ -2626,7 +2626,7 @@ impl UrlOpener for SystemUrlOpener {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .map(|_| ())
-                .map_err(|_| "Orivo could not open this store page.".to_string())
+                .map_err(|_| "Orivo could not open that page.".to_string())
         }
     }
 }
