@@ -680,7 +680,15 @@ impl AppState {
         let wine_prefix_root = app_data.join(WINE_PREFIXES_DIRECTORY);
         // The game-state document is re-keyed with the catalog it belongs to,
         // before `GameStateStore` reads it during setup.
-        let mut catalog = load_or_migrate_catalog(&catalog_path, &app_data.join(GAME_STATE_FILE))?;
+        let mut catalog =
+            match load_or_migrate_catalog(&catalog_path, &app_data.join(GAME_STATE_FILE)) {
+                Ok(catalog) => catalog,
+                // Propagating this with `?` would make Tauri panic inside the
+                // setup callback, which on macOS is a Cocoa callback that
+                // cannot unwind: the process aborts with a SIGABRT and the
+                // user never learns why. Say it, leave the file alone, exit.
+                Err(error) => exit_with_startup_failure(&startup_catalog_failure_message(&*error)),
+            };
 
         // Imported artwork is copied once into the app cache. That keeps the
         // browser's asset protocol tightly scoped and means a moved source
@@ -8295,6 +8303,42 @@ fn resolved_catalog_path(app: &AppHandle) -> Result<PathBuf, tauri::Error> {
     Ok(app.path().app_data_dir()?.join(CATALOG_FILE))
 }
 
+/// What to tell the user when the catalog cannot be loaded at startup.
+///
+/// A catalog written by a newer Orivo is refused on purpose: an older build
+/// must not rewrite a format it does not understand. The person only needs to
+/// know that, and what to do about it. Any other failure (unreadable or
+/// corrupt file) has no such single remedy, so the underlying error is shown.
+fn startup_catalog_failure_message(error: &(dyn std::error::Error + 'static)) -> String {
+    match error.downcast_ref::<catalog::CatalogError>() {
+        Some(catalog::CatalogError::UnsupportedSchema { .. }) => "Your library was saved by a \
+             newer version of Orivo. Install the latest version of Orivo to open it. Your \
+             library has not been changed."
+            .to_string(),
+        _ => format!(
+            "Orivo could not open your library.\n\n{error}\n\nYour library has not been \
+             changed."
+        ),
+    }
+}
+
+/// Shows a blocking native message, then ends the process.
+///
+/// Startup has no window yet, so there is nowhere else to say it. It exits
+/// instead of returning an error because an error out of `setup` becomes a
+/// panic in a callback that cannot unwind (see `AppState::load`).
+fn exit_with_startup_failure(message: &str) -> ! {
+    eprintln!("{message}");
+    #[cfg(desktop)]
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Orivo cannot start")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
+    std::process::exit(1)
+}
+
 /// A migration that rewrites game ids also has to move the wishlist, media
 /// selections and imported files that are keyed by them, so the catalog and the
 /// game-state document are published as one unit rather than one at a time.
@@ -10255,6 +10299,34 @@ pub(crate) mod tests {
             serde_json::Value::Bool(true)
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_newer_catalog_is_explained_and_left_untouched() {
+        let root = temporary_directory("catalog-newer-schema");
+        let catalog_path = root.join("catalog.json");
+        let contents = format!(
+            r#"{{"schema_version":{},"games":[]}}"#,
+            catalog::CURRENT_SCHEMA_VERSION + 1
+        );
+        fs::write(&catalog_path, &contents).unwrap();
+
+        let error = load_or_migrate_catalog(&catalog_path, &root.join(GAME_STATE_FILE))
+            .expect_err("a newer schema must be refused");
+
+        assert!(matches!(
+            error.downcast_ref::<catalog::CatalogError>(),
+            Some(catalog::CatalogError::UnsupportedSchema { .. })
+        ));
+        assert!(startup_catalog_failure_message(&*error).contains("newer version of Orivo"));
+        assert_eq!(fs::read_to_string(&catalog_path).unwrap(), contents);
+    }
+
+    #[test]
+    fn an_unreadable_catalog_failure_message_carries_the_error() {
+        let error = catalog::CatalogError::Invalid("broken".into());
+
+        assert!(startup_catalog_failure_message(&error).contains("invalid catalog: broken"));
     }
 
     #[test]
