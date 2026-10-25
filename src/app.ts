@@ -5365,6 +5365,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     detail.className = "update-status__detail";
     detail.textContent = description.detail;
     status.replaceChildren(label, detail);
+    // What is new, as a few bullets, when the release says so readably.
+    if (description.highlights && description.highlights.length > 0) {
+      const list = document.createElement("ul");
+      list.className = "update-status__highlights";
+      for (const line of description.highlights) {
+        const item = document.createElement("li");
+        item.textContent = line;
+        list.append(item);
+      }
+      status.append(list);
+    }
 
     const downloading = isTauriRuntime() && state.update.status === "downloading";
     progress.hidden = !downloading;

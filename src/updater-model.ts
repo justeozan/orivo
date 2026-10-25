@@ -57,6 +57,53 @@ export interface UpdateDescription {
   detail: string;
   buttonLabel: string;
   buttonDisabled: boolean;
+  /** What the new version brings, one short line each; empty when unknown. */
+  highlights?: string[];
+}
+
+/** No more than a glance: the full notes are the changelog's job. */
+const MAX_HIGHLIGHTS = 5;
+/** A highlight is one line; a longer first sentence is cut at a word. */
+const MAX_HIGHLIGHT_LENGTH = 110;
+
+/**
+ * The release notes as a handful of readable bullets.
+ *
+ * A release's body is the changelog section: long paragraphs, then download
+ * instructions for people installing by hand. Shown as-is it was a wall of
+ * text. This keeps the bullets of the "Added" and "Changed" sections, takes
+ * each one's first sentence, strips the Markdown and stops at five. Anything
+ * it cannot read as such gives nothing, and the panel then simply says a new
+ * version is there.
+ */
+export function releaseHighlights(body: string | null | undefined): string[] {
+  if (!body) return [];
+  const highlights: string[] = [];
+  let section = "";
+  for (const raw of body.split(/\r?\n/)) {
+    const line = raw.trim();
+    const heading = /^#{2,4}\s+(.+)$/.exec(line);
+    if (heading) {
+      section = heading[1].trim().toLowerCase();
+      continue;
+    }
+    if (section !== "added" && section !== "changed") continue;
+    const bullet = /^[-*]\s+(.+)$/.exec(line);
+    if (!bullet) continue;
+    const text = bullet[1]
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+      .replace(/[*_`]+/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const sentence = /^(.+?[.!?])(\s|$)/.exec(text)?.[1] ?? text;
+    let short = sentence.replace(/[.]$/, "");
+    if (short.length > MAX_HIGHLIGHT_LENGTH) {
+      short = `${short.slice(0, MAX_HIGHLIGHT_LENGTH).replace(/\s+\S*$/, "")}…`;
+    }
+    if (short) highlights.push(short);
+    if (highlights.length >= MAX_HIGHLIGHTS) break;
+  }
+  return highlights;
 }
 
 export const INITIAL_UPDATE_STATE: UpdateState = {
@@ -205,11 +252,10 @@ export function describeUpdateState(state: UpdateState): UpdateDescription {
     case "available":
       return {
         label: `Version ${state.availableVersion ?? "unknown"} is available`,
-        detail:
-          state.notes ??
-          "Download it now. Orivo installs the update and restarts once to finish.",
+        detail: "Orivo installs it and restarts once to finish.",
         buttonLabel: "Download and install",
         buttonDisabled: false,
+        highlights: releaseHighlights(state.notes),
       };
     case "up-to-date":
       return {

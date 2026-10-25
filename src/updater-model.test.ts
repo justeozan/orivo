@@ -8,6 +8,7 @@ import {
   describeUpdateState,
   formatBytes,
   markReady,
+  releaseHighlights,
   startCheck,
   startDownload,
   updateProgressPercent,
@@ -204,22 +205,21 @@ describe("updater model", () => {
     });
   });
 
-  it("describes an available update, preferring its release notes", () => {
+  it("describes an available update, with its notes as a few highlights", () => {
     const withNotes = applyCheckResult(running(), {
       version: "0.4.0",
-      body: "Adds Wine profiles.",
+      body: "### Added\n- Wine profiles. Long text.",
     });
     expect(describeUpdateState(withNotes)).toEqual({
       label: "Version 0.4.0 is available",
-      detail: "Adds Wine profiles.",
+      detail: "Orivo installs it and restarts once to finish.",
       buttonLabel: "Download and install",
       buttonDisabled: false,
+      highlights: ["Wine profiles"],
     });
 
     const withoutNotes = applyCheckResult(running(), { version: "0.4.0" });
-    expect(describeUpdateState(withoutNotes).detail).toBe(
-      "Download it now. Orivo installs the update and restarts once to finish.",
-    );
+    expect(describeUpdateState(withoutNotes).highlights).toEqual([]);
 
     // A malformed manifest must not render "Version null is available".
     expect(describeUpdateState(running({ status: "available" })).label).toBe(
@@ -301,5 +301,33 @@ describe("updater model", () => {
     markReady(state);
     applyError(state, new Error("boom"));
     expect(state).toEqual(snapshot);
+  });
+});
+
+describe("releaseHighlights", () => {
+  const body = [
+    "## [0.3.9] - 2026-10-22",
+    "### Added",
+    "- A games folder on desktop. Choose it once from the *Games folder* menu, and more.",
+    "- A startup animation. Orivo opens on its ring.",
+    "### Changed",
+    "- The browse bar shows [logos](https://x). Long explanation follows.",
+    "### Fixed",
+    "- A bug nobody needs to read about here.",
+    "## Downloads",
+    "- **macOS:** download the `.dmg`.",
+  ].join("\n");
+
+  it("keeps the first sentence of each new or changed thing, without Markdown", () => {
+    expect(releaseHighlights(body)).toEqual([
+      "A games folder on desktop",
+      "A startup animation",
+      "The browse bar shows logos",
+    ]);
+  });
+
+  it("gives nothing for notes it cannot read as sections", () => {
+    expect(releaseHighlights("Just a paragraph of text.")).toEqual([]);
+    expect(releaseHighlights(null)).toEqual([]);
   });
 });
