@@ -7156,8 +7156,14 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   // Elden Ring's cover on every game whose art lives in the media cache: a
   // `cache:` token is not resolvable synchronously, so the fallback won, and
   // only the first handful of cards were ever hydrated back to the truth.
-  const fallback = fallbackLibrary.find((game) => game.title === title) ?? lastUsedFallback;
-  const artworkFallback = fallbackLibrary.find((game) => game.title === title) ?? null;
+  //
+  // History never does either. Borrowing `lastUsedFallback` for every game
+  // with no match gave the whole library Elden Ring's "2 days ago", play time
+  // and genre, so Recently Played, Most Played and Never Played sorted a
+  // library of identical twins. Only a fixture of the same title lends copy.
+  const fixture = fallbackLibrary.find((game) => game.title === title) ?? null;
+  const fallback = fixture ?? lastUsedFallback;
+  const artworkFallback = fixture;
   const rawSource = readString(record, "source");
   const source: LibraryGame["source"] =
     rawSource === "steam" || rawSource === "local" || rawSource === "android"
@@ -7196,10 +7202,10 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       // Spirits`) is not how a title should read on screen; game-title.ts.
       title: displayTitle(title),
       source,
-      description: readString(record, "description") || fallback.description,
-      metadata: readString(record, "metadata") || fallback.metadata,
+      description: readString(record, "description") || fixture?.description || "",
+      metadata: readString(record, "metadata") || fixture?.metadata || "",
       developer: readString(record, "developer"),
-      genre: readString(record, "genre") || fallback.genre,
+      genre: readString(record, "genre") || fixture?.genre || "",
       heroUrl: immediateMediaUrl(heroToken) || artworkFallback?.heroUrl || "",
       coverUrl: immediateMediaUrl(coverToken) || artworkFallback?.coverUrl || "",
       landscapeUrl:
@@ -7210,10 +7216,10 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       // An empty value is meaningful for a newly synced Steam game: it has
       // never been launched locally. Do not borrow a fixture's last-played
       // date merely because the backend intentionally returned an empty one.
-      lastPlayedAt: readOptionalString(record, "lastPlayedAt", "last_played_at") ?? fallback.lastPlayedAt,
+      lastPlayedAt: readOptionalString(record, "lastPlayedAt", "last_played_at") ?? fixture?.lastPlayedAt ?? "",
       logoUrl: immediateMediaUrl(logoToken),
-      playTimeSeconds: readNumber(record, "playTimeSeconds", "play_time_seconds") ?? fallback.playTimeSeconds,
-      launchable: readBoolean(record, "launchable") ?? fallback.launchable,
+      playTimeSeconds: readNumber(record, "playTimeSeconds", "play_time_seconds") ?? fixture?.playTimeSeconds ?? 0,
+      launchable: readBoolean(record, "launchable") ?? fixture?.launchable ?? false,
       launchOptions: readLaunchOptions(record),
       // Opaque tokens from the host, compared against closed tables in
       // library-browse.ts and never shown as they are.
