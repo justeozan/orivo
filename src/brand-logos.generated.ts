@@ -6,7 +6,7 @@ export const BRAND_LOGOS = {
   "ubisoft": { src: "/media/brands/ubisoft.png", width: 376, height: 72, label: "Ubisoft Connect" },
   "xbox": { src: "/media/brands/xbox.png", width: 239, height: 72, label: "Xbox" },
   "microsoft-store": { src: "/media/brands/microsoft-store.png", width: 487, height: 72, label: "Microsoft Store" },
-  "local": { src: "/media/brands/local.png", width: 251, height: 72, label: "Local" },
+  "local": { src: "/media/brands/local.png", width: 242, height: 72, label: "Local" },
   "wine": { src: "/media/brands/wine.png", width: 197, height: 72, label: "Wine" },
   "moonlight": { src: "/media/brands/moonlight.png", width: 360, height: 72, label: "Moonlight" },
   "ryujinx": { src: "/media/brands/ryujinx.png", width: 285, height: 72, label: "Ryujinx" },
