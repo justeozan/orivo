@@ -8452,7 +8452,7 @@ function shell(): string {
                     ${icon("search")}
                     <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="Search available plugins…" aria-label="Search available plugins" />
                   </label>
-                  <div id="plugins-catalog-list"></div>
+                  <div id="plugins-catalog-list" class="plugins-group__list"></div>
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>No plugins match that search.</p>
                 </div>
               </section>
