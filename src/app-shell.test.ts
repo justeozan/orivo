@@ -1019,7 +1019,8 @@ describe("application shell against the desktop backend", () => {
     const settingsMark = root.querySelector<HTMLElement>(
       "[data-source-row='microsoft-store'] .source-account-row__mark",
     );
-    expect(settingsMark?.innerHTML).toContain("#f25022");
+    // The Microsoft Store's own mark (its bag), in its Settings colour.
+    expect(settingsMark?.innerHTML).toContain('fill="#f4f3f7"');
 
     await goto("#/library");
     // The store's mark belongs to Settings, the rail and the game's own page.
