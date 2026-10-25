@@ -153,6 +153,9 @@ const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT: &str = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT: &str = "source-library-synced";
 /// Carries how many games a games-folder scan just added.
 const GAME_FOLDER_SCANNED_EVENT: &str = "game-folder-scanned";
+/// Progress of an artwork search over a batch of games: one event when it
+/// starts, then one per game as it finishes.
+const GAME_ARTWORK_PROGRESS_EVENT: &str = "game-artwork-progress";
 /// The record of the chosen games folder, kept beside the catalog.
 const GAME_FOLDER_RECORD: &str = "game-folder.json";
 const GAME_FOLDER_FIRST_SCAN_DELAY: Duration = Duration::from_secs(5);
@@ -5049,7 +5052,24 @@ async fn reset_game_artwork(
 /// How many cards one call will try to fill. An import can bring in a library,
 /// and each card is a lookup and up to four downloads; the caller is told what
 /// is left so it can come back rather than being held for an unbounded run.
-const MAX_ARTWORK_FILLS_PER_CALL: usize = 40;
+const MAX_ARTWORK_FILLS_PER_CALL: usize = 200;
+/// Cards searched at once. Each runs a lookup and up to four concurrent
+/// downloads, so a handful in flight keeps a big import quick without opening
+/// hundreds of connections to the artwork hosts.
+const MAX_CONCURRENT_ARTWORK_FILLS: usize = 4;
+
+/// What the library hears while a batch is searched, so cards can show
+/// "looking for artwork" and swap to the real image as each one lands.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameArtworkProgressEvent {
+    /// Games whose search has not finished yet. Empty on the last event.
+    pending: Vec<String>,
+    /// The game that just finished; `None` on the opening event.
+    game_id: Option<String>,
+    /// Whether that game's artwork was written.
+    found: bool,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5103,14 +5123,52 @@ async fn fetch_runner_profile_artwork(
             .collect()
     };
     let remaining = artless.len().saturating_sub(MAX_ARTWORK_FILLS_PER_CALL);
+    let batch = artless
+        .into_iter()
+        .take(MAX_ARTWORK_FILLS_PER_CALL)
+        .collect::<Vec<_>>();
+    if batch.is_empty() {
+        return Ok(ArtworkFillResult { filled: 0, remaining });
+    }
+
+    let emit_progress = |event: GameArtworkProgressEvent| {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_ARTWORK_PROGRESS_EVENT, event);
+    };
+    let mut pending = batch
+        .iter()
+        .map(|(game_id, _)| game_id.clone())
+        .collect::<Vec<_>>();
+    emit_progress(GameArtworkProgressEvent {
+        pending: pending.clone(),
+        game_id: None,
+        found: false,
+    });
+
+    let app_ref = &app;
+    let state_ref = &*state;
+    let credentials_ref = &**credentials;
+    let mut results = futures_util::stream::iter(batch.into_iter().map(
+        |(game_id, title)| async move {
+            let found =
+                apply_resolved_artwork(app_ref, state_ref, credentials_ref, &game_id, title)
+                    .await
+                    .is_ok();
+            (game_id, found)
+        },
+    ))
+    .buffer_unordered(MAX_CONCURRENT_ARTWORK_FILLS);
+
     let mut filled = 0;
-    for (game_id, title) in artless.into_iter().take(MAX_ARTWORK_FILLS_PER_CALL) {
-        if apply_resolved_artwork(&app, &state, &credentials, &game_id, title)
-            .await
-            .is_ok()
-        {
+    while let Some((game_id, found)) = results.next().await {
+        if found {
             filled += 1;
         }
+        pending.retain(|id| id != &game_id);
+        emit_progress(GameArtworkProgressEvent {
+            pending: pending.clone(),
+            game_id: Some(game_id),
+            found,
+        });
     }
     Ok(ArtworkFillResult { filled, remaining })
 }
@@ -5136,45 +5194,57 @@ async fn apply_resolved_artwork(
     let cache_dir = media_cache_dir(app).map_err(|error| error.to_string())?;
     fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
     let stem = cache_stem(game_id);
-    let mut downloaded = Vec::new();
-    for role in game_artwork::ArtworkRole::all() {
-        // Candidates are ordered best-first; the first one that actually
-        // exists wins. A publisher who never uploaded a library hero is a
-        // normal case, not an error.
-        for url in artwork.for_role(role) {
-            if !game_artwork::is_trusted_artwork_url(url) {
-                continue;
+    // The four roles are independent, so they download side by side: a slow
+    // host costs one role's time, not the sum of all four.
+    let downloads = game_artwork::ArtworkRole::all().map(|role| {
+        let cache_dir = &cache_dir;
+        let stem = &stem;
+        let candidates = artwork.for_role(role);
+        async move {
+            // Candidates are ordered best-first; the first one that actually
+            // exists wins. A publisher who never uploaded a library hero is a
+            // normal case, not an error.
+            for url in candidates {
+                if !game_artwork::is_trusted_artwork_url(url) {
+                    continue;
+                }
+                let Ok(bytes) = download_artwork_bytes(url).await else {
+                    continue;
+                };
+                let extension = if url
+                    .split('?')
+                    .next()
+                    .unwrap_or(url)
+                    .to_ascii_lowercase()
+                    .ends_with(".png")
+                {
+                    "png"
+                } else {
+                    "jpg"
+                };
+                let prefix = match role {
+                    game_artwork::ArtworkRole::Cover => "usercover",
+                    game_artwork::ArtworkRole::Landscape => "landscape",
+                    game_artwork::ArtworkRole::Background => "home",
+                    game_artwork::ArtworkRole::Logo => "logo",
+                };
+                // A fresh filename each time, so the WebView repaints instead of
+                // serving its cached copy of a stable path.
+                remove_cached_artwork(cache_dir, &format!("{stem}-{prefix}-"));
+                let path =
+                    cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
+                if fs::write(&path, &bytes).is_ok() {
+                    return Some((role, path));
+                }
             }
-            let Ok(bytes) = download_artwork_bytes(url).await else {
-                continue;
-            };
-            let extension = if url
-                .split('?')
-                .next()
-                .unwrap_or(url)
-                .to_ascii_lowercase()
-                .ends_with(".png")
-            {
-                "png"
-            } else {
-                "jpg"
-            };
-            let prefix = match role {
-                game_artwork::ArtworkRole::Cover => "usercover",
-                game_artwork::ArtworkRole::Landscape => "landscape",
-                game_artwork::ArtworkRole::Background => "home",
-                game_artwork::ArtworkRole::Logo => "logo",
-            };
-            // A fresh filename each time, so the WebView repaints instead of
-            // serving its cached copy of a stable path.
-            remove_cached_artwork(&cache_dir, &format!("{stem}-{prefix}-"));
-            let path = cache_dir.join(format!("{stem}-{prefix}-{}.{extension}", cache_nonce()));
-            if fs::write(&path, &bytes).is_ok() {
-                downloaded.push((role, path));
-                break;
-            }
+            None
         }
-    }
+    });
+    let downloaded = futures_util::future::join_all(downloads)
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
 
     if downloaded.is_empty() {
         return Err(format!(
@@ -5247,9 +5317,10 @@ struct ArtworkResetResponse {
 
 async fn download_artwork_bytes(url: &str) -> Result<Vec<u8>, String> {
     const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|_| "The artwork download could not be started.".to_string())?;
+    // The shared artwork client carries the timeouts: this one used to have
+    // none, so a stalled CDN held the whole fill for as long as it liked.
+    let client = game_artwork::download_client()
+        .ok_or_else(|| "The artwork download could not be started.".to_string())?;
     let response = client
         .get(url)
         .send()
@@ -9229,32 +9300,27 @@ fn presentation_catalog(stored_catalog: &Catalog, include_showcase: bool) -> Cat
     }
 
     // A local record with no discovered or fetched artwork borrows the bundled
-    // plate whose title matches its own (case-insensitive, loose), and
-    // otherwise wears the neutral placeholder. This is presentation-only: the
-    // stored record keeps its empty slots, so the post-import artwork search
-    // still sees the gap and can fill it with real art.
+    // plate whose title matches its own (case-insensitive, loose). One with no
+    // match keeps its empty slots, so the frontend draws its own generated
+    // per-game fallback instead of every such card sharing one image. This is
+    // presentation-only: the stored record is untouched, so the post-import
+    // artwork search still sees the gap and can fill it with real art.
     for game in &mut presentation.games {
         if game.source != GameSource::Local
             || (game.cover_path.is_some() && game.artwork_path.is_some())
         {
             continue;
         }
-        let matched = bundled_artwork_for_title(&game.title);
-        let cover = matched.and_then(|entry| entry.cover.clone());
-        let hero = matched.and_then(|entry| entry.hero.clone());
+        let Some(matched) = bundled_artwork_for_title(&game.title) else {
+            continue;
+        };
+        let cover = matched.cover.clone();
+        let hero = matched.hero.clone();
         if game.cover_path.is_none() {
-            game.cover_path = Some(PathBuf::from(
-                cover
-                    .clone()
-                    .or_else(|| hero.clone())
-                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
-            ));
+            game.cover_path = cover.clone().or_else(|| hero.clone()).map(PathBuf::from);
         }
         if game.artwork_path.is_none() {
-            game.artwork_path = Some(PathBuf::from(
-                hero.or(cover)
-                    .unwrap_or_else(|| NEUTRAL_ARTWORK_PLACEHOLDER.to_owned()),
-            ));
+            game.artwork_path = hero.or(cover).map(PathBuf::from);
         }
     }
 
@@ -9440,11 +9506,6 @@ fn game_key(title: &str) -> String {
 /// The bundled IGDB artwork manifest shipped with the app. It names the titles
 /// whose covers and heroes exist as `/media/igdb` public assets.
 const BUNDLED_ARTWORK_MANIFEST: &str = include_str!("../../assets/igdb/sources.json");
-
-/// A neutral bundled brand image for games whose artwork was not found. An
-/// unknown game must never wear another game's art (this used to fall through
-/// to the Elden Ring plates).
-const NEUTRAL_ARTWORK_PLACEHOLDER: &str = "/media/orivo-ring-icon.png";
 
 /// One bundled title from the manifest, keyed by its normalized title.
 struct BundledArtwork {
@@ -10463,7 +10524,7 @@ pub(crate) mod tests {
 
     /// A freshly imported local game must never wear another game's art: a
     /// title matching a bundled plate borrows that plate, and an unknown title
-    /// gets the neutral placeholder rather than the Elden Ring fallback.
+    /// keeps empty slots rather than wearing another game's art.
     #[test]
     fn local_games_without_artwork_get_bundled_or_neutral_presentation_art() {
         let mut stored = Catalog::default();
@@ -10495,14 +10556,10 @@ pub(crate) mod tests {
             .iter()
             .find(|game| game.id == "local-hozy")
             .unwrap();
-        assert_eq!(
-            unknown.cover_path.as_deref(),
-            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
-        );
-        assert_eq!(
-            unknown.artwork_path.as_deref(),
-            Some(Path::new(NEUTRAL_ARTWORK_PLACEHOLDER))
-        );
+        // No slot is filled for an unknown title, so the frontend draws its own
+        // generated fallback for it instead of a shared image.
+        assert!(unknown.cover_path.is_none());
+        assert!(unknown.artwork_path.is_none());
         // Presentation enrichment must stay out of the stored catalog so the
         // post-import artwork search still sees the gap.
         assert!(stored.games.iter().all(|game| game.cover_path.is_none()));

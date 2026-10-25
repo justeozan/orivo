@@ -22,6 +22,12 @@ use serde::Deserialize;
 use std::time::Duration;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// A host that does not even accept the connection is dead for this attempt;
+/// waiting out the whole request timeout for it only stalls the fill behind it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Pause before the single retry of a request that failed for a reason that
+/// is usually gone a moment later (a dropped connection, a 5xx, a 429).
+const RETRY_DELAY: Duration = Duration::from_millis(400);
 const USER_AGENT: &str = "Orivo/0.3 artwork";
 const STEAM_SEARCH_ENDPOINT: &str = "https://store.steampowered.com/api/storesearch/";
 const STEAM_CDN: &str = "https://cdn.cloudflare.steamstatic.com/steam/apps";
@@ -137,9 +143,30 @@ pub fn is_trusted_artwork_url(url: &str) -> bool {
         .any(|trusted| host == *trusted || host.ends_with(&format!(".{trusted}")))
 }
 
-fn client() -> Option<reqwest::Client> {
+/// The HTTP client artwork searches go through (downloads use
+/// `download_client`). Both timeouts matter: without them a single stalled host holds a
+/// whole fill hostage, since the fill waits on every card.
+pub(crate) fn client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
+        .user_agent(USER_AGENT)
+        .build()
+        .ok()
+}
+
+/// How long one artwork file may take to arrive. Longer than a search: a 4K
+/// background from SteamGridDB is several megabytes, and a slow line must not
+/// turn a real picture into "nothing found". The connect timeout still drops a
+/// dead host quickly.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// The client artwork files are downloaded with: the search client's
+/// connection rules, with room for a large file.
+pub(crate) fn download_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(DOWNLOAD_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()
         .ok()
@@ -149,16 +176,17 @@ fn client() -> Option<reqwest::Client> {
 /// optional Settings value; without it the Steam tier alone is used, which
 /// still covers almost every PC game.
 pub async fn resolve(title: &str, steamgriddb_key: Option<&str>) -> ArtworkSet {
-    let Some(query) = normalize_query(title) else {
+    let queries = query_variants(title);
+    if queries.is_empty() {
         return ArtworkSet::default();
-    };
+    }
     let Some(client) = client() else {
         return ArtworkSet::default();
     };
 
-    let steam_app_id = steam_app_id_for_title(&client, &query).await;
+    let steam_app_id = steam_app_id_for_title(&client, &queries).await;
     let mut set = match steamgriddb_key.map(str::trim).filter(|key| !key.is_empty()) {
-        Some(key) => steamgriddb_artwork(&client, &query, steam_app_id, key).await,
+        Some(key) => steamgriddb_artwork(&client, &queries, steam_app_id, key).await,
         None => ArtworkSet::default(),
     };
     if let Some(app_id) = steam_app_id {
@@ -174,9 +202,12 @@ pub async fn resolve(title: &str, steamgriddb_key: Option<&str>) -> ArtworkSet {
 /// Nothing is downloaded: these are CDN URLs the WebView loads directly, the
 /// same way an imported Steam game's artwork already works.
 pub async fn resolve_steam_only(title: &str) -> Option<ArtworkSet> {
-    let query = normalize_query(title)?;
+    let queries = query_variants(title);
+    if queries.is_empty() {
+        return None;
+    }
     let client = client()?;
-    let app_id = steam_app_id_for_title(&client, &query).await?;
+    let app_id = steam_app_id_for_title(&client, &queries).await?;
     Some(steam_artwork(app_id))
 }
 
@@ -219,27 +250,67 @@ struct SteamSearchItem {
     name: String,
 }
 
-/// Find the Steam app whose name matches the title. An exact normalised match
-/// always wins, because Steam's own ranking happily puts a soundtrack or a
-/// season pass above the game when the title is short.
-async fn steam_app_id_for_title(client: &reqwest::Client, title: &str) -> Option<u64> {
-    let response = client
-        .get(STEAM_SEARCH_ENDPOINT)
-        .query(&[("term", title), ("cc", "us"), ("l", "en")])
-        .send()
-        .await
-        .ok()?;
+/// Send a request, and once more after a short pause if it failed at the
+/// network level or came back 5xx/429. Store search endpoints shed load by
+/// failing a request now and then; a second try a moment later almost always
+/// goes through, and giving up on the first would leave the card artless.
+async fn send_with_retry(request: reqwest::RequestBuilder) -> Option<reqwest::Response> {
+    let retry = request.try_clone();
+    let first = request.send().await;
+    let transient = match &first {
+        Ok(response) => {
+            response.status().is_server_error()
+                || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
+        Err(_) => true,
+    };
+    match retry {
+        Some(retry) if transient => {
+            tokio::time::sleep(RETRY_DELAY).await;
+            retry.send().await.ok()
+        }
+        _ => first.ok(),
+    }
+}
+
+/// One Steam store search, or `None` when the store could not answer.
+async fn steam_search(client: &reqwest::Client, term: &str) -> Option<Vec<SteamSearchItem>> {
+    let response = send_with_retry(client.get(STEAM_SEARCH_ENDPOINT).query(&[
+        ("term", term),
+        ("cc", "us"),
+        ("l", "en"),
+    ]))
+    .await?;
     if !response.status().is_success() {
         return None;
     }
-    let payload = response.json::<SteamSearchResponse>().await.ok()?;
-    let wanted = comparison_key(title);
-    payload
-        .items
-        .iter()
-        .find(|item| item.id > 0 && comparison_key(&item.name) == wanted)
-        .or_else(|| payload.items.iter().find(|item| item.id > 0))
-        .map(|item| item.id)
+    Some(response.json::<SteamSearchResponse>().await.ok()?.items)
+}
+
+/// Find the Steam app whose name matches the title, trying each query variant
+/// in turn. An exact normalised match against the variant being tried always
+/// wins, because Steam's own ranking happily puts a soundtrack or a season
+/// pass above the game when the title is short. Failing that, the top result
+/// of the first variant that found anything is the answer, but only once every
+/// variant has had its chance at an exact match.
+async fn steam_app_id_for_title(client: &reqwest::Client, queries: &[String]) -> Option<u64> {
+    let mut first_hit = None;
+    for query in queries {
+        let Some(items) = steam_search(client, query).await else {
+            continue;
+        };
+        let wanted = comparison_key(query);
+        if let Some(item) = items
+            .iter()
+            .find(|item| item.id > 0 && comparison_key(&item.name) == wanted)
+        {
+            return Some(item.id);
+        }
+        if first_hit.is_none() {
+            first_hit = items.iter().find(|item| item.id > 0).map(|item| item.id);
+        }
+    }
+    first_hit
 }
 
 #[derive(Debug, Deserialize)]
@@ -296,11 +367,11 @@ const CLEAN_FILTERS: &str = "nsfw=false&humor=false&types=static";
 /// actually delivers 4K-class backgrounds.
 async fn steamgriddb_artwork(
     client: &reqwest::Client,
-    title: &str,
+    queries: &[String],
     steam_app_id: Option<u64>,
     key: &str,
 ) -> ArtworkSet {
-    let Some(game_id) = griddb_game_id(client, title, steam_app_id, key).await else {
+    let Some(game_id) = griddb_game_id(client, queries, steam_app_id, key).await else {
         return ArtworkSet::default();
     };
     ArtworkSet {
@@ -357,7 +428,7 @@ async fn steamgriddb_artwork(
 
 async fn griddb_game_id(
     client: &reqwest::Client,
-    title: &str,
+    queries: &[String],
     steam_app_id: Option<u64>,
     key: &str,
 ) -> Option<u64> {
@@ -370,15 +441,21 @@ async fn griddb_game_id(
             return Some(game.id);
         }
     }
-    let url = format!(
-        "{STEAMGRIDDB_API}/search/autocomplete/{}",
-        urlencode_path(title)
-    );
-    griddb_get::<Vec<GridDbGame>>(client, &url, key)
-        .await?
-        .into_iter()
-        .find(|game| game.id > 0)
-        .map(|game| game.id)
+    // The first variant SteamGridDB knows a game for wins: they are ordered
+    // from most to least specific, so a hit is as precise as it can be.
+    for query in queries {
+        let url = format!(
+            "{STEAMGRIDDB_API}/search/autocomplete/{}",
+            urlencode_path(query)
+        );
+        let found = griddb_get::<Vec<GridDbGame>>(client, &url, key)
+            .await
+            .and_then(|games| games.into_iter().find(|game| game.id > 0));
+        if let Some(game) = found {
+            return Some(game.id);
+        }
+    }
+    None
 }
 
 async fn griddb_assets(
@@ -425,7 +502,7 @@ async fn griddb_get<T: for<'de> Deserialize<'de> + Default>(
     url: &str,
     key: &str,
 ) -> Option<T> {
-    let response = client.get(url).bearer_auth(key).send().await.ok()?;
+    let response = send_with_retry(client.get(url).bearer_auth(key)).await?;
     if !response.status().is_success() {
         return None;
     }
@@ -433,19 +510,167 @@ async fn griddb_get<T: for<'de> Deserialize<'de> + Default>(
     envelope.success.then_some(envelope.data).flatten()
 }
 
-/// Titles arrive with trademark marks, edition suffixes and stray punctuation
-/// that no store search matches. Strip them before asking.
-fn normalize_query(title: &str) -> Option<String> {
-    let cleaned = title
+/// Words a title keeps lowercase when it is rebuilt from a slug, the way a
+/// person would write it: "Mio Memories in Orbit", not "Mio Memories In Orbit".
+const SMALL_WORDS: &[&str] = &[
+    "a", "an", "and", "as", "at", "by", "for", "in", "of", "on", "or", "the", "to", "vs",
+];
+
+/// Edition tags a store appends and the search index does not carry. Longer
+/// phrases come before the shorter ones they end with, so "GOTY Edition" is
+/// taken off whole rather than leaving "Edition" behind.
+const EDITION_SUFFIXES: &[&str] = &[
+    "Remastered",
+    "Remaster",
+    "Definitive Edition",
+    "Game of the Year Edition",
+    "GOTY Edition",
+    "GOTY",
+    "Deluxe Edition",
+    "Complete Edition",
+    "Ultimate Edition",
+    "Enhanced Edition",
+    "Director's Cut",
+    "Gold Edition",
+    "Standard Edition",
+];
+
+/// The longest query sent to any store.
+const MAX_QUERY_CHARS: usize = 120;
+
+/// A title that is really an identifier: a folder or package name such as
+/// `mio-memories-in-orbit`. Anything with a space, a capital or other
+/// punctuation was written by a person and is left alone, so "Spider-Man" and
+/// "half-life" (one dash) are never mistaken for one.
+fn is_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '-'
+                || character == '_'
+        })
+        && (value.contains('_') || value.matches('-').count() >= 2)
+}
+
+fn capitalise(word: &str) -> String {
+    let mut characters = word.chars();
+    match characters.next() {
+        Some(first) => first.to_uppercase().chain(characters).collect(),
+        None => String::new(),
+    }
+}
+
+/// The display-quality form of a title.
+///
+/// Library sources hand over whatever the install left behind: a slug, an
+/// underscored folder name, or "Game - Subtitle" with a spaced dash. The same
+/// text is shown on the card and searched on, so a title that reads well is
+/// also one a store can match. Hyphens inside a word ("Spider-Man", "X-COM 2")
+/// are part of the name and are kept.
+pub fn tidy_title(raw: &str) -> String {
+    let cleaned = raw
         .chars()
         .filter(|character| !character.is_control())
-        .map(|character| match character {
-            '™' | '®' | '©' => ' ',
-            other => other,
-        })
+        .filter(|character| !matches!(character, '™' | '®' | '©'))
         .collect::<String>();
-    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!cleaned.is_empty()).then(|| cleaned.chars().take(120).collect())
+    let cleaned = cleaned.trim();
+
+    if is_slug(cleaned) {
+        let words = cleaned
+            .split(['-', '_'])
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>();
+        let last = words.len().saturating_sub(1);
+        return words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                if index != 0 && index != last && SMALL_WORDS.contains(word) {
+                    (*word).to_owned()
+                } else {
+                    capitalise(word)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+
+    let spaced = cleaned.replace('_', " ");
+    let tokens = spaced.split_whitespace().collect::<Vec<_>>();
+    let mut tidy = String::new();
+    for (index, token) in tokens.iter().enumerate() {
+        let separator = matches!(*token, "-" | "\u{2013}" | "\u{2014}")
+            && index != 0
+            && index + 1 != tokens.len();
+        if separator {
+            // "A - B" reads as "A: B"; the colon hugs the word before it.
+            tidy.push(':');
+        } else {
+            if !tidy.is_empty() {
+                tidy.push(' ');
+            }
+            tidy.push_str(token);
+        }
+    }
+    tidy
+}
+
+/// Drop one trailing edition tag ("Remastered", "Deluxe Edition"…), matched
+/// case-insensitively and only as a whole word.
+fn strip_edition_suffix(value: &str) -> Option<&str> {
+    EDITION_SUFFIXES.iter().find_map(|suffix| {
+        let start = value.len().checked_sub(suffix.len())?;
+        if !value.is_char_boundary(start) || !value[start..].eq_ignore_ascii_case(suffix) {
+            return None;
+        }
+        let head = value[..start].trim_end();
+        (head.len() < start && !head.is_empty()).then_some(head)
+    })
+}
+
+/// The searches to try for a title, most specific first: the whole tidied
+/// title, the same without its edition tag, and the part before the first
+/// subtitle separator. Stores index "Uncharted: Legacy of Thieves Collection"
+/// and "Uncharted 4: A Thief's End" under neither "Remastered" nor the full
+/// subtitle, so asking only once leaves many ordinary games artless.
+///
+/// A colon is dropped from the queries because Steam's search treats it as
+/// noise at best. Empty and duplicate queries are skipped.
+fn query_variants(title: &str) -> Vec<String> {
+    let tidy = tidy_title(title);
+    let collapse = |value: &str| value.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let mut candidates = Vec::new();
+    // A curly apostrophe is still an apostrophe: "Director’s Cut" must lose
+    // its edition tag exactly like "Director's Cut" does.
+    let full = collapse(&tidy.replace(':', " ").replace('\u{2019}', "'"));
+    let mut trimmed = full.as_str();
+    while let Some(head) = strip_edition_suffix(trimmed) {
+        trimmed = head;
+    }
+    candidates.push(full.clone());
+    candidates.push(trimmed.to_owned());
+    if let Some((before, _)) = tidy.split_once(':') {
+        let before = collapse(before);
+        if before.chars().count() >= 2 {
+            candidates.push(before);
+        }
+    }
+
+    let mut variants: Vec<String> = Vec::new();
+    for candidate in candidates {
+        let candidate = candidate
+            .chars()
+            .take(MAX_QUERY_CHARS)
+            .collect::<String>()
+            .trim()
+            .to_owned();
+        if !candidate.is_empty() && !variants.contains(&candidate) {
+            variants.push(candidate);
+        }
+    }
+    variants
 }
 
 /// Compare two titles the way a person would: ignoring case, punctuation and
@@ -591,12 +816,95 @@ mod tests {
     }
 
     #[test]
-    fn titles_are_cleaned_before_a_store_is_asked_about_them() {
+    fn a_slug_becomes_a_readable_title() {
+        assert_eq!(tidy_title("mio-memories-in-orbit"), "Mio Memories in Orbit");
+        assert_eq!(tidy_title("the-perfect-pencil"), "The Perfect Pencil");
+        // A small word stays capitalised when it ends the title.
+        assert_eq!(tidy_title("what-to-do-on"), "What to Do On");
+        assert_eq!(tidy_title("my_cool_game"), "My Cool Game");
+        // One dash is a name, not a slug.
+        assert_eq!(tidy_title("half-life"), "half-life");
+    }
+
+    #[test]
+    fn a_title_a_person_wrote_is_left_alone_apart_from_separators() {
+        assert_eq!(tidy_title("Spider-Man"), "Spider-Man");
+        assert_eq!(tidy_title("Half-Life 2"), "Half-Life 2");
+        assert_eq!(tidy_title("X-COM 2"), "X-COM 2");
         assert_eq!(
-            normalize_query("  Halo™   Infinite \n").as_deref(),
-            Some("Halo Infinite")
+            tidy_title("Assassin's Creed - Mirage"),
+            "Assassin's Creed: Mirage"
         );
-        assert_eq!(normalize_query("   ").as_deref(), None);
+        assert_eq!(
+            tidy_title("Dark Souls \u{2013} Remastered"),
+            "Dark Souls: Remastered"
+        );
+        assert_eq!(
+            tidy_title("Dark Souls \u{2014} Remastered"),
+            "Dark Souls: Remastered"
+        );
+        assert_eq!(tidy_title("Old_Game_Name"), "Old Game Name");
+        assert_eq!(tidy_title("  Halo\u{2122}   Infinite \n"), "Halo Infinite");
+        assert_eq!(
+            tidy_title("Forza\u{00ae} Horizon \u{00a9}"),
+            "Forza Horizon"
+        );
+        assert_eq!(tidy_title("   "), "");
+    }
+
+    #[test]
+    fn a_title_is_searched_under_progressively_looser_names() {
+        assert_eq!(
+            query_variants("Uncharted 4 A Thief's End - Remastered"),
+            vec![
+                "Uncharted 4 A Thief's End Remastered",
+                "Uncharted 4 A Thief's End"
+            ]
+        );
+        assert_eq!(
+            query_variants("Dark Souls: Prepare to Die Edition"),
+            vec!["Dark Souls Prepare to Die Edition", "Dark Souls"]
+        );
+        assert_eq!(
+            query_variants("mio-memories-in-orbit")
+                .first()
+                .map(String::as_str),
+            Some("Mio Memories in Orbit")
+        );
+        // Nothing to loosen: one query, not three copies of it.
+        assert_eq!(
+            query_variants("Halo\u{2122} Infinite"),
+            vec!["Halo Infinite"]
+        );
+        assert!(query_variants("  ").is_empty());
+    }
+
+    #[test]
+    fn edition_tags_come_off_whole_words_only() {
+        let variants = query_variants("Resident Evil 4 Ultimate Edition");
+        assert_eq!(
+            variants,
+            vec!["Resident Evil 4 Ultimate Edition", "Resident Evil 4"]
+        );
+        // "GOTY" inside a word is not an edition tag.
+        assert_eq!(query_variants("NotGOTY"), vec!["NotGOTY"]);
+        assert_eq!(query_variants("Fallout 3 goty edition")[1], "Fallout 3");
+        // A title that is only a tag keeps it.
+        assert_eq!(query_variants("Remastered"), vec!["Remastered"]);
+    }
+
+    #[test]
+    fn queries_are_bounded() {
+        let long = "word ".repeat(60);
+        assert!(
+            query_variants(&long)
+                .iter()
+                .all(|query| query.chars().count() <= 120)
+        );
+    }
+
+    #[test]
+    fn titles_compare_the_way_a_person_would() {
         // Punctuation and case never decide whether a title matches.
         assert_eq!(
             comparison_key("Marvel's Spider-Man"),
