@@ -14,7 +14,10 @@ import {
   blockedRunsOnLabel,
   isBlockedForHost,
 } from "./game-detail-model";
+import { applyArtSeed } from "./art-fallback";
+import { displayTitle } from "./game-title";
 import { hostDeviceLabel, stepAsideCopy } from "./host-device";
+import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
 import { brandIcon, icon, type IconName } from "./icons";
 import {
   type BrowseMode,
@@ -456,6 +459,7 @@ const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
+const GAME_ARTWORK_PROGRESS_EVENT = "game-artwork-progress";
 const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 /** The launch option a phone offers to download an Epic game rather than stream it (`moonlight_android.rs`). */
@@ -582,6 +586,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     launchSplash: get<HTMLElement>("#launch-splash"),
     feedbackButton: get<HTMLButtonElement>("#feedback-button"),
     heroLayers: [get<HTMLImageElement>("#hero-a"), get<HTMLImageElement>("#hero-b")],
+    heroGround: get<HTMLElement>("#hero-ground"),
     genre: get<HTMLElement>("#hero-genre"),
     title: get<HTMLElement>("#hero-title"),
     logo: get<HTMLImageElement>("#hero-logo"),
@@ -682,9 +687,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // One decoded wordmark is remembered per URL, so walking back along the rail
   // costs a set lookup rather than another load.
   let heroLogoSource = "";
-  const heroLogosReady = new Set<string>();
-  const heroLogosFailed = new Set<string>();
-  const heroLogoWaiters = new Map<string, Array<() => void>>();
+  /**
+   * Games whose artwork the host is looking for right now, from its
+   * `game-artwork-progress` events. Their cards say so, which is what tells
+   * "still looking" apart from "nothing exists" (#59).
+   */
+  const artworkPending = new Set<string>();
+  let artworkRefreshTimer = 0;
+  /** Wordmarks already decoded and measured, by their catalog source. */
+  const heroLogosReady = new Map<string, PreparedLogo>();
   let toastTimer: number | undefined;
   let libraryRequest = 0;
   /** Ticks the library while an Epic download runs; null when nothing is. */
@@ -909,57 +920,42 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showHeroTitle();
       return;
     }
-    if (refs.logo.getAttribute("src") === source && !refs.logo.hidden) {
+    const ready = heroLogosReady.get(source);
+    if (ready && refs.logo.getAttribute("src") === ready.src && !refs.logo.hidden) {
       return;
     }
     // Until this one is ready the title stands: showing the previous game's
     // wordmark over the new game's artwork would be worse than showing none.
     showHeroTitle();
 
-    if (heroLogosReady.has(source)) {
-      showHeroLogo(source, game.title);
+    if (ready) {
+      showHeroLogo(ready, game.title);
       return;
     }
-    preloadHeroLogo(source, () => {
-      if (heroLogoSource === source) showHeroLogo(source, game.title);
+    preloadHeroLogo(source, (logo) => {
+      if (heroLogoSource === source) showHeroLogo(logo, game.title);
     });
   };
 
   /**
-   * Decode one wordmark and remember that it is good. A second caller for an
-   * image already in flight waits on the same decode, which is what lets the
-   * neighbour pass and the selection itself ask for the same picture without
-   * racing.
+   * Decode one wordmark, cut its transparent margin and remember how big it
+   * should stand (logo-fit.ts). A second caller for an image already in flight
+   * shares the same work, which is what lets the neighbour pass and the
+   * selection itself ask for the same picture without racing; one that failed
+   * once is not asked for again.
    */
-  const preloadHeroLogo = (source: string, done?: () => void): void => {
-    if (!source || heroLogosReady.has(source)) {
-      done?.();
+  const preloadHeroLogo = (source: string, done?: (logo: PreparedLogo) => void): void => {
+    if (!source) return;
+    const ready = heroLogosReady.get(source);
+    if (ready) {
+      done?.(ready);
       return;
     }
-    // A wordmark that failed once fails again: asking for it on every
-    // selection was a request per press for a picture that is not there.
-    if (heroLogosFailed.has(source)) return;
-    const waiting = heroLogoWaiters.get(source);
-    if (waiting) {
-      if (done) waiting.push(done);
-      return;
-    }
-    heroLogoWaiters.set(source, done ? [done] : []);
-
-    const probe = new Image();
-    probe.decoding = "async";
-    probe.onload = () => {
-      const waiters = heroLogoWaiters.get(source) ?? [];
-      heroLogoWaiters.delete(source);
-      if (probe.naturalWidth === 0) return;
-      heroLogosReady.add(source);
-      for (const waiter of waiters) waiter();
-    };
-    probe.onerror = () => {
-      heroLogoWaiters.delete(source);
-      heroLogosFailed.add(source);
-    };
-    probe.src = source;
+    void prepareLogo(source).then((logo) => {
+      if (!logo) return;
+      heroLogosReady.set(source, logo);
+      done?.(logo);
+    });
   };
 
   /** The wordmarks either side of the selection, decoded while nothing else is. */
@@ -975,8 +971,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     });
   };
 
-  const showHeroLogo = (source: string, title: string): void => {
-    refs.logo.src = source;
+  const showHeroLogo = (logo: PreparedLogo, title: string): void => {
+    applyLogoFit(refs.logo, logo);
+    refs.logo.src = logo.src;
     refs.logo.alt = title;
     refs.logo.hidden = false;
     refs.title.hidden = true;
@@ -1033,6 +1030,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   const updateHeroImage = (game: LibraryGame, immediate = false): void => {
+    // The ground under the layers is this game's own, so a game with no
+    // picture, or one still being looked for, shows its generated ground
+    // rather than a blank scene or the last game's colours.
+    applyArtSeed(refs.heroGround, game.id);
+    refs.heroGround.classList.toggle("is-art-pending", artworkPending.has(game.id));
     const candidates = heroCandidates(game);
     const source = candidates[0] ?? "";
     const current = refs.heroLayers[activeHero];
@@ -1438,8 +1440,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // What a card shows when no picture of the game could be had: its name,
     // which the aria-label already carries for whoever cannot see the card.
     const fallbackTitle = document.createElement("span");
-    fallbackTitle.className = "card-fallback";
+    fallbackTitle.className = "card-fallback art-ground";
     fallbackTitle.setAttribute("aria-hidden", "true");
+    const fallbackName = document.createElement("span");
+    fallbackName.className = "card-fallback__title";
+    const fallbackStatus = document.createElement("span");
+    fallbackStatus.className = "card-fallback__status";
+    fallbackStatus.textContent = "Finding artwork";
+    fallbackTitle.append(fallbackName, fallbackStatus);
 
     media.append(portrait, landscape, fallbackTitle);
 
@@ -1482,7 +1490,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const landscape = card.querySelector<HTMLImageElement>(".card-art--landscape");
     const fallback = steamAssetUrl(game, "header.jpg");
     const fallbackTitle = card.querySelector<HTMLElement>(".card-fallback");
-    if (fallbackTitle && fallbackTitle.textContent !== game.title) fallbackTitle.textContent = game.title;
+    const fallbackName = card.querySelector<HTMLElement>(".card-fallback__title");
+    if (fallbackName && fallbackName.textContent !== game.title) fallbackName.textContent = game.title;
+    if (fallbackTitle) applyArtSeed(fallbackTitle, game.id);
+    card.classList.toggle("is-art-pending", artworkPending.has(game.id));
 
     card.dataset.gameId = game.id;
     // Spatial navigation verbs: A opens the game's page, Enter starts it.
@@ -5872,6 +5883,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void refreshLibrary();
       showToast(added === 1 ? "1 game added from your games folder." : `${added} games added from your games folder.`);
     });
+    // Artwork for freshly imported cards arrives one game at a time. Each find
+    // pulls the library again — batched, since four lookups run at once — so
+    // the pictures come in as they are found rather than all at the end.
+    void listen<unknown>(GAME_ARTWORK_PROGRESS_EVENT, (event) => {
+      const progress = readArtworkProgress(event.payload);
+      if (!progress) return;
+      artworkPending.clear();
+      for (const id of progress.pending) artworkPending.add(id);
+      if (progress.found || progress.pending.length === 0) {
+        window.clearTimeout(artworkRefreshTimer);
+        artworkRefreshTimer = window.setTimeout(() => void refreshLibrary(), 450);
+      }
+      if (currentRoute.page === "library") renderCards();
+      const selected = selectedGame();
+      refs.heroGround.classList.toggle("is-art-pending", artworkPending.has(selected.id));
+    });
     void listen<unknown>(SOURCE_LIBRARY_SYNCED_EVENT, (event) => {
       const result = normaliseSourceSyncResult(event.payload);
       if (!result) return;
@@ -7085,7 +7112,9 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   return {
     game: {
       id,
-      title,
+      // How a source spelled it (`the-perfect-pencil`, `Kena - Bridge of
+      // Spirits`) is not how a title should read on screen; game-title.ts.
+      title: displayTitle(title),
       source,
       description: readString(record, "description") || fallback.description,
       metadata: readString(record, "metadata") || fallback.metadata,
@@ -7133,6 +7162,15 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
  * as-is; a `cache:` token resolves once the media directory has been learned,
  * which `primeMediaDirectory` does before the first library load.
  */
+/** The host's `game-artwork-progress` payload, or null when it is not one. */
+function readArtworkProgress(value: unknown): { pending: string[]; found: boolean } | null {
+  if (!isRecord(value) || !Array.isArray(value.pending)) return null;
+  return {
+    pending: value.pending.filter((id): id is string => typeof id === "string"),
+    found: value.found === true,
+  };
+}
+
 function immediateMediaUrl(value: string): string {
   if (value.startsWith("https://") || value.startsWith("/media/")) {
     return value;
@@ -7581,6 +7619,7 @@ function shell(): string {
       <div class="selector">
       <div id="app-page-library" class="app-page app-page--library">
       <div class="hero-media" aria-hidden="true">
+        <div id="hero-ground" class="hero-ground art-ground"></div>
         <img id="hero-a" class="hero-image" alt="" />
         <img id="hero-b" class="hero-image" alt="" />
       </div>

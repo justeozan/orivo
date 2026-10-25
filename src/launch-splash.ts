@@ -22,6 +22,7 @@
    after a deadline: a game that opened behind Orivo is never left there.
    --------------------------------------------------------------------------- */
 
+import { applyLogoFit, prepareLogo } from "./logo-fit";
 import { prefersReducedMotion } from "./motion";
 
 /** Who puts the game on screen, as the host reports it with the launch. */
@@ -198,6 +199,13 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
         { once: true },
       );
       logo.src = game.logoUrl;
+      // The hero has already measured this mark, so the trimmed copy and its
+      // size are normally ready before the splash has finished arriving.
+      void prepareLogo(game.logoUrl).then((prepared) => {
+        if (!prepared || !logo.parentElement) return;
+        applyLogoFit(logo, prepared);
+        logo.src = prepared.src;
+      });
       content.classList.add("has-logo");
       content.append(logo);
     }

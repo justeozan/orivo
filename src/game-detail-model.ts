@@ -13,6 +13,7 @@ import type {
   WallpaperSearchView,
 } from "./contracts";
 import { WALLPAPER_CATEGORIES } from "./contracts";
+import { displayTitle } from "./game-title";
 import type { IconName } from "./icons";
 
 /* -------------------------------------------------------------------------- */
@@ -453,7 +454,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
   );
   return {
     id,
-    title: text(value.title, "Untitled game"),
+    title: displayTitle(text(value.title, "Untitled game")),
     source: oneOf(
       value.source,
       [

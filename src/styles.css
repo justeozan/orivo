@@ -111,6 +111,44 @@ button { border: 0; cursor: pointer; }
    shadow instead of standing on a tint. */
 .hero-image.is-active { opacity: 1; transform: scale(1); }
 
+/* The ground a game stands on when it has no picture (art-fallback.ts sets the
+   hues and the light's position). Two lights on a dark field, then a fixed
+   grain: dark enough at every hue for a light title to read on it. */
+.art-ground {
+  --art-hue: 262;
+  --art-hue-2: 222;
+  --art-x: 30%;
+  --art-y: 24%;
+  background:
+    radial-gradient(85% 70% at var(--art-x) var(--art-y), hsl(var(--art-hue) 62% 42% / .78) 0%, hsl(var(--art-hue) 62% 30% / 0) 70%),
+    radial-gradient(90% 80% at calc(100% - var(--art-x) / 2) calc(100% - var(--art-y) / 3), hsl(var(--art-hue-2) 58% 30% / .7) 0%, hsl(var(--art-hue-2) 58% 22% / 0) 72%),
+    linear-gradient(165deg, hsl(var(--art-hue) 26% 13%) 0%, #0c0b10 78%);
+}
+.art-ground::before,
+.art-ground::after { position: absolute; inset: 0; content: ""; pointer-events: none; }
+.art-ground::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 180px 180px;
+  mix-blend-mode: overlay;
+  opacity: .32;
+}
+/* While its artwork is being looked for, a slow light crosses the ground. */
+.art-ground::after {
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, .09) 50%, transparent 70%);
+  background-size: 250% 100%;
+  opacity: 0;
+}
+.art-ground.is-art-pending::after,
+.game-card.is-art-pending .art-ground::after { animation: art-ground-search 2.4s ease-in-out infinite; opacity: 1; }
+@keyframes art-ground-search { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .art-ground.is-art-pending::after,
+  html:not([data-motion="full"]) .game-card.is-art-pending .art-ground::after { animation: none; background: rgba(255, 255, 255, .05); }
+}
+[data-motion="reduced"] .art-ground.is-art-pending::after,
+[data-motion="reduced"] .game-card.is-art-pending .art-ground::after { animation: none; background: rgba(255, 255, 255, .05); }
+.hero-ground { position: absolute; inset: 0; }
+
 .scene-overlay { z-index: -2; }
 
 /* Legibility without darkness: the text block sits on blurred artwork rather
@@ -606,8 +644,15 @@ button { border: 0; cursor: pointer; }
    move the metadata under them. Height-bounded rather than width-bounded — a
    wide mark and a tall one have to look like the same piece of furniture. */
 .hero-logo {
+  /* The box every mark is drawn in. A wide mark is drawn shorter than the box
+     (`--logo-scale`, set from its proportions in logo-fit.ts) so a banner and
+     a crest cover a similar area; the room it gives up goes above it, so the
+     mark still sits on the line of metadata under it. */
+  --hero-logo-box: clamp(150px, 22svh, 300px);
+  box-sizing: border-box;
   max-width: min(760px, 100%);
-  height: clamp(150px, 22svh, 300px);
+  height: var(--hero-logo-box);
+  padding-top: calc(var(--hero-logo-box) * (1 - var(--logo-scale, 1)));
   /* Shrinkable, and `object-fit: contain` keeps the aspect: on a window too
      short for the full mark it scales down instead of being cropped at the top
      by the identity block's `overflow: hidden`. */
@@ -615,7 +660,7 @@ button { border: 0; cursor: pointer; }
   flex: 0 1 auto;
   margin: 0 0 14px;
   object-fit: contain;
-  object-position: left center;
+  object-position: left bottom;
   filter: drop-shadow(0 2px 10px rgba(6,6,10,.55));
 }
 .hero-content [hidden] { display: none !important; }
@@ -1309,22 +1354,43 @@ button { border: 0; cursor: pointer; }
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
-/* With no picture of the game at all, the card wears its name. */
+/* With no picture of the game at all, the card wears its generated ground
+   (.art-ground) and its name: no real cover is behind it to carry the title. */
 .card-fallback {
   position: absolute;
   inset: 0;
   display: none;
-  place-items: center;
-  padding: 10px;
+  align-content: end;
+  gap: 6px;
+  padding: 14px 12px;
   overflow: hidden;
-  color: #ddd8e4;
-  background: linear-gradient(160deg, #262330 0%, #16151b 100%);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.25;
-  text-align: center;
-  overflow-wrap: anywhere;
+  color: #f4f1f8;
+  text-align: left;
 }
+.card-fallback__title {
+  position: relative;
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 640;
+  letter-spacing: -.01em;
+  line-height: 1.18;
+  text-shadow: 0 1px 10px rgba(6, 6, 10, .6);
+  overflow-wrap: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+/* Only while the host is still looking: "nothing yet" and "nothing exists"
+   are different answers, and only the first one is temporary. */
+.card-fallback__status {
+  position: relative;
+  display: none;
+  color: rgba(244, 241, 248, .62);
+  font-size: 10.5px;
+  font-weight: 560;
+  letter-spacing: .02em;
+}
+.game-card.is-art-pending .card-fallback__status { display: block; }
 .game-card.is-art-missing:not(:has(.card-art--landscape.is-ready)) .card-fallback,
 .game-card.is-art-missing:not(.is-selected) .card-fallback { display: grid; }
 .game-card:hover .card-art { transform: scale(1.035); }
@@ -1507,9 +1573,12 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* Bounded in height, not width, like the hero's: a wide mark and a tall one
    read as the same piece of furniture. */
 .launch-splash__logo {
+  --splash-logo-box: clamp(110px, 19svh, 236px);
   display: block;
+  box-sizing: border-box;
   max-width: 100%;
-  height: clamp(110px, 19svh, 236px);
+  height: var(--splash-logo-box);
+  padding-top: calc(var(--splash-logo-box) * (1 - var(--logo-scale, 1)));
   object-fit: contain;
   object-position: left bottom;
   filter: drop-shadow(0 2px 12px rgba(6, 6, 10, .55));
@@ -2751,7 +2820,7 @@ html[data-form-factor="compact"] .hero-meta { display: none; }
    clipped off the top by `.hero-identity`. A long title ends in an ellipsis. */
 html[data-form-factor="compact"] .hero-content h1 { margin: 6px 0 8px; font-size: var(--fs-hero-title); -webkit-line-clamp: 1; }
 html[data-form-factor="compact"] .hero-actions { margin-top: 10px; gap: 10px; }
-html[data-form-factor="compact"] .hero-logo { height: clamp(52px, 18svh, 86px); }
+html[data-form-factor="compact"] .hero-logo { --hero-logo-box: clamp(52px, 18svh, 86px); }
 html[data-form-factor="compact"] .recently-played { bottom: var(--rail-bottom); left: calc(var(--edge-left) + 5px); }
 /* The landscape card keeps the desktop's 2.5:1 as the rail shrinks. */
 html[data-form-factor="compact"] .game-card.is-selected { flex-basis: calc(var(--rail-card-height) * 2.5); }
@@ -2810,7 +2879,7 @@ html[data-form-factor="compact"] .launch-splash__content {
   gap: 10px;
   width: calc(100vw - var(--hero-left) - var(--edge-right));
 }
-html[data-form-factor="compact"] .launch-splash__logo { height: clamp(52px, 20svh, 96px); }
+html[data-form-factor="compact"] .launch-splash__logo { --splash-logo-box: clamp(52px, 20svh, 96px); }
 html[data-form-factor="compact"] .launch-splash__eyebrow { font-size: 13px; }
 html[data-form-factor="compact"] .browse-bar__segment-logo { height: 15px; }
 
@@ -2889,7 +2958,7 @@ html[data-device="phone"] .nav-link.is-active {
 
 html[data-device="phone"] .scene-arrow { display: none; }
 
-html[data-device="phone"] .hero-logo { height: clamp(36px, 12svh, 58px); }
+html[data-device="phone"] .hero-logo { --hero-logo-box: clamp(36px, 12svh, 58px); }
 html[data-device="phone"] .play-button { gap: 7px; }
 html[data-device="phone"] .play-button .icon { width: 12px; height: 12px; }
 /* Scaled with the card, so a smaller card is the same shape and not a

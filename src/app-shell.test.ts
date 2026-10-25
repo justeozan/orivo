@@ -343,7 +343,7 @@ describe("application shell", () => {
     expect(portrait.hasAttribute("src")).toBe(false);
     expect(portrait.classList.contains("is-missing")).toBe(true);
     expect(card.classList.contains("is-art-missing")).toBe(true);
-    const fallback = card.querySelector<HTMLElement>(".card-fallback")!;
+    const fallback = card.querySelector<HTMLElement>(".card-fallback__title")!;
     expect(fallback.textContent).toBe(card.getAttribute("aria-label")!.replace(/^Open details for /, ""));
   });
 
@@ -860,6 +860,8 @@ describe("application shell against the desktop backend", () => {
       const probe = probes.find((image) => image.src.includes("alpha-logo"));
       expect(probe, "the wordmark must be decoded off-screen").toBeDefined();
       probe?.onload?.(new Event("load"));
+      // Measuring the mark (logo-fit.ts) answers on the next turn.
+      await settle();
 
       expect(logo.getAttribute("src")).toBe("https://cdn.example/alpha-logo.png");
       expect(logo.hidden).toBe(false);

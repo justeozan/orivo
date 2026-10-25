@@ -357,11 +357,15 @@
   object-position: center 30%;
 }
 
-.gd-hero__media--missing {
-  background:
-    radial-gradient(circle at 70% 34%, rgba(233, 150, 61, 0.3), transparent 58%),
-    radial-gradient(circle at 30% 20%, rgba(125, 84, 244, 0.16), transparent 60%),
-    #12141d;
+/* Under the picture, so it is what shows while there is none (#59). */
+.gd-hero__ground {
+  position: absolute;
+  inset: 0;
+}
+
+.gd-hero__image,
+.gd-hero__video {
+  position: relative;
 }
 
 .gd-hero__media--missing .gd-hero__image {
