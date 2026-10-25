@@ -1767,7 +1767,11 @@
    a fade reads as an invitation. It costs nothing on a panel that fits: there
    is only empty space down there to fade. */
 .gd-body > * {
+  /* A card is as tall as what it says, up to its row: stretched to the row,
+     a game with two facts got a tall empty card. */
+  align-self: start;
   min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
