@@ -64,7 +64,8 @@ describe("hash routing", () => {
       ),
     ).toEqual({
       page: "store",
-      category: "short-sessions",
+      // A shelf the bar no longer offers lands on the default one.
+      category: "for-you",
       platforms: [],
       query: "co-op",
     });

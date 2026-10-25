@@ -88,13 +88,13 @@ export interface StorePlatformOption {
   icon: "windows" | "playstation" | "xbox" | "switch" | "emulator";
 }
 
-/** The filter bar reads left to right exactly as in the approved design. */
+/**
+ * The filter bar. The four mood shelves (brain, short, stories, relaxing) were
+ * dropped from the bar: the catalog still carries those tags, but the shelves
+ * are no longer offered, and an old link to one lands on "Pour toi".
+ */
 export const STORE_CATEGORIES: readonly StoreCategoryOption[] = [
   { id: "for-you", label: "Pour toi" },
-  { id: "good-for-brain", label: "Bon pour le cerveau" },
-  { id: "short-sessions", label: "Courte durée" },
-  { id: "strong-stories", label: "Récits forts" },
-  { id: "relaxing", label: "Relaxant" },
   { id: "all-games", label: "Tous les jeux" },
 ];
 

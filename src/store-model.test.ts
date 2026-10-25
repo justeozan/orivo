@@ -520,10 +520,6 @@ describe("storeCategoryLabel", () => {
   it("labels every known category in French", () => {
     expect(STORE_CATEGORIES.map((option) => storeCategoryLabel(option.id))).toEqual([
       "Pour toi",
-      "Bon pour le cerveau",
-      "Courte durée",
-      "Récits forts",
-      "Relaxant",
       "Tous les jeux",
     ]);
   });
