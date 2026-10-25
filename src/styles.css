@@ -186,7 +186,7 @@ button { border: 0; cursor: pointer; }
 /* Glyphs and translucent pills cannot take a text shadow, and their surfaces
    were tuned against the scrims this page no longer has. Over bare artwork they
    carry a little more of their own. */
-.topbar--over-art .search-control { background: rgba(16,15,19,.6); }
+.topbar--over-art .search-control::before { background: rgba(16,15,19,.6); }
 
 .topbar {
   position: absolute;
@@ -384,21 +384,43 @@ button { border: 0; cursor: pointer; }
 .nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
 .nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
+/* Search stays out of the scene's way: at rest it is a magnifier and nothing
+   else. Reaching it — pointer, focus, or a query already typed — opens the
+   glass pill from the magnifier outwards, and the field and its shortcut
+   arrive just behind it. */
 .search-control {
+  position: relative;
+  isolation: isolate;
   width: 100%;
   min-width: 0;
   height: var(--search-h);
   gap: 11px;
   padding: 0 12px 0 16px;
-  border: 1px solid rgba(255,255,255,.15);
   border-radius: var(--search-r);
-  color: #ede6e2;
+  color: rgba(237,230,226,.62);
+  cursor: text;
+  transition: color 200ms ease;
+}
+.search-control::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: inherit;
   background: rgba(22,20,23,.31);
   box-shadow: 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
   -webkit-backdrop-filter: blur(22px) saturate(130%);
   backdrop-filter: blur(22px) saturate(130%);
-  transition: border-color 160ms ease, background 160ms ease;
+  content: "";
+  opacity: 0;
+  transform: scaleX(.18);
+  transform-origin: 20px 50%;
+  transition: opacity 200ms ease, transform 420ms cubic-bezier(.2,.9,.25,1), border-color 160ms ease, background 160ms ease;
 }
+.search-control > :not(.icon) { opacity: 0; transform: translateX(-8px); transition: opacity 220ms ease, transform 360ms cubic-bezier(.2,.9,.25,1); }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) { color: #ede6e2; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)))::before { opacity: 1; transform: none; }
+.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; transform: none; transition-delay: 70ms; }
 
 .search-control .icon { width: 16px; height: 16px; }
 .search-control input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
@@ -415,13 +437,15 @@ button { border: 0; cursor: pointer; }
   height: var(--tap-round);
   padding: 0;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.14);
+  border: 1px solid transparent;
   border-radius: 50%;
-  background: rgba(255,255,255,.06);
+  background: transparent;
   color: rgba(255,255,255,.72);
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
-.feedback-button:hover, .feedback-button[data-nav-focus] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+/* Bare at rest, like the search beside them: a glyph on the scene. Reaching
+   one gives it a faint disc so it reads as pressable. */
+.feedback-button:hover, .feedback-button[data-nav-focus] { background: rgba(255,255,255,.1); color: #fff; }
 .feedback-button svg { width: 18px; height: 18px; }
 /* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
    Sentry DSN would still paint the button. */
@@ -437,15 +461,15 @@ button { border: 0; cursor: pointer; }
   height: var(--tap-round);
   padding: 0;
   place-items: center;
-  border: 1px solid rgba(255,255,255,.14);
+  border: 1px solid transparent;
   border-radius: 50%;
   color: rgba(255,255,255,.72);
-  background: rgba(255,255,255,.06);
+  background: transparent;
   transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
 }
 .notifications-button:hover,
 .notifications-button[data-nav-focus],
-.notifications-button[aria-expanded="true"] { border-color: rgba(255,255,255,.28); background: rgba(255,255,255,.14); color: #fff; }
+.notifications-button[aria-expanded="true"] { background: rgba(255,255,255,.1); color: #fff; }
 .notifications-button svg { width: 18px; height: 18px; }
 /* The dot is the count. A number on a 36px circle is unreadable, and there are
    never enough notices for one to matter. */
@@ -679,25 +703,159 @@ button { border: 0; cursor: pointer; }
 /* `flex: none` and a fixed height: the row is the fixed point of the scene, so
    nothing inside it may resize it. */
 .hero-actions { height: var(--play-h); flex: none; gap: 13px; margin-top: 24px; }
-.play-button { display: inline-flex; align-items: center; justify-content: center; width: var(--play-w); min-width: var(--play-w); height: var(--play-h); gap: 9px; border: 1px solid rgba(255,255,255,.46); border-radius: 999px; color: #1a1820; background: linear-gradient(105deg, #f2efff, #bbb2f4); box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: var(--fs-play); font-weight: 600; white-space: nowrap; transition: filter 160ms ease, transform 160ms ease; }
-.play-button:hover { filter: brightness(1.06); transform: translateY(-1px); }
-.play-button:active { transform: translateY(1px) scale(.98); }
+/* The Play button is the search bar's glass taken one step further: a dark
+   frosted pill, a rim of light that slowly turns around it, and — when it will
+   actually start something — a field of coloured light drifting inside it.
+   `data-kind` (app.ts) picks the palette, so the button says what it does
+   before its label is read: Play, Stream it, Emulate it, Install, or a quiet
+   Unavailable. */
+@property --play-rim-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.play-button {
+  /* The three lights of the field and the rim's tint, per kind below. */
+  --play-a: #6fe3ff;
+  --play-b: #4d63ff;
+  --play-c: #9a5bff;
+  --play-spark: #ffe28a;
+  --play-rim: #ffe9f7, #a9dcff, #4f7dff, #c6b2ff, #ffe9f7;
+  --play-field: 1;
+  position: relative;
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--play-w);
+  min-width: var(--play-w);
+  height: var(--play-h);
+  gap: 9px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  color: #fff;
+  background: rgba(16,15,22,.62);
+  box-shadow: 0 10px 30px rgba(0,0,0,.26), inset 0 1px rgba(255,255,255,.12);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(140%);
+  font-size: var(--fs-play);
+  font-weight: 600;
+  letter-spacing: .005em;
+  text-shadow: 0 1px 10px rgba(8,6,28,.4);
+  white-space: nowrap;
+  transition: filter 160ms ease, transform 160ms ease, box-shadow 220ms ease;
+}
+/* The rim: a ring of light cut out of a turning conic gradient, above the
+   field so the edge stays crisp over the brightest colour. */
+.play-button::before {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: conic-gradient(from var(--play-rim-angle), var(--play-rim));
+  content: "";
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: play-rim-turn 7s linear infinite;
+}
+.play-button > :not(.play-button__fill, .play-button__aura) { position: relative; z-index: 1; }
+.play-button__icon { display: inline-flex; }
+.play-button__icon:empty { display: none; }
 .play-button .icon { width: 14px; height: 14px; }
+
+/* The field: three blurred lights inside the pill, each drifting on its own
+   period so the mix never repeats the same frame. */
+.play-button__aura {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  opacity: var(--play-field);
+  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 70%, #12101c), color-mix(in srgb, var(--play-b) 75%, #12101c) 55%, color-mix(in srgb, var(--play-c) 70%, #12101c));
+  transition: opacity 320ms ease;
+  pointer-events: none;
+}
+.play-button__aura i {
+  position: absolute;
+  width: 70%;
+  height: 160%;
+  border-radius: 50%;
+  filter: blur(14px);
+  opacity: .9;
+}
+.play-button__aura i:nth-child(1) { top: -60%; left: -12%; background: var(--play-a); animation: play-drift-a 6.5s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(2) { top: -20%; left: 38%; background: var(--play-c); animation: play-drift-b 8s ease-in-out infinite alternate; }
+.play-button__aura i:nth-child(3) { top: -70%; left: 18%; width: 34%; background: var(--play-spark); opacity: .55; animation: play-drift-c 5.5s ease-in-out infinite alternate; }
+/* The reflection: a band of light that crosses the glass now and then. */
+.play-button::after {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(105deg, transparent 35%, rgba(255,255,255,.28) 48%, rgba(255,255,255,.06) 54%, transparent 64%);
+  background-size: 260% 100%;
+  content: "";
+  pointer-events: none;
+  animation: play-sheen 4.8s cubic-bezier(.45,.05,.25,1) infinite;
+}
+
+@keyframes play-rim-turn { to { --play-rim-angle: 360deg; } }
+@keyframes play-drift-a { to { transform: translate(38%, 18%) scale(1.15); } }
+@keyframes play-drift-b { to { transform: translate(-42%, -12%) scale(.9); } }
+@keyframes play-drift-c { to { transform: translate(120%, 22%) scale(1.3); } }
+@keyframes play-sheen { 0%, 55% { background-position: 130% 0; } 100% { background-position: -130% 0; } }
+
+/* Palettes. Play is the full field; streaming is cooler, emulation warmer. */
+.play-button[data-kind="stream"] { --play-a: #5ff2dc; --play-b: #2f8dff; --play-c: #4b5bff; --play-spark: #b8fff2; --play-rim: #e6fffb, #8ff0ff, #2f8dff, #9fd0ff, #e6fffb; }
+.play-button[data-kind="emulate"] { --play-a: #ff7ac8; --play-b: #8c4dff; --play-c: #ff9a5c; --play-spark: #ffe08a; --play-rim: #fff0f6, #ffb3d9, #9b6bff, #ffc89e, #fff0f6; }
+/* Install is the dark pill from the reference: glass first, its light held
+   back until the pointer or the pad reaches it. */
+.play-button[data-kind="install"],
+.play-button[data-kind="downloading"] { --play-field: .16; }
+.play-button[data-kind="install"]:hover,
+.play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
+/* Nothing to start: no field, no sheen, a still grey rim. */
+.play-button[data-kind="unavailable"],
+.play-button[data-kind="blocked"] { --play-field: 0; --play-rim: rgba(255,255,255,.2), rgba(255,255,255,.08), rgba(255,255,255,.2); }
+.play-button[data-kind="unavailable"]::before,
+.play-button[data-kind="blocked"]::before { animation: none; }
+.play-button[data-kind="unavailable"]::after,
+.play-button[data-kind="blocked"]::after { display: none; }
+
+.play-button:hover { filter: brightness(1.08); transform: translateY(-1px); box-shadow: 0 14px 34px rgba(0,0,0,.3), 0 0 26px color-mix(in srgb, var(--play-b) 38%, transparent), inset 0 1px rgba(255,255,255,.16); }
+.play-button:active { transform: translateY(1px) scale(.98); }
 /* `aria-disabled`, not the property: the greyed button still takes focus so the
    arrow keys can walk up to it from the rail and read its label, while a press
    on it stays as quiet as a disabled one. */
-.play-button[aria-disabled='true'] { cursor: default; opacity: .56; filter: saturate(.35); transform: none; }
-/* A game with no build for this machine. Grey rather than dimmed-lavender: the
-   button is the only place that fact is stated now, so it has to read as a
-   deliberate answer and not as a Play button that failed to load. */
-.play-button.is-blocked { width: auto; padding: 0 20px; border-color: rgba(255,255,255,.16); background: rgba(26,24,32,.6); color: #b6b0bd; box-shadow: none; opacity: 1; filter: none; }
-.play-button.is-blocked .icon { display: none; }
-/* While Epic transfers, the button *is* the progress bar: a fill behind the
-   label, so nothing moves and nothing has to be taken away when it finishes. */
-.play-button { position: relative; overflow: hidden; }
-.play-button > :not(.play-button__fill) { position: relative; }
-.play-button__fill { position: absolute; inset: 0 auto 0 0; background: rgba(26,24,32,.20); transition: width 400ms ease; pointer-events: none; }
-.play-button.is-downloading[aria-disabled='true'] { opacity: 1; filter: none; }
+.play-button[aria-disabled='true'] { cursor: default; color: #bdb7c4; filter: none; transform: none; box-shadow: 0 8px 24px rgba(0,0,0,.2); }
+/* A game with no build for this machine. The button is the only place that
+   fact is stated now, so it reads as a deliberate answer, not a failed load. */
+.play-button.is-blocked { width: auto; padding: 0 20px; }
+/* While Epic transfers, the button *is* the progress bar: the field fills it
+   from the left, so nothing moves and nothing has to be taken away after. */
+.play-button__fill {
+  position: absolute;
+  z-index: 0;
+  inset: 0 auto 0 0;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--play-a) 55%, transparent), color-mix(in srgb, var(--play-c) 55%, transparent));
+  transition: width 400ms ease;
+  pointer-events: none;
+}
+.play-button.is-downloading[aria-disabled='true'] { color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .play-button::before,
+  html:not([data-motion="full"]) .play-button::after,
+  html:not([data-motion="full"]) .play-button__aura i { animation: none; }
+}
+[data-motion="reduced"] .play-button::before,
+[data-motion="reduced"] .play-button::after,
+[data-motion="reduced"] .play-button__aura i { animation: none; }
 
 
 /* The Steam account surface is a card inside Settings › Libraries & Sources.
@@ -2690,7 +2848,11 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 
 /* The field is the pill around it, not the bare input. */
-.search-control:has(input[data-nav-focus]) {
+.search-control:has(input[data-nav-focus]) { color: #ede6e2; }
+.search-control:has(input[data-nav-focus]) > :not(.icon) { opacity: 1; transform: none; }
+.search-control:has(input[data-nav-focus])::before {
+  opacity: 1;
+  transform: none;
   border-color: rgba(255,255,255,.34);
   background: rgba(22,20,23,.52);
 }
@@ -2698,15 +2860,12 @@ body[data-mood="rage"] { --violet: #f2453c; }
 /* Play is the one control the scene is for: it rises and glows rather than
    brightening by 6%. A greyed Play still says it was reached. */
 .play-button[data-nav-focus] {
-  filter: brightness(1.06);
+  filter: brightness(1.08);
   transform: translateY(-2px) scale(1.04);
-  box-shadow: 0 12px 30px rgba(0,0,0,.26), 0 0 28px rgba(233,228,255,.34);
+  box-shadow: 0 12px 30px rgba(0,0,0,.26), 0 0 30px color-mix(in srgb, var(--play-b) 45%, transparent);
 }
-.play-button[aria-disabled='true'][data-nav-focus] { opacity: .82; filter: saturate(.35) brightness(1.12); transform: scale(1.04); }
-/* Blocked and downloading wear their own full-strength look; focus keeps it. */
-.play-button.is-blocked[data-nav-focus],
-.play-button.is-downloading[data-nav-focus] { opacity: 1; filter: none; }
-.play-button.is-blocked[data-nav-focus] { border-color: rgba(255,255,255,.34); color: #e4dfea; }
+/* A quiet button still says it was reached, with its rim rather than a glow. */
+.play-button[aria-disabled='true'][data-nav-focus] { color: #e4dfea; filter: none; transform: scale(1.04); --play-rim: rgba(255,255,255,.42), rgba(255,255,255,.16), rgba(255,255,255,.42); }
 
 /* A segment is a bare word; focus gives it a pill of light behind it without
    moving the words beside it. */

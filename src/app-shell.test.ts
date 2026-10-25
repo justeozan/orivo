@@ -1134,6 +1134,19 @@ describe("application shell against the desktop backend", () => {
   // this machine. Streaming is the case where they disagree, and the second
   // one wins — "Windows only" printed over a working Play would be the wrong
   // fact about the right game.
+  it("dresses the play button for what it will do", async () => {
+    backend.library = [
+      { ...alpha, id: "runner:emu", title: "Zelda", launchable: true, runner: "com.orivo.ryujinx" },
+    ];
+    mount();
+    await settle();
+
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.dataset.kind).toBe("emulate");
+    expect(play.querySelector(".play-button__label")?.textContent).toBe("Emulate it");
+    expect(play.querySelector(".play-button__icon svg")).not.toBeNull();
+  });
+
   it("plays a game with no build for this machine when something here can still start it", async () => {
     backend.library = [
       {
@@ -1153,7 +1166,9 @@ describe("application shell against the desktop backend", () => {
     await settle();
 
     const play = root.querySelector<HTMLButtonElement>("#play-button")!;
-    expect(play.textContent).toContain("Play");
+    // Streaming is the only way it starts here, and the button says so.
+    expect(play.textContent).toContain("Stream it");
+    expect(play.dataset.kind).toBe("stream");
     expect(play.textContent).not.toContain("Windows only");
     expect(play.hasAttribute("aria-disabled")).toBe(false);
     expect(play.classList.contains("is-blocked")).toBe(false);

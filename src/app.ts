@@ -459,6 +459,42 @@ const SOURCE_ACCOUNT_LOGIN_CANCELLED_EVENT = "source-account-login-cancelled";
 const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
+
+/** What the hero's main button will do, and so how it is dressed. */
+type PlayButtonKind = "play" | "stream" | "emulate" | "install" | "downloading" | "unavailable" | "blocked";
+const PLAY_BUTTON_LABELS: Record<PlayButtonKind, string> = {
+  play: "Play",
+  stream: "Stream it",
+  emulate: "Emulate it",
+  install: "Install",
+  downloading: "Downloading",
+  unavailable: "Unavailable",
+  blocked: "",
+};
+const PLAY_BUTTON_ICONS: Record<PlayButtonKind, IconName | null> = {
+  play: "play",
+  stream: "cloud",
+  emulate: "gamepad",
+  install: "download",
+  downloading: "download",
+  unavailable: null,
+  blocked: null,
+};
+/** Runners that start a console game through an emulator. */
+const EMULATOR_RUNNERS = new Set(["com.orivo.ryujinx", "com.orivo.retroarch", "com.orivo.ppsspp"]);
+
+/**
+ * A launchable game is played here, streamed from another machine, or run in
+ * an emulator. Streaming wins only when nothing local can start it: a game
+ * installed here and also streamable is simply played.
+ */
+function playKindFor(game: LibraryGame): "play" | "stream" | "emulate" {
+  if (game.runner && EMULATOR_RUNNERS.has(game.runner)) return "emulate";
+  if (game.runner === "com.orivo.gamestream") return "stream";
+  const options = (game.launchOptions ?? []).filter((option) => option.launchable);
+  if (options.length > 0 && options.every((option) => option.remote)) return "stream";
+  return "play";
+}
 const GAME_ARTWORK_PROGRESS_EVENT = "game-artwork-progress";
 const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
@@ -1747,19 +1783,32 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
                 ? "Downloading " + game.title
                 : game.title + " is unavailable",
     );
-    const playLabel = refs.playButton.querySelector<HTMLElement>("span:not(.play-button__fill)");
+    // What pressing it does decides how it looks (styles.css, `data-kind`):
+    // the scene's one call to action is vivid only when it will start something.
+    const kind: PlayButtonKind = blocked
+      ? "blocked"
+      : game.launchable
+        ? playKindFor(game)
+        : isSteamInstallable || isEpicInstallable
+          ? "install"
+          : isEpicInstalling
+            ? "downloading"
+            : "unavailable";
+    if (refs.playButton.dataset.kind !== kind) {
+      refs.playButton.dataset.kind = kind;
+      const glyph = refs.playButton.querySelector<HTMLElement>(".play-button__icon");
+      if (glyph) glyph.innerHTML = PLAY_BUTTON_ICONS[kind] ? icon(PLAY_BUTTON_ICONS[kind]) : "";
+    }
+    const playLabel = refs.playButton.querySelector<HTMLElement>(".play-button__label");
     if (playLabel) {
-      playLabel.textContent = blocked
-        ? blockedLabel(game)
-        : game.launchable
-          ? "Play"
-          : isSteamInstallable || isEpicInstallable
-            ? "Install"
-            : isEpicInstalling
-              ? typeof game.installPercent === "number"
-                ? `Downloading ${game.installPercent}%`
-                : "Downloading"
-              : "Unavailable";
+      playLabel.textContent =
+        kind === "blocked"
+          ? blockedLabel(game)
+          : kind === "downloading"
+            ? typeof game.installPercent === "number"
+              ? `Downloading ${game.installPercent}%`
+              : "Downloading"
+            : PLAY_BUTTON_LABELS[kind];
     }
     updateHeroImage(game, immediateHero);
     primeNeighbourLogos();
@@ -7681,7 +7730,7 @@ function shell(): string {
              not a dialog over the page. -->
         <div class="hero-actions" data-nav-steps>
           <div class="play-control">
-            <button id="play-button" class="play-button" type="button"><span class="play-button__fill" hidden></span>${icon("play")}<span>Play</span></button>
+            <button id="play-button" class="play-button" type="button" data-kind="play"><span class="play-button__aura" aria-hidden="true"><i></i><i></i><i></i></span><span class="play-button__fill" hidden></span><span class="play-button__icon" aria-hidden="true">${icon("play")}</span><span class="play-button__label">Play</span></button>
             <div id="play-launch-menu" class="play-launch-menu" role="menu" aria-label="How to start this game" hidden></div>
           </div>
         </div>
