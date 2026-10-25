@@ -3476,3 +3476,12 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .source-account-row__info .icon { width: 14px; height: 14px; }
 .source-account-row__info:hover, .source-account-row__info:focus-visible { color: #fff; }
 .source-grid .source-account-row__name { white-space: normal; }
+
+/* Centred on every card, the paired marks as a group, whatever wraps them
+   (Steam's row sits one level deeper, inside its own block). */
+.source-grid .steam-source-block,
+.source-grid #steam-source-row { display: block; width: 100%; height: 100%; }
+.source-grid .source-account-row { width: 100%; box-sizing: border-box; }
+.source-grid .source-account-row__mark { align-self: center; margin-inline: auto; place-items: center; justify-content: center; }
+.source-grid .source-account-row__mark .icon,
+.source-grid .source-account-row__mark img { display: block; margin: 0 auto; }
