@@ -8,6 +8,7 @@ import { createFallbackGameDetail } from "./game-detail-model";
 import {
   createGameDetailPage,
   type GameDetailPageClient,
+  type GameDetailPageOptions,
 } from "./game-detail-page";
 import { PageLifecycleHost } from "./page-lifecycle";
 
@@ -124,11 +125,13 @@ afterEach(() => {
 async function mountWith(
   detail: ReturnType<typeof createFallbackGameDetail>,
   overrides: Partial<GameDetailPageClient> = {},
+  pageOptions: Partial<GameDetailPageOptions> = {},
 ): Promise<PageLifecycleHost> {
   const page = createGameDetailPage({
     navigate: () => {},
     back: () => {},
     play: () => {},
+    ...pageOptions,
     client: clientWithDetail(detail, overrides),
   });
   host = new PageLifecycleHost(container, page);
@@ -143,11 +146,12 @@ async function mountWith(
  */
 async function openWallpaperDialog(
   overrides: Partial<GameDetailPageClient> = {},
+  pageOptions: Partial<GameDetailPageOptions> = {},
 ): Promise<void> {
   const detail = createFallbackGameDetail(GAME_ID);
   // No saved wallpapers, so each row shows exactly what its own search returned.
   detail.media = [];
-  await mountWith(detail, overrides);
+  await mountWith(detail, overrides, pageOptions);
   // The dialog opens from the "…" menu now: open the menu, then the item.
   container
     .querySelector<HTMLElement>("[data-focus-key='more-actions']")
@@ -855,5 +859,204 @@ describe("watching an Epic install", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(polls).toBeGreaterThan(0);
     expect(primaryText()).toContain("Downloading 63%");
+  });
+});
+
+describe("saving chosen artwork", () => {
+  /** A promise the test settles by hand, to hold a save mid-flight. */
+  function deferred(): { promise: Promise<void>; resolve(): void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  /** A search that offers two tiles per row, and a recording save path. */
+  function savingClient(
+    calls: string[],
+    gate: Promise<void>,
+  ): Partial<GameDetailPageClient> {
+    return {
+      async searchWallpapers(category, query) {
+        return {
+          phase: "ready",
+          category,
+          query,
+          message: "",
+          candidates: candidatesFor(category, 2),
+        };
+      },
+      async importWallpaper(_gameId, candidateId) {
+        calls.push(`import:${candidateId}`);
+        await gate;
+        return [
+          {
+            id: `saved-${candidateId}`,
+            kind: "wallpaper",
+            title: candidateId,
+            previewUrl: `/media/${candidateId}.jpg`,
+            origin: "imported",
+            selected: true,
+            availableOffline: true,
+          },
+        ];
+      },
+      async selectMedia(_gameId, mediaId) {
+        calls.push(`select:${mediaId}`);
+        return [];
+      },
+      async setHomeImage(_gameId, mediaId, role) {
+        calls.push(`home:${mediaId}:${role}`);
+      },
+    };
+  }
+
+  const tick = (key: string): void =>
+    container.querySelector<HTMLElement>(`[data-focus-key='${key}']`)?.click();
+
+  it("finishes the whole chain after the page is left, then refreshes the library", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    const notify = vi.fn();
+    await openWallpaperDialog(savingClient(calls, gate.promise), {
+      onLibraryChanged,
+      notify,
+    });
+
+    tick("wall-cover-0");
+    tick("wall-background-0");
+    tick("wallpaper-apply");
+    await flush();
+    expect(calls).toEqual(["import:cover-0"]);
+
+    // Navigating away aborts the page's own requests, but not this save.
+    host!.deactivate();
+    gate.resolve();
+    await flush();
+
+    expect(calls).toEqual([
+      "import:cover-0",
+      "import:background-0",
+      "select:saved-background-0",
+      "home:saved-cover-0:cover",
+      "home:saved-background-0:background",
+    ]);
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith("2 wallpapers applied to this game.");
+  });
+
+  it("reports a failure after the page is left, and still refreshes the library", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    const notify = vi.fn();
+    await openWallpaperDialog(
+      {
+        ...savingClient(calls, gate.promise),
+        async selectMedia() {
+          throw new Error("The disk is full.");
+        },
+      },
+      { onLibraryChanged, notify },
+    );
+
+    tick("wall-cover-0");
+    tick("wallpaper-apply");
+    await flush();
+    host!.deactivate();
+    gate.resolve();
+    await flush();
+
+    expect(calls).toEqual(["import:cover-0"]);
+    expect(notify).toHaveBeenCalledWith("The disk is full.");
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the save as in progress when the page is reopened, then reloads the game", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const onLibraryChanged = vi.fn();
+    let loads = 0;
+    await openWallpaperDialog(
+      {
+        ...savingClient(calls, gate.promise),
+        async getDetail() {
+          loads += 1;
+          const detail = createFallbackGameDetail(GAME_ID);
+          detail.media = [];
+          return detail;
+        },
+      },
+      { onLibraryChanged },
+    );
+
+    tick("wall-cover-0");
+    tick("wallpaper-apply");
+    await flush();
+    host!.deactivate();
+    await host!.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await flush();
+
+    expect(container.textContent).toContain("Saving wallpapers…");
+    const loadsWhileSaving = loads;
+
+    gate.resolve();
+    await flush();
+
+    expect(calls).toEqual([
+      "import:cover-0",
+      "select:saved-cover-0",
+      "home:saved-cover-0:cover",
+    ]);
+    expect(container.textContent).not.toContain("Saving wallpapers…");
+    expect(loads).toBeGreaterThan(loadsWhileSaving);
+    expect(onLibraryChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs two saves of one game one after the other", async () => {
+    const calls: string[] = [];
+    const gate = deferred();
+    const detail = createFallbackGameDetail(GAME_ID);
+    await mountWith(detail, {
+      async resetArtwork() {
+        calls.push("reset:start");
+        await gate.promise;
+        calls.push("reset:end");
+        return { title: "Test", replaced: ["cover", "landscape", "background"] };
+      },
+      async selectMedia(_gameId, mediaId) {
+        calls.push(`select:${mediaId}`);
+        return [];
+      },
+      async setHomeImage(_gameId, mediaId) {
+        calls.push(`home:${mediaId}`);
+      },
+    });
+
+    container
+      .querySelector<HTMLButtonElement>("[data-focus-key='menu-artwork']")!
+      .click();
+    await flush();
+    expect(calls).toEqual(["reset:start"]);
+
+    // A wallpaper chosen from the rail while the reset is still running.
+    const rail = detail.media.find((item) => item.kind === "wallpaper");
+    expect(rail).toBeDefined();
+    container
+      .querySelector<HTMLElement>(`[data-focus-key='media-${rail!.id}']`)
+      ?.click();
+    await flush();
+    expect(calls).toEqual(["reset:start"]);
+
+    gate.resolve();
+    await flush();
+    expect(calls).toEqual([
+      "reset:start",
+      "reset:end",
+      `select:${rail!.id}`,
+      `home:${rail!.id}`,
+    ]);
   });
 });
