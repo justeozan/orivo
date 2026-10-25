@@ -32,7 +32,9 @@
      whether the hero resolves to a positive height. */
   --hero-top: clamp(196px, 21.6svh, 230px);
   --hero-bottom: 443px;
-  --hero-left: clamp(48px, 10.35vw, 159px);
+  /* The hero's left edge is the first card's: logo, title and Play stand on
+     the same line as the shelf (`.recently-played` + the rail's 3px inset). */
+  --hero-left: calc(var(--edge-left) + 8px);
   --hero-width: min(560px, calc(100vw - 160px));
   --fs-hero-title: clamp(48px, 4.3vw, 66px);
   --play-w: 148px;
@@ -831,15 +833,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   filter: drop-shadow(0 2px 10px rgba(6,6,10,.55));
 }
 .hero-content [hidden] { display: none !important; }
-.hero-logo.is-arriving { animation: hero-logo-arrive 520ms cubic-bezier(.2, .8, .2, 1) both; }
-@keyframes hero-logo-arrive {
-  from { opacity: 0; transform: translateY(6px); filter: drop-shadow(0 2px 10px rgba(6,6,10,.55)) blur(4px); }
-  to { opacity: 1; transform: none; filter: drop-shadow(0 2px 10px rgba(6,6,10,.55)) blur(0); }
-}
-@media (prefers-reduced-motion: reduce) {
-  html:not([data-motion="full"]) .hero-logo.is-arriving { animation-name: hero-logo-fade; animation-duration: 240ms; }
-}
-[data-motion="reduced"] .hero-logo.is-arriving { animation-name: hero-logo-fade; animation-duration: 240ms; }
+/* A plain fade: the wordmark is never blurred or moved on its way in. */
+.hero-logo.is-arriving { animation: hero-logo-fade 380ms ease both; }
 @keyframes hero-logo-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* One line under the wordmark, and never more: the genre pill and the studio.
@@ -3136,7 +3131,7 @@ html[data-form-factor="compact"] {
      with the home indicator and shrinks on a short screen, so a literal here
      would land the button on the cards. 224px on a Pixel 8, as before. */
   --hero-bottom: calc(var(--rail-bottom) + var(--rail-header-h) + 8px + var(--rail-card-height) + var(--rail-focus-bleed) + 16px);
-  --hero-left: max(20px, calc(env(safe-area-inset-left) + 8px));
+  --hero-left: calc(var(--edge-left) + 8px);
   --hero-width: min(430px, calc(100vw - 40px));
   --fs-hero-title: clamp(22px, 7.5svh, 34px);
   --play-w: 120px;
