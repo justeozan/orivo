@@ -471,6 +471,9 @@ const SOURCE_GLYPHS: Readonly<Record<string, IconName>> = {
   wine: "wine",
 };
 
+/** How wide the fade is where cards leave the shelf on the left. */
+const SHELF_FADE_PX = 72;
+
 /** How far a library card leans toward the pointer at its edges, each way. */
 const CARD_TILT_DEGREES = 14;
 
@@ -5681,14 +5684,30 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   root.querySelector<HTMLButtonElement>("#next-game")?.addEventListener("click", () => moveSelection(1));
   // The keys step the rail through the library's own list: the rail renders a
   // window of it, so the card after the last one on screen is ours to name.
-  // The left fade (styles.css `.game-cards.is-scrolled`) only once the shelf
-  // has moved: at rest the first card must not be dimmed.
+  // Cards leaving on the left fade over the first stretch of the shelf. Each
+  // departing card gets its own mask, placed where the shelf's edge crosses
+  // it; every other card has none, so the glass ones keep their blur. At rest
+  // (not scrolled) nothing is masked, and the first card is fully drawn.
   let shelfFadeFrame = 0;
   const syncShelfFade = (): void => {
     cancelAnimationFrame(shelfFadeFrame);
-    shelfFadeFrame = requestAnimationFrame(() =>
-      refs.cards.classList.toggle("is-scrolled", refs.cards.scrollLeft > 4),
-    );
+    shelfFadeFrame = requestAnimationFrame(() => {
+      const scrolled = refs.cards.scrollLeft > 4;
+      const edge = refs.cards.getBoundingClientRect().left;
+      for (const card of refs.cards.querySelectorAll<HTMLElement>(".game-card")) {
+        const left = scrolled ? card.getBoundingClientRect().left - edge : SHELF_FADE_PX;
+        if (left >= SHELF_FADE_PX || card.getBoundingClientRect().right < edge) {
+          if (card.style.maskImage) {
+            card.style.removeProperty("mask-image");
+            card.style.removeProperty("-webkit-mask-image");
+          }
+          continue;
+        }
+        const mask = `linear-gradient(to right, transparent ${(-left).toFixed(1)}px, #000 ${(SHELF_FADE_PX - left).toFixed(1)}px)`;
+        card.style.setProperty("mask-image", mask);
+        card.style.setProperty("-webkit-mask-image", mask);
+      }
+    });
   };
   refs.cards.addEventListener("scroll", syncShelfFade, { passive: true });
 
