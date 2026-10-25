@@ -45,6 +45,11 @@ import {
   type GameDetailViewModel,
 } from "./game-detail-model";
 import { hostDeviceLabel } from "./host-device";
+import {
+  enqueueMediaSave,
+  isMediaSaving,
+  whenMediaSaveSettled,
+} from "./media-save-queue";
 import { fillStoreChoiceMenu, type StoreChoice, type StoreChoicesClient } from "./store-choices";
 
 export interface GameDetailPageClient {
@@ -207,6 +212,11 @@ export interface GameDetailPageOptions {
    * reflect the change.
    */
   onLibraryChanged?(): void;
+  /**
+   * Says something to the user when the page cannot: a save that finished (or
+   * failed) after they left it. Without it the outcome goes to the console.
+   */
+  notify?(message: string): void;
   /**
    * Debug-only: when this returns true, a loaded game is overlaid with sample
    * achievements, friends and activity for any section it ships empty. Wired to
@@ -670,6 +680,41 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   /**
+   * A save that outlived its page has no screen to report on. Success is a
+   * short note and failure says why; the caller refreshes the library either
+   * way, and the console keeps a trace when the shell gave no way to speak.
+   */
+  const reportSavedAfterLeaving = (message: string): void => {
+    options.notify?.(message);
+  };
+  const reportFailedAfterLeaving = (message: string): void => {
+    if (!message) return;
+    if (options.notify) options.notify(message);
+    else console.warn(`[game-detail] ${message}`);
+  };
+
+  /**
+   * A page opened while its game is still being saved cannot see the job (it
+   * belongs to the page that started it), so it shows the save as in progress
+   * and reads the catalog again once the queue drains.
+   */
+  const resumePendingSave = async (
+    context: PageActivation,
+    gameId: string,
+  ): Promise<void> => {
+    if (!isMediaSaving(gameId)) return;
+    dispatch({ type: "media-busy-changed", busy: true });
+    await whenMediaSaveSettled(gameId);
+    if (!isFresh(context, gameId)) return;
+    await loadDetail(context, gameId);
+    if (!isFresh(context, gameId)) return;
+    // The dialog that started the save may still be open on this page.
+    wallpaperSelection.clear();
+    dispatch({ type: "media-busy-changed", busy: false });
+    dispatch({ type: "wallpaper-search-closed" });
+  };
+
+  /**
    * Refill all three artwork roles — portrait cover, landscape cover and
    * background — from a reliable high-resolution source, then repaint.
    *
@@ -683,9 +728,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (!isActive(context) || !gameId) return;
     showTransientStatus("Fetching fresh covers…");
     try {
-      const result = await client.resetArtwork(gameId, context.signal);
-      if (!isFresh(context, gameId)) return;
+      const result = await enqueueMediaSave(gameId, (signal) =>
+        client.resetArtwork(gameId, signal),
+      );
       options.onLibraryChanged?.();
+      if (!isFresh(context, gameId)) {
+        reportSavedAfterLeaving("Fresh covers saved.");
+        return;
+      }
       await loadDetail(context, gameId);
       if (!isFresh(context, gameId)) return;
       // A partial result is stated rather than hidden: a game whose publisher
@@ -701,10 +751,13 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         );
       }
     } catch (error) {
-      if (!isFresh(context, gameId) || isUserCancellation(error)) return;
-      showTransientStatus(
-        requestErrorMessage(error, "No covers were found for this game."),
+      const message = requestErrorMessage(
+        error,
+        "No covers were found for this game.",
       );
+      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
+      if (isUserCancellation(error)) return;
+      showTransientStatus(message);
     }
   };
 
@@ -807,27 +860,31 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     dispatch({ type: "media-previewed", mediaId });
     dispatch({ type: "media-busy-changed", busy: true });
     try {
-      const media = await client.selectMedia(gameId, mediaId, context.signal);
-      if (!isFresh(context, gameId)) return;
-      const committed = normaliseGameMedia(media);
-      // The browser fallback returns nothing; keep the preview rather than
-      // wiping the rail.
-      if (committed.length > 0)
-        dispatch({ type: "media-committed", media: committed });
-      else dispatch({ type: "media-busy-changed", busy: false });
-      await client.setHomeImage(gameId, mediaId, "background", context.signal);
-      if (!isFresh(context, gameId)) return;
-      options.onLibraryChanged?.();
-      showTransientStatus("Wallpaper set as your home background.");
-    } catch (error) {
-      if (!isFresh(context, gameId)) return;
-      dispatch({
-        type: "media-failed",
-        message: requestErrorMessage(
-          error,
-          "That wallpaper could not be set as your background.",
-        ),
+      await enqueueMediaSave(gameId, async (signal) => {
+        const media = await client.selectMedia(gameId, mediaId, signal);
+        if (isFresh(context, gameId)) {
+          const committed = normaliseGameMedia(media);
+          // The browser fallback returns nothing; keep the preview rather than
+          // wiping the rail.
+          if (committed.length > 0)
+            dispatch({ type: "media-committed", media: committed });
+          else dispatch({ type: "media-busy-changed", busy: false });
+        }
+        await client.setHomeImage(gameId, mediaId, "background", signal);
       });
+      options.onLibraryChanged?.();
+      const done = "Wallpaper set as your home background.";
+      if (!isFresh(context, gameId)) return reportSavedAfterLeaving(done);
+      showTransientStatus(done);
+    } catch (error) {
+      const message = requestErrorMessage(
+        error,
+        "That wallpaper could not be set as your background.",
+      );
+      // Steps that finished before the failure are already in the catalog.
+      options.onLibraryChanged?.();
+      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
+      dispatch({ type: "media-failed", message });
     }
   };
 
@@ -921,75 +978,60 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     if (chosen.length === 0) return;
     dispatch({ type: "media-busy-changed", busy: true });
     try {
-      // Download every chosen search result so several are saved in one go,
-      // keeping each saved id paired with the slot its row asked for.
-      const saved: Array<{ mediaId: string; role: WallpaperRole }> = [];
-      for (const slide of chosen) {
-        const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
-        if (slide.candidate) {
-          const media = await client.importWallpaper(
-            gameId,
-            slide.id,
-            context.signal,
-          );
-          if (!isFresh(context, gameId)) return;
-          const normalised = normaliseGameMedia(media);
-          if (normalised.length > 0)
-            dispatch({ type: "media-imported", media: normalised });
-          const stored =
-            normalised.find((item) => item.selected) ??
-            normalised[normalised.length - 1];
-          if (stored) saved.push({ mediaId: stored.id, role });
-        } else {
-          saved.push({ mediaId: slide.id, role });
+      await enqueueMediaSave(gameId, async (signal) => {
+        // Download every chosen search result so several are saved in one go,
+        // keeping each saved id paired with the slot its row asked for.
+        const saved: Array<{ mediaId: string; role: WallpaperRole }> = [];
+        for (const slide of chosen) {
+          const role = WALLPAPER_ROLE_FOR_CATEGORY[slide.category];
+          if (slide.candidate) {
+            const media = await client.importWallpaper(gameId, slide.id, signal);
+            const normalised = normaliseGameMedia(media);
+            if (normalised.length > 0 && isFresh(context, gameId))
+              dispatch({ type: "media-imported", media: normalised });
+            const stored =
+              normalised.find((item) => item.selected) ??
+              normalised[normalised.length - 1];
+            if (stored) saved.push({ mediaId: stored.id, role });
+          } else {
+            saved.push({ mediaId: slide.id, role });
+          }
         }
-      }
-      // The background pick (or a lone pick of any shape) is what the hero and
-      // the Library card paint, so that one is also the committed selection.
-      const home =
-        saved.find((entry) => entry.role === "background") ?? saved[0];
-      if (home) {
-        const media = await client.selectMedia(
-          gameId,
-          home.mediaId,
-          context.signal,
-        );
-        if (!isFresh(context, gameId)) return;
-        const committed = normaliseGameMedia(media);
-        if (committed.length > 0)
-          dispatch({ type: "media-committed", media: committed });
-        for (const entry of saved) {
-          await client.setHomeImage(
-            gameId,
-            entry.mediaId,
-            entry.role,
-            context.signal,
-          );
-          if (!isFresh(context, gameId)) return;
+        // The background pick (or a lone pick of any shape) is what the hero and
+        // the Library card paint, so that one is also the committed selection.
+        const home =
+          saved.find((entry) => entry.role === "background") ?? saved[0];
+        if (home) {
+          const media = await client.selectMedia(gameId, home.mediaId, signal);
+          const committed = normaliseGameMedia(media);
+          if (committed.length > 0 && isFresh(context, gameId))
+            dispatch({ type: "media-committed", media: committed });
+          for (const entry of saved) {
+            await client.setHomeImage(gameId, entry.mediaId, entry.role, signal);
+          }
         }
-      } else {
-        dispatch({ type: "media-busy-changed", busy: false });
-      }
-      if (!isFresh(context, gameId)) return;
+      });
       options.onLibraryChanged?.();
-      wallpaperSelection.clear();
-      dispatch({ type: "wallpaper-search-closed" });
-      showTransientStatus(
+      const done =
         chosen.length > 1
           ? `${chosen.length} wallpapers applied to this game.`
           : WALLPAPER_ROLE_APPLIED[
               WALLPAPER_ROLE_FOR_CATEGORY[chosen[0].category]
-            ],
-      );
+            ];
+      if (!isFresh(context, gameId)) return reportSavedAfterLeaving(done);
+      wallpaperSelection.clear();
+      dispatch({ type: "media-busy-changed", busy: false });
+      dispatch({ type: "wallpaper-search-closed" });
+      showTransientStatus(done);
     } catch (error) {
-      if (!isFresh(context, gameId)) return;
-      dispatch({
-        type: "media-failed",
-        message: requestErrorMessage(
-          error,
-          "Those wallpapers could not be saved.",
-        ),
-      });
+      const message = requestErrorMessage(
+        error,
+        "Those wallpapers could not be saved.",
+      );
+      // Steps that finished before the failure are already in the catalog.
+      options.onLibraryChanged?.();
+      if (!isFresh(context, gameId)) return reportFailedAfterLeaving(message);
+      dispatch({ type: "media-failed", message });
     }
   };
 
@@ -2451,6 +2493,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState();
       });
+      void resumePendingSave(context, gameId);
       void loadDetail(context, gameId).then(() => {
         if (isActive(context)) restorePageState();
         // Reopening the page mid-download: the catalog snapshot is already

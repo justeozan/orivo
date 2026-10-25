@@ -6321,6 +6321,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         onLibraryChanged: () => {
           void refreshLibrary();
         },
+        // Artwork saves outlive the page; this reports one that ended after it.
+        notify: (message) => showToast(message),
         // Debug overlay: when the Settings toggle is on, the detail page fills in
         // sample achievements, friends and activity for games that ship none.
         sampleSocialEnabled: () => state.preferences.debugSampleSocial,
