@@ -2541,6 +2541,26 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-row .settings-row__copy small:first-of-type,
 .plugin-catalog-row .settings-row__copy small:first-of-type { overflow: hidden; color: rgba(244,242,248,.5); text-overflow: ellipsis; white-space: nowrap; }
 /* The row's one action, as a bare glyph. */
+/* Plugins wear the Libraries tab's account button. `is-on` is the blue a
+   connected store wears ("Installed"); `is-safe` keeps a non-destructive
+   hover action (Settings) out of the red. */
+.plugin-state-button.is-on,
+.plugin-state-button:has(.source-account-row__account-hover) {
+  color: #dcebfa;
+  border-color: rgba(114,170,232,.78);
+  background: rgba(76,146,222,.14);
+}
+.plugin-state-button.is-on:disabled { cursor: default; opacity: 1; transform: none; }
+.plugin-state-button.is-safe:hover,
+.plugin-state-button.is-safe:focus-visible,
+.plugin-state-button.is-safe[data-nav-focus] {
+  color: #fff;
+  border-color: rgba(255,255,255,.72);
+  background: rgba(255,255,255,.1);
+}
+.plugin-state-button:disabled:not(.is-on) { cursor: default; opacity: .7; transform: none; }
+html:not([data-beta]) .plugins-debug-only { display: none !important; }
+.plugin-row__state[hidden] { display: none; }
 .plugin-action-button {
   display: grid;
   width: 34px;

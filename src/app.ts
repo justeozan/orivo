@@ -465,6 +465,29 @@ const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
 
 /**
+ * The Libraries tab's account button, for a plugin: one outlined slot of one
+ * width whose label says the state at rest and, when `hover` is given, the
+ * action under the pointer (red, because the only such action is a removal).
+ */
+function pluginStateButton(options: { idle: string; hover?: string }): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "source-account-row__account plugin-state-button";
+  const name = document.createElement("span");
+  name.className = "source-account-row__account-name";
+  name.textContent = options.idle;
+  button.append(name);
+  if (options.hover) {
+    const hover = document.createElement("span");
+    hover.className = "source-account-row__account-hover";
+    hover.setAttribute("aria-hidden", "true");
+    hover.textContent = options.hover;
+    button.append(hover);
+  }
+  return button;
+}
+
+/**
  * The tile a plugin row opens with. Plugins ship no icon of their own, so the
  * glyph is chosen from what the plugin is (its id, else its name).
  */
@@ -2720,10 +2743,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     install.disabled = busy || installed;
     const label = formatInstallLabel(progress, { ...entry, installed });
     install.setAttribute("aria-label", `${label} ${entry.name}`);
-    // One glyph, the way an integrations list reads: "+" to add it, a tick once
-    // it is in. The words stay as the button's name and its tooltip.
-    install.className = "plugin-action-button";
-    install.innerHTML = icon(installed ? "check" : busy ? "download" : "plus");
+    // The Libraries tab's button: "Install" to add it, its progress while it
+    // comes in, then the blue "Installed" a connected store wears.
+    install.className = "source-account-row__account plugin-state-button";
+    if (installed) install.classList.add("is-on");
+    const word = document.createElement("span");
+    word.className = "source-account-row__account-name";
+    word.textContent = installed ? "Installed" : busy ? `${pluginPercent(progress)}%` : "Install";
+    install.replaceChildren(word);
     install.title = label;
     row.append(pluginTile(entry.id, entry.name), copy, install);
 
@@ -2748,20 +2775,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     copy.className = "settings-row__copy";
     const name = document.createElement("strong");
     name.textContent = plugin.name;
+    // Debug detail (version, extension points, health counts, the log and the
+    // rollback) only shows with Beta features on; the row otherwise says what
+    // the plugin is and offers what to do with it.
+    const debug = state.preferences.betaFeatures;
     const details = document.createElement("small");
     details.textContent =
       [
-        plugin.version ? `v${plugin.version}` : "",
-        plugin.extensions.join(", "),
+        debug && plugin.version ? `v${plugin.version}` : "",
+        debug ? plugin.extensions.join(", ") : "",
         plugin.message,
       ]
         .filter(Boolean)
-        .join(" · ") || "Plugin tiers";
+        .join(" · ") || "Third-party plugin";
     copy.append(name, details);
 
     const health = pluginHealthById.get(plugin.id) ?? null;
     const healthSummary = pluginHealthSummary(health);
-    if (healthSummary) {
+    if (healthSummary && (debug || health?.degraded)) {
       const healthLine = document.createElement("small");
       healthLine.className = "plugin-row__health";
       if (health?.degraded) healthLine.classList.add("plugin-row__health--degraded");
@@ -2769,13 +2800,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       copy.append(healthLine);
     }
 
-    const state = document.createElement("span");
-    state.className = "plugin-row__state";
+    const status = document.createElement("span");
+    status.className = "plugin-row__state";
     // A plugin the host refused to load must not read in the same green as one
-    // that works; the copy says so, the colour says it faster.
-    if (plugin.state === "incompatible") state.classList.add("plugin-row__state--warn");
-    if (plugin.state === "invalid") state.classList.add("plugin-row__state--error");
-    state.textContent = formatPluginStatus(plugin);
+    // that works; the copy says so, the colour says it faster. A working one
+    // says nothing here: its button already reads "Installed".
+    if (plugin.state === "incompatible") status.classList.add("plugin-row__state--warn");
+    if (plugin.state === "invalid") status.classList.add("plugin-row__state--error");
+    const troubled = plugin.state === "incompatible" || plugin.state === "invalid";
+    status.textContent = troubled ? formatPluginStatus(plugin) : "";
+    status.hidden = !troubled;
 
     const actions = document.createElement("div");
     actions.className = "plugin-row__actions";
@@ -2791,21 +2825,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const updateProgress = pluginManager.progressFor(plugin.id);
     const updateBusy = isPluginInstallBusy(updateProgress);
     if (plugin.updateTo || updateBusy) {
-      const update = document.createElement("button");
-      update.type = "button";
-      update.className = "settings-button settings-button--quiet";
+      const update = pluginStateButton({ idle: "" });
       update.dataset.pluginUpdate = plugin.id;
       // A second click while one is already running must not restart it — the
       // controller itself ignores it too, but the button should already look
       // like there is nothing left to click.
       update.disabled = updateBusy;
-      update.textContent = updateBusy
+      update.firstElementChild!.textContent = updateBusy
         ? updateProgress?.phase === "downloading"
-          ? `Downloading ${pluginPercent(updateProgress)}%`
-          : updateProgress?.phase === "verifying"
-            ? "Verifying…"
-            : "Installing…"
-        : `Update to v${plugin.updateTo}`;
+          ? `${pluginPercent(updateProgress)}%`
+          : "Updating…"
+        : "Update";
+      update.title = plugin.updateTo ? `Update to v${plugin.updateTo}` : "Updating";
       actions.append(update);
       if (updateProgress?.phase === "failed") {
         const failed = document.createElement("small");
@@ -2814,7 +2845,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         copy.append(failed);
       }
     }
-    if (plugin.rollbackTo) {
+    if (debug && plugin.rollbackTo) {
       const rollback = document.createElement("button");
       rollback.type = "button";
       rollback.className = "settings-button settings-button--quiet";
@@ -2829,25 +2860,26 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       actions.append(rollback);
     }
 
-    const log = document.createElement("button");
-    log.type = "button";
-    log.className = "settings-button settings-button--quiet";
-    log.dataset.pluginLog = plugin.id;
-    log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
-    log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
-    actions.append(log);
+    if (debug) {
+      const log = document.createElement("button");
+      log.type = "button";
+      log.className = "settings-button settings-button--quiet";
+      log.dataset.pluginLog = plugin.id;
+      log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
+      log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
+      actions.append(log);
+    }
 
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "settings-button settings-button--quiet plugin-uninstall-button";
+    // The Libraries tab's button: it states the plugin is in at rest, and
+    // under the pointer offers the one thing that state is for.
+    const remove = pluginStateButton({ idle: "Installed", hover: "Uninstall" });
     remove.dataset.pluginUninstall = plugin.id;
     remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
-    remove.textContent = "Uninstall";
     actions.append(remove);
 
-    row.append(pluginTile(plugin.id, plugin.name), copy, state, actions);
+    row.append(pluginTile(plugin.id, plugin.name), copy, status, actions);
 
-    if (openPluginLogId === plugin.id) {
+    if (debug && openPluginLogId === plugin.id) {
       row.append(renderPluginLogPanel(plugin.id));
     }
     return row;
@@ -3063,7 +3095,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       )
       .map((entry) => {
         const row = document.createElement("div");
-        row.className = "settings-row plugin-row plugin-row--soon";
+        // A plugin that does not exist yet is a promise, not a control: it
+        // only shows with Beta features on.
+        row.className = "settings-row plugin-row plugin-row--soon plugins-debug-only";
         const copy = document.createElement("div");
         copy.className = "settings-row__copy";
         const name = document.createElement("strong");
@@ -6280,6 +6314,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const applyBetaFeatures = (): void => {
     const beta = state.preferences.betaFeatures;
+    // Debug-only controls (plugin logs, rollbacks, install from file) are
+    // styled away unless Beta features are on.
+    document.documentElement.toggleAttribute("data-beta", beta);
     for (const link of refs.navLinks) {
       if (link.dataset.navPage === "me") link.hidden = !beta;
     }
@@ -6784,7 +6821,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void savePreferences({ showEditorialGames: target.checked });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-beta") {
-      void savePreferences({ betaFeatures: target.checked });
+      void savePreferences({ betaFeatures: target.checked }).then(() => renderDiscoveredPlugins());
     }
     if (target instanceof HTMLInputElement && target.id === "preference-trailer-autoplay") {
       void savePreferences({ trailerAutoplayOff: !target.checked });
@@ -8308,8 +8345,7 @@ function shell(): string {
                         <strong>Wine</strong>
                         <small>Wine-Staging runner and isolated profiles</small>
                       </div>
-                      <span class="plugin-row__state">Installed</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
+                      <button type="button" class="source-account-row__account plugin-state-button is-on is-safe" data-plugin-open="wine" aria-label="Open Wine settings"><span class="source-account-row__account-name">Installed</span><span class="source-account-row__account-hover" aria-hidden="true">Settings</span></button>
                     </div>
                     <div class="settings-row plugin-row">
                       <span class="plugin-tile" aria-hidden="true">${icon("landscape")}</span>
@@ -8317,8 +8353,7 @@ function shell(): string {
                         <strong>Wallpaper Searcher</strong>
                         <small>Finds wallpaper artwork from IGDB and Google Images</small>
                       </div>
-                      <span class="plugin-row__state">Installed</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
+                      <button type="button" class="source-account-row__account plugin-state-button is-on is-safe" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings"><span class="source-account-row__account-name">Installed</span><span class="source-account-row__account-hover" aria-hidden="true">Settings</span></button>
                     </div>
                     <!-- Third-party runners has no row here on purpose: it is
                          not a plugin but part of Orivo itself, and the section
@@ -8336,7 +8371,7 @@ function shell(): string {
                         <span>Automatic updates</span>
                       </label>
                       <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>Check for updates</span></button>
-                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
                     </div>
                   </div>
                   <label class="plugins-search">
