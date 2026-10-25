@@ -265,7 +265,7 @@ interface SteamAccountConnectedEvent {
 
 interface WineLaunchStatusEvent {
   gameId: string;
-  phase: "preparing" | "started" | "failed";
+  phase: "preparing" | "started" | "failed" | "ended";
   message: string;
 }
 
@@ -6139,16 +6139,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (
         !payload ||
         typeof payload.gameId !== "string" ||
-        (payload.phase !== "preparing" && payload.phase !== "started" && payload.phase !== "failed") ||
+        (payload.phase !== "preparing" &&
+          payload.phase !== "started" &&
+          payload.phase !== "failed" &&
+          payload.phase !== "ended") ||
         typeof payload.message !== "string" ||
         !state.games.some((game) => game.id === payload.gameId && game.source === "wine")
       ) {
         return;
       }
+      // The game's process ended: the "running" line has nothing left to say.
+      if (payload.phase === "ended") {
+        if (state.launchFeedback?.gameId === payload.gameId) {
+          state.launchFeedback = null;
+          renderLaunchFeedback();
+        }
+        return;
+      }
+      const title = state.games.find((game) => game.id === payload.gameId)?.title ?? "The game";
       state.launchFeedback = {
         gameId: payload.gameId,
         phase: payload.phase === "preparing" ? "launching" : payload.phase,
-        message: payload.message,
+        message: payload.phase === "started" ? `${title} is running` : payload.message,
       };
       renderLaunchFeedback();
       if (payload.phase === "failed") {

@@ -4192,7 +4192,7 @@ async fn ensure_dxvk_macos_for_automatic_game(
         WineLaunchStatusEvent {
             game_id: game_id.to_string(),
             phase: "preparing",
-            message: "Téléchargement et vérification de DXVK-macOS pour ce jeu…".into(),
+            message: "Getting this game ready to run on your Mac…".into(),
         },
     );
     install_verified_dxvk_macos_for_profile(
@@ -7549,7 +7549,7 @@ fn monitor_wine_startup(
                         WineLaunchStatusEvent {
                             game_id,
                             phase: "failed",
-                            message: "Wine stopped before this game finished starting. Retry in compatibility mode from Orivo."
+                            message: "The game closed before it finished starting. Try again in compatibility mode."
                                 .into(),
                         },
                     );
@@ -7562,7 +7562,7 @@ fn monitor_wine_startup(
                         WineLaunchStatusEvent {
                             game_id,
                             phase: "failed",
-                            message: "Wine could not confirm this game started. Retry in compatibility mode from Orivo."
+                            message: "Orivo couldn't tell whether the game started. Try again in compatibility mode."
                                 .into(),
                         },
                     );
@@ -7575,15 +7575,27 @@ fn monitor_wine_startup(
                         WineLaunchStatusEvent {
                             game_id: game_id.clone(),
                             phase: "started",
-                            message: format!(
-                                "Wine-Staging is running this game with {graphics_label}."
-                            ),
+                            // Plain words: which translation layer and which
+                            // renderer run the game is not the player's
+                            // business (`graphics_label` is kept for logs).
+                            message: "Running".into(),
                         },
                     );
+                    eprintln!("[wine] {game_id} running with {graphics_label}");
                     // Reap the direct Wine process once it exits, but do not
-                    // turn a normal end-of-session into a launch failure.
+                    // turn a normal end-of-session into a launch failure; say
+                    // that it ended, so the "running" line goes away.
                     let _ = child.wait();
                     record_session(&app, &game_id, started);
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        WINE_LAUNCH_STATUS_EVENT,
+                        WineLaunchStatusEvent {
+                            game_id,
+                            phase: "ended",
+                            message: String::new(),
+                        },
+                    );
                     return;
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(75)),
