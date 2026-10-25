@@ -147,10 +147,19 @@ it happens once per machine.
 the client commit to a PIN and the machine's operator confirm the same one. So a
 stream profile's card offers *Pair with this host…*, which draws four digits,
 starts `<the profile's application> pair <host> --pin <pin>`, and shows the
-number until the user says they are done — not on a timer, because a PIN that
+number for as long as the attempt is open — not on a timer, because a PIN that
 vanished while they were walking to the other machine is the one failure worth
 avoiding. The address is the machine's, without any web port: pairing does not go
 through the web interface.
+
+**Orivo watches for the result itself.** The setup asks `gamestream_pairing_status`
+every couple of seconds for up to three minutes, and the answer is the machine's:
+if it lists, this client is paired, whatever the `pair` process looks like. The
+process is read only to tell an attempt still open from one that ended without
+pairing — a wrong PIN, the client's own timeout — so "didn't finish" can be said at
+once. The service keeps the `pair` child per profile, so a retry (which draws a new
+PIN), a cancel, a success and a deleted profile all end the old one rather than
+leaving it waiting on a number nobody will type.
 
 **The state is read first, and that is the whole point of the shape.** A client
 that is already paired *refuses to start a handshake*, so starting one anyway and
@@ -181,8 +190,9 @@ A user who streams has the client installed, so making them walk a file dialog t
 a bundle Orivo can see is asking them to do its work. Detection looks at a fixed
 list of locations per platform — the `.app` bundles on macOS, the standard
 install roots on Windows, the package and flatpak/snap launchers on Linux — and
-offers each one it finds as *+ Add &lt;name&gt;* beside the picker, which stays,
-because the list only covers where a normal install puts things.
+uses the first it finds (a small choice if there are several) and keeps the
+picker as a quiet link, because the list only covers where a normal install puts
+things.
 
 Deliberately a fixed list rather than a `PATH` walk or a search: the answer
 becomes a program the host starts, so what it can find is a decision made in that
@@ -269,28 +279,51 @@ its own grid, and indexed through its private settings file in a different
 format on every platform. On the machine this was measured on it held three
 covers out of forty-two.
 
-## Settings
+## Settings: one guided setup
 
-One address, under Plugins & Runners, and only once a profile actually launches
-streams — an address for a machine nothing streams from is a box with no question
-behind it.
+There is one place to set this up: **Settings › Plugins › Game streaming**, behind
+the plugin's own row (installing the plugin lands there). It is a stepper —
+Moonlight on this computer, the gaming PC, pairing, the games — each step shown as
+done, current or waiting, and `setupStage` (`src/gamestream-setup.ts`) is the one
+pure function that decides which is current from five facts. Someone who already
+has a profile sees those facts as they are now (the PC is asked on arrival), so a
+finished setup reads as four ticks and a PC that has stopped knowing them puts them
+back on the pairing step.
 
-There is no credential on this card, and no password anywhere in this feature.
-A settings file written by the version that had one still loads; the extra fields
-are dropped rather than failing the read, so an upgrade does not look like a lost
-configuration.
+- **Moonlight** is found with the same detection as before. Missing, the step
+  offers the download page (opened by name — the host builds the address), *Check
+  again*, and the picker as a quiet link.
+- **The PC** is one field. A pasted web address is reduced to the machine (scheme,
+  path, credentials and port all go), and the host asks it before keeping it:
+  reachable on GameStream's ports is separate from `list`, because `list` waits on
+  a machine that is off and exits non-zero on one that has not paired, and only
+  the second needs a PIN. A PC that does not answer is not saved unless the person
+  says *Save anyway*.
+- **The games** go into a folder Orivo keeps itself, `<app data>/streaming/<profile>`,
+  made and allowed by `prepare_gamestream_library` with no picker. This is the one
+  grant Orivo makes on its own initiative, so it is held to one rule: the folder,
+  after links are resolved, must be strictly inside `<app data>/streaming`.
+  Anything else is refused.
+- The profile is made by `create_gamestream_profile`, already authorising streams,
+  and there is only ever one: choosing a client again repoints it.
 
-A scheme and a port are accepted in the address and then discarded, because a
-user who has been in Sunshine's web interface has that URL in their clipboard.
-What reaches the client is the machine.
+The generic runners list does not show the streaming plugin, and there is no
+separate host card. There is no credential anywhere in this feature. A settings
+file written by the version that had one still loads; the extra fields are dropped
+rather than failing the read.
+
+A launch that fails for a stream profile is said in streaming words
+(`RunnerHostError::in_streaming_words`): where Moonlight is chosen again, or that
+the games need refreshing, always pointing at the same screen. An import with no
+PC saved says "Add your gaming PC first." instead of reporting zero games.
 
 ## What this is not, yet
 
 - **No automatic PIN confirmation.** See above: the machine's side of pairing is
   still typed into Sunshine or Apollo.
-- **No client installation.** Orivo finds a client that is already installed; it
-  does not offer to install one. The matrix of "offer Moonlight / Artemis per
-  platform" is host UI work that does not exist.
+- **No client installation.** Orivo finds a client that is already installed and,
+  when there is none, opens Moonlight's download page. It does not install one
+  itself, and it does not offer an alternative client per platform.
 - **No network import in the guest.** Closing gap one in the plugin instead of
   the host would be a v2 contract revision — a WIT import, an allowlist, a
   raised SDK baseline — and is deliberately not done here. It is also no longer

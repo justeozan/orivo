@@ -161,7 +161,12 @@ import {
 } from "./plugin-health";
 import { createDefaultRunnerManagerClient, createRunnerManagerController } from "./runner-manager";
 import { mountRunnerPanel } from "./runner-view";
-import { createGameStreamClient, mountGameStreamPanel } from "./gamestream-settings";
+import { createGameStreamClient } from "./gamestream-settings";
+import {
+  GAMESTREAM_PLUGIN_ID,
+  createGameStreamSetup,
+  mountGameStreamSetup,
+} from "./gamestream-setup";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
 import { createStoreChoicesClient, fillStoreChoiceMenu, type StoreChoice } from "./store-choices";
@@ -249,7 +254,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher";
+type PluginId = "wine" | "wallpaper-searcher" | "game-streaming";
 /** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
 type PluginView = "list" | PluginId;
 
@@ -722,8 +727,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
     runnersPanel: get<HTMLElement>("#runners-panel"),
     runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
-    gamestreamPanel: get<HTMLElement>("#gamestream-panel"),
-    gamestreamPanelBody: get<HTMLElement>("#gamestream-panel-body"),
+    gamestreamSetupPanel: get<HTMLElement>("#gamestream-setup-panel"),
+    gamestreamSetupBody: get<HTMLElement>("#gamestream-setup-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
@@ -2697,13 +2702,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // file does with them beyond toggling the panel's `hidden` attribute.
   const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
   mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
-  // The streaming host is that panel's companion: it owns its own subtree the
-  // same way, and this file only decides whether the card is there at all.
-  const gamestreamPanel = mountGameStreamPanel(
-    refs.gamestreamPanelBody,
-    createGameStreamClient(),
-    { showToast },
-  );
+  // Game streaming has one place: a guided setup behind its plugin's row. It
+  // owns its subtree the same way, and this file only opens and closes it.
+  const gamestreamSetup = createGameStreamSetup({
+    runners: runnerManager,
+    stream: createGameStreamClient(),
+    showToast,
+    openLibrary: () => navigate({ page: "library" }),
+  });
+  mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
+  let gamestreamSetupOpen = false;
 
   const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
     const row = document.createElement("div");
@@ -2878,6 +2886,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     actions.append(remove);
 
     row.append(pluginTile(plugin.id, plugin.name), copy, status, actions);
+
+    // Game streaming is set up, not just installed: the same chevron the
+    // built-in rows wear opens its guided setup.
+    if (plugin.id === GAMESTREAM_PLUGIN_ID && platformFeatures.localRunners) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "plugin-open-button";
+      open.dataset.pluginOpen = "game-streaming";
+      open.setAttribute("aria-label", "Set up game streaming");
+      open.title = "Set up";
+      open.innerHTML = icon("chevron-right");
+      row.append(open);
+    }
 
     if (debug && openPluginLogId === plugin.id) {
       row.append(renderPluginLogPanel(plugin.id));
@@ -3113,32 +3134,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       });
   };
 
-  /**
-   * The streaming host card is the runners panel's companion and appears with
-   * it, but only once a profile actually launches streams: an address for a
-   * machine nothing streams from is a box with no question behind it.
-   *
-   * Its own function because it is also what the runner controller's change
-   * events need — flipping a profile to streams has to make the card appear
-   * without a re-render of the whole plugin browser behind it, which an import
-   * poll would then repeat every tick.
-   */
-  const syncGameStreamCard = (): void => {
-    refs.gamestreamPanel.hidden =
-      !platformFeatures.localRunners ||
-      state.pluginView !== "list" ||
-      !runnerManager
-        .runners()
-        .some((runner) => runner.profiles.some((profile) => profile.launchMode === "stream"));
-  };
-  runnerManager.onChange(syncGameStreamCard);
-
   const renderPluginList = (): void => {
     const showList = state.pluginView === "list";
     renderDiscoveredPlugins();
     refs.pluginsCatalogPanel.hidden = !showList;
     refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    refs.gamestreamSetupPanel.hidden =
+      state.pluginView !== "game-streaming" || !platformFeatures.localRunners;
+    // The setup reads the PC and the plugin when it is opened and stops its
+    // pairing watch when it is left, whichever way that happens: the back
+    // button, another section, or leaving Settings.
+    const settingUp = state.pluginView === "game-streaming" && platformFeatures.localRunners;
+    if (settingUp && !gamestreamSetupOpen) {
+      gamestreamSetupOpen = true;
+      void gamestreamSetup.open();
+    } else if (!settingUp && gamestreamSetupOpen) {
+      gamestreamSetupOpen = false;
+      gamestreamSetup.close();
+    }
     // An iOS build downloads no code and starts no game itself, so what is left
     // of the section there is what is built in and works: the wallpaper search.
     const catalogGroup = refs.pluginsCatalogPanel.querySelector<HTMLElement>(".plugins-group--catalog");
@@ -3156,7 +3170,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // section by name, so it sits inline with the browser and is replaced by
     // whichever detail view opens, exactly like the browser itself.
     refs.runnersPanel.hidden = !showList || !platformFeatures.localRunners;
-    syncGameStreamCard();
     if (!showList) return;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
     refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
@@ -3173,7 +3186,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // the kind of dead end this panel used to have.
     refs.pluginsCatalogEmpty.textContent =
       available.length === 0
-        ? "Aucun plugin à installer pour le moment."
+        ? "There are no plugins to install right now."
         : "No plugins match that search.";
   };
 
@@ -6543,11 +6556,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // Cheap and always fresh: a background import or a plugin update can
         // change a profile's status between visits, so every visit re-reads it.
         void runnerManager.load(activation.signal);
-        // Host-private configuration another window could have changed, so it
-        // is re-read on arrival rather than kept from the last visit.
-        void gamestreamPanel.load(activation.signal).catch(() => {
-          // A host with no such command renders the empty card it already has.
-        });
       }
       // The catalogue is re-read on every visit: a plugin installed from the
       // file picker in a previous session has to show up without a restart.
@@ -6710,7 +6718,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher") {
+    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "game-streaming") {
       openPluginDetail(pluginId);
       return;
     }
@@ -6730,7 +6738,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (installId) {
       // The controller notifies on every phase, and `onChange` repaints the
       // row: nothing here waits for the install to finish.
-      void pluginManager.installFromRegistry(installId);
+      void pluginManager.installFromRegistry(installId).then(() => {
+        // Installing the streaming plugin is the first step of using it, so the
+        // person lands on its setup instead of a row that now says "Installed"
+        // and a question of what comes next. Only if they are still looking at
+        // the plugin list: someone who has moved on is not pulled back.
+        const installed = pluginManager
+          .catalog()
+          .installed.some((plugin) => plugin.id === installId);
+        if (
+          installId === GAMESTREAM_PLUGIN_ID &&
+          installed &&
+          settingsPageActive &&
+          state.pluginView === "list" &&
+          platformFeatures.localRunners
+        ) {
+          openPluginDetail("game-streaming");
+        }
+      });
       return;
     }
     const uninstallId = target?.closest<HTMLButtonElement>("[data-plugin-uninstall]")?.dataset
@@ -8498,18 +8523,18 @@ function shell(): string {
                 <div id="runners-panel-body"></div>
               </section>
 
-              <!-- Shown only once a profile launches streams: one remote
-                   machine's address is configuration for that profile's
-                   import, so it has nothing to say until there is one. -->
-              <section id="gamestream-panel" class="settings-card" aria-labelledby="gamestream-panel-title" data-settings-searchable hidden>
+              <!-- Game streaming has one place: the guided setup behind its
+                   plugin's row. It is a detail view like Wine's, so it is
+                   hidden until that row's chevron opens it. -->
+              <section id="gamestream-setup-panel" class="settings-card" aria-labelledby="gamestream-setup-title" hidden>
                 <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
                   <div class="settings-card__copy">
-                    <strong id="gamestream-panel-title">Game streaming host</strong>
-                    <small>The machine your games run on, and what Orivo needs to ask it for its library</small>
+                    <strong id="gamestream-setup-title">Game streaming</strong>
+                    <small>Play the games on your gaming PC from your Library</small>
                   </div>
                 </header>
-                <div id="gamestream-panel-body"></div>
+                <div id="gamestream-setup-body"></div>
               </section>
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>

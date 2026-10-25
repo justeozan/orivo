@@ -2711,16 +2711,6 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .runner-profile-card__toggle { display: flex; align-items: center; gap: 7px; color: #b7b2c1; font-size: 12px; }
 .runner-profile-card__mode { display: flex; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 .runner-group__adders { display: flex; flex-wrap: wrap; gap: 8px; }
-.runner-pairing { display: grid; gap: 6px; justify-items: start; }
-/* The PIN is the one thing in this card the user has to read off a screen and
-   type on another machine, so it is set at a size that survives that walk. */
-.runner-pairing__pin {
-  font-size: 28px;
-  letter-spacing: .22em;
-  font-variant-numeric: tabular-nums;
-  color: #f2eff7;
-  user-select: all;
-}
 .runner-profile-card__mode .settings-select { flex: 1; min-width: 0; }
 .runner-directory-list { display: grid; gap: 4px; }
 .runner-directory-row {
@@ -2735,6 +2725,59 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 }
 .runner-directory-row__revoked { color: #f0a3a3; }
 .runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
+
+/* Game streaming setup: four steps, one open at a time. A finished step folds
+   to a line with a tick; the one in front of the person is open; the rest wait,
+   numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
+   so nothing here is a new kind of control. */
+#gamestream-setup-body { padding: 4px 18px 18px; }
+.gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
+.gs-step { display: grid; gap: 10px; padding: 14px 0; }
+.gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }
+.gs-step__head { display: flex; align-items: center; gap: 12px; }
+.gs-step__mark {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 50%;
+  color: #cec8dd;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.gs-step__copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.gs-step__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 560; letter-spacing: -.01em; }
+.gs-step__copy small { overflow: hidden; color: rgba(244,242,248,.52); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
+.gs-step.is-todo .gs-step__copy strong { color: rgba(244,242,248,.55); }
+.gs-step.is-active .gs-step__mark { border-color: rgba(185,168,255,.8); color: #e7dfff; }
+.gs-step.is-done .gs-step__mark {
+  border-color: rgba(114,170,232,.78);
+  color: #dcebfa;
+  background: rgba(76,146,222,.14);
+}
+.gs-step__body { display: grid; gap: 10px; padding-left: 38px; }
+.gs-step__content { display: grid; gap: 10px; }
+.gs-step__text { margin: 0; color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.gs-step__note, .gs-step__status { margin: 0; color: #9993a7; font-size: 12.5px; line-height: 1.5; }
+.gs-step__error { margin: 0; color: #f0a3a3; font-size: 12.5px; line-height: 1.5; }
+.gs-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.gs-step .credentials-form__field { max-width: 420px; }
+/* The primary actions wear the Libraries tab's account button; it is sized for
+   a short label there, so here it only has to fit its own words. */
+.gs-primary.source-account-row__account { width: auto; min-width: 116px; }
+.gs-primary:disabled { cursor: default; opacity: .6; }
+/* The PIN is the one number read off this screen and typed on another machine,
+   so it is set at a size that survives that walk. */
+.gs-pin {
+  color: #f2eff7;
+  font-size: 40px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  letter-spacing: .24em;
+  user-select: all;
+}
 
 .plugin-back-button { height: 32px; padding: 0 12px; }
 .plugin-back-button .icon { width: 14px; height: 14px; }

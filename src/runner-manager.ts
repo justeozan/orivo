@@ -17,6 +17,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PluginState } from "./plugin-manager";
 
+/**
+ * The game-streaming plugin. Its profile is not an emulator and is never shown
+ * among them: the guided setup (`gamestream-setup.ts`) is the one place that
+ * makes and manages it.
+ */
+export const GAMESTREAM_PLUGIN_ID = "com.orivo.gamestream";
+
 export type RunnerProfileStatus = "unvalidated" | "valid" | "rejected";
 /**
  * The launch shape a profile authorises. `default` starts the emulator with
@@ -42,6 +49,24 @@ export type GameStreamPairing =
   | { state: "alreadyPaired"; host: string }
   | { state: "started"; host: string; pin: string };
 
+/**
+ * What a PC said when asked. `unreachable` means nothing answered on the PC's
+ * ports, which is a different problem from `notPaired` (it answered, and does
+ * not know this client yet) and needs a different fix.
+ */
+export type HostState = "paired" | "notPaired" | "unreachable" | "clientMissing";
+
+export interface HostStatusView {
+  state: HostState;
+  /** The PC as Orivo understood what was typed: no scheme, no port, no path. */
+  host: string;
+  /** How many games it listed, when it listed any. */
+  games: number;
+}
+
+/** Where a pairing attempt stands, asked while the PIN is on screen. */
+export type PairingState = "paired" | "waiting" | "failed" | "unreachable" | "clientMissing";
+
 /** A streaming client Orivo found on this machine. A handle and a name — never a path. */
 export interface DetectedClientView {
   id: string;
@@ -62,6 +87,8 @@ export interface RunnerProfileView {
   statusMessage: string | null;
   enabled: boolean;
   applicationLabel: string;
+  /** Whether the application can be started right now (it may have been uninstalled). */
+  applicationAvailable: boolean;
   launchMode: RunnerLaunchMode;
   directories: RunnerDirectoryView[];
   gameCount: number;
@@ -98,6 +125,19 @@ const PROFILE_STATUSES: ReadonlySet<string> = new Set<RunnerProfileStatus>([
   "valid",
   "rejected",
 ]);
+const HOST_STATES: ReadonlySet<string> = new Set<HostState>([
+  "paired",
+  "notPaired",
+  "unreachable",
+  "clientMissing",
+]);
+const PAIRING_STATES: ReadonlySet<string> = new Set<PairingState>([
+  "paired",
+  "waiting",
+  "failed",
+  "unreachable",
+  "clientMissing",
+]);
 const LAUNCH_MODES: ReadonlySet<string> = new Set<RunnerLaunchMode>(["default", "stream"]);
 const IMPORT_PHASES: ReadonlySet<string> = new Set<RunnerImportPhase>([
   "running",
@@ -128,6 +168,17 @@ export interface RunnerManagerClient {
   ): Promise<RunnerProfileView>;
   beginPairing(profileId: string, signal: AbortSignal): Promise<GameStreamPairing>;
   findStreamClients(signal: AbortSignal): Promise<DetectedClientView[]>;
+  /**
+   * The one game-streaming profile, made if need be and always authorising
+   * streams. A handle from `findStreamClients`, or null to open the picker.
+   */
+  createStreamProfile(clientId: string | null, signal: AbortSignal): Promise<RunnerProfileView>;
+  /** Ask a PC if it is on and knows this client. An empty `host` means the saved one. */
+  probeHost(profileId: string, host: string, signal: AbortSignal): Promise<HostStatusView>;
+  pairingStatus(profileId: string, signal: AbortSignal): Promise<PairingState>;
+  cancelPairing(profileId: string, signal: AbortSignal): Promise<void>;
+  /** Make the folder Orivo keeps for this profile's games and allow it. No picker. */
+  prepareLibrary(profileId: string, signal: AbortSignal): Promise<RunnerProfileView>;
   /**
    * Fill in artwork for the cards an import of this profile created. Answers
    * how many were filled, so a run that found nothing costs no repaint.
@@ -169,6 +220,13 @@ export interface RunnerManagerController {
   beginPairing(profileId: string): Promise<GameStreamPairing>;
   /** The streaming clients Orivo can see, so a profile can skip the file picker. */
   streamClients(): DetectedClientView[];
+  /** Look again, after the user installed one. */
+  refreshStreamClients(): Promise<DetectedClientView[]>;
+  createStreamProfile(clientId?: string): Promise<RunnerProfileView>;
+  probeHost(profileId: string, host: string): Promise<HostStatusView>;
+  pairingStatus(profileId: string): Promise<PairingState>;
+  cancelPairing(profileId: string): Promise<void>;
+  prepareLibrary(profileId: string): Promise<RunnerProfileView>;
   deleteProfile(profileId: string): Promise<boolean>;
   grantDirectory(profileId: string, slot?: string): Promise<RunnerProfileView>;
   revokeDirectory(profileId: string, directoryId: string): Promise<RunnerProfileView>;
@@ -183,7 +241,7 @@ function isTauriRuntime(): boolean {
 }
 
 function assertActive(signal: AbortSignal): void {
-  if (signal.aborted) throw new DOMException("La requête a été annulée.", "AbortError");
+  if (signal.aborted) throw new DOMException("The request was cancelled.", "AbortError");
 }
 
 export function runnerErrorMessage(error: unknown): string {
@@ -226,6 +284,29 @@ export function readPairing(value: unknown): GameStreamPairing {
   return { state: "started", host, pin };
 }
 
+export function readHostStatus(value: unknown): HostStatusView {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  if (typeof raw.state !== "string" || !HOST_STATES.has(raw.state)) {
+    throw new Error("Orivo could not check your PC. Try again.");
+  }
+  return {
+    state: raw.state as HostState,
+    host: typeof raw.host === "string" ? raw.host : "",
+    games:
+      typeof raw.games === "number" && Number.isFinite(raw.games) && raw.games >= 0
+        ? Math.floor(raw.games)
+        : 0,
+  };
+}
+
+export function readPairingState(value: unknown): PairingState {
+  const state = (value as { state?: unknown } | null)?.state;
+  if (typeof state !== "string" || !PAIRING_STATES.has(state)) {
+    throw new Error("Orivo could not check the pairing. Try again.");
+  }
+  return state as PairingState;
+}
+
 function readDetectedClients(value: unknown): DetectedClientView[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry) => {
@@ -253,6 +334,9 @@ function readProfile(value: unknown): RunnerProfileView[] {
         typeof raw.statusMessage === "string" && raw.statusMessage ? raw.statusMessage : null,
       enabled: raw.enabled !== false,
       applicationLabel: typeof raw.applicationLabel === "string" ? raw.applicationLabel : "",
+      // Only an explicit "no" reads as gone: an older host that does not say
+      // is not evidence the application is missing.
+      applicationAvailable: raw.applicationAvailable !== false,
       // A mode this build does not implement reads as the default one: a
       // profile is then shown as the ordinary kind it behaves like, rather
       // than as a shape the panel has no control for.
@@ -297,17 +381,17 @@ export function readInstalledRunners(value: unknown): InstalledRunnerView[] {
 
 function readOneProfile(value: unknown): RunnerProfileView {
   const [profile] = readProfile(value);
-  if (!profile) throw new Error("Orivo n'a pas reconnu la réponse pour ce profil.");
+  if (!profile) throw new Error("Orivo did not understand the answer for this profile.");
   return profile;
 }
 
 function readImportJob(value: unknown): RunnerImportJobView {
   if (!value || typeof value !== "object") {
-    throw new Error("Orivo n'a pas reconnu la réponse pour cet import.");
+    throw new Error("Orivo did not understand the answer for this import.");
   }
   const raw = value as Partial<RunnerImportJobView>;
   if (typeof raw.jobId !== "string" || !raw.jobId || typeof raw.profileId !== "string") {
-    throw new Error("Orivo n'a pas reconnu la réponse pour cet import.");
+    throw new Error("Orivo did not understand the answer for this import.");
   }
   const count = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : 0);
   return {
@@ -376,6 +460,36 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
       if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
       assertActive(signal);
       return readPairing(await invoke("begin_gamestream_pairing", { profileId }));
+    },
+
+    async createStreamProfile(clientId, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readOneProfile(await invoke("create_gamestream_profile", { clientId }));
+    },
+
+    async probeHost(profileId, host, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readHostStatus(await invoke("probe_gamestream_host", { profileId, host }));
+    },
+
+    async pairingStatus(profileId, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readPairingState(await invoke("gamestream_pairing_status", { profileId }));
+    },
+
+    async cancelPairing(profileId, signal) {
+      if (!isTauriRuntime()) return;
+      assertActive(signal);
+      await invoke("cancel_gamestream_pairing", { profileId });
+    },
+
+    async prepareLibrary(profileId, signal) {
+      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      assertActive(signal);
+      return readOneProfile(await invoke("prepare_gamestream_library", { profileId }));
     },
 
     async fetchProfileArtwork(profileId, signal) {
@@ -665,6 +779,40 @@ export function createRunnerManagerController(client: RunnerManagerClient): Runn
       // Nothing to reload: pairing changes no catalog state. The host state it
       // does change lives on the other machine.
       return client.beginPairing(profileId, lifetime.signal);
+    },
+
+    async refreshStreamClients() {
+      const found = await client.findStreamClients(lifetime.signal).catch(() => []);
+      if (disposed) return [];
+      streamClients = found;
+      notify();
+      return found;
+    },
+
+    async createStreamProfile(clientId) {
+      const created = await client.createStreamProfile(clientId ?? null, lifetime.signal);
+      if (!disposed) await refresh();
+      return created;
+    },
+
+    async probeHost(profileId, host) {
+      // Asking changes nothing the panel shows: a PC that answered is saved by
+      // the caller, which is what decides to.
+      return client.probeHost(profileId, host, lifetime.signal);
+    },
+
+    async pairingStatus(profileId) {
+      return client.pairingStatus(profileId, lifetime.signal);
+    },
+
+    async cancelPairing(profileId) {
+      await client.cancelPairing(profileId, lifetime.signal).catch(() => {});
+    },
+
+    async prepareLibrary(profileId) {
+      const prepared = await client.prepareLibrary(profileId, lifetime.signal);
+      if (!disposed) await refresh();
+      return prepared;
     },
 
     async setLaunchMode(profileId, launchMode) {

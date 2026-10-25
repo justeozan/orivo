@@ -1618,7 +1618,7 @@ pub async fn create_gamestream_profile(
         let application = match client_id {
             Some(id) => crate::gamestream::client_for_id(&id)
                 .ok_or_else(|| "That application is no longer available.".to_string())?,
-            None => pick_application()?,
+            None => pick_stream_client()?,
         };
         service
             .create_stream_profile(&application)
@@ -1793,6 +1793,22 @@ fn pick_application() -> Result<PathBuf, String> {
 #[cfg(mobile)]
 fn pick_application() -> Result<PathBuf, String> {
     Err("Third-party runners cannot be configured on this device yet.".into())
+}
+
+/// The same picker, worded for someone setting up game streaming rather than an
+/// emulator. The refusal text is matched by the setup (`PICKER_CANCELLED` in
+/// `gamestream-setup.ts`) so closing the dialog is silent.
+#[cfg(desktop)]
+fn pick_stream_client() -> Result<PathBuf, String> {
+    rfd::FileDialog::new()
+        .set_title("Choose Moonlight")
+        .pick_file()
+        .ok_or_else(|| "No app was chosen.".to_string())
+}
+
+#[cfg(mobile)]
+fn pick_stream_client() -> Result<PathBuf, String> {
+    Err("Game streaming cannot be set up on this device yet.".into())
 }
 
 #[cfg(desktop)]
