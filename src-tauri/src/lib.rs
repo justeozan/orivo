@@ -918,10 +918,18 @@ pub fn run() {
             // on the next turn of the main queue, after this, and moved the
             // screen-sized window 12 points left of the display.
             #[cfg(target_os = "macos")]
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL)
-                && let Err(error) = window.set_simple_fullscreen(true)
-            {
-                eprintln!("[macos] could not cover the screen: {error}");
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                // A borderless window still gets macOS's window shadow, and
+                // with it the one-point light rim it draws around every
+                // window — on a window that covers the screen, a white hairline
+                // along the display's edges. Nothing sits behind Orivo to cast
+                // a shadow on, so there is nothing to lose.
+                if let Err(error) = window.set_shadow(false) {
+                    eprintln!("[macos] could not drop the window rim: {error}");
+                }
+                if let Err(error) = window.set_simple_fullscreen(true) {
+                    eprintln!("[macos] could not cover the screen: {error}");
+                }
             }
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
