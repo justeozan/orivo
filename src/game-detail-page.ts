@@ -407,6 +407,11 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
 
 type FocusableElement = HTMLElement & { dataset: DOMStringMap };
 
+/** The line an empty card shows in place of its content. */
+function emptyNote(text: string): HTMLElement {
+  return element("p", "gd-panel__empty", text);
+}
+
 /**
  * Whether focus arrived from the keyboard or a pad rather than a pointer.
  * Spatial navigation marks what it reaches with `data-nav-focus`; otherwise
@@ -2389,6 +2394,8 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
         list.append(chip);
       }
       section.append(list);
+    } else if (!progress) {
+      section.append(emptyNote("No achievements to show for this game."));
     }
     return section;
   };
@@ -2422,7 +2429,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       more.setAttribute("aria-label", `${friends.length - 4} more friends`);
       list.append(more);
     }
-    section.append(list);
+    section.append(friends.length > 0 ? list : emptyNote("None of your friends play this yet."));
     return section;
   };
 
@@ -2455,7 +2462,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (relative) item.append(element("p", "gd-activity__time", relative));
       list.append(item);
     }
-    section.append(list);
+    section.append(
+      list.childElementCount > 0 ? list : emptyNote("No recent activity."),
+    );
     return section;
   };
 
@@ -2492,7 +2501,9 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const list = element("ul", "gd-related__list");
     for (const game of detail.relatedGames.slice(0, 8))
       list.append(renderRelatedCard(game));
-    section.append(list);
+    section.append(
+      list.childElementCount > 0 ? list : emptyNote("No related games yet."),
+    );
     return section;
   };
 
@@ -2515,15 +2526,14 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       facts.append(renderFeatures(detail));
     if (facts.childElementCount > 0) body.append(facts);
     const trophies = element("div", "gd-infocard gd-infocard--achievements");
-    if (shouldRenderSection(detail, "achievements"))
-      trophies.append(renderAchievements(detail));
+    // The social cards always stand, empty or not: the page has the same
+    // shape for every game, and an empty card says "nothing yet" where a
+    // missing one read as a layout that failed to load.
+    trophies.append(renderAchievements(detail));
     if (trophies.childElementCount > 0) body.append(trophies);
-    if (shouldRenderSection(detail, "friends"))
-      body.append(renderFriends(detail));
-    if (shouldRenderSection(detail, "activity"))
-      body.append(renderActivity(detail));
-    if (shouldRenderSection(detail, "related"))
-      body.append(renderRelated(detail));
+    body.append(renderFriends(detail));
+    body.append(renderActivity(detail));
+    body.append(renderRelated(detail));
     // Each panel scrolls on its own (`.gd-body > *`). Their classes tell them
     // apart, which stays true when a neighbouring panel appears or goes.
     for (const panel of body.children) {
@@ -2647,6 +2657,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     pageRoot.replaceChildren(fragment);
     writeScrollTop(scrollTop);
     writeInnerScrolls(innerScrolls);
+    // The activity feed alone fades at its foot, and only once it is longer
+    // than its card (game-detail-page.css `.gd-panel--overflowing`).
+    for (const panel of pageRoot.querySelectorAll<HTMLElement>(".gd-body > .gd-activity")) {
+      panel.classList.toggle("gd-panel--overflowing", panel.scrollHeight > panel.clientHeight + 1);
+    }
     focusByKey(restoreFocusKey);
   };
 

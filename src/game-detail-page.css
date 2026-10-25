@@ -1845,9 +1845,15 @@
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+/* Only the activity feed fades at its foot, and only when it runs longer than
+   its card (app sets the class after measuring): a card that hugs its content
+   has no empty space down there, so a fade would eat its last line. */
+.gd-body > .gd-panel--overflowing {
   -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
   mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
-  scrollbar-width: none;
 }
 
 .gd-body > *::-webkit-scrollbar {
@@ -1926,7 +1932,6 @@
   border: 1px solid var(--gd-line);
   border-radius: 20px;
   background: var(--gd-card);
-  box-shadow: var(--gd-elev-card);
 }
 
 /* The hairline dividing Game info from Features inside the shared card. */
@@ -1941,6 +1946,14 @@
   min-width: 0;
   flex-direction: column;
   gap: 18px;
+}
+
+/* An empty card's one line: quiet, where its content would start. */
+.gd-panel__empty {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .gd-info__value--unknown {

@@ -361,17 +361,18 @@ describe("game detail page social rendering", () => {
     ).toBeNull();
   });
 
-  it("omits the social row and its sections when the detail ships no social data", async () => {
+  it("shows the social cards empty when the detail ships no social data", async () => {
     const detail = createFallbackGameDetail(GAME_ID);
     detail.friends = [];
     detail.activity = [];
     detail.relatedGames = [];
+    detail.achievements = null;
 
     await mountWith(detail);
 
-    expect(container.querySelector(".gd-friends")).toBeNull();
-    expect(container.querySelector(".gd-activity")).toBeNull();
-    expect(container.querySelector(".gd-related")).toBeNull();
+    for (const card of [".gd-achievements", ".gd-friends", ".gd-activity", ".gd-related"]) {
+      expect(container.querySelector(`${card} .gd-panel__empty`), card).not.toBeNull();
+    }
   });
 });
 

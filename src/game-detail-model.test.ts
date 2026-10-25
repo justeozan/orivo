@@ -1768,12 +1768,17 @@ describe("game detail page lifecycle", () => {
     expect(openOffer).toHaveBeenCalledWith("offer_1", expect.anything());
   });
 
-  it("never renders empty friends or activity placeholders", async () => {
+  it("keeps the social cards in place, empty, when there is nothing to show", async () => {
     const { page, host } = mountPage(stubClient());
     await page.activate(activationFor(gameRoute).activation);
-    expect(host.querySelector(".gd-friends")).toBeNull();
-    expect(host.querySelector(".gd-activity")).toBeNull();
-    expect(host.querySelector(".gd-related")).toBeNull();
+    expect(host.querySelector(".gd-friends .gd-panel__empty")?.textContent).toBe(
+      "None of your friends play this yet.",
+    );
+    expect(host.querySelector(".gd-activity .gd-panel__empty")?.textContent).toBe(
+      "No recent activity.",
+    );
+    expect(host.querySelector(".gd-related .gd-panel__empty")).not.toBeNull();
+    expect(host.querySelectorAll(".gd-friends__item, .gd-activity__item")).toHaveLength(0);
   });
 
   it("renders a game with no media at all without breaking", async () => {
