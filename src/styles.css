@@ -3485,3 +3485,22 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .source-grid .source-account-row__mark { align-self: center; margin-inline: auto; place-items: center; justify-content: center; }
 .source-grid .source-account-row__mark .icon,
 .source-grid .source-account-row__mark img { display: block; margin: 0 auto; }
+
+/* The price-data-only stores below the accounts: the same cards, the state
+   where the others have their button. */
+.provider-status-list { grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); gap: 12px; margin-top: 12px; }
+.provider-status-row {
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 12px 14px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.025);
+  text-align: center;
+}
+.provider-status-row .source-account-row__mark { width: 40px; height: 40px; margin-inline: auto; }
+.provider-status-row .source-account-row__mark .icon,
+.provider-status-row .source-account-row__mark img { width: 34px; height: 34px; margin: 0 auto; }
+.provider-status-row strong { font-size: 13.5px; }
+.provider-status-row .provider-health { margin: auto 0 0; }
