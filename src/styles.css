@@ -2834,7 +2834,7 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 /* Two or three columns of stores, Steam among them. The lists inside are
    unwrapped so their rows land in the same grid; sentences that are not a
    row (hints, the shared-sign-in note) take the whole width. */
-.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); column-gap: 32px; align-items: start; }
+.source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 170px), 1fr)); gap: 12px; align-items: stretch; padding-top: 4px; }
 .source-grid .source-accounts-body,
 .source-grid .source-account-list { display: contents; }
 .source-grid .source-accounts-body > :not(.source-account-list),
@@ -3443,3 +3443,29 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
 .update-status__highlights li { position: relative; padding-left: 16px; color: rgba(244,242,248,.82); font-size: 13px; line-height: 1.4; }
 .update-status__highlights li::before { position: absolute; top: .55em; left: 2px; width: 5px; height: 5px; border-radius: 50%; background: #b9a8ff; content: ""; }
+
+/* Each store is a small card read top to bottom: its logo, its name, then
+   the one decision (Connect, or the account that turns into Disconnect). The
+   sync glyph sits in the card's corner so the stack stays three things. */
+.source-grid .source-account-row,
+.source-grid .steam-source-block .source-account-row {
+  position: relative;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  height: 100%;
+  padding: 16px 12px 14px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 14px;
+  background: rgba(255,255,255,.025);
+  text-align: center;
+}
+.source-grid .source-account-row__mark { width: 40px; height: 40px; }
+.source-grid .source-account-row__mark .icon { width: 34px; height: 34px; }
+.source-grid .source-account-row__logo { width: 34px; height: 34px; }
+.source-grid .source-account-row__name { max-width: 100%; font-size: 13.5px; }
+.source-grid .source-account-row__actions { flex-wrap: wrap; justify-content: center; margin: auto 0 0; }
+.source-grid .source-account-row__sync { position: absolute; top: 8px; right: 8px; }
+.source-grid .source-account-row__confirm { text-align: center; }
+.source-grid .source-account-entry { display: grid; gap: 8px; }
