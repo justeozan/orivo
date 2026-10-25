@@ -460,6 +460,9 @@ const SOURCE_ACCOUNT_LOGIN_FAILED_EVENT = "source-account-login-failed";
 const SOURCE_LIBRARY_SYNCED_EVENT = "source-library-synced";
 const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 
+/** How far a library card leans toward the pointer at its edges, each way. */
+const CARD_TILT_DEGREES = 14;
+
 /** What the hero's main button will do, and so how it is dressed. */
 type PlayButtonKind = "play" | "stream" | "emulate" | "install" | "downloading" | "unavailable" | "blocked";
 const PLAY_BUTTON_LABELS: Record<PlayButtonKind, string> = {
@@ -1521,6 +1524,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // playtime stamp. Everything about the game is in the hero above the rail,
     // and the title lives in the aria-label.
     card.append(media);
+    // The tilt follows a mouse or a pen, never a touch (a finger is on the
+    // card, there is nothing to look at it from) and never with motion reduced.
+    let tiltFrame = 0;
+    card.addEventListener("pointermove", (event) => {
+      if (event.pointerType === "touch" || prefersReducedMotion()) return;
+      const { clientX, clientY } = event;
+      cancelAnimationFrame(tiltFrame);
+      tiltFrame = requestAnimationFrame(() => {
+        const box = card.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0) return;
+        const x = Math.min(1, Math.max(0, (clientX - box.left) / box.width));
+        const y = Math.min(1, Math.max(0, (clientY - box.top) / box.height));
+        card.classList.add("is-tilting");
+        card.style.setProperty("--tilt-x", `${((0.5 - y) * CARD_TILT_DEGREES).toFixed(2)}deg`);
+        card.style.setProperty("--tilt-y", `${((x - 0.5) * CARD_TILT_DEGREES).toFixed(2)}deg`);
+        card.style.setProperty("--glare-x", `${(x * 100).toFixed(1)}%`);
+        card.style.setProperty("--glare-y", `${(y * 100).toFixed(1)}%`);
+      });
+    });
+    card.addEventListener("pointerleave", () => {
+      cancelAnimationFrame(tiltFrame);
+      card.classList.remove("is-tilting");
+      card.style.removeProperty("--tilt-x");
+      card.style.removeProperty("--tilt-y");
+    });
     card.addEventListener("focus", () => {
       const id = card.dataset.gameId;
       if (id && currentRoute.page === "library") selectGame(id, false);

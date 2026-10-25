@@ -1451,10 +1451,35 @@ button { border: 0; cursor: pointer; }
     box-shadow 280ms ease,
     transform 260ms cubic-bezier(.2, .8, .2, 1);
 }
-.game-card:hover {
-  border-color: rgba(255,255,255,.42);
-  transform: translateY(-2px);
+/* Under the pointer the card tilts toward it like a card held in the hand
+   (app.ts sets `--tilt-x/--tilt-y` and the glare's position), and a light
+   catches its face where the pointer is. The follow is quick while the
+   pointer moves and the return is slow, so leaving reads as letting go. */
+.game-card {
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
 }
+.game-card:hover { border-color: rgba(255,255,255,.42); }
+.game-card.is-tilting {
+  transition:
+    flex-basis 560ms cubic-bezier(.22, .74, .2, 1),
+    border-color 220ms ease,
+    box-shadow 280ms ease,
+    transform 90ms linear;
+}
+.card-media::after {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  background: radial-gradient(circle at var(--glare-x, 50%) var(--glare-y, 50%), rgba(255,255,255,.26) 0%, rgba(255,255,255,.08) 28%, transparent 60%);
+  content: "";
+  mix-blend-mode: soft-light;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 300ms ease;
+}
+.game-card.is-tilting .card-media::after { opacity: 1; }
 
 /*
  * Selected-card focus stack:
@@ -1588,7 +1613,7 @@ button { border: 0; cursor: pointer; }
 .game-card.is-art-pending .card-fallback__status { display: block; }
 .game-card.is-art-missing:not(:has(.card-art--landscape.is-ready)) .card-fallback,
 .game-card.is-art-missing:not(.is-selected) .card-fallback { display: grid; }
-.game-card:hover .card-art { transform: scale(1.035); }
+
 
 @keyframes cover-glint-orbit { to { --cover-glint-angle: 360deg; } }
 @keyframes hero-title-arrive { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
