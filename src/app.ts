@@ -3146,7 +3146,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const wineRow = refs.pluginsCatalogPanel
       .querySelector<HTMLElement>("[data-plugin-open='wine']")
       ?.closest<HTMLElement>(".plugin-row");
-    if (wineRow) wineRow.hidden = !platformFeatures.localRunners;
+    // Wine is the desktop's built-in runner; a phone has Winlator instead.
+    if (wineRow) {
+      wineRow.hidden =
+        !platformFeatures.localRunners ||
+        isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
+    }
     // The runners panel is not a plugin's detail view: it belongs to the
     // section by name, so it sits inline with the browser and is replaced by
     // whichever detail view opens, exactly like the browser itself.
@@ -6697,6 +6702,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       openPluginDetail(pluginId);
       return;
     }
+    if (pluginId === "winlator") {
+      // Winlator's setup is its export folder, which lives with the libraries.
+      navigate({ page: "settings", section: "libraries", attachGameId: null });
+      return;
+    }
     if (target?.closest("[data-plugin-back]")) {
       state.pluginView = "list";
       renderPluginList();
@@ -8345,7 +8355,7 @@ function shell(): string {
                         <strong>Wine</strong>
                         <small>Wine-Staging runner and isolated profiles</small>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">Installed</span>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
                     </div>
                     <div class="settings-row plugin-row">
@@ -8354,9 +8364,24 @@ function shell(): string {
                         <strong>Wallpaper Searcher</strong>
                         <small>Finds wallpaper artwork from IGDB and Google Images</small>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">Installed</span>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
                       <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
                     </div>
+                    ${
+                      isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
+                        ? `<!-- On Android, Winlator is the runner Orivo ships with: it
+                             is set up where its games come from, under Libraries. -->
+                    <div class="settings-row plugin-row">
+                      <span class="plugin-tile" aria-hidden="true">${icon("android")}</span>
+                      <div class="settings-row__copy">
+                        <strong>Winlator</strong>
+                        <small>Runs Windows games on this phone</small>
+                      </div>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="winlator" aria-label="Set up Winlator">${icon("chevron-right")}</button>
+                    </div>`
+                        : ""
+                    }
                     <!-- Third-party runners has no row here on purpose: it is
                          not a plugin but part of Orivo itself, and the section
                          it belongs to is already named after it — the panel
