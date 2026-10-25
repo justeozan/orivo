@@ -396,6 +396,20 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
 
 type FocusableElement = HTMLElement & { dataset: DOMStringMap };
 
+/**
+ * Whether focus arrived from the keyboard or a pad rather than a pointer.
+ * Spatial navigation marks what it reaches with `data-nav-focus`; otherwise
+ * the browser's own `:focus-visible` heuristic answers.
+ */
+function isKeyboardFocus(node: HTMLElement): boolean {
+  if (node.hasAttribute("data-nav-focus")) return true;
+  try {
+    return node.matches(":focus-visible");
+  } catch {
+    return false;
+  }
+}
+
 function element<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   className: string,
@@ -1692,6 +1706,22 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       if (!storeSelection || storeSelection.kind !== "movie") stopHeroPlayer();
       else if (heroPlayer) stopHeroPlayer();
       render();
+    });
+    // Walking the rail with the arrows or a pad shows each tile as it is
+    // reached, like a store's media strip: no confirm press. A mouse focus is
+    // left to the click above, and reaching the tile already shown does
+    // nothing — the repaint puts focus back on it, which must not loop.
+    tile.addEventListener("focus", () => {
+      // Spatial navigation marks the tile right after focusing it, so the
+      // question is asked once the move that focused it has finished.
+      queueMicrotask(() => {
+        if (!tile.isConnected || document.activeElement !== tile) return;
+        if (!isKeyboardFocus(tile)) return;
+        if (storeSelection?.kind === item.kind && storeSelection.index === item.index) return;
+        stopHeroPlayer();
+        storeSelection = { kind: item.kind, index: item.index };
+        render();
+      });
     });
     return tile;
   };

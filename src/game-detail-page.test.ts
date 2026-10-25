@@ -1147,6 +1147,22 @@ describe("game detail page store media", () => {
     expect(video?.muted).toBe(false);
   });
 
+  it("shows each tile as the arrows reach it, without a confirm press", async () => {
+    await mountWith(createFallbackGameDetail(GAME_ID), {
+      getStoreMedia: async () => storeMedia,
+    });
+
+    const shot = tiles()[1]!;
+    shot.dataset.navFocus = "";
+    shot.focus();
+    await flush();
+
+    expect(container.querySelector(".gd-hero__video")).toBeNull();
+    expect(
+      container.querySelector<HTMLImageElement>(".gd-hero__image")?.getAttribute("src"),
+    ).toBe("/store/s1.jpg");
+  });
+
   it("shows a clicked screenshot full size in the hero", async () => {
     await mountWith(createFallbackGameDetail(GAME_ID), {
       getStoreMedia: async () => storeMedia,
