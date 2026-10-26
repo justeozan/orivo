@@ -33,6 +33,17 @@ pub enum StartPage {
     Store,
 }
 
+/// The interface language; `System` follows the OS. Mirrors `LANGUAGES` in
+/// `src/i18n.ts` — a language added there needs its variant here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    #[default]
+    System,
+    En,
+    Fr,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StoreRegion {
@@ -103,6 +114,8 @@ pub struct PreferencesDto {
     /// with sound unless this is set.
     #[serde(default)]
     pub trailer_muted: bool,
+    #[serde(default)]
+    pub language: Language,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -118,6 +131,7 @@ pub struct PreferencesUpdate {
     pub show_editorial_games: Option<bool>,
     pub trailer_autoplay_off: Option<bool>,
     pub trailer_muted: Option<bool>,
+    pub language: Option<Language>,
     #[serde(default)]
     pub reset: bool,
 }
@@ -199,6 +213,9 @@ impl PreferencesService {
             }
             if let Some(muted) = update.trailer_muted {
                 preferences.trailer_muted = muted;
+            }
+            if let Some(language) = update.language {
+                preferences.language = language;
             }
         }
         self.save_atomically(&preferences)?;
@@ -396,11 +413,13 @@ mod tests {
                 show_editorial_games: Some(true),
                 trailer_autoplay_off: Some(true),
                 trailer_muted: Some(true),
+                language: Some(Language::Fr),
                 reset: false,
             })
             .unwrap();
         assert_eq!(dirs.service().load().unwrap(), saved);
         assert_eq!(saved.start_page, StartPage::Store);
+        assert_eq!(saved.language, Language::Fr);
         assert_eq!(saved.on_game_start, GameStartAction::Stay);
         assert!(saved.show_editorial_games);
     }

@@ -14,6 +14,7 @@
  * only the references that come back from this list.
  */
 
+import { t } from "./i18n";
 import {
   type SourceReviewEntry,
   type TitleCollision,
@@ -132,9 +133,9 @@ export function winlatorShortcutsToOffer(folder: WinlatorExportFolder): Winlator
  */
 export function winlatorReviewPrompt(shortcuts: WinlatorShortcut[]): string {
   if (shortcuts.length === 1) {
-    return `Add “${shortcuts[0]!.title}” to your library?`;
+    return t("misc.winlator.prompt.one", { title: shortcuts[0]!.title });
   }
-  return `Add these ${shortcuts.length} Winlator games to your library?`;
+  return t("misc.winlator.prompt.other", { count: shortcuts.length });
 }
 
 /**
@@ -165,9 +166,9 @@ export function winlatorWaitingToast(payload: unknown): string | null {
   const changed = count(record.changed);
   if (pending === 0 && changed === 0) return null;
   const parts: string[] = [];
-  if (pending === 1) parts.push("one new shortcut");
-  else if (pending > 1) parts.push(`${pending} new shortcuts`);
-  if (changed === 1) parts.push("one that changed");
-  else if (changed > 1) parts.push(`${changed} that changed`);
-  return `Winlator has ${parts.join(" and ")}. Open Sources to review them.`;
+  if (pending === 1) parts.push(t("misc.winlator.pending.one"));
+  else if (pending > 1) parts.push(t("misc.winlator.pending.other", { count: pending }));
+  if (changed === 1) parts.push(t("misc.winlator.changed.one"));
+  else if (changed > 1) parts.push(t("misc.winlator.changed.other", { count: changed }));
+  return t("misc.winlator.toast", { parts: parts.join(t("misc.winlator.and")) });
 }

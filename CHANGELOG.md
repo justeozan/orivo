@@ -4,6 +4,7 @@
 
 ### Added
 
+- Orivo speaks English and French. Settings › General › Language follows the system or holds the one you pick; every screen is translated, and the screens that were still in French now have their English too.
 - Guided game streaming setup. Settings › Plugins › Game streaming finds Moonlight, connects to your gaming PC, shows the pairing PIN with a button to Sunshine's PIN page, notices by itself when pairing is done, and imports your games into a folder Orivo manages — no folder to pick, no separate host card.
 - Trailers and screenshots on a game's page. The media rail and the slideshow show the game's Steam trailers and screenshots instead of your saved wallpapers; the first trailer plays on its own, with sound, and both are settings (Appearance › Game pages). The arrows and a pad walk the rail, showing each tile as it is reached.
 - Artwork is repaired at launch. Missing covers, backgrounds and logos — including pictures whose file was removed from the cache — are looked for a few seconds after Orivo opens, with a thin progress line along the top of the window; a game with nothing to find is not asked again for three days.

@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { t } from "./i18n";
 
 export interface QuikyTitle {
   slug: string;
@@ -109,7 +110,7 @@ function assertActive(signal: AbortSignal): void {
 export function quikyErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "L'installation n'a pas abouti.";
+  return t("runners.quiky.error");
 }
 
 /**
@@ -256,19 +257,19 @@ export function quikyPercent(progress: QuikyProgress | null): number {
 }
 
 export function formatQuikyLabel(progress: QuikyProgress | null, title: QuikyTitle): string {
-  const idle = title.installed ? "Installé" : "Installer";
+  const idle = title.installed ? t("runners.quiky.installed") : t("runners.quiky.install");
   if (!progress) return idle;
   switch (progress.phase) {
     case "queued":
-      return "En attente…";
+      return t("runners.quiky.queued");
     case "downloading":
-      return `Téléchargement ${quikyPercent(progress)}%`;
+      return t("runners.quiky.downloading", { percent: quikyPercent(progress) });
     case "extracting":
-      return `Extraction ${quikyPercent(progress)}%`;
+      return t("runners.quiky.extracting", { percent: quikyPercent(progress) });
     case "installed":
-      return "Installé";
+      return t("runners.quiky.installed");
     case "failed":
-      return "Réessayer";
+      return t("runners.quiky.retry");
     case "cancelled":
       // A cancelled install left nothing behind, so the offer is the first one.
       return idle;

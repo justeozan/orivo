@@ -13,6 +13,7 @@
    --------------------------------------------------------------------------- */
 
 import { invoke } from "@tauri-apps/api/core";
+import { t, type MessageKey } from "./i18n";
 
 export interface PluginHealthView {
   pluginId: string;
@@ -54,7 +55,7 @@ function assertActive(signal: AbortSignal): void {
 export function pluginHealthErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "Orivo could not read this plugin's health.";
+  return t("runners.health.readError");
 }
 
 function readHealthView(value: unknown): PluginHealthView[] {
@@ -119,12 +120,12 @@ export function createDefaultPluginHealthClient(): PluginHealthClient {
 
     async resume(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Resuming a plugin needs the Orivo desktop app.");
+        throw new Error(t("runners.health.resumeDesktopOnly"));
       }
       assertActive(signal);
       const view = await invoke<unknown>("resume_plugin", { pluginId });
       const [health] = readHealthView(view);
-      if (!health) throw new Error("Orivo could not resume this plugin.");
+      if (!health) throw new Error(t("runners.health.resumeError"));
       return health;
     },
 
@@ -155,36 +156,43 @@ export function createDefaultPluginHealthClient(): PluginHealthClient {
  * dropped, because a plugin's journal outliving this table's memory is a
  * certainty, not an edge case.
  */
+/** A phrase with the host's detail after it, or ending on its own. */
+function withDetail(phrase: MessageKey, detail: string): string {
+  return detail
+    ? t("runners.health.withDetail", { phrase: t(phrase), detail })
+    : t("runners.health.noDetail", { phrase: t(phrase) });
+}
+
 const DECISION_PHRASES: Readonly<Record<string, (detail: string) => string>> = {
-  "job-panicked": () => "A background job crashed unexpectedly. Orivo kept running.",
-  "job-failed": (detail) => `A background job failed${detail ? `: ${detail}` : "."}`,
-  cancelled: () => "A queued request was cancelled before it ran.",
-  degraded: () => "Orivo paused this plugin after repeated failures.",
-  resumed: () => "This plugin was resumed.",
-  "submit-refused": (detail) => `Orivo could not queue a request${detail ? `: ${detail}` : "."}`,
-  "host-call-budget": () =>
-    "This plugin made too many requests to Orivo in one call and was cut off.",
-  "capability-refused": (detail) =>
-    `This plugin tried something it has no permission for${detail ? `: ${detail}` : "."}`,
-  "scope-refused": () => "This plugin asked for a folder it was not granted.",
-  "files-truncated": (detail) => `A folder listing was shortened${detail ? `: ${detail}` : "."}`,
-  "identity-mismatch": () => "This plugin's component does not match what it announced.",
+  "job-panicked": () => t("runners.health.jobPanicked"),
+  "job-failed": (detail) => withDetail("runners.health.jobFailed", detail),
+  cancelled: () => t("runners.health.cancelled"),
+  degraded: () => t("runners.health.degraded"),
+  resumed: () => t("runners.health.resumed"),
+  "submit-refused": (detail) => withDetail("runners.health.submitRefused", detail),
+  "host-call-budget": () => t("runners.health.hostCallBudget"),
+  "capability-refused": (detail) => withDetail("runners.health.capabilityRefused", detail),
+  "scope-refused": () => t("runners.health.scopeRefused"),
+  "files-truncated": (detail) => withDetail("runners.health.filesTruncated", detail),
+  "identity-mismatch": () => t("runners.health.identityMismatch"),
   // Neutral on purpose: a plugin that simply has no use for a capability logs
   // this on every call it makes, which is expected behaviour, not wrongdoing —
   // "asked for" would accuse a plugin that is doing exactly what it should.
-  "capability-unlinked": (detail) => detail || "A capability this plugin's manifest does not declare is unavailable to it.",
-  trap: (detail) => `This plugin's request failed${detail ? `: ${detail}` : "."}`,
-  "get-identity": (detail) => `Reading this plugin's identity failed${detail ? `: ${detail}` : "."}`,
-  "health-check": (detail) => `The last health check failed${detail ? `: ${detail}` : "."}`,
-  "validate-profile": (detail) => `Checking a runner profile failed${detail ? `: ${detail}` : "."}`,
-  "discover-page": (detail) => `Looking for games failed${detail ? `: ${detail}` : "."}`,
-  "prepare-launch": (detail) => `Preparing a launch failed${detail ? `: ${detail}` : "."}`,
+  "capability-unlinked": (detail) => detail || t("runners.health.capabilityUnlinked"),
+  trap: (detail) => withDetail("runners.health.trap", detail),
+  "get-identity": (detail) => withDetail("runners.health.getIdentity", detail),
+  "health-check": (detail) => withDetail("runners.health.healthCheck", detail),
+  "validate-profile": (detail) => withDetail("runners.health.validateProfile", detail),
+  "discover-page": (detail) => withDetail("runners.health.discoverPage", detail),
+  "prepare-launch": (detail) => withDetail("runners.health.prepareLaunch", detail),
 };
 
 function fallbackPhrase(decision: string, detail: string): string {
   const words = decision.replace(/-/g, " ");
   const sentence = words.charAt(0).toUpperCase() + words.slice(1);
-  return detail ? `${sentence}: ${detail}` : `${sentence}.`;
+  return detail
+    ? t("runners.health.withDetail", { phrase: sentence, detail })
+    : t("runners.health.noDetail", { phrase: sentence });
 }
 
 /** A readable line for one journal entry, with its repeat count if it repeated. */
@@ -198,10 +206,18 @@ export function pluginHealthSummary(health: PluginHealthView | null): string {
   if (!health) return "";
   if (health.degraded) {
     return health.consecutiveFailures === 1
-      ? "Degraded · 1 failure"
-      : `Degraded · ${health.consecutiveFailures} failures`;
+      ? t("runners.health.degradedOne")
+      : t("runners.health.degradedMany", { count: health.consecutiveFailures });
   }
-  if (health.running > 0) return health.running === 1 ? "Running 1 job" : `Running ${health.running} jobs`;
-  if (health.queued > 0) return health.queued === 1 ? "1 job queued" : `${health.queued} jobs queued`;
+  if (health.running > 0) {
+    return health.running === 1
+      ? t("runners.health.runningOne")
+      : t("runners.health.runningMany", { count: health.running });
+  }
+  if (health.queued > 0) {
+    return health.queued === 1
+      ? t("runners.health.queuedOne")
+      : t("runners.health.queuedMany", { count: health.queued });
+  }
   return "";
 }

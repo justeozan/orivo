@@ -11,6 +11,7 @@
  * Everything here is pure: the page owns the DOM, this owns the answers.
  */
 
+import { t } from "./i18n";
 import type { LibraryGame } from "./mock-library";
 import { sourceBadge } from "./source-model";
 
@@ -24,17 +25,17 @@ export interface BrowseSegment {
 
 /** The cycle order of the single mode button, and its wording. */
 export const BROWSE_MODES: ReadonlyArray<{ mode: BrowseMode; label: string }> = [
-  { mode: "activity", label: "Activity" },
-  { mode: "genre", label: "Genre" },
-  { mode: "source", label: "Source" },
-  { mode: "platform", label: "Platform" },
+  { mode: "activity", label: t("store.browse.activity") },
+  { mode: "genre", label: t("store.browse.genre") },
+  { mode: "source", label: t("store.browse.source") },
+  { mode: "platform", label: t("store.browse.platform") },
 ];
 
 /**
  * A mode that has nothing to divide the library by still needs one segment, or
  * the bar would read as broken. A library with no genres simply shows the lot.
  */
-export const ALL_GAMES_SEGMENT: BrowseSegment = { id: "all", label: "All Games" };
+export const ALL_GAMES_SEGMENT: BrowseSegment = { id: "all", label: t("store.browse.allGames") };
 
 /**
  * What the backend returns as a game's genre when no store published one.
@@ -54,7 +55,7 @@ export function knownGenre(genre: string | undefined): string {
 }
 
 export function browseModeLabel(mode: BrowseMode): string {
-  return BROWSE_MODES.find((entry) => entry.mode === mode)?.label ?? "Activity";
+  return BROWSE_MODES.find((entry) => entry.mode === mode)?.label ?? t("store.browse.activity");
 }
 
 export function nextBrowseMode(mode: BrowseMode): BrowseMode {
@@ -155,7 +156,7 @@ const PLATFORM_LABELS: Record<PlatformKey, string> = {
   gb: "Game Boy",
   gba: "Game Boy Advance",
   megadrive: "Mega Drive",
-  other: "Other",
+  other: t("store.browse.other"),
 };
 
 const isPlatformKey = (value: string): value is PlatformKey =>
@@ -184,7 +185,7 @@ function sourceOf(game: LibraryGame): BrowseSegment | null {
   if (game.runner) {
     // A third-party runner: its own name, as the profile the player set up
     // calls it, rather than lumping it in with what is local.
-    return { id: `runner:${game.runner}`, label: game.launchOptions?.[0]?.label || "Other" };
+    return { id: `runner:${game.runner}`, label: game.launchOptions?.[0]?.label || t("store.browse.other") };
   }
   const badge = sourceBadge(game.source);
   return badge && game.source ? { id: game.source, label: badge.label } : null;
@@ -250,30 +251,30 @@ interface ActivityShelf extends BrowseSegment {
 const ACTIVITY_SHELVES: readonly ActivityShelf[] = [
   {
     id: "recent",
-    label: "Recently Played",
+    label: t("store.browse.recent"),
     rank: (game, now) => -(lastPlayedTime(game.lastPlayedAt, now) ?? Number.NEGATIVE_INFINITY),
   },
   {
     id: "most-played",
-    label: "Most Played",
+    label: t("store.browse.mostPlayed"),
     rank: (game) => -game.playTimeSeconds,
   },
   {
     id: "play-next",
-    label: "Play Next",
+    label: t("store.browse.playNext"),
     keep: (game) => game.launchable && game.playTimeSeconds < STARTED_THRESHOLD_SECONDS,
     // The least-touched first: this shelf exists to surface what is waiting.
     rank: (game) => game.playTimeSeconds,
   },
   {
     id: "resume",
-    label: "Resume",
+    label: t("store.browse.resume"),
     keep: (game) => game.launchable && game.playTimeSeconds >= STARTED_THRESHOLD_SECONDS,
     rank: (game, now) => -(lastPlayedTime(game.lastPlayedAt, now) ?? Number.NEGATIVE_INFINITY),
   },
   {
     id: "never",
-    label: "Never Played",
+    label: t("store.browse.never"),
     keep: (game, now) => game.playTimeSeconds <= 0 && lastPlayedTime(game.lastPlayedAt, now) === null,
     rank: () => 0,
   },

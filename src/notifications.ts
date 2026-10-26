@@ -20,6 +20,7 @@
  * No DOM and no storage handle of its own: `app.ts` owns both.
  */
 import type { IconName } from "./icons";
+import { t } from "./i18n";
 
 export type NotificationId = "artwork-keys" | "store-prices";
 
@@ -59,12 +60,15 @@ export const NOTIFICATIONS: readonly NotificationDefinition[] = [
   {
     id: "artwork-keys",
     icon: "palette",
-    title: "Sharper artwork, with your own key",
-    body:
-      "Covers come from whatever each store publishes. SteamGridDB and IGDB return 4K key " +
-      "art and clean wordmarks — Orivo ships no key of its own, so add yours in " +
-      "Plugins › Wallpaper Searcher.",
-    actionLabel: "Open Wallpaper Searcher",
+    get title() {
+      return t("misc.notice.artworkKeys.title");
+    },
+    get body() {
+      return t("misc.notice.artworkKeys.body");
+    },
+    get actionLabel() {
+      return t("misc.notice.artworkKeys.action");
+    },
     target: "wallpaper-keys",
     delayMs: 2 * MINUTE,
     applies: (context) => context.hasGames && !context.hasArtworkKey,
@@ -72,12 +76,15 @@ export const NOTIFICATIONS: readonly NotificationDefinition[] = [
   {
     id: "store-prices",
     icon: "store",
-    title: "Where store prices come from",
-    body:
-      "Orivo only shows a price a store actually returned, and most feeds need an authorised " +
-      "key it does not ship. Libraries & Sources lists every provider and what each one can " +
-      "answer right now.",
-    actionLabel: "Open Libraries & Sources",
+    get title() {
+      return t("misc.notice.storePrices.title");
+    },
+    get body() {
+      return t("misc.notice.storePrices.body");
+    },
+    get actionLabel() {
+      return t("misc.notice.storePrices.action");
+    },
     target: "library-sources",
     delayMs: 5 * MINUTE,
     applies: (context) => !context.visitedLibrarySources,

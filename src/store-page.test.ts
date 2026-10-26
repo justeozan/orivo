@@ -476,7 +476,7 @@ describe("Store page offer facts", () => {
     // fabricated price line.
     expect(cardFor(mounted.container, "unpriced").querySelector(".store-card__price")).toBeNull();
     expect(await previewOfferLine(mounted.container, "unpriced")).toBe(
-      "Disponible sur Instant Gaming · tarif non vérifié",
+      "Available on Instant Gaming · price not verified",
     );
 
     const outdated = cardFor(mounted.container, "outdated");
@@ -484,13 +484,13 @@ describe("Store page offer facts", () => {
     // A reading older than a day is still shown, dated, so the shopper knows
     // how fresh it is instead of being told it is today's price.
     expect(await previewOfferLine(mounted.container, "outdated")).toMatch(
-      /^Dès .*19[.,]99.* sur Steam · relevé le .+$/,
+      /^From .*19[.,]99.* on Steam · read on .+$/,
     );
 
     const verified = cardFor(mounted.container, "verified");
     expect(verified.querySelector(".store-card__price")?.textContent).toMatch(/29[.,]99/);
     expect(await previewOfferLine(mounted.container, "verified")).toMatch(
-      /^Dès .*29[.,]99.* sur Steam · vérifié aujourd'hui$/,
+      /^From .*29[.,]99.* on Steam · verified today$/,
     );
   });
 

@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 import { formatDataSize } from "./settings-model";
 
 /**
@@ -244,66 +245,74 @@ export function describeUpdateState(state: UpdateState): UpdateDescription {
   switch (state.status) {
     case "checking":
       return {
-        label: "Checking for updates…",
-        detail: "Asking the Orivo release feed for a newer version.",
-        buttonLabel: "Checking…",
+        label: t("misc.update.checking.label"),
+        detail: t("misc.update.checking.detail"),
+        buttonLabel: t("misc.update.checking.button"),
         buttonDisabled: true,
       };
     case "available":
       return {
-        label: `Version ${state.availableVersion ?? "unknown"} is available`,
-        detail: "Orivo installs it and restarts once to finish.",
-        buttonLabel: "Download and install",
+        label: t("misc.update.available.label", {
+          version: state.availableVersion ?? t("misc.update.unknownVersion"),
+        }),
+        detail: t("misc.update.available.detail"),
+        buttonLabel: t("misc.update.available.button"),
         buttonDisabled: false,
         highlights: releaseHighlights(state.notes),
       };
     case "up-to-date":
       return {
-        label: "You're on the latest version.",
+        label: t("misc.update.upToDate.label"),
         detail: state.currentVersion
-          ? `Orivo ${state.currentVersion} is the newest release.`
-          : "There is nothing newer to install.",
-        buttonLabel: "Check again",
+          ? t("misc.update.upToDate.detailCurrent", { version: state.currentVersion })
+          : t("misc.update.upToDate.detail"),
+        buttonLabel: t("misc.update.upToDate.button"),
         buttonDisabled: false,
       };
     case "downloading": {
       const percent = updateProgressPercent(state);
       return {
-        label: percent === null ? "Downloading update…" : `Downloading update — ${percent}%`,
+        label:
+          percent === null
+            ? t("misc.update.downloading.label")
+            : t("misc.update.downloading.labelPercent", { percent }),
         detail:
           state.totalBytes === null
-            ? `${formatBytes(state.downloadedBytes)} downloaded`
-            : `${formatBytes(state.downloadedBytes)} of ${formatBytes(state.totalBytes)}`,
-        buttonLabel: "Downloading…",
+            ? t("misc.update.downloading.detailUnknown", { done: formatBytes(state.downloadedBytes) })
+            : t("misc.update.downloading.detail", {
+                done: formatBytes(state.downloadedBytes),
+                total: formatBytes(state.totalBytes),
+              }),
+        buttonLabel: t("misc.update.downloading.button"),
         buttonDisabled: true,
       };
     }
     case "ready":
       return {
-        label: "Update ready to install",
+        label: t("misc.update.ready.label"),
         detail: state.availableVersion
-          ? `Restart Orivo to finish updating to version ${state.availableVersion}.`
-          : "Restart Orivo to finish the update.",
-        buttonLabel: "Restart to update",
+          ? t("misc.update.ready.detailVersion", { version: state.availableVersion })
+          : t("misc.update.ready.detail"),
+        buttonLabel: t("misc.update.ready.button"),
         buttonDisabled: false,
       };
     case "error":
       return {
         label:
           state.failure === "download"
-            ? "The update could not be installed"
-            : "The update check failed",
-        detail: state.error ?? "Something went wrong. Try again in a moment.",
-        buttonLabel: "Try again",
+            ? t("misc.update.error.labelDownload")
+            : t("misc.update.error.labelCheck"),
+        detail: state.error ?? t("misc.update.error.detail"),
+        buttonLabel: t("misc.update.error.button"),
         buttonDisabled: false,
       };
     case "idle":
       return {
-        label: "Orivo has not checked for updates yet.",
+        label: t("misc.update.idle.label"),
         detail: state.currentVersion
-          ? `You are running version ${state.currentVersion}.`
-          : "Check whenever you like — nothing is downloaded until you ask.",
-        buttonLabel: "Check for updates",
+          ? t("misc.update.idle.detailVersion", { version: state.currentVersion })
+          : t("misc.update.idle.detail"),
+        buttonLabel: t("misc.update.idle.button"),
         buttonDisabled: false,
       };
   }
@@ -326,7 +335,7 @@ function errorMessage(err: unknown): string {
     const message = (err as { message?: unknown }).message;
     if (typeof message === "string" && message.trim()) return message.trim();
   }
-  return "The update could not be completed.";
+  return t("misc.update.error.fallback");
 }
 
 function nonEmpty(value: string | null | undefined): string | null {

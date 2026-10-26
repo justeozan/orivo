@@ -6,6 +6,7 @@ import type {
   SourceSyncResult,
 } from "./contracts";
 import type { IconName } from "./icons";
+import { t } from "./i18n";
 
 /**
  * The presentation half of the connected-store connectors. The backend owns
@@ -59,7 +60,7 @@ export function sourceBadge(
     case "wine":
       return { label: "Windows", icon: "windows" };
     case "local":
-      return { label: "Local", icon: "folder" };
+      return { label: t("misc.source.local"), icon: "folder" };
     case "epic":
       return { label: "Epic Games", icon: "epic" };
     case "gog":
@@ -148,26 +149,27 @@ export function normaliseSourceSyncResult(value: unknown): SourceSyncResult | nu
  * are always named.
  */
 export function sourceSyncSummary(result: SourceSyncResult): string {
-  const games = (count: number): string => (count === 1 ? "1 game" : `${count} games`);
+  const games = (count: number, one: "added" | "refreshed" | "unreadable"): string =>
+    count === 1 ? t(`misc.source.${one}.one`) : t(`misc.source.${one}.other`, { count });
   const parts: string[] = [];
-  if (result.importedGames > 0) parts.push(`${games(result.importedGames)} added`);
-  if (result.updatedGames > 0) parts.push(`${games(result.updatedGames)} refreshed`);
+  if (result.importedGames > 0) parts.push(games(result.importedGames, "added"));
+  if (result.updatedGames > 0) parts.push(games(result.updatedGames, "refreshed"));
   if (parts.length === 0) {
-    parts.push(result.totalGames === 0 ? "no games found" : "nothing new");
+    parts.push(t(result.totalGames === 0 ? "misc.source.noGames" : "misc.source.nothingNew"));
   }
   if (result.skippedGames > 0) {
-    parts.push(`${games(result.skippedGames)} could not be read`);
+    parts.push(games(result.skippedGames, "unreadable"));
   }
-  return `${result.label}: ${parts.join(" · ")}`;
+  return t("misc.source.summary", { label: result.label, parts: parts.join(" · ") });
 }
 
 /** How a connected source reads in the Sources menu and in Settings. */
 export function sourceStatusLine(status: SourceAccountStatus): string {
   if (!status.connected) {
-    return status.style === "session" ? "Signs in through its own window" : "Not connected";
+    return status.style === "session" ? t("misc.source.ownWindow") : t("misc.source.notConnected");
   }
   const account = status.accountLabel.trim();
-  return account ? `Connected as ${account}` : "Connected";
+  return account ? t("misc.source.connectedAs", { account }) : t("misc.source.connected");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

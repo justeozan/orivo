@@ -19,6 +19,7 @@
    --------------------------------------------------------------------------- */
 
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "./i18n";
 
 export interface GameStreamSettingsView {
   /** `astra.local`, `astra.local:47990`, `192.168.1.40`, `[fd00::1]:47990`. */
@@ -54,7 +55,7 @@ function assertActive(signal: AbortSignal): void {
 export function gameStreamErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "Orivo could not save that. Try again.";
+  return t("runners.gsSettings.saveError");
 }
 
 /** Whatever the host answered, as the three strings this card renders. */
@@ -82,7 +83,7 @@ export function createGameStreamClient(): GameStreamClient {
 
     async save(update, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Game streaming is only available in the Orivo desktop app.");
+        throw new Error(t("runners.gsSettings.desktopOnly"));
       }
       assertActive(signal);
       return readGameStreamSettings(await invoke("update_gamestream_settings", { update }));
@@ -90,7 +91,7 @@ export function createGameStreamClient(): GameStreamClient {
 
     async openLink(link, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Game streaming is only available in the Orivo desktop app.");
+        throw new Error(t("runners.gsSettings.desktopOnly"));
       }
       assertActive(signal);
       await invoke("open_gamestream_link", { target: link });

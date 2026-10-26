@@ -23,6 +23,7 @@
    --------------------------------------------------------------------------- */
 
 import { applyLogoFit, prepareLogo } from "./logo-fit";
+import { t } from "./i18n";
 import { prefersReducedMotion } from "./motion";
 
 /** Who puts the game on screen, as the host reports it with the launch. */
@@ -178,7 +179,7 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
     content.className = "launch-splash__content";
     const eyebrow = document.createElement("p");
     eyebrow.className = "launch-splash__eyebrow";
-    eyebrow.textContent = "Starting";
+    eyebrow.textContent = t("misc.splash.starting");
     // The wordmark when the store published one, the title when it did not,
     // as in the Library's hero: the title stays in the markup and comes back
     // the moment the image fails, and the image's alt carries the name.

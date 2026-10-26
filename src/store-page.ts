@@ -7,6 +7,7 @@ import type {
   StoreHighlight,
   StorePlatform,
 } from "./contracts";
+import { t } from "./i18n";
 import { icon, type IconName } from "./icons";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
@@ -364,7 +365,7 @@ function requestErrorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return "";
   if (typeof error === "string" && error.trim()) return error;
   if (error instanceof Error && error.message.trim()) return error.message;
-  return "Les sources du Store sont injoignables. Les sélections enregistrées restent disponibles.";
+  return t("store.error.unreachable");
 }
 
 /**
@@ -376,12 +377,15 @@ function offerLine(game: GameSummary): string {
   const offer = selectBestOffer(game);
   if (!offer) return "";
   const price = formatPrice(offer);
-  if (!price) return `Disponible sur ${offer.providerLabel} · tarif non vérifié`;
-  if (offer.priceMinor === 0) return `Gratuit sur ${offer.providerLabel}`;
-  const line = `Dès ${price} sur ${offer.providerLabel}`;
-  if (!isOfferStale(offer)) return `${line} · vérifié aujourd'hui`;
+  const provider = offer.providerLabel;
+  if (!price) return t("store.offer.unverified", { provider });
+  if (offer.priceMinor === 0) return t("store.offer.free", { provider });
+  const line = t("store.offer.from", { price, provider });
+  if (!isOfferStale(offer)) return `${line} · ${t("store.offer.verifiedToday")}`;
   const day = offerVerifiedOn(offer);
-  return day ? `${line} · relevé le ${day}` : `${line} · tarif à revérifier`;
+  return day
+    ? `${line} · ${t("store.offer.readOn", { day })}`
+    : `${line} · ${t("store.offer.recheck")}`;
 }
 
 /**
@@ -512,7 +516,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const home = await client.getHome(context.signal);
       if (!isActive(context)) return;
       dispatch({ type: "home-loaded", requestId, home });
-      if (announce) showTransientStatus("Sources du Store actualisées.");
+      if (announce) showTransientStatus(t("store.status.refreshed"));
     } catch (error) {
       if (!isActive(context)) return;
       const message = requestErrorMessage(error);
@@ -569,13 +573,15 @@ export function createStorePage(options: StorePageOptions): AppPage {
       await client.setWishlist(game.id, wishlisted, context.signal);
       if (isActive(context)) {
         showTransientStatus(
-          wishlisted ? `${game.title} ajouté à tes envies.` : `${game.title} retiré de tes envies.`,
+          wishlisted
+            ? t("store.wishlist.added", { title: game.title })
+            : t("store.wishlist.removed", { title: game.title }),
         );
       }
     } catch (error) {
       if (!isActive(context)) return;
       dispatch({ type: "wishlist-changed", gameId: game.id, wishlisted: !wishlisted });
-      showTransientStatus(requestErrorMessage(error) || "Le changement d'envie a été annulé.");
+      showTransientStatus(requestErrorMessage(error) || t("store.wishlist.cancelled"));
     }
   };
 
@@ -612,10 +618,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
   };
 
   const quikyResultMeta = (title: QuikyTitle): string => {
-    if (title.installed) return "Déjà installé";
+    if (title.installed) return t("store.quiky.installed");
     return title.source === "fitgirl"
-      ? "Repack FitGirl · téléchargement aria2"
-      : "Installateur Windows";
+      ? t("store.quiky.fitgirl")
+      : t("store.quiky.windowsInstaller");
   };
 
   const buildQuikyResult = (title: QuikyTitle): HTMLElement => {
@@ -669,11 +675,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
       } else {
         const message =
           quikySearchPhase === "loading"
-            ? "Recherche sur FitGirl…"
+            ? t("store.quiky.searching")
             : quikySearchPhase === "error"
-              ? quikySearchMessage || "La recherche FitGirl a échoué."
+              ? quikySearchMessage || t("store.quiky.failed")
               : quikySearchPhase === "empty"
-                ? "Aucun repack FitGirl ne correspond à cette recherche."
+                ? t("store.quiky.empty")
                 : "";
         if (message) fragment.append(element("p", "quiky-results__empty", message));
       }
@@ -684,10 +690,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const short = query.length > 48 ? `${query.slice(0, 48)}…` : query;
       nodes.quikyHeading.textContent =
         quikySearchPhase === "loading"
-          ? `Recherche pour « ${short} »…`
+          ? t("store.quiky.headingLoading", { query: short })
           : quikySearchPhase === "error"
-            ? `Recherche indisponible pour « ${short} »`
-            : `Résultats pour « ${short} »`;
+            ? t("store.quiky.headingError", { query: short })
+            : t("store.quiky.headingResults", { query: short });
     }
     renderInstallState();
   };
@@ -767,7 +773,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     copy.append(nodes.heroEyebrow, nodes.heroTitle, nodes.heroAction, nodes.heroOffer);
 
     const highlights = element("aside", "store-highlights");
-    highlights.setAttribute("aria-label", "Pourquoi cette sélection");
+    highlights.setAttribute("aria-label", t("store.highlights.label"));
     nodes.highlightList = element("ul", "store-highlights__list");
     highlights.append(nodes.highlightList);
 
@@ -795,7 +801,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     nodes.arrowPrevious.type = "button";
     nodes.arrowPrevious.dataset.focusKey = "rail-previous";
     nodes.arrowPrevious.dataset.navSkip = "";
-    nodes.arrowPrevious.setAttribute("aria-label", "Voir les jeux précédents");
+    nodes.arrowPrevious.setAttribute("aria-label", t("store.rail.previous"));
     nodes.arrowPrevious.append(iconElement("arrow-left"));
     nodes.arrowPrevious.addEventListener("click", () => scrollRail(-1));
 
@@ -803,7 +809,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     nodes.arrowNext.type = "button";
     nodes.arrowNext.dataset.focusKey = "rail-next";
     nodes.arrowNext.dataset.navSkip = "";
-    nodes.arrowNext.setAttribute("aria-label", "Voir plus de jeux");
+    nodes.arrowNext.setAttribute("aria-label", t("store.rail.next"));
     nodes.arrowNext.append(iconElement("arrow-right"));
     nodes.arrowNext.addEventListener("click", () => scrollRail(1));
 
@@ -817,10 +823,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
   const buildFilters = (): HTMLElement => {
     const filters = element("section", "store-filters");
-    filters.setAttribute("aria-label", "Filtres du Store");
+    filters.setAttribute("aria-label", t("store.filters.label"));
 
     nodes.categoryBar = element("nav", "store-chipbar store-chipbar--categories");
-    nodes.categoryBar.setAttribute("aria-label", "Catégories");
+    nodes.categoryBar.setAttribute("aria-label", t("store.filters.categories"));
     // A strip of chips is a row: left and right walk it, on into the platform
     // chips beside it, and up or down come back to the chip last left.
     nodes.categoryBar.setAttribute("data-nav-row", "");
@@ -841,7 +847,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
     const platformGroup = element("div", "store-platform-group");
     nodes.platformBar = element("nav", "store-chipbar store-chipbar--platforms");
-    nodes.platformBar.setAttribute("aria-label", "Plateformes");
+    nodes.platformBar.setAttribute("aria-label", t("store.filters.platforms"));
     nodes.platformBar.setAttribute("data-nav-row", "");
     for (const option of STORE_PLATFORMS) {
       const chip = element("button", "store-chip store-chip--platform");
@@ -868,7 +874,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     more.type = "button";
     more.dataset.focusKey = "platform-more";
     more.setAttribute("aria-haspopup", "true");
-    more.append(element("span", "store-chip__label", "Plus"), iconElement("chevron-down", "store-chip__caret"));
+    more.append(element("span", "store-chip__label", t("store.filters.more")), iconElement("chevron-down", "store-chip__caret"));
     more.addEventListener("click", () => {
       morePlatformsOpen = !morePlatformsOpen;
       renderMorePanel();
@@ -892,7 +898,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
   const buildQuikySearch = (): HTMLElement => {
     const panel = element("section", "quiky-results");
     panel.hidden = true;
-    panel.setAttribute("aria-label", "Résultats FitGirl");
+    panel.setAttribute("aria-label", t("store.quiky.resultsLabel"));
     const head = element("div", "quiky-results__head");
     nodes.quikyHeading = element("p", "quiky-results__title");
     head.append(
@@ -994,9 +1000,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     button.type = "button";
     button.dataset.focusKey = `install-${key}`;
     button.dataset.phase = "idle";
-    button.setAttribute("aria-label", `Installer ${title.title}`);
+    button.setAttribute("aria-label", t("store.install.aria", { title: title.title }));
     const glyph = iconElement("download", "store-card__install-glyph");
-    const label = element("span", "store-card__install-label", "Installer");
+    const label = element("span", "store-card__install-label", t("store.install.label"));
     button.append(glyph, label);
     button.addEventListener("click", (event) => {
       // The card is one big link to the game page; installing is not going.
@@ -1011,7 +1017,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     meter.setAttribute("aria-valuemin", "0");
     meter.setAttribute("aria-valuemax", "100");
     meter.setAttribute("aria-valuenow", "0");
-    meter.setAttribute("aria-label", `${title.title} — Installer`);
+    meter.setAttribute("aria-label", t("store.install.meterIdle", { title: title.title }));
     meter.hidden = true;
     const fill = element("span", "store-card__fill");
     fill.style.width = "0%";
@@ -1053,7 +1059,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const installed = title.installed || progress?.phase === "installed";
       const failed = progress?.phase === "failed";
 
-      const label = busy ? "Annuler" : phaseLabel;
+      const label = busy ? t("store.install.cancel") : phaseLabel;
       if (entry.label.textContent !== label) entry.label.textContent = label;
 
       const glyphName = installGlyph(busy, installed, failed);
@@ -1070,15 +1076,15 @@ export function createStorePage(options: StorePageOptions): AppPage {
       entry.button.setAttribute(
         "aria-label",
         busy
-          ? `Annuler l'installation de ${title.title} — ${phaseLabel}`
+          ? t("store.install.cancelAria", { title: title.title, phase: phaseLabel })
           : installed
-            ? `${title.title} est déjà installé`
-            : `Installer ${title.title}`,
+            ? t("store.install.alreadyAria", { title: title.title })
+            : t("store.install.aria", { title: title.title }),
       );
 
       entry.meter.hidden = !busy;
       entry.meter.setAttribute("aria-valuenow", String(percent));
-      entry.meter.setAttribute("aria-label", `${title.title} — ${phaseLabel}`);
+      entry.meter.setAttribute("aria-label", t("store.install.meterPhase", { title: title.title, phase: phaseLabel }));
       entry.fill.style.width = `${percent}%`;
     }
   };
@@ -1094,7 +1100,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     open.dataset.navOpen = game.id;
     // An entry of the shelf's rail: left and right step between the cards.
     open.dataset.navItem = "";
-    open.setAttribute("aria-label", `Ouvrir ${game.title}`);
+    open.setAttribute("aria-label", t("store.card.open", { title: game.title }));
     open.addEventListener("click", () =>
       options.navigate({ page: "game", gameId: game.id, from: "store" }),
     );
@@ -1191,7 +1197,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const row = element("span", "store-card__stat");
       const dots = element("span", "store-card__dots");
       dots.setAttribute("role", "img");
-      dots.setAttribute("aria-label", `${stat.value} sur 5`);
+      dots.setAttribute("aria-label", t("store.card.score", { value: stat.value }));
       for (let dot = 0; dot < 5; dot += 1) {
         dots.append(element("i", `store-card__dot${dot < stat.value ? " store-card__dot--on" : ""}`));
       }
@@ -1209,7 +1215,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     wishlist.setAttribute("aria-pressed", String(game.wishlisted));
     wishlist.setAttribute(
       "aria-label",
-      game.wishlisted ? `Retirer ${game.title} de tes envies` : `Ajouter ${game.title} à tes envies`,
+      game.wishlisted
+        ? t("store.wishlist.removeLabel", { title: game.title })
+        : t("store.wishlist.addLabel", { title: game.title }),
     );
     wishlist.append(iconElement(game.wishlisted ? "heart-filled" : "heart"));
     wishlist.addEventListener("click", (event) => {
@@ -1276,12 +1284,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
     if (games.length === 0) {
       nodes.emptyState.replaceChildren(
         iconElement("search"),
-        element("h2", "store-empty__title", "Aucun jeu ne correspond"),
-        element(
-          "p",
-          "store-empty__copy",
-          "Essaie une autre catégorie ou une autre plateforme — ta bibliothèque est déjà retirée de ces résultats.",
-        ),
+        element("h2", "store-empty__title", t("store.empty.title")),
+        element("p", "store-empty__copy", t("store.empty.copy")),
       );
     }
     renderInstallState();
@@ -1342,7 +1346,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       list.append(item);
     }
     nodes.morePanel.replaceChildren(
-      element("p", "store-more-panel__title", "Sources de prix"),
+      element("p", "store-more-panel__title", t("store.sources.title")),
       list,
     );
   };
@@ -1353,7 +1357,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     if (!whyOpen) return;
     const close = element("button", "store-why__close");
     close.type = "button";
-    close.setAttribute("aria-label", "Fermer");
+    close.setAttribute("aria-label", t("store.why.close"));
     close.append(iconElement("close"));
     close.addEventListener("click", () => {
       whyOpen = false;
@@ -1362,22 +1366,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
     });
     nodes.whyPanel.replaceChildren(
       close,
-      element("h2", "store-why__title", "Pourquoi cette sélection"),
-      element(
-        "p",
-        "store-why__text",
-        "Orivo ne classe pas les jeux par budget marketing. Chaque titre est retenu pour ce qu'il te laisse : une idée, une émotion, une heure bien passée.",
-      ),
-      element(
-        "p",
-        "store-why__text",
-        "Les durées annoncées sont celles de l'histoire principale, les prix viennent des boutiques elles-mêmes, et les jeux déjà dans ta bibliothèque n'apparaissent jamais ici.",
-      ),
-      element(
-        "p",
-        "store-why__text",
-        "Moins de bruit, plus de sens : une étagère courte que tu peux lire en entier.",
-      ),
+      element("h2", "store-why__title", t("store.why.title")),
+      element("p", "store-why__text", t("store.why.p1")),
+      element("p", "store-why__text", t("store.why.p2")),
+      element("p", "store-why__text", t("store.why.p3")),
     );
   };
 
@@ -1533,7 +1525,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       // this page root is that landmark — never a nested one.
       pageRoot = element("main", "store-page");
       pageRoot.tabIndex = -1;
-      pageRoot.setAttribute("aria-label", "Store");
+      pageRoot.setAttribute("aria-label", t("store.page"));
       container.replaceChildren(pageRoot);
       buildSkeleton();
       window.addEventListener("online", onOnline);
