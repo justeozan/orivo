@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 /**
  * What this machine is called in user-facing copy — settings hints, toasts,
  * onboarding rows. Read from the user agent because this copy spans modules
@@ -6,12 +8,12 @@
  */
 export function hostDeviceLabel(): string {
   const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
-  if (userAgent.includes("Windows")) return "this PC";
-  if (userAgent.includes("Mac")) return "this Mac";
+  if (userAgent.includes("Windows")) return t("misc.device.pc");
+  if (userAgent.includes("Mac")) return t("misc.device.mac");
   if (userAgent.includes("Linux") || userAgent.includes("X11")) {
-    return "this machine";
+    return t("misc.device.machine");
   }
-  return "this device";
+  return t("misc.device.device");
 }
 
 /**
@@ -23,12 +25,12 @@ export function stepAsideCopy(): { action: string; hint: string } {
   const userAgent = typeof navigator === "undefined" ? "" : navigator.userAgent;
   if (userAgent.includes("Mac")) {
     return {
-      action: "Hide Orivo",
-      hint: "Orivo hides once the game is on screen. ⌘-Tab or the Dock brings it back.",
+      action: t("misc.stepAside.hide.action"),
+      hint: t("misc.stepAside.hide.hint"),
     };
   }
   return {
-    action: "Minimise Orivo",
-    hint: "Orivo minimises once the game is on screen. The taskbar brings it back.",
+    action: t("misc.stepAside.minimise.action"),
+    hint: t("misc.stepAside.minimise.hint"),
   };
 }

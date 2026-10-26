@@ -13,6 +13,7 @@
  * answer: the host imports only the references that come back from this list.
  */
 
+import { t } from "./i18n";
 import {
   type ReviewedFile,
   type SourceReviewEntry,
@@ -32,12 +33,16 @@ export const CONSOLE_EMULATORS = [
   {
     slug: "retroarch",
     label: "RetroArch",
-    description: "NES, SNES, Game Boy, GBA and Mega Drive, through RetroArch's cores",
+    get description() {
+      return t("misc.console.retroarch");
+    },
   },
   {
     slug: "ppsspp",
     label: "PPSSPP",
-    description: "PSP games, opened straight from the folder you grant",
+    get description() {
+      return t("misc.console.ppsspp");
+    },
   },
 ] as const;
 
@@ -171,9 +176,9 @@ export function consoleRomsToOffer(folder: ConsoleRomFolder): ConsoleRom[] {
  */
 export function consoleReviewPrompt(roms: ConsoleRom[], emulatorLabel: string): string {
   if (roms.length === 1) {
-    return `Add “${roms[0]!.title}” to your library, to play in ${emulatorLabel}?`;
+    return t("misc.console.prompt.one", { title: roms[0]!.title, emulator: emulatorLabel });
   }
-  return `Add these ${roms.length} games to your library, to play in ${emulatorLabel}?`;
+  return t("misc.console.prompt.other", { count: roms.length, emulator: emulatorLabel });
 }
 
 /** The lines to show, each naming the console, the file and its folder. */
@@ -200,8 +205,11 @@ export function consoleEmulatorNote(folder: {
 }): string | null {
   if (!folder.emulatorInstalled) return null;
   return folder.emulatorInstaller
-    ? `${folder.emulatorLabel} on this device came from ${installerName(folder.emulatorInstaller)}.`
-    : `${folder.emulatorLabel} on this device was installed by hand, not from a store.`;
+    ? t("misc.console.note.store", {
+        emulator: folder.emulatorLabel,
+        installer: installerName(folder.emulatorInstaller),
+      })
+    : t("misc.console.note.hand", { emulator: folder.emulatorLabel });
 }
 
 /**
@@ -215,11 +223,11 @@ export function consoleEmulatorNote(folder: {
  * fact to act on.
  */
 function installerName(installer: string): string {
-  if (installer === "com.android.vending") return "Google Play";
-  if (installer === "org.fdroid.fdroid" || installer === "org.fdroid.basic") return "F-Droid";
-  if (installer === "com.amazon.venezia") return "the Amazon Appstore";
-  if (installer === "com.samsung.android.app.galaxystore") return "the Galaxy Store";
+  if (installer === "com.android.vending") return t("misc.console.installer.googlePlay");
+  if (installer === "org.fdroid.fdroid" || installer === "org.fdroid.basic") return t("misc.console.installer.fdroid");
+  if (installer === "com.amazon.venezia") return t("misc.console.installer.amazon");
+  if (installer === "com.samsung.android.app.galaxystore") return t("misc.console.installer.galaxy");
   if (installer === "com.google.android.packageinstaller" || installer === "com.android.packageinstaller")
-    return "a file you opened";
-  return "another source";
+    return t("misc.console.installer.file");
+  return t("misc.console.installer.other");
 }

@@ -15,6 +15,7 @@
    --------------------------------------------------------------------------- */
 
 import { invoke } from "@tauri-apps/api/core";
+import { t } from "./i18n";
 import type { PluginState } from "./plugin-manager";
 
 /**
@@ -247,7 +248,7 @@ function assertActive(signal: AbortSignal): void {
 export function runnerErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "This did not work. Try again.";
+  return t("runners.error.generic");
 }
 
 /* ---------------------------------------------------------------------------
@@ -279,7 +280,7 @@ export function readPairing(value: unknown): GameStreamPairing {
   if (raw.state === "alreadyPaired") return { state: "alreadyPaired", host };
   const pin = typeof raw.pin === "string" ? raw.pin : "";
   if (raw.state !== "started" || !/^[0-9]{4}$/.test(pin)) {
-    throw new Error("Pairing did not start. Try again.");
+    throw new Error(t("runners.error.pairingNotStarted"));
   }
   return { state: "started", host, pin };
 }
@@ -287,7 +288,7 @@ export function readPairing(value: unknown): GameStreamPairing {
 export function readHostStatus(value: unknown): HostStatusView {
   const raw = (value ?? {}) as Record<string, unknown>;
   if (typeof raw.state !== "string" || !HOST_STATES.has(raw.state)) {
-    throw new Error("Orivo could not check your PC. Try again.");
+    throw new Error(t("runners.error.checkPc"));
   }
   return {
     state: raw.state as HostState,
@@ -302,7 +303,7 @@ export function readHostStatus(value: unknown): HostStatusView {
 export function readPairingState(value: unknown): PairingState {
   const state = (value as { state?: unknown } | null)?.state;
   if (typeof state !== "string" || !PAIRING_STATES.has(state)) {
-    throw new Error("Orivo could not check the pairing. Try again.");
+    throw new Error(t("runners.error.checkPairing"));
   }
   return state as PairingState;
 }
@@ -381,17 +382,17 @@ export function readInstalledRunners(value: unknown): InstalledRunnerView[] {
 
 function readOneProfile(value: unknown): RunnerProfileView {
   const [profile] = readProfile(value);
-  if (!profile) throw new Error("Orivo did not understand the answer for this profile.");
+  if (!profile) throw new Error(t("runners.error.profileAnswer"));
   return profile;
 }
 
 function readImportJob(value: unknown): RunnerImportJobView {
   if (!value || typeof value !== "object") {
-    throw new Error("Orivo did not understand the answer for this import.");
+    throw new Error(t("runners.error.importAnswer"));
   }
   const raw = value as Partial<RunnerImportJobView>;
   if (typeof raw.jobId !== "string" || !raw.jobId || typeof raw.profileId !== "string") {
-    throw new Error("Orivo did not understand the answer for this import.");
+    throw new Error(t("runners.error.importAnswer"));
   }
   const count = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : 0);
   return {
@@ -428,7 +429,7 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
 
     async createProfile(pluginId, displayName, clientId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Adding an emulator is only available in the Orivo desktop app.");
+        throw new Error(t("runners.error.addDesktopOnly"));
       }
       assertActive(signal);
       return readOneProfile(
@@ -437,19 +438,19 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
     },
 
     async renameProfile(profileId, displayName, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(await invoke("rename_runner_profile", { profileId, displayName }));
     },
 
     async setProfileEnabled(profileId, enabled, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(await invoke("set_runner_profile_enabled", { profileId, enabled }));
     },
 
     async setProfileLaunchMode(profileId, launchMode, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(
         await invoke("set_runner_profile_launch_mode", { profileId, launchMode }),
@@ -457,25 +458,25 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
     },
 
     async beginPairing(profileId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readPairing(await invoke("begin_gamestream_pairing", { profileId }));
     },
 
     async createStreamProfile(clientId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(await invoke("create_gamestream_profile", { clientId }));
     },
 
     async probeHost(profileId, host, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readHostStatus(await invoke("probe_gamestream_host", { profileId, host }));
     },
 
     async pairingStatus(profileId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readPairingState(await invoke("gamestream_pairing_status", { profileId }));
     },
@@ -487,7 +488,7 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
     },
 
     async prepareLibrary(profileId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(await invoke("prepare_gamestream_library", { profileId }));
     },
@@ -514,19 +515,19 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
     },
 
     async deleteProfile(profileId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return (await invoke<boolean>("delete_runner_profile", { profileId })) === true;
     },
 
     async grantDirectory(profileId, slot, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(await invoke("grant_runner_profile_directory", { profileId, slot }));
     },
 
     async revokeDirectory(profileId, directoryId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readOneProfile(
         await invoke("revoke_runner_profile_directory", { profileId, directoryId }),
@@ -534,7 +535,7 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
     },
 
     async startImport(profileId, signal) {
-      if (!isTauriRuntime()) throw new Error("This is only available in the Orivo desktop app.");
+      if (!isTauriRuntime()) throw new Error(t("runners.error.desktopOnly"));
       assertActive(signal);
       return readImportJob(await invoke("start_runner_import", { profileId }));
     },
@@ -558,11 +559,13 @@ export function createDefaultRunnerManagerClient(): RunnerManagerClient {
 export function runnerProfileStatusLabel(profile: RunnerProfileView): string {
   switch (profile.status) {
     case "valid":
-      return "Ready";
+      return t("runners.status.ready");
     case "rejected":
-      return profile.statusMessage ? `Rejected: ${profile.statusMessage}` : "Rejected by the plugin";
+      return profile.statusMessage
+        ? t("runners.status.rejectedWith", { message: profile.statusMessage })
+        : t("runners.status.rejected");
     case "unvalidated":
-      return "Checking with the plugin…";
+      return t("runners.status.checking");
   }
 }
 
@@ -571,14 +574,14 @@ export function runnerImportSummary(job: RunnerImportJobView | null): string {
   switch (job.phase) {
     case "running":
       return job.resumed
-        ? `Continuing… ${job.imported + job.refreshed} game(s) so far`
-        : `Importing… ${job.imported + job.refreshed} game(s) so far`;
+        ? t("runners.import.continuing", { count: job.imported + job.refreshed })
+        : t("runners.import.importing", { count: job.imported + job.refreshed });
     case "ready":
-      return job.message || `Imported ${job.imported} game(s), refreshed ${job.refreshed}.`;
+      return job.message || t("runners.import.done", { imported: job.imported, refreshed: job.refreshed });
     case "cancelled":
-      return job.message || "Import stopped. Orivo kept its place.";
+      return job.message || t("runners.import.stopped");
     case "failed":
-      return job.message || "This import did not finish.";
+      return job.message || t("runners.import.failed");
   }
 }
 

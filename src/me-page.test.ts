@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setLanguage } from "./i18n";
 import type { LibraryGame } from "./mock-library";
 import { createMePage } from "./me-page";
 import { PageLifecycleHost } from "./page-lifecycle";
@@ -35,6 +36,7 @@ describe("me page", () => {
   let host: PageLifecycleHost | null = null;
 
   beforeEach(() => {
+    setLanguage("en");
     document.body.replaceChildren();
     container = document.createElement("div");
     document.body.append(container);
@@ -49,6 +51,7 @@ describe("me page", () => {
   });
 
   afterEach(() => {
+    setLanguage("en");
     host?.deactivate();
     host = null;
     vi.restoreAllMocks();
@@ -64,7 +67,7 @@ describe("me page", () => {
 
   it("paints the dashboard sections from the cognitive scan", async () => {
     await mount();
-    expect(container.querySelector(".me-head__title")?.textContent).toBe("Performance Cognitive");
+    expect(container.querySelector(".me-head__title")?.textContent).toBe("Cognitive Performance");
     // Les trois colonnes et la rangée basse sont toutes présentes.
     expect(container.querySelector(".me-score")).not.toBeNull();
     expect(container.querySelector(".me-daily")).not.toBeNull();

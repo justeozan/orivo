@@ -25,6 +25,7 @@ describe("settings model", () => {
       }),
     ).toEqual({
       startPage: "store",
+      language: "system",
       storeRegion: "fr",
       motion: "reduced",
       // Absent from the record, so Orivo gets out of a started game's way.
@@ -59,6 +60,7 @@ describe("settings model", () => {
   it("resets preferences without carrying unrelated update fields", () => {
     const current = {
       startPage: "store",
+      language: "fr",
       storeRegion: "jp",
       motion: "reduced",
       onGameStart: "stay",

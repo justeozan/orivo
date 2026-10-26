@@ -282,14 +282,13 @@ test.describe("Plugins & Runners browser", () => {
 
 test.describe("Settings ships no fake controls", () => {
   const FORBIDDEN = [
-    { label: "language", pattern: /\blanguages?\b|\blocale\b/i },
     { label: "autostart", pattern: /auto[- ]?start|start (?:at|on) (?:login|startup)|launch at login|open at login/i },
     { label: "tray", pattern: /\btray\b|menu ?bar icon/i },
     { label: "updater", pattern: /check for updates?|auto[- ]?updat|update channel|install updates?/i },
     { label: "screenshot folder", pattern: /screenshots?/i },
   ];
 
-  test("no control offers language, autostart, tray, updater or screenshot folders", async ({
+  test("no control offers autostart, tray, updater or screenshot folders", async ({
     page,
   }) => {
     const seen: string[] = [];

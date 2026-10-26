@@ -9,6 +9,7 @@ import type {
   StorePlatform,
   StoreProvider,
 } from "./contracts";
+import { currentLanguage, t } from "./i18n";
 import { STORE_CATALOG } from "./store-catalog.generated";
 
 export type StoreLoadPhase =
@@ -94,8 +95,8 @@ export interface StorePlatformOption {
  * are no longer offered, and an old link to one lands on "Pour toi".
  */
 export const STORE_CATEGORIES: readonly StoreCategoryOption[] = [
-  { id: "for-you", label: "Pour toi" },
-  { id: "all-games", label: "Tous les jeux" },
+  { id: "for-you", label: t("store.category.forYou") },
+  { id: "all-games", label: t("store.category.allGames") },
 ];
 
 export const STORE_PLATFORMS: readonly StorePlatformOption[] = [
@@ -103,7 +104,7 @@ export const STORE_PLATFORMS: readonly StorePlatformOption[] = [
   { id: "playstation", label: "PlayStation", icon: "playstation" },
   { id: "xbox", label: "Xbox", icon: "xbox" },
   { id: "switch", label: "Switch", icon: "switch" },
-  { id: "emulators", label: "Emulateurs", icon: "emulator" },
+  { id: "emulators", label: t("store.platform.emulators"), icon: "emulator" },
 ];
 
 /**
@@ -142,20 +143,20 @@ const providerStatus = (
 ): ProviderStatus => ({ provider, label, health, message, refreshedAt: null });
 
 export const EDITORIAL_PROVIDER_STATUSES: ProviderStatus[] = [
-  providerStatus("steam", "Steam", "available", "Tarifs de la boutique française."),
-  providerStatus("gog", "GOG", "available", "Tarifs relevés en dollars américains."),
-  providerStatus("epic", "Epic Games Store", "available", "Tarifs relevés en dollars américains."),
-  providerStatus("humble", "Humble Store", "available", "Tarifs relevés en dollars américains."),
-  providerStatus("fanatical", "Fanatical", "available", "Tarifs relevés en dollars américains."),
+  providerStatus("steam", "Steam", "available", t("store.provider.steam")),
+  providerStatus("gog", "GOG", "available", t("store.provider.usd")),
+  providerStatus("epic", "Epic Games Store", "available", t("store.provider.usd")),
+  providerStatus("humble", "Humble Store", "available", t("store.provider.usd")),
+  providerStatus("fanatical", "Fanatical", "available", t("store.provider.usd")),
   providerStatus(
     "instant-gaming",
     "Instant Gaming",
     "not-configured",
-    "Aucun flux commercial autorisé n'est configuré.",
+    t("store.provider.notConfigured"),
   ),
-  providerStatus("playstation", "PlayStation Store", "degraded", "Disponibilité connue, tarif non vérifié."),
-  providerStatus("microsoft", "Microsoft Store", "degraded", "Disponibilité connue, tarif non vérifié."),
-  providerStatus("nintendo", "Nintendo eShop", "degraded", "Disponibilité connue, tarif non vérifié."),
+  providerStatus("playstation", "PlayStation Store", "degraded", t("store.provider.unverified")),
+  providerStatus("microsoft", "Microsoft Store", "degraded", t("store.provider.unverified")),
+  providerStatus("nintendo", "Nintendo eShop", "degraded", t("store.provider.unverified")),
 ];
 
 /**
@@ -170,7 +171,7 @@ export const EDITORIAL_STORE_HOME: StoreHomeView = {
   games: EDITORIAL_GAMES,
   providerStatuses: EDITORIAL_PROVIDER_STATUSES,
   recommendationMode: "editorial",
-  recommendationHeading: "Recommandé pour vous",
+  recommendationHeading: t("store.recommended"),
   refreshedAt: null,
 };
 
@@ -209,7 +210,7 @@ export function reduceStorePageState(
         browseGames: null,
         nextCursor: null,
         previewGameId: null,
-        errorMessage: action.online ? state.errorMessage : "Tu es hors ligne. Voici les sélections enregistrées.",
+        errorMessage: action.online ? state.errorMessage : t("store.offline"),
       };
     case "request-started":
       return {
@@ -299,7 +300,7 @@ export function reduceStorePageState(
         : {
             ...state,
             phase: "offline",
-            errorMessage: "Tu es hors ligne. Voici les sélections enregistrées.",
+            errorMessage: t("store.offline"),
           };
   }
 }
@@ -419,7 +420,7 @@ export function selectStoreGames(state: StorePageState): GameSummary[] {
 }
 
 export function storeCategoryLabel(category: StoreCategory): string {
-  return STORE_CATEGORIES.find((option) => option.id === category)?.label ?? "Tous les jeux";
+  return STORE_CATEGORIES.find((option) => option.id === category)?.label ?? t("store.category.allGames");
 }
 
 export function isOfferStale(offer: StoreOffer, now = Date.now()): boolean {
@@ -434,7 +435,7 @@ export function offerVerifiedOn(offer: StoreOffer): string {
   const verifiedAt = new Date(offer.verifiedAt);
   if (Number.isNaN(verifiedAt.getTime())) return "";
   try {
-    return new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long" }).format(verifiedAt);
+    return new Intl.DateTimeFormat(currentLanguage(), { day: "numeric", month: "long" }).format(verifiedAt);
   } catch {
     return "";
   }
@@ -492,7 +493,7 @@ export function selectBestOffer(game: GameSummary, currency = displayCurrency())
 export function formatPrice(offer: StoreOffer | null): string {
   if (!offer || offer.priceMinor === null) return "";
   // Free needs no currency to be true, so it is answered before one is required.
-  if (offer.priceMinor === 0) return "Gratuit";
+  if (offer.priceMinor === 0) return t("store.free");
   if (!offer.currency) return "";
   const fractionDigits = ["JPY", "KRW"].includes(offer.currency.toUpperCase()) ? 0 : 2;
   const amount = offer.priceMinor / 10 ** fractionDigits;
@@ -529,41 +530,40 @@ export function fitStats(game: GameSummary): StoreFitStat[] {
 export function sessionLabel(game: GameSummary): string {
   if (game.curation?.duration) return game.curation.duration;
   const hours = Math.round(game.playTimeSeconds / 3_600);
-  return hours > 0 ? `${hours}h` : "Variable";
+  return hours > 0 ? `${hours}h` : t("store.session.variable");
 }
 
 export function modeLabel(game: GameSummary): string {
   if (game.curation?.mode) return game.curation.mode;
-  return game.tags.some((tag) => /co-?op|multi/i.test(tag)) ? "Coop" : "Solo";
+  return game.tags.some((tag) => /co-?op|multi/i.test(tag)) ? t("store.mode.coop") : t("store.mode.solo");
 }
 
 export function genreLabel(game: GameSummary): string {
   const genres = game.curation?.genres.length ? game.curation.genres : game.genres;
-  return genres.slice(0, 2).join(", ") || "Genre non vérifié";
+  return genres.slice(0, 2).join(", ") || t("store.genre.unverified");
 }
 
 export function taglineLabel(game: GameSummary): string {
   return game.curation?.tagline || game.shortDescription;
 }
 
-export const DEFAULT_HERO_TITLE = "Des expériences qui comptent.";
-export const DEFAULT_HERO_LEAD =
-  "Des jeux choisis pour nourrir ton esprit, respecter ton temps et t'offrir des moments vrais.";
+export const DEFAULT_HERO_TITLE = t("store.hero.title");
+export const DEFAULT_HERO_LEAD = t("store.hero.lead");
 export const DEFAULT_HIGHLIGHTS: StoreHighlight[] = [
   {
     icon: "brain",
-    title: "Bon pour le cerveau",
-    text: "Stimule la réflexion, la créativité et la mémoire.",
+    title: t("store.hero.highlight.brain.title"),
+    text: t("store.hero.highlight.brain.text"),
   },
   {
     icon: "clock",
-    title: "Peu de temps",
-    text: "Parfait pour des sessions courtes et satisfaisantes.",
+    title: t("store.hero.highlight.time.title"),
+    text: t("store.hero.highlight.time.text"),
   },
   {
     icon: "book",
-    title: "Bonne histoire",
-    text: "Des récits marquants qui restent avec toi.",
+    title: t("store.hero.highlight.story.title"),
+    text: t("store.hero.highlight.story.text"),
   },
 ];
 
@@ -586,23 +586,23 @@ export function selectHeroCopy(state: StorePageState, games: GameSummary[]): Sto
     : null;
   if (!preview) {
     return {
-      eyebrow: "Recommandé pour vous",
+      eyebrow: t("store.recommended"),
       title: DEFAULT_HERO_TITLE,
       lead: DEFAULT_HERO_LEAD,
       highlights: DEFAULT_HIGHLIGHTS,
       backgroundUrl: DEFAULT_STORE_BACKGROUND,
-      actionLabel: "Découvrir pourquoi",
+      actionLabel: t("store.hero.discoverWhy"),
       gameId: null,
     };
   }
   const curation: StoreCuration | undefined = preview.curation;
   return {
-    eyebrow: "Recommandé pour vous",
+    eyebrow: t("store.recommended"),
     title: curation?.heroTitle || DEFAULT_HERO_TITLE,
     lead: curation?.heroLead || preview.shortDescription || DEFAULT_HERO_LEAD,
     highlights: curation?.highlights.length ? curation.highlights : DEFAULT_HIGHLIGHTS,
     backgroundUrl: preview.heroUrl || preview.landscapeUrl || DEFAULT_STORE_BACKGROUND,
-    actionLabel: `Découvrir ${preview.title}`,
+    actionLabel: t("store.hero.discover", { title: preview.title }),
     gameId: preview.id,
   };
 }

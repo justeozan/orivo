@@ -5,6 +5,8 @@
  * one small record, and it has to be there for the very first paint.
  */
 
+import { t } from "./i18n";
+
 export interface PlayerProfile {
   name: string;
   /** A data URL of the square picture, or "" for the default one. */
@@ -57,7 +59,7 @@ export function avatarSource(profile: PlayerProfile): string {
 export function avatarFromFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     if (!file.type.startsWith("image/")) {
-      reject(new Error("That file is not a picture."));
+      reject(new Error(t("me.profile.notPicture")));
       return;
     }
     const url = URL.createObjectURL(file);
@@ -66,7 +68,7 @@ export function avatarFromFile(file: File): Promise<string> {
       URL.revokeObjectURL(url);
       const side = Math.min(image.naturalWidth, image.naturalHeight);
       if (side === 0) {
-        reject(new Error("That picture could not be read."));
+        reject(new Error(t("me.profile.unreadable")));
         return;
       }
       const canvas = document.createElement("canvas");
@@ -74,7 +76,7 @@ export function avatarFromFile(file: File): Promise<string> {
       canvas.height = AVATAR_SIZE;
       const context = canvas.getContext("2d");
       if (!context) {
-        reject(new Error("That picture could not be read."));
+        reject(new Error(t("me.profile.unreadable")));
         return;
       }
       context.drawImage(
@@ -92,7 +94,7 @@ export function avatarFromFile(file: File): Promise<string> {
     };
     image.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error("That picture could not be read."));
+      reject(new Error(t("me.profile.unreadable")));
     };
     image.src = url;
   });

@@ -161,29 +161,29 @@ describe("matchTitle", () => {
 describe("formatQuikyLabel", () => {
   it("names every phase", () => {
     const entry = title();
-    expect(formatQuikyLabel(null, entry)).toBe("Installer");
-    expect(formatQuikyLabel(progress({ phase: "queued", percent: 0 }), entry)).toBe("En attente…");
+    expect(formatQuikyLabel(null, entry)).toBe("Install");
+    expect(formatQuikyLabel(progress({ phase: "queued", percent: 0 }), entry)).toBe("Waiting…");
     expect(formatQuikyLabel(progress({ phase: "downloading", percent: 42 }), entry)).toBe(
-      "Téléchargement 42%",
+      "Downloading 42%",
     );
     expect(formatQuikyLabel(progress({ phase: "extracting", percent: 78 }), entry)).toBe(
-      "Extraction 78%",
+      "Extracting 78%",
     );
-    expect(formatQuikyLabel(progress({ phase: "installed", percent: 100 }), entry)).toBe("Installé");
-    expect(formatQuikyLabel(progress({ phase: "failed", percent: 61 }), entry)).toBe("Réessayer");
-    expect(formatQuikyLabel(progress({ phase: "cancelled", percent: 61 }), entry)).toBe("Installer");
+    expect(formatQuikyLabel(progress({ phase: "installed", percent: 100 }), entry)).toBe("Installed");
+    expect(formatQuikyLabel(progress({ phase: "failed", percent: 61 }), entry)).toBe("Retry");
+    expect(formatQuikyLabel(progress({ phase: "cancelled", percent: 61 }), entry)).toBe("Install");
   });
 
   it("reads a title the plugin already installed as installed", () => {
     const entry = title({ installed: true, installPath: "C:/Games/OpenTTD" });
-    expect(formatQuikyLabel(null, entry)).toBe("Installé");
-    expect(formatQuikyLabel(progress({ phase: "cancelled" }), entry)).toBe("Installé");
+    expect(formatQuikyLabel(null, entry)).toBe("Installed");
+    expect(formatQuikyLabel(progress({ phase: "cancelled" }), entry)).toBe("Installed");
   });
 
   it("keeps the percentage inside the bar", () => {
-    expect(formatQuikyLabel(progress({ percent: 41.6 }), title())).toBe("Téléchargement 42%");
-    expect(formatQuikyLabel(progress({ percent: -5 }), title())).toBe("Téléchargement 0%");
-    expect(formatQuikyLabel(progress({ percent: 140 }), title())).toBe("Téléchargement 100%");
+    expect(formatQuikyLabel(progress({ percent: 41.6 }), title())).toBe("Downloading 42%");
+    expect(formatQuikyLabel(progress({ percent: -5 }), title())).toBe("Downloading 0%");
+    expect(formatQuikyLabel(progress({ percent: 140 }), title())).toBe("Downloading 100%");
     expect(quikyPercent(progress({ percent: Number.NaN }))).toBe(0);
     expect(quikyPercent(null)).toBe(0);
   });
@@ -234,7 +234,7 @@ describe("createQuikyController", () => {
     expect(changes.length).toBe(4);
   });
 
-  it("records a finished install on the title so the button stays on Installé", async () => {
+  it("records a finished install on the title so the button stays on Installed", async () => {
     const fake = createFakeQuiky();
     const controller = createQuikyController(fake.client);
     await controller.load(liveSignal());
@@ -245,7 +245,7 @@ describe("createQuikyController", () => {
     const entry = controller.status().titles[0];
     expect(entry.installed).toBe(true);
     expect(entry.installPath).toBe("C:/Games/OpenTTD");
-    expect(formatQuikyLabel(controller.progressFor("openttd"), entry)).toBe("Installé");
+    expect(formatQuikyLabel(controller.progressFor("openttd"), entry)).toBe("Installed");
   });
 
   it("queues optimistically and hands the rest of the phases to the host", async () => {
@@ -279,7 +279,7 @@ describe("createQuikyController", () => {
     const failed = controller.progressFor("openttd");
     expect(failed?.phase).toBe("failed");
     expect(failed?.message).toBe("Le disque est plein.");
-    expect(formatQuikyLabel(failed, title())).toBe("Réessayer");
+    expect(formatQuikyLabel(failed, title())).toBe("Retry");
   });
 
   it("leaves the cancelled phase to the host and only records a refusal", async () => {
@@ -295,7 +295,7 @@ describe("createQuikyController", () => {
 
     fake.emit(progress({ phase: "cancelled", percent: 42 }));
     expect(controller.progressFor("openttd")?.phase).toBe("cancelled");
-    expect(formatQuikyLabel(controller.progressFor("openttd"), title())).toBe("Installer");
+    expect(formatQuikyLabel(controller.progressFor("openttd"), title())).toBe("Install");
   });
 
   it("records a refused cancel as a failure", async () => {
@@ -577,8 +577,8 @@ describe("Store page install affordance", () => {
 
     const button = installButton(mounted.container);
     expect(button.type).toBe("button");
-    expect(button.textContent).toBe("Installer");
-    expect(button.getAttribute("aria-label")).toBe("Installer OpenTTD");
+    expect(button.textContent).toBe("Install");
+    expect(button.getAttribute("aria-label")).toBe("Install OpenTTD");
 
     const meter = mounted.container.querySelector<HTMLElement>(".store-card__meter");
     expect(meter?.getAttribute("role")).toBe("progressbar");
@@ -609,15 +609,15 @@ describe("Store page install affordance", () => {
     expect(fill.style.width).toBe("42%");
     expect(meter.hidden).toBe(false);
     expect(meter.getAttribute("aria-valuenow")).toBe("42");
-    expect(meter.getAttribute("aria-label")).toBe("OpenTTD — Téléchargement 42%");
-    expect(button.textContent).toBe("Annuler");
+    expect(meter.getAttribute("aria-label")).toBe("OpenTTD — Downloading 42%");
+    expect(button.textContent).toBe("Cancel");
     expect(button.getAttribute("aria-label")).toBe(
-      "Annuler l'installation de OpenTTD — Téléchargement 42%",
+      "Cancel the installation of OpenTTD — Downloading 42%",
     );
 
     fake.emit(progress({ phase: "extracting", percent: 78 }));
     expect(fill.style.width).toBe("78%");
-    expect(meter.getAttribute("aria-label")).toBe("OpenTTD — Extraction 78%");
+    expect(meter.getAttribute("aria-label")).toBe("OpenTTD — Extracting 78%");
 
     // The same nodes throughout: a percentage tick never rebuilds the shelf.
     expect(installButton(mounted.container)).toBe(button);
@@ -632,7 +632,7 @@ describe("Store page install affordance", () => {
 
     fake.emit(progress({ phase: "downloading", percent: 42 }));
     const button = installButton(mounted.container);
-    expect(button.textContent).toBe("Annuler");
+    expect(button.textContent).toBe("Cancel");
 
     button.click();
     await flush();
@@ -640,11 +640,11 @@ describe("Store page install affordance", () => {
     expect(fake.calls).not.toContain("startInstall:openttd");
 
     fake.emit(progress({ phase: "cancelled", percent: 42 }));
-    expect(button.textContent).toBe("Installer");
+    expect(button.textContent).toBe("Install");
     expect(mounted.container.querySelector<HTMLElement>(".store-card__meter")?.hidden).toBe(true);
   });
 
-  it("settles on Installé and stops offering the install", async () => {
+  it("settles on Installed and stops offering the install", async () => {
     const fake = createFakeQuiky();
     const mounted = mountStore([game()], fake.client);
     await mounted.host.activate(storeRoute());
@@ -653,9 +653,9 @@ describe("Store page install affordance", () => {
     fake.emit(progress({ phase: "installed", percent: 100, installPath: "C:/Games/OpenTTD" }));
 
     const button = installButton(mounted.container);
-    expect(button.textContent).toBe("Installé");
+    expect(button.textContent).toBe("Installed");
     expect(button.getAttribute("aria-disabled")).toBe("true");
-    expect(button.getAttribute("aria-label")).toBe("OpenTTD est déjà installé");
+    expect(button.getAttribute("aria-label")).toBe("OpenTTD is already installed");
     expect(mounted.container.querySelector<HTMLElement>(".store-card__meter")?.hidden).toBe(true);
 
     button.click();
@@ -677,7 +677,7 @@ describe("Store page install affordance", () => {
     await flush();
 
     const button = installButton(mounted.container);
-    expect(button.textContent).toBe("Réessayer");
+    expect(button.textContent).toBe("Retry");
     expect(button.dataset.phase).toBe("failed");
     expect(button.title).toBe("Le disque est plein.");
     expect(mounted.container.querySelector(".store-status__copy")?.textContent).toBe(

@@ -12,6 +12,7 @@
  */
 import type { ConnectedSource, SourceConnectStyle } from "./contracts";
 import { hostDeviceLabel } from "./host-device";
+import { t } from "./i18n";
 import type { IconName } from "./icons";
 import { CONNECTED_SOURCES } from "./source-model";
 
@@ -36,18 +37,18 @@ export interface OnboardingStep {
 export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   {
     icon: "link",
-    title: "Connect your libraries",
-    detail: "Steam, Epic, GOG…",
+    title: t("store.onboarding.step.connect.title"),
+    detail: t("store.onboarding.step.connect.detail"),
   },
   {
     icon: "sliders",
-    title: "Personalise Orivo",
-    detail: "Themes, layouts, wallpapers…",
+    title: t("store.onboarding.step.personalise.title"),
+    detail: t("store.onboarding.step.personalise.detail"),
   },
   {
     icon: "play",
-    title: "Play your games",
-    detail: "Launch, organise, enjoy.",
+    title: t("store.onboarding.step.play.title"),
+    detail: t("store.onboarding.step.play.detail"),
   },
 ] as const;
 
@@ -76,15 +77,15 @@ export interface OnboardingSourceDescriptor {
  */
 const SOURCE_COPY: Record<OnboardingSource, { detail: string; signIn?: string }> = {
   steam: {
-    detail: `Owned games, plus installs on ${hostDeviceLabel()}`,
-    signIn: "Signs in through Steam's own web login.",
+    detail: t("store.onboarding.source.steam", { device: hostDeviceLabel() }),
+    signIn: t("store.onboarding.source.steamSignIn"),
   },
-  epic: { detail: "Your Epic library and its installs" },
-  gog: { detail: "Your GOG library and installers" },
-  ubisoft: { detail: "Your Ubisoft Connect library" },
-  xbox: { detail: "Xbox and PC Game Pass" },
-  "microsoft-store": { detail: "Your Microsoft Store games" },
-  "instant-gaming": { detail: "The keys you bought there" },
+  epic: { detail: t("store.onboarding.source.epic") },
+  gog: { detail: t("store.onboarding.source.gog") },
+  ubisoft: { detail: t("store.onboarding.source.ubisoft") },
+  xbox: { detail: t("store.onboarding.source.xbox") },
+  "microsoft-store": { detail: t("store.onboarding.source.microsoftStore") },
+  "instant-gaming": { detail: t("store.onboarding.source.instantGaming") },
 };
 
 /**
@@ -122,8 +123,8 @@ export function isOnboardingSource(value: string): value is OnboardingSource {
  */
 export function onboardingSignInLine(style: SourceConnectStyle): string {
   return style === "session"
-    ? "No account API: a sign-in window opens and stays signed in, and every sync runs inside it."
-    : "Signs in once. The credential is kept in your keychain and syncs run in the background.";
+    ? t("store.onboarding.signIn.session")
+    : t("store.onboarding.signIn.token");
 }
 
 /**
@@ -145,7 +146,7 @@ export function onboardingBack(view: OnboardingView): OnboardingView {
 
 /** The label Back wears, which names the destination rather than the gesture. */
 export function onboardingBackLabel(view: OnboardingView): string {
-  return view.step === "connect" ? "Libraries" : "Back";
+  return view.step === "connect" ? t("store.onboarding.backToLibraries") : t("store.onboarding.back");
 }
 
 /** Two views are the same view when they show the same thing. */

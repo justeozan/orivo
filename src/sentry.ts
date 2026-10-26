@@ -16,6 +16,8 @@
  * module watches for errors from the moment it is initialised and hands
  * whatever it caught to the SDK as soon as the SDK exists.
  */
+import { t } from "./i18n";
+
 type SentrySdk = typeof import("./sentry-sdk");
 
 /** Read once: Vite inlines this at build time, so it cannot change at runtime. */
@@ -105,13 +107,20 @@ export function initErrorReporting(
             autoInject: false,
             colorScheme: "dark",
             showBranding: false,
-            formTitle: "Tell us what happened",
-            buttonLabel: "Feedback",
-            submitButtonLabel: "Send feedback",
-            messagePlaceholder:
-              "What were you doing, and what did Orivo do instead? A store name or a game title helps a lot.",
-            namePlaceholder: "Your name (optional)",
-            emailPlaceholder: "Your email, if you want an answer",
+            formTitle: t("misc.feedback.title"),
+            buttonLabel: t("misc.feedback.button"),
+            submitButtonLabel: t("misc.feedback.submit"),
+            cancelButtonLabel: t("misc.feedback.cancel"),
+            successMessageText: t("misc.feedback.success"),
+            nameLabel: t("misc.feedback.nameLabel"),
+            emailLabel: t("misc.feedback.emailLabel"),
+            messageLabel: t("misc.feedback.messageLabel"),
+            isRequiredLabel: t("misc.feedback.required"),
+            addScreenshotButtonLabel: t("misc.feedback.addScreenshot"),
+            removeScreenshotButtonLabel: t("misc.feedback.removeScreenshot"),
+            messagePlaceholder: t("misc.feedback.message"),
+            namePlaceholder: t("misc.feedback.name"),
+            emailPlaceholder: t("misc.feedback.email"),
             isNameRequired: false,
             isEmailRequired: false,
             enableScreenshot: true,

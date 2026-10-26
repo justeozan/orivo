@@ -1,4 +1,5 @@
 import { knownGenre } from "./library-browse";
+import { t } from "./i18n";
 import type { LibraryGame } from "./mock-library";
 
 /**
@@ -18,11 +19,11 @@ export type CognitiveMetricId =
 
 export interface CognitiveMetric {
   id: CognitiveMetricId;
-  /** Libellé court en français, affiché sur la carte. */
+  /** Libellé court, traduit, affiché sur la carte. */
   label: string;
   /** Score entier entre 0 et 100 inclus. */
   score: number;
-  /** Description courte en français, dépendante du score. */
+  /** Description courte, traduite, dépendante du score. */
   description: string;
 }
 
@@ -229,65 +230,65 @@ export function computeDominantGenre(games: LibraryGame[]): string | null {
 function engagementDescription(score: number): string {
   switch (scoreBand(score)) {
     case "faible":
-      return "Un volume de jeu léger, encore ponctuel.";
+      return t("me.desc.engagement.low");
     case "modere":
-      return "Une pratique installée, sans excès.";
+      return t("me.desc.engagement.moderate");
     case "soutenu":
-      return "Un investissement conséquent dans le jeu.";
+      return t("me.desc.engagement.strong");
     default:
-      return "Un temps de jeu très élevé sur la durée.";
+      return t("me.desc.engagement.high");
   }
 }
 
 function regularityDescription(score: number): string {
   switch (scoreBand(score)) {
     case "faible":
-      return "Des sessions rares ou anciennes.";
+      return t("me.desc.regularity.low");
     case "modere":
-      return "Un rythme irrégulier, par vagues.";
+      return t("me.desc.regularity.moderate");
     case "soutenu":
-      return "Un rythme de jeu assez régulier.";
+      return t("me.desc.regularity.strong");
     default:
-      return "Une pratique quasi quotidienne.";
+      return t("me.desc.regularity.high");
   }
 }
 
 function diversityDescription(score: number): string {
   switch (scoreBand(score)) {
     case "faible":
-      return "Fidèle à un seul univers de jeu.";
+      return t("me.desc.diversity.low");
     case "modere":
-      return "Quelques genres de prédilection.";
+      return t("me.desc.diversity.moderate");
     case "soutenu":
-      return "Une belle variété de genres explorés.";
+      return t("me.desc.diversity.strong");
     default:
-      return "Un profil très éclectique.";
+      return t("me.desc.diversity.high");
   }
 }
 
 function intensityDescription(score: number): string {
   switch (scoreBand(score)) {
     case "faible":
-      return "Des expériences surtout calmes et contemplatives.";
+      return t("me.desc.intensity.low");
     case "modere":
-      return "Un penchant pour les jeux posés.";
+      return t("me.desc.intensity.moderate");
     case "soutenu":
-      return "Un mélange dosé d'action et de calme.";
+      return t("me.desc.intensity.strong");
     default:
-      return "Une nette préférence pour l'action nerveuse.";
+      return t("me.desc.intensity.high");
   }
 }
 
 function balanceDescription(score: number): string {
   switch (scoreBand(score)) {
     case "faible":
-      return "Un format de session très marqué domine.";
+      return t("me.desc.balance.low");
     case "modere":
-      return "Un format de session nettement favori.";
+      return t("me.desc.balance.moderate");
     case "soutenu":
-      return "Un bon dosage entre formats de jeu.";
+      return t("me.desc.balance.strong");
     default:
-      return "Sessions courtes et longues bien équilibrées.";
+      return t("me.desc.balance.high");
   }
 }
 
@@ -305,31 +306,31 @@ export function computeCognitiveProfile(games: LibraryGame[]): CognitiveProfile 
     metrics: [
       {
         id: "engagement",
-        label: "Temps de jeu",
+        label: t("me.metric.engagement.label"),
         score: engagement,
         description: engagementDescription(engagement),
       },
       {
         id: "regularite",
-        label: "Régularité",
+        label: t("me.metric.regularite.label"),
         score: regularite,
         description: regularityDescription(regularite),
       },
       {
         id: "diversite",
-        label: "Diversité des genres",
+        label: t("me.metric.diversite.label"),
         score: diversite,
         description: diversityDescription(diversite),
       },
       {
         id: "intensite",
-        label: "Intensité",
+        label: t("me.metric.intensite.label"),
         score: intensite,
         description: intensityDescription(intensite),
       },
       {
         id: "equilibre",
-        label: "Équilibre des sessions",
+        label: t("me.metric.equilibre.label"),
         score: equilibre,
         description: balanceDescription(equilibre),
       },
@@ -350,9 +351,7 @@ function metricScore(profile: CognitiveProfile, id: CognitiveMetricId): number {
  * Déterministe : mêmes scores, même phrase.
  */
 export function describePlayerProfile(profile: CognitiveProfile): string {
-  if (profile.gameCount === 0) {
-    return "Aucune donnée de jeu disponible pour établir un profil. Lancez quelques parties et revenez faire le scan.";
-  }
+  if (profile.gameCount === 0) return t("me.summary.empty");
   const hours = Math.round(profile.totalPlayTimeSeconds / 3_600);
   const engagement = metricScore(profile, "engagement");
   const regularite = metricScore(profile, "regularite");
@@ -362,37 +361,46 @@ export function describePlayerProfile(profile: CognitiveProfile): string {
 
   const engagementWord =
     scoreBand(engagement) === "faible"
-      ? "occasionnelle"
+      ? t("me.summary.engagement.low")
       : scoreBand(engagement) === "modere"
-        ? "régulière"
+        ? t("me.summary.engagement.moderate")
         : scoreBand(engagement) === "soutenu"
-          ? "soutenue"
-          : "intensive";
+          ? t("me.summary.engagement.strong")
+          : t("me.summary.engagement.high");
 
   const rhythm =
     scoreBand(regularite) === "faible" || scoreBand(regularite) === "modere"
-      ? "Vous jouez par vagues plutôt qu'à rythme fixe."
-      : "Vous gardez un rythme de jeu régulier.";
+      ? t("me.summary.rhythm.waves")
+      : t("me.summary.rhythm.steady");
 
   const taste = profile.dominantGenre
     ? scoreBand(diversite) === "faible" || scoreBand(diversite) === "modere"
-      ? `Votre cœur va au ${profile.dominantGenre}, avec peu d'écarts.`
-      : `Le ${profile.dominantGenre} domine, mais vous explorez volontiers d'autres genres.`
-    : "Vos genres de prédilection restent à découvrir.";
+      ? t("me.summary.taste.focused", { genre: profile.dominantGenre })
+      : t("me.summary.taste.varied", { genre: profile.dominantGenre })
+    : t("me.summary.taste.none");
 
   const pace =
     intensite >= 65
-      ? "Vous recherchez l'action et la tension."
+      ? t("me.summary.pace.action")
       : intensite <= 35
-        ? "Vous privilégiez les expériences calmes."
-        : "Vous alternez entre action et moments plus posés.";
+        ? t("me.summary.pace.calm")
+        : t("me.summary.pace.mixed");
 
   const sessions =
     scoreBand(equilibre) === "eleve" || scoreBand(equilibre) === "soutenu"
-      ? "Vos sessions alternent bien formats courts et longues traversées."
+      ? t("me.summary.sessions.balanced")
       : profile.shortPlayShare >= 0.5
-        ? "Vos sessions penchent nettement vers les jeux courts."
-        : "Vos sessions penchent nettement vers les longues traversées.";
+        ? t("me.summary.sessions.short")
+        : t("me.summary.sessions.long");
 
-  return `Sur ${profile.gameCount} jeux et environ ${hours} heures, votre pratique est ${engagementWord}. ${rhythm} ${taste} ${pace} ${sessions}`;
+  const count = profile.gameCount;
+  return t("me.summary.full", {
+    games: count === 1 ? t("me.summary.games.one") : t("me.summary.games.other", { count }),
+    hours: hours === 1 ? t("me.summary.hours.one") : t("me.summary.hours.other", { count: hours }),
+    engagement: engagementWord,
+    rhythm,
+    taste,
+    pace,
+    sessions,
+  });
 }

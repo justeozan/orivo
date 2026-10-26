@@ -45,6 +45,7 @@ import {
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
 import { prefersReducedMotion, rememberMotionPreference } from "./motion";
+import { LANGUAGE_NAMES, LANGUAGES, rememberLanguagePreference, t, type LanguagePreference } from "./i18n";
 import type { BootSplash } from "./boot-splash";
 import { brandLogoFor } from "./brand-logos";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
@@ -499,16 +500,16 @@ function pluginStateButton(options: { idle: string; hover?: string }): HTMLButto
  */
 function pluginPurpose(id: string, name: string, extensions: readonly string[]): string {
   const key = `${id} ${name}`.toLocaleLowerCase();
-  if (key.includes("stream") || key.includes("moonlight")) return "Game streaming";
-  if (key.includes("ryujinx") || key.includes("switch")) return "Switch games";
-  if (key.includes("ppsspp") || key.includes("psp")) return "PSP games";
-  if (key.includes("retroarch")) return "Retro consoles";
-  if (key.includes("winlator") || key.includes("wine")) return "Windows games";
-  if (key.includes("quiky")) return "Game installs";
-  if (key.includes("wallpaper") || key.includes("artwork")) return "Artwork search";
+  if (key.includes("stream") || key.includes("moonlight")) return t("app.purpose.streaming");
+  if (key.includes("ryujinx") || key.includes("switch")) return t("app.purpose.switch");
+  if (key.includes("ppsspp") || key.includes("psp")) return t("app.purpose.psp");
+  if (key.includes("retroarch")) return t("app.purpose.retro");
+  if (key.includes("winlator") || key.includes("wine")) return t("app.purpose.windows");
+  if (key.includes("quiky")) return t("app.purpose.installs");
+  if (key.includes("wallpaper") || key.includes("artwork")) return t("app.purpose.artwork");
   const kinds = extensions.join(" ").toLocaleLowerCase();
-  if (kinds.includes("runner")) return "Game launcher";
-  if (kinds.includes("source") || kinds.includes("library")) return "Game library";
+  if (kinds.includes("runner")) return t("app.purpose.launcher");
+  if (kinds.includes("source") || kinds.includes("library")) return t("app.purpose.library");
   return "";
 }
 
@@ -554,12 +555,12 @@ const CARD_TILT_DEGREES = 14;
 /** What the hero's main button will do, and so how it is dressed. */
 type PlayButtonKind = "play" | "stream" | "emulate" | "install" | "downloading" | "unavailable" | "blocked";
 const PLAY_BUTTON_LABELS: Record<PlayButtonKind, string> = {
-  play: "Play",
-  stream: "Stream it",
-  emulate: "Emulate it",
-  install: "Install",
-  downloading: "Downloading",
-  unavailable: "Unavailable",
+  play: t("app.playButton.play"),
+  stream: t("app.playButton.stream"),
+  emulate: t("app.playButton.emulate"),
+  install: t("app.playButton.install"),
+  downloading: t("app.playButton.downloading"),
+  unavailable: t("app.playButton.unavailable"),
   blocked: "",
 };
 const PLAY_BUTTON_ICONS: Record<PlayButtonKind, IconName | null> = {
@@ -999,7 +1000,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       retry.className = "launch-feedback__retry";
       retry.dataset.launchAction = "retry";
       retry.dataset.gameId = feedback.gameId;
-      retry.textContent = "Retry in compatibility mode";
+      retry.textContent = t("app.launch.retryCompat");
       refs.launchFeedback.append(retry);
     }
   };
@@ -1341,7 +1342,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.browseModeLabel.textContent = browseModeLabel(state.browse.mode);
     refs.browseMode.setAttribute(
       "aria-label",
-      `Browsing by ${browseModeLabel(state.browse.mode)}, press to change`,
+      t("app.browse.modeAria", { mode: browseModeLabel(state.browse.mode) }),
     );
 
     const existing = Array.from(
@@ -1371,7 +1372,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
     // The heading names the shelf on screen; a search overrides it, because
     // what is on the rail then is the search, not the segment.
-    const heading = state.query.trim() ? "Search results" : (active?.label ?? "Library");
+    const heading = state.query.trim() ? t("app.browse.searchResults") : (active?.label ?? t("app.browse.library"));
     refs.railTitle.textContent = heading;
     refs.cards.setAttribute("aria-label", heading);
   };
@@ -1511,7 +1512,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     else delete document.body.dataset.mood;
     refs.rageToggle.setAttribute("aria-checked", String(rage));
     refs.rageToggle.classList.toggle("is-active", rage);
-    refs.rageLabel.textContent = rage ? "Rage" : "Orivo";
+    refs.rageLabel.textContent = rage ? t("app.rage.label") : "Orivo";
     refs.brandMarkRing.hidden = rage;
     refs.brandMarkSpiral.hidden = !rage;
 
@@ -1554,7 +1555,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (!refs.cards.querySelector(".rail-empty")) {
         const empty = document.createElement("p");
         empty.className = "rail-empty";
-        empty.textContent = "No games match that search.";
+        empty.textContent = t("app.rail.empty");
         refs.cards.replaceChildren(empty);
       }
       return;
@@ -1666,7 +1667,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     fallbackName.className = "card-fallback__title";
     const fallbackStatus = document.createElement("span");
     fallbackStatus.className = "card-fallback__status";
-    fallbackStatus.textContent = "Finding artwork";
+    fallbackStatus.textContent = t("app.card.findingArtwork");
     fallbackTitle.append(fallbackName, fallbackStatus);
 
     media.append(portrait, landscape, fallbackTitle);
@@ -1745,7 +1746,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     card.classList.toggle("is-selected", selected);
     card.toggleAttribute("data-nav-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
-    card.setAttribute("aria-label", `Open details for ${game.title}`);
+    card.setAttribute("aria-label", t("app.card.openDetails", { title: game.title }));
 
     // The cards in view load first, the selected one before all of them.
     const priority = selected ? "high" : distance <= 6 ? "auto" : "low";
@@ -1873,17 +1874,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     try {
       choices = await storeChoices.list(gameId);
     } catch (error) {
-      showToast(messageFromError(error, "Orivo could not look this game up."));
+      showToast(messageFromError(error, t("app.store.lookupFailed")));
       return;
     }
     const open = (choice: StoreChoice): void => {
       closeMenu();
       void storeChoices.open(gameId, choice.id).catch((error) => {
-        showToast(messageFromError(error, "That page could not be opened."));
+        showToast(messageFromError(error, t("app.store.openFailed")));
       });
     };
     if (choices.length === 0) {
-      showToast("There is nowhere to get this game on this device.");
+      showToast(t("app.store.nowhere"));
       return;
     }
     if (choices.length === 1) {
@@ -1976,19 +1977,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.playButton.setAttribute(
       "aria-label",
       blocked
-        ? game.title +
-          " has no " +
-          (HOST_NAMES[game.hostPlatform ?? "macos"] ?? "macOS") +
-          " version"
+        ? t("app.play.aria.blocked", {
+            title: game.title,
+            host: HOST_NAMES[game.hostPlatform ?? "macos"] ?? "macOS",
+          })
         : game.launchable
-          ? "Play " + game.title
+          ? t("app.play.aria.play", { title: game.title })
           : isSteamInstallable
-            ? "Install " + game.title + " in Steam"
+            ? t("app.play.aria.installSteam", { title: game.title })
             : isEpicInstallable
-              ? "Install " + game.title + " from Epic Games"
+              ? t("app.play.aria.installEpic", { title: game.title })
               : isEpicInstalling
-                ? "Downloading " + game.title
-                : game.title + " is unavailable",
+                ? t("app.play.aria.downloading", { title: game.title })
+                : t("app.play.aria.unavailable", { title: game.title }),
     );
     // What pressing it does decides how it looks (styles.css, `data-kind`):
     // the scene's one call to action is vivid only when it will start something.
@@ -2013,8 +2014,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           ? blockedLabel(game)
           : kind === "downloading"
             ? typeof game.installPercent === "number"
-              ? `Downloading ${game.installPercent}%`
-              : "Downloading"
+              ? t("app.play.downloadingPercent", { percent: game.installPercent })
+              : t("app.playButton.downloading")
             : PLAY_BUTTON_LABELS[kind];
     }
     updateHeroImage(game, immediateHero);
@@ -2112,7 +2113,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       steam.dataset.libraryAction = "source-steam";
       steam.innerHTML =
         `<span class="library-source-action__icon library-source-action__icon--library" aria-hidden="true">${icon("steam")}</span>` +
-        `<span class="library-source-action__copy"><strong>Steam</strong><small>Connected · import installed games</small></span>` +
+        `<span class="library-source-action__copy"><strong>Steam</strong><small>${t("app.librarySource.steamHint")}</small></span>` +
         icon("chevron-right", "library-source-action__chevron");
       list.append(steam);
     }
@@ -2188,8 +2189,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // the rows above it, and saying so with the same value is what keeps that true.
     addLabel.textContent =
       review.entries.length === 1
-        ? "Add this game"
-        : `Add these ${review.entries.length} games`;
+        ? t("app.review.addOne")
+        : t("app.review.addMany", { count: review.entries.length });
     addCopy.append(addLabel);
     add.append(addCopy);
 
@@ -2201,7 +2202,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const dismissCopy = document.createElement("span");
     dismissCopy.className = "library-source-action__copy";
     const dismissLabel = document.createElement("strong");
-    dismissLabel.textContent = "Not now";
+    dismissLabel.textContent = t("app.review.notNow");
     dismissCopy.append(dismissLabel);
     dismiss.append(dismissCopy);
 
@@ -2341,7 +2342,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         renderSelection();
         releaseBootSplash();
       }
-      showToast("Your library could not be read.");
+      showToast(t("app.library.readFailed"));
       return;
     }
 
@@ -2395,13 +2396,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       input.value = settings?.pcName ?? "";
       if (status) {
         status.textContent = settings?.pcName
-          ? `PC games now offer a stream from ${settings.pcName}.`
-          : "Streaming is off.";
+          ? t("app.streaming.pcOffer", { name: settings.pcName })
+          : t("app.streaming.off");
       }
       // Every card's menu changes with this, so the library is read again.
       void refreshLibrary();
     } catch (error) {
-      if (status) status.textContent = messageFromError(error, "The PC name could not be saved.");
+      if (status) status.textContent = messageFromError(error, t("app.streaming.nameSaveFailed"));
     }
   };
 
@@ -2432,7 +2433,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const importGame = async (): Promise<void> => {
     closeLibraryMenu();
     if (!isTauriRuntime()) {
-      showToast("Import is available in the Orivo desktop app.");
+      showToast(t("app.import.desktopOnly"));
       return;
     }
 
@@ -2441,7 +2442,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const importedId = readImportedId(result);
       await refreshLibrary(importedId);
       if (importedId) {
-        showToast("Game added to your library.");
+        showToast(t("app.import.added"));
         // A manual import rarely ships its own artwork, so look one up in the
         // background and refresh the card once it lands.
         void invoke("fetch_game_artwork", { gameId: importedId, force: false })
@@ -2451,14 +2452,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           });
       }
     } catch (error) {
-      showToast(messageFromError(error, "Could not import this game."));
+      showToast(messageFromError(error, t("app.import.failed")));
     }
   };
 
   const chooseGameFolder = async (): Promise<void> => {
     closeLibraryMenu();
     if (!isTauriRuntime()) {
-      showToast("The games folder is available in the Orivo desktop app.");
+      showToast(t("app.folder.desktopOnly"));
       return;
     }
 
@@ -2466,16 +2467,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // Null means the dialog was cancelled. Otherwise the host is scanning now,
       // and the GAME_FOLDER_SCANNED_EVENT listener reports what it added.
       const folder = await invoke<string | null>("choose_game_folder");
-      if (folder) showToast(`Looking for games in ${folder}…`);
+      if (folder) showToast(t("app.folder.looking", { folder }));
     } catch (error) {
-      showToast(messageFromError(error, "Orivo could not use that folder."));
+      showToast(messageFromError(error, t("app.folder.useFailed")));
     }
   };
 
   const connectWinlatorExportFolder = async (): Promise<void> => {
     if (!isTauriRuntime()) {
       closeLibraryMenu();
-      showToast("Connecting a folder is available in the Orivo app.");
+      showToast(t("app.folder.connectUnavailable"));
       return;
     }
 
@@ -2485,7 +2486,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       );
       if (!answer) {
         closeLibraryMenu();
-        showToast("Orivo could not read the folder you chose.");
+        showToast(t("app.folder.readFailed"));
         return;
       }
       const waiting = winlatorShortcutsToOffer(answer);
@@ -2503,7 +2504,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showToast(answer.message);
     } catch (error) {
       closeLibraryMenu();
-      showToast(messageFromError(error, "Orivo could not connect that folder."));
+      showToast(messageFromError(error, t("app.folder.connectFailed")));
     }
   };
 
@@ -2524,7 +2525,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         }),
       );
       if (!result) {
-        showToast("Orivo could not add those Winlator games.");
+        showToast(t("app.winlator.addFailed"));
         return;
       }
       if (result.importedIds.length > 0) {
@@ -2532,14 +2533,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       }
       showToast(result.message);
     } catch (error) {
-      showToast(messageFromError(error, "Orivo could not add those Winlator games."));
+      showToast(messageFromError(error, t("app.winlator.addFailed")));
     }
   };
 
   const connectConsoleRomFolder = async (emulator: string): Promise<void> => {
     if (!isTauriRuntime()) {
       closeLibraryMenu();
-      showToast("Connecting a folder is available in the Orivo app.");
+      showToast(t("app.folder.connectUnavailable"));
       return;
     }
 
@@ -2549,7 +2550,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       );
       if (!answer) {
         closeLibraryMenu();
-        showToast("Orivo could not read the folder you chose.");
+        showToast(t("app.folder.readFailed"));
         return;
       }
       const waiting = consoleRomsToOffer(answer);
@@ -2575,7 +2576,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showToast(answer.message);
     } catch (error) {
       closeLibraryMenu();
-      showToast(messageFromError(error, "Orivo could not connect that folder."));
+      showToast(messageFromError(error, t("app.folder.connectFailed")));
     }
   };
 
@@ -2596,7 +2597,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         }),
       );
       if (!result) {
-        showToast("Orivo could not add those games.");
+        showToast(t("app.games.addFailed"));
         return;
       }
       if (result.importedIds.length > 0) {
@@ -2604,7 +2605,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       }
       showToast(result.message);
     } catch (error) {
-      showToast(messageFromError(error, "Orivo could not add those games."));
+      showToast(messageFromError(error, t("app.games.addFailed")));
     }
   };
 
@@ -2658,18 +2659,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const runnerStatusLabel = (runner: WineRunnerStatus | null): string => {
     if (!runner || runner.state === "checking") {
-      return "Checking Wine-Staging…";
+      return t("app.wine.checking");
     }
     if (runner.state === "ready") {
-      return runner.version ? "Ready · " + runner.version : "Ready";
+      return runner.version ? t("app.wine.readyVersion", { version: runner.version }) : t("app.wine.ready");
     }
     if (runner.state === "unavailable") {
-      return "Wine-Staging not found";
+      return t("app.wine.notFound");
     }
     if (runner.state === "invalid") {
-      return "Invalid Wine installation";
+      return t("app.wine.invalid");
     }
-    return "Wine-Staging unavailable";
+    return t("app.wine.unavailable");
   };
 
   const appendWineRunnerSummary = (
@@ -2777,7 +2778,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (installed) install.classList.add("is-on");
     const word = document.createElement("span");
     word.className = "source-account-row__account-name";
-    word.textContent = installed ? "Installed" : busy ? `${pluginPercent(progress)}%` : "Install";
+    word.textContent = installed
+      ? t("app.plugin.installed")
+      : busy
+        ? `${pluginPercent(progress)}%`
+        : t("app.plugin.install");
     install.replaceChildren(word);
     install.title = label;
     row.append(pluginTile(entry.id, entry.name), copy, install);
@@ -2814,12 +2819,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       [
         pluginPurpose(plugin.id, plugin.name, plugin.extensions),
         plugin.version ? `v${plugin.version}` : "",
-        plugin.updateTo ? `v${plugin.updateTo} available` : "",
+        plugin.updateTo ? t("app.plugin.versionAvailable", { version: plugin.updateTo }) : "",
         debug ? plugin.extensions.join(", ") : "",
         debug ? plugin.message : "",
       ]
         .filter(Boolean)
-        .join(" · ") || "Third-party plugin";
+        .join(" · ") || t("app.plugin.thirdParty");
     copy.append(name, details);
 
     const health = pluginHealthById.get(plugin.id) ?? null;
@@ -2851,7 +2856,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       resume.type = "button";
       resume.className = "settings-button settings-button--quiet";
       resume.dataset.pluginResume = plugin.id;
-      resume.textContent = "Resume";
+      resume.textContent = t("app.plugin.resume");
       actions.append(resume);
     }
     const updateProgress = pluginManager.progressFor(plugin.id);
@@ -2866,14 +2871,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       update.firstElementChild!.textContent = updateBusy
         ? updateProgress?.phase === "downloading"
           ? `${pluginPercent(updateProgress)}%`
-          : "Updating…"
-        : "Update";
-      update.title = plugin.updateTo ? `Update to v${plugin.updateTo}` : "Updating";
+          : t("app.plugin.updatingEllipsis")
+        : t("app.plugin.update");
+      update.title = plugin.updateTo
+        ? t("app.plugin.updateTo", { version: plugin.updateTo })
+        : t("app.plugin.updating");
       actions.append(update);
       if (updateProgress?.phase === "failed") {
         const failed = document.createElement("small");
         failed.className = "plugin-row__update-error";
-        failed.textContent = updateProgress.message || "This update did not finish.";
+        failed.textContent = updateProgress.message || t("app.plugin.updateFailed");
         copy.append(failed);
       }
     }
@@ -2887,8 +2894,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // signed one, and that is not the same kind of "previous version".
       rollback.textContent =
         plugin.rollbackTrusted === false
-          ? `Go back to v${plugin.rollbackTo} (unsigned)`
-          : `Go back to v${plugin.rollbackTo}`;
+          ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
+          : t("app.plugin.rollback", { version: plugin.rollbackTo });
       actions.append(rollback);
     }
 
@@ -2898,15 +2905,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       log.className = "settings-button settings-button--quiet";
       log.dataset.pluginLog = plugin.id;
       log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
-      log.textContent = openPluginLogId === plugin.id ? "Hide log" : "View log";
+      log.textContent = openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog");
       actions.append(log);
     }
 
     // The Libraries tab's button: it states the plugin is in at rest, and
     // under the pointer offers the one thing that state is for.
-    const remove = pluginStateButton({ idle: "Installed", hover: "Uninstall" });
+    const remove = pluginStateButton({ idle: t("app.plugin.installed"), hover: t("app.plugin.uninstall") });
     remove.dataset.pluginUninstall = plugin.id;
-    remove.setAttribute("aria-label", `Uninstall ${plugin.name}`);
+    remove.setAttribute("aria-label", t("app.plugin.uninstallNamed", { name: plugin.name }));
     actions.append(remove);
 
     row.append(pluginTile(plugin.id, plugin.name), copy, status, actions);
@@ -2918,8 +2925,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       open.type = "button";
       open.className = "plugin-open-button";
       open.dataset.pluginOpen = "game-streaming";
-      open.setAttribute("aria-label", "Set up game streaming");
-      open.title = "Set up";
+      open.setAttribute("aria-label", t("app.plugin.setupStreamingAria"));
+      open.title = t("app.plugin.setup");
       open.innerHTML = icon("chevron-right");
       row.append(open);
     }
@@ -2935,14 +2942,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     panel.className = "plugin-row__log";
     const entries = pluginJournalById.get(pluginId);
     if (entries === undefined) {
-      panel.textContent = "Loading…";
+      panel.textContent = t("app.plugin.logLoading");
     } else if (entries === null) {
       // A failed read must never look like a quiet, healthy plugin — the one
       // case this panel exists to tell apart from the other.
       panel.classList.add("plugin-row__log--error");
-      panel.textContent = "Orivo could not read this plugin's log. Try again.";
+      panel.textContent = t("app.plugin.logFailed");
     } else if (entries.length === 0) {
-      panel.textContent = "No recent activity.";
+      panel.textContent = t("app.plugin.logEmpty");
     } else {
       const list = document.createElement("ul");
       for (const line of entries) {
@@ -3033,8 +3040,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       await pluginManager.rollback(pluginId);
       showToast(
         unsigned
-          ? `${name} went back to an unsigned build.`
-          : `${name} went back to a previous version.`,
+          ? t("app.plugin.rolledBackUnsigned", { name })
+          : t("app.plugin.rolledBack", { name }),
       );
     } catch (error) {
       showToast(pluginErrorMessage(error));
@@ -3107,14 +3114,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     summary: string;
     ids?: readonly string[];
   }> = [
-    { name: "Spotify", summary: "What you are listening to, beside what you are playing." },
+    { name: "Spotify", summary: t("app.soon.spotify") },
     {
       name: "Moonlight / Sunshine",
-      summary: "Stream a game from another machine on your network.",
+      summary: t("app.soon.moonlight"),
       ids: ["com.orivo.gamestream"],
     },
-    { name: "Playnite", summary: "Import a Playnite library, its metadata and its categories." },
-    { name: "Ludusavi", summary: "Back up and restore your save games." },
+    { name: "Playnite", summary: t("app.soon.playnite") },
+    { name: "Ludusavi", summary: t("app.soon.ludusavi") },
   ];
 
   const renderComingSoonPlugins = (term: string): HTMLElement[] => {
@@ -3152,7 +3159,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         copy.append(name, summary);
         const state = document.createElement("span");
         state.className = "plugin-row__state plugin-row__state--soon";
-        state.textContent = "Soon";
+        state.textContent = t("app.soon.badge");
         row.append(pluginTile(entry.name, entry.name), copy, state);
         return row;
       });
@@ -3210,8 +3217,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // the kind of dead end this panel used to have.
     refs.pluginsCatalogEmpty.textContent =
       available.length === 0
-        ? "There are no plugins to install right now."
-        : "No plugins match that search.";
+        ? t("app.plugins.noneToInstall")
+        : t("app.plugins.noMatch");
   };
 
   const pluginName = (pluginId: string): string => {
@@ -3228,7 +3235,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const name = pluginName(pluginId);
     try {
       await pluginManager.uninstall(pluginId);
-      showToast(`${name} has been uninstalled.`);
+      showToast(t("app.plugin.uninstalled", { name }));
     } catch (error) {
       showToast(pluginErrorMessage(error));
     }
@@ -3236,13 +3243,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const installPluginFromFile = async (): Promise<void> => {
     if (!isTauriRuntime()) {
-      showToast("Installing a plugin from a file needs the Orivo desktop app.");
+      showToast(t("app.plugin.fileNeedsDesktop"));
       return;
     }
     try {
       const installed = await pluginManager.installFromFile();
       // A cancelled picker is not a failure and says nothing.
-      if (installed) showToast(`${pluginName(installed)} has been installed.`);
+      if (installed) showToast(t("app.plugin.installedToast", { name: pluginName(installed) }));
     } catch (error) {
       showToast(pluginErrorMessage(error));
     }
@@ -3274,25 +3281,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       appendWineNotice(body, settings.notice, settings.noticeTone);
       appendWineLoadingState(
         body,
-        "Loading plugins",
-        "Orivo is reading the local Wine runner and its profiles.",
+        t("app.wine.loadingTitle"),
+        t("app.wine.loadingBody"),
       );
       return;
     }
 
-    appendWineRunnerSummary(body, settings.runner, "Runner status");
+    appendWineRunnerSummary(body, settings.runner, t("app.wine.runnerStatus"));
     appendWineNotice(body, settings.notice, settings.noticeTone);
 
     const heading = document.createElement("h2");
     heading.className = "wine-settings-heading";
-    heading.textContent = "Wine profiles";
+    heading.textContent = t("app.wine.profiles");
     body.append(heading);
 
     if (settings.profiles.length === 0) {
       const empty = document.createElement("section");
       empty.className = "wine-directory-empty";
       empty.textContent =
-        "No Wine-Staging profile yet. Orivo adds one automatically the first time you import a Windows game while Wine-Staging is installed.";
+        t("app.wine.noProfiles");
       body.append(empty);
       return;
     }
@@ -3313,19 +3320,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const stateLabel = document.createElement("span");
       stateLabel.className = "wine-profile-state";
       stateLabel.classList.toggle("is-disabled", !profile.enabled);
-      stateLabel.textContent = profile.enabled ? "Active" : "Disabled";
+      stateLabel.textContent = profile.enabled ? t("app.wine.active") : t("app.wine.disabled");
       profileHeader.append(copy, stateLabel);
       card.append(profileHeader);
 
       const directoryHeading = document.createElement("p");
       directoryHeading.className = "wine-profile-card__label";
-      directoryHeading.textContent = "Allowed folders";
+      directoryHeading.textContent = t("app.wine.allowedFolders");
       card.append(directoryHeading);
       const directories = document.createElement("ul");
       directories.className = "wine-profile-directories";
       if (profile.directories.length === 0) {
         const item = document.createElement("li");
-        item.textContent = "No allowed folder";
+        item.textContent = t("app.wine.noFolder");
         directories.append(item);
       } else {
         for (const directory of profile.directories) {
@@ -3339,7 +3346,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
       const graphicsHeading = document.createElement("p");
       graphicsHeading.className = "wine-profile-card__label";
-      graphicsHeading.textContent = "Graphismes";
+      graphicsHeading.textContent = t("app.wine.graphics");
       const graphics = document.createElement("p");
       graphics.className = "wine-profile-card__graphics";
       graphics.textContent = profile.graphicsSummary;
@@ -3347,33 +3354,33 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (profile.graphicsBackend === "dxvk_macos") {
         const warning = document.createElement("p");
         warning.className = "wine-profile-card__warning";
-        warning.textContent = "Experimental · avoid games protected by anti-cheat.";
+        warning.textContent = t("app.wine.experimental");
         card.append(warning);
       } else {
         const dxvkHint = document.createElement("p");
         dxvkHint.className = "wine-profile-card__hint";
         dxvkHint.textContent =
-          "Automatic compatibility · the first time a compatible Wine game launches, Orivo prepares DXVK-macOS for this profile if it is needed, without changing Wine-Staging or any other application’s prefix.";
+          t("app.wine.autoCompat");
         card.append(dxvkHint);
       }
 
       const lastImport = document.createElement("p");
       lastImport.className = "wine-profile-card__import";
       const importDetails = [
-        profile.lastImport ? "Last import · " + profile.lastImport : "",
+        profile.lastImport ? t("app.wine.lastImport", { when: profile.lastImport }) : "",
         profile.lastImportSummary,
       ].filter(Boolean);
-      lastImport.textContent = importDetails.length > 0 ? importDetails.join(" · ") : "No import yet";
+      lastImport.textContent = importDetails.length > 0 ? importDetails.join(" · ") : t("app.wine.noImport");
       card.append(lastImport);
 
       if (settings.pendingDeleteProfileId === profile.id) {
         const confirmation = document.createElement("div");
         confirmation.className = "wine-delete-confirmation";
         const prompt = document.createElement("p");
-        prompt.textContent = "Delete this Wine profile? Its Wine games are removed from your library too.";
-        const confirm = wineActionButton("confirm-delete-wine-profile", "Delete the profile", "wine-danger-button");
+        prompt.textContent = t("app.wine.deletePrompt");
+        const confirm = wineActionButton("confirm-delete-wine-profile", t("app.wine.deleteConfirm"), "wine-danger-button");
         confirm.dataset.profileId = profile.id;
-        const cancel = wineActionButton("cancel-delete-wine-profile", "Conserver", "steam-secondary-button");
+        const cancel = wineActionButton("cancel-delete-wine-profile", t("app.wine.keep"), "steam-secondary-button");
         confirmation.append(prompt, confirm, cancel);
         card.append(confirmation);
       } else {
@@ -3381,7 +3388,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         actions.className = "wine-profile-card__actions";
         const dxvk = wineActionButton(
           "install-dxvk-macos",
-          profile.graphicsBackend === "dxvk_macos" ? "Reinstall DXVK-macOS" : "Enable DXVK-macOS",
+          profile.graphicsBackend === "dxvk_macos" ? t("app.wine.dxvkReinstall") : t("app.wine.dxvkEnable"),
           "steam-secondary-button",
           "monitor",
         );
@@ -3390,7 +3397,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         if (profile.graphicsBackend === "dxvk_macos") {
           const wine3d = wineActionButton(
             "use-wine-3d",
-            "Switch back to Wine 3D",
+            t("app.wine.useWine3d"),
             "steam-secondary-button",
           );
           wine3d.dataset.profileId = profile.id;
@@ -3398,12 +3405,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         }
         const toggle = wineActionButton(
           "toggle-wine-profile",
-          profile.enabled ? "Disable" : "Enable",
+          profile.enabled ? t("app.wine.disable") : t("app.wine.enable"),
           "steam-secondary-button",
         );
         toggle.dataset.profileId = profile.id;
         toggle.dataset.enabled = String(!profile.enabled);
-        const remove = wineActionButton("delete-wine-profile", "Delete", "wine-text-button");
+        const remove = wineActionButton("delete-wine-profile", t("app.wine.delete"), "wine-text-button");
         remove.dataset.profileId = profile.id;
         actions.append(dxvk, toggle, remove);
         card.append(actions);
@@ -3428,7 +3435,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         state: "unavailable",
         available: false,
         version: "",
-        message: "Wine-Staging settings are available in the Orivo desktop app.",
+        message: t("app.wine.desktopOnly"),
       };
       settings.profiles = [];
       settings.notice = "";
@@ -3449,7 +3456,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       settings.pendingDeleteProfileId = "";
     } catch (error) {
       if (request !== settingsRequest) return;
-      settings.notice = messageFromError(error, "Wine-Staging settings could not be loaded.");
+      settings.notice = messageFromError(error, t("app.wine.loadFailed"));
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -3462,16 +3469,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!profileId || !isTauriRuntime()) {
       return;
     }
-    state.wineSettings.notice = enabled ? "Enabling the Wine profile…" : "Disabling the Wine profile…";
+    state.wineSettings.notice = enabled ? t("app.wine.enabling") : t("app.wine.disabling");
     state.wineSettings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("set_wine_profile_enabled", { profileId, enabled });
       await refreshWineRunnerSettings(false);
-      state.wineSettings.notice = enabled ? "Wine profile enabled." : "Wine profile disabled.";
+      state.wineSettings.notice = enabled ? t("app.wine.enabled") : t("app.wine.disabledDone");
       state.wineSettings.noticeTone = "success";
     } catch (error) {
-      state.wineSettings.notice = messageFromError(error, "The Wine profile state could not be changed.");
+      state.wineSettings.notice = messageFromError(error, t("app.wine.toggleFailed"));
       state.wineSettings.noticeTone = "error";
     }
     renderWineSettingsPanel();
@@ -3481,17 +3488,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!profileId || !isTauriRuntime()) {
       return;
     }
-    state.wineSettings.notice = "Deleting the Wine profile…";
+    state.wineSettings.notice = t("app.wine.deleting");
     state.wineSettings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("delete_wine_profile", { profileId });
       state.wineSettings.pendingDeleteProfileId = "";
       await Promise.all([refreshWineRunnerSettings(false), refreshLibrary()]);
-      state.wineSettings.notice = "Wine profile deleted, along with its Wine games in your library.";
+      state.wineSettings.notice = t("app.wine.deleted");
       state.wineSettings.noticeTone = "success";
     } catch (error) {
-      state.wineSettings.notice = messageFromError(error, "The Wine profile could not be deleted.");
+      state.wineSettings.notice = messageFromError(error, t("app.wine.deleteFailed"));
       state.wineSettings.noticeTone = "error";
     }
     renderWineSettingsPanel();
@@ -3571,9 +3578,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       spinner.className = "steam-spinner";
       spinner.setAttribute("aria-hidden", "true");
       const heading = document.createElement("h2");
-      heading.textContent = "Checking your Steam connection";
+      heading.textContent = t("app.steam.checking");
       const message = document.createElement("p");
-      message.textContent = `Your account details stay on ${hostDeviceLabel()}.`;
+      message.textContent = t("app.steam.detailsStay", { device: hostDeviceLabel() });
       loading.append(spinner, heading, message);
       body.append(loading);
       if (restoreFocus) {
@@ -3590,11 +3597,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       spinner.className = "steam-spinner";
       spinner.setAttribute("aria-hidden", "true");
       const heading = document.createElement("h2");
-      heading.textContent = "Continue in the Steam window";
+      heading.textContent = t("app.steam.continueTitle");
       const message = document.createElement("p");
-      message.textContent = "Sign in directly with Steam, including Steam Guard. Orivo never receives your password.";
-      const complete = accountActionButton("complete-login", "I’ve signed in", "steam-import-button", "refresh");
-      const cancel = accountActionButton("cancel-wait", "I’ll connect later", "steam-secondary-button", "close");
+      message.textContent = t("app.steam.continueBody");
+      const complete = accountActionButton("complete-login", t("app.steam.signedIn"), "steam-import-button", "refresh");
+      const cancel = accountActionButton("cancel-wait", t("app.steam.connectLater"), "steam-secondary-button", "close");
       waiting.append(spinner, heading, message, complete, cancel);
       body.append(waiting);
       appendNotice();
@@ -3608,9 +3615,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const intro = document.createElement("section");
       intro.className = "steam-account-intro";
       const heading = document.createElement("h2");
-      heading.textContent = "Use your Steam API key";
+      heading.textContent = t("app.steam.apiKeyTitle");
       const message = document.createElement("p");
-      message.textContent = "This fallback stays encrypted in your macOS Keychain and is sent only to Steam.";
+      message.textContent = t("app.steam.apiKeyBody");
       intro.append(heading, message);
 
       const form = document.createElement("form");
@@ -3629,14 +3636,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       steamIdLabel.append(steamId);
 
       const apiKeyLabel = document.createElement("label");
-      apiKeyLabel.textContent = "Steam Web API key";
+      apiKeyLabel.textContent = t("app.steam.apiKeyLabel");
       const apiKey = document.createElement("input");
       apiKey.name = "steam-api-key";
       apiKey.type = "password";
       apiKey.autocomplete = "off";
       apiKey.spellcheck = false;
       apiKey.required = true;
-      apiKey.placeholder = "32-character key";
+      apiKey.placeholder = t("app.steam.apiKeyPlaceholder");
       apiKeyLabel.append(apiKey);
 
       const help = document.createElement("a");
@@ -3644,12 +3651,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       help.href = "https://steamcommunity.com/dev/apikey";
       help.target = "_blank";
       help.rel = "noreferrer";
-      help.textContent = "Get a Steam Web API key";
+      help.textContent = t("app.steam.apiKeyGet");
 
       const actions = document.createElement("div");
       actions.className = "steam-account-actions";
-      const back = accountActionButton("back", "Back", "steam-secondary-button", "close");
-      const submit = accountActionButton("save-api-key", "Connect & sync", "steam-import-button", "library");
+      const back = accountActionButton("back", t("app.common.back"), "steam-secondary-button", "close");
+      const submit = accountActionButton("save-api-key", t("app.steam.connectSync"), "steam-import-button", "library");
       submit.type = "submit";
       actions.append(back, submit);
       form.append(steamIdLabel, apiKeyLabel, help, actions);
@@ -3670,9 +3677,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       spinner.className = "steam-spinner";
       spinner.setAttribute("aria-hidden", "true");
       const heading = document.createElement("h2");
-      heading.textContent = account.phase === "saving-api-key" ? "Saving your Steam connection" : "Syncing your Steam library";
+      heading.textContent = account.phase === "saving-api-key" ? t("app.steam.saving") : t("app.steam.syncingLibrary");
       const message = document.createElement("p");
-      message.textContent = "Your library will appear here as soon as Steam responds. You can keep using Orivo.";
+      message.textContent = t("app.steam.syncingBody");
       syncing.append(spinner, heading, message);
       body.append(syncing);
       if (restoreFocus) {
@@ -3692,13 +3699,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     badge.setAttribute("aria-hidden", "true");
     const copy = document.createElement("div");
     const heading = document.createElement("h2");
-    heading.textContent = connected ? "Steam is connected" : "Connect your Steam library";
+    heading.textContent = connected ? t("app.steam.connected") : t("app.steam.connect");
     const message = document.createElement("p");
     if (connectedStatus) {
       const suffix = connectedStatus.steamId.length > 4 ? "••••" + connectedStatus.steamId.slice(-4) : connectedStatus.steamId;
-      message.textContent = "Steam account " + suffix + " · " + (connectedStatus.method === "api_key" ? "API key" : "Web login");
+      message.textContent = t("app.steam.accountLine", {
+        suffix,
+        method: connectedStatus.method === "api_key" ? t("app.steam.methodApiKey") : t("app.steam.methodWeb"),
+      });
     } else {
-      message.textContent = `See the games you own, even before they are installed on ${hostDeviceLabel()}.`;
+      message.textContent = t("app.steam.seeGames", { device: hostDeviceLabel() });
     }
     copy.append(heading, message);
     overview.append(badge, copy);
@@ -3709,7 +3719,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const summary = document.createElement("p");
       summary.className = "steam-account-sync-summary";
       const installed = account.lastSync.installedGames;
-      summary.textContent = account.lastSync.totalGames.toLocaleString() + " owned games · " + installed.toLocaleString() + " installed on " + hostDeviceLabel();
+      summary.textContent = t("app.steam.syncSummary", {
+        total: account.lastSync.totalGames.toLocaleString(),
+        installed: installed.toLocaleString(),
+        device: hostDeviceLabel(),
+      });
       body.append(summary);
     }
 
@@ -3717,13 +3731,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     actions.className = "steam-account-actions";
     if (connected) {
       actions.append(
-        accountActionButton("sync", "Sync library", "steam-import-button", "refresh"),
-        accountActionButton("disconnect", "Disconnect", "steam-secondary-button", "close"),
+        accountActionButton("sync", t("app.steam.sync"), "steam-import-button", "refresh"),
+        accountActionButton("disconnect", t("app.common.disconnect"), "steam-secondary-button", "close"),
       );
     } else {
       actions.append(
-        accountActionButton("connect", "Continue with Steam", "steam-import-button", "steam"),
-        accountActionButton("api-key", "Use an API key", "steam-secondary-button", "settings"),
+        accountActionButton("connect", t("app.steam.continueWith"), "steam-import-button", "steam"),
+        accountActionButton("api-key", t("app.steam.useApiKey"), "steam-secondary-button", "settings"),
       );
     }
     body.append(actions);
@@ -3740,7 +3754,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!isTauriRuntime()) {
       state.steamAccount.status = { connected: false, steamId: "", method: "", personaName: "" };
       state.steamAccount.phase = "disconnected";
-      state.steamAccount.notice = "Steam account connection is available in the Orivo desktop app.";
+      state.steamAccount.notice = t("app.steam.desktopOnly");
       state.steamAccount.noticeTone = "info";
       renderSteamAccountPanel();
       return;
@@ -3750,7 +3764,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const status = normaliseSteamAccountStatus(await invoke<unknown>("get_steam_account_status"));
       if (request !== settingsRequest) return;
       if (!status) {
-        throw new Error("Steam returned an invalid account status.");
+        throw new Error(t("app.steam.invalidStatus"));
       }
       state.steamAccount.status = status;
       state.steamAccount.phase = status.connected ? "connected" : "disconnected";
@@ -3760,7 +3774,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } catch (error) {
       if (request !== settingsRequest) return;
       state.steamAccount.phase = "error";
-      state.steamAccount.notice = messageFromError(error, "Steam account status could not be loaded.");
+      state.steamAccount.notice = messageFromError(error, t("app.steam.statusFailed"));
       state.steamAccount.noticeTone = "error";
     }
     renderSteamAccountPanel();
@@ -3825,12 +3839,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     dot.setAttribute("role", "img");
     if (health) {
       dot.className = `source-account-row__dot source-account-row__dot--${health.health}`;
-      dot.title = health.message || `Store data: ${health.health.replace("-", " ")}`;
-      dot.setAttribute("aria-label", `Store data: ${health.health.replace("-", " ")}`);
+      dot.title = health.message || t("app.source.storeData", { health: health.health.replace("-", " ") });
+      dot.setAttribute("aria-label", t("app.source.storeData", { health: health.health.replace("-", " ") }));
       return dot;
     }
     dot.className = "source-account-row__dot source-account-row__dot--connected";
-    dot.setAttribute("aria-label", "Connected");
+    dot.setAttribute("aria-label", t("app.common.connectedState"));
     return dot;
   };
 
@@ -3844,7 +3858,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     button.type = "button";
     button.className = "source-account-row__sync";
     button.innerHTML = icon("sync");
-    button.setAttribute("aria-label", `Sync ${label}`);
+    button.setAttribute("aria-label", t("app.source.syncNamed", { name: label }));
     if (provider) {
       button.dataset.sourceAction = "sync";
       button.dataset.sourceProvider = provider;
@@ -3923,7 +3937,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const waiting = document.createElement("span");
       waiting.className = "source-account-row__waiting";
       waiting.setAttribute("role", "status");
-      waiting.textContent = account.phase === "syncing" ? "Syncing…" : "Continue in the window…";
+      waiting.textContent = account.phase === "syncing" ? t("app.common.syncing") : t("app.common.continueInWindow");
       actions.append(spinner, waiting);
     } else if (connected) {
       actions.append(
@@ -3932,12 +3946,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           provider: null,
           // The persona name is the account's own name; the id stands in
           // whenever Steam showed no profile to take one from.
-          idle: account.status?.personaName || account.status?.steamId || "Connected",
-          hover: "Disconnect",
+          idle: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
+          hover: t("app.common.disconnect"),
         }),
       );
     } else {
-      actions.append(sourceAccountButton({ action: "connect", provider: null, idle: "Connect" }));
+      actions.append(sourceAccountButton({ action: "connect", provider: null, idle: t("app.common.connect") }));
     }
 
     refs.steamSourceRow.replaceChildren(row);
@@ -3975,7 +3989,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         await invoke<unknown>("sync_steam_account_library"),
       );
       if (!result) {
-        throw new Error("Steam returned an invalid library sync.");
+        throw new Error(t("app.steam.invalidSync"));
       }
       state.steamAccount.lastSync = result;
       state.steamAccount.phase = "connected";
@@ -3985,7 +3999,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showToast(state.steamAccount.notice);
     } catch (error) {
       state.steamAccount.phase = "error";
-      state.steamAccount.notice = messageFromError(error, "Steam library could not be synced.");
+      state.steamAccount.notice = messageFromError(error, t("app.steam.syncFailed"));
       state.steamAccount.noticeTone = "error";
     }
     renderSteamAccountPanel();
@@ -3994,7 +4008,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const startSteamWebLogin = async (): Promise<void> => {
     if (!isTauriRuntime()) {
       state.steamAccount.phase = "disconnected";
-      state.steamAccount.notice = "Steam account connection is available in the Orivo desktop app.";
+      state.steamAccount.notice = t("app.steam.desktopOnly");
       state.steamAccount.noticeTone = "info";
       renderSteamAccountPanel();
       return;
@@ -4006,7 +4020,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       await invoke("begin_steam_web_login");
     } catch (error) {
       state.steamAccount.phase = state.steamAccount.status?.connected ? "connected" : "disconnected";
-      state.steamAccount.notice = messageFromError(error, "Steam sign-in window could not be opened.");
+      state.steamAccount.notice = messageFromError(error, t("app.steam.windowFailed"));
       state.steamAccount.noticeTone = "error";
       renderSteamAccountPanel();
     }
@@ -4024,14 +4038,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         await invoke<unknown>("connect_steam_with_api_key", { steamId, apiKey }),
       );
       if (!status?.connected) {
-        throw new Error("Steam API key could not be saved.");
+        throw new Error(t("app.steam.keySaveFailed"));
       }
       state.steamAccount.status = status;
       state.steamAccount.phase = "connected";
       await syncSteamAccountLibrary();
     } catch (error) {
       state.steamAccount.phase = "api-key";
-      state.steamAccount.notice = messageFromError(error, "Steam API key could not be connected.");
+      state.steamAccount.notice = messageFromError(error, t("app.steam.keyConnectFailed"));
       state.steamAccount.noticeTone = "error";
       renderSteamAccountPanel();
     }
@@ -4047,11 +4061,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       state.steamAccount.phase = "disconnected";
       state.steamAccount.lastSync = null;
       state.steamAccount.apiKeySteamId = "";
-      state.steamAccount.notice = "Steam was disconnected. Games already imported into Orivo remain in your library.";
+      state.steamAccount.notice = t("app.steam.disconnected");
       state.steamAccount.noticeTone = "info";
     } catch (error) {
       state.steamAccount.phase = "error";
-      state.steamAccount.notice = messageFromError(error, "Steam could not be disconnected.");
+      state.steamAccount.notice = messageFromError(error, t("app.steam.disconnectFailed"));
       state.steamAccount.noticeTone = "error";
     }
     renderSteamAccountPanel();
@@ -4122,7 +4136,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!isTauriRuntime()) {
       const hint = document.createElement("p");
       hint.className = "settings-hint";
-      hint.textContent = "Connecting another game library is available in the Orivo desktop app.";
+      hint.textContent = t("app.source.desktopOnly");
       body.append(hint);
       return;
     }
@@ -4169,7 +4183,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         info.className = "source-account-row__info";
         info.tabIndex = 0;
         info.innerHTML = icon("info");
-        const sentence = "One Microsoft sign-in covers both: connecting or disconnecting one affects the other.";
+        const sentence = t("app.source.microsoftPair");
         info.title = sentence;
         info.setAttribute("role", "img");
         info.setAttribute("aria-label", sentence);
@@ -4194,16 +4208,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         waiting.className = "source-account-row__waiting";
         waiting.setAttribute("role", "status");
         waiting.textContent = status.connected
-          ? "Syncing…"
+          ? t("app.common.syncing")
           : status.style === "session"
-            ? "Continue in the window…"
-            : "Waiting for sign-in…";
+            ? t("app.common.continueInWindow")
+            : t("app.source.waitingSignIn");
         actions.append(spinner, waiting);
         actions.append(
           sourceActionButton(
             descriptor.provider,
             "cancel",
-            "Cancel",
+            t("app.common.cancel"),
             "steam-secondary-button",
             "close",
           ),
@@ -4213,27 +4227,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // forget what was already imported. Never guess the second.
         const confirm = document.createElement("span");
         confirm.className = "source-account-row__confirm";
-        confirm.textContent = "Keep the games already imported?";
+        confirm.textContent = t("app.source.keepPrompt");
         actions.append(confirm);
         actions.append(
           sourceActionButton(
             descriptor.provider,
             "disconnect-keep",
-            "Keep them",
+            t("app.source.keepThem"),
             "steam-secondary-button",
             "check",
           ),
           sourceActionButton(
             descriptor.provider,
             "disconnect-forget",
-            "Remove them",
+            t("app.source.removeThem"),
             "steam-secondary-button",
             "close",
           ),
           sourceActionButton(
             descriptor.provider,
             "disconnect-cancel",
-            "Cancel",
+            t("app.common.cancel"),
             "steam-secondary-button",
             "chevron-left",
           ),
@@ -4244,13 +4258,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
             action: "disconnect",
             provider: descriptor.provider,
             // Who you are signed in as: the account, not a verdict about it.
-            idle: status.accountLabel || "Connected",
-            hover: "Disconnect",
+            idle: status.accountLabel || t("app.common.connectedState"),
+            hover: t("app.common.disconnect"),
           }),
         );
       } else {
         actions.append(
-          sourceAccountButton({ action: "connect", provider: descriptor.provider, idle: "Connect" }),
+          sourceAccountButton({
+            action: "connect",
+            provider: descriptor.provider,
+            idle: t("app.common.connect"),
+          }),
         );
       }
 
@@ -4314,7 +4332,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (request !== settingsRequest) return;
       setSourceNotice(
         null,
-        messageFromError(error, "Library source connections could not be loaded."),
+        messageFromError(error, t("app.source.loadFailed")),
         "error",
       );
     }
@@ -4338,10 +4356,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // A session-style store imports its library as part of connecting, so
       // the Library has to be re-read either way.
       await refreshLibrary();
-      setSourceNotice(provider, `${label} is connected.`, "success");
-      showToast(`${label} is connected.`);
+      setSourceNotice(provider, t("app.source.connected", { name: label }), "success");
+      showToast(t("app.source.connected", { name: label }));
     } catch (error) {
-      setSourceNotice(provider, messageFromError(error, `${label} could not be connected.`), "error");
+      setSourceNotice(provider, messageFromError(error, t("app.source.connectFailed", { name: label })), "error");
     }
     setSourceBusy(provider, false);
     renderSourceAccountsPanel();
@@ -4360,14 +4378,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         await invoke<unknown>("sync_source_library", { provider }),
       );
       if (!result) {
-        throw new Error(`${label} returned an invalid library sync.`);
+        throw new Error(t("app.source.invalidSync", { name: label }));
       }
       state.sourceAccounts.lastSync.set(provider, result);
       await refreshLibrary();
       setSourceNotice(provider, sourceSyncSummary(result), "success");
       showToast(sourceSyncSummary(result));
     } catch (error) {
-      setSourceNotice(provider, messageFromError(error, `${label} could not be synced.`), "error");
+      setSourceNotice(provider, messageFromError(error, t("app.source.syncFailed", { name: label })), "error");
     }
     setSourceBusy(provider, false);
     renderSourceAccountsPanel();
@@ -4390,19 +4408,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       .filter((status) => status.connected)
       .map((status) => status.provider);
     if (connected.length === 0) {
-      showToast("Connect a store first — there is nothing to refresh yet.");
+      showToast(t("app.source.connectFirst"));
       return;
     }
 
     showToast(
       connected.length === 1
-        ? "Refreshing 1 library…"
-        : `Refreshing ${connected.length} libraries…`,
+        ? t("app.source.refreshingOne")
+        : t("app.source.refreshingMany", { count: connected.length }),
     );
     for (const provider of connected) {
       await syncSourceLibrary(provider);
     }
-    showToast("Every connected library has been refreshed.");
+    showToast(t("app.source.refreshed"));
   };
 
   const cancelSourceLogin = async (provider: ConnectedSource): Promise<void> => {
@@ -4439,8 +4457,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       setSourceNotice(
         provider,
         forgetGames
-          ? `${label} was disconnected and ${removedCount === 1 ? "1 game was" : `${removedCount} games were`} removed.`
-          : `${label} was disconnected. Games already imported stay in your library.`,
+          ? removedCount === 1
+            ? t("app.source.disconnectedRemovedOne", { name: label })
+            : t("app.source.disconnectedRemovedMany", { name: label, count: removedCount })
+          : t("app.source.disconnectedKept", { name: label }),
         "info",
       );
       await refreshSourceAccounts();
@@ -4448,7 +4468,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } catch (error) {
       setSourceNotice(
         provider,
-        messageFromError(error, `${label} could not be disconnected.`),
+        messageFromError(error, t("app.source.disconnectFailed", { name: label })),
         "error",
       );
     }
@@ -4484,7 +4504,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // Icon-only controls carry their own name, and this one's name changes.
     refs.notificationsButton.setAttribute(
       "aria-label",
-      unread === 0 ? "Notifications" : `Notifications, ${unread} unread`,
+      unread === 0 ? t("app.notifications.title") : t("app.notifications.unread", { count: unread }),
     );
 
     refs.notificationsList.replaceChildren();
@@ -4492,7 +4512,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const empty = document.createElement("p");
       empty.className = "notifications-panel__empty";
       empty.textContent =
-        "Nothing to report. Orivo writes here only when it has something useful to add.";
+        t("app.notifications.empty");
       refs.notificationsList.append(empty);
       return;
     }
@@ -4526,7 +4546,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       dismiss.className = "notification-card__dismiss";
       dismiss.dataset.notificationAction = "dismiss";
       dismiss.dataset.notificationId = item.id;
-      dismiss.setAttribute("aria-label", `Dismiss: ${item.title}`);
+      dismiss.setAttribute("aria-label", t("app.notifications.dismiss", { title: item.title }));
       dismiss.innerHTML = icon("close");
 
       card.append(mark, copy, dismiss);
@@ -4707,7 +4727,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (config.connected) {
       const pill = document.createElement("span");
       pill.className = "onboarding__pill";
-      pill.textContent = "Connected";
+      pill.textContent = t("app.common.connectedState");
       row.append(pill);
     } else if (config.chevron !== false) {
       row.insertAdjacentHTML("beforeend", icon("chevron-right", "onboarding__chevron"));
@@ -4734,7 +4754,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const onboardingDesktopOnlyNote = (): HTMLParagraphElement => {
     const note = document.createElement("p");
     note.className = "onboarding__aside";
-    note.textContent = "Connecting a library is available in the Orivo desktop app.";
+    note.textContent = t("app.onboarding.desktopOnly");
     return note;
   };
 
@@ -4753,31 +4773,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       onboardingRow({
         action: "sources",
         mark: icon("collections"),
-        title: "Connect a library",
-        detail: "Steam, Epic, GOG, Xbox and more",
+        title: t("app.onboarding.connectTitle"),
+        detail: t("app.onboarding.connectDetail"),
       }),
       onboardingRow({
         action: "local",
         mark: icon("folder"),
-        title: "Import a local game",
-        detail: `Pick an app or executable on ${hostDeviceLabel()}`,
+        title: t("app.onboarding.localTitle"),
+        detail: t("app.onboarding.localDetail", { device: hostDeviceLabel() }),
         chevron: false,
       }),
     );
 
     const aside = document.createElement("p");
     aside.className = "onboarding__aside";
-    aside.append(document.createTextNode("Both of these also live in "));
+    aside.append(document.createTextNode(t("app.onboarding.alsoIn")));
     const link = document.createElement("button");
     link.type = "button";
     link.className = "onboarding__link";
     link.dataset.onboardingAction = "settings";
-    link.textContent = "Settings › Libraries & Sources";
+    link.textContent = t("app.onboarding.settingsLink");
     aside.append(link, document.createTextNode("."));
 
     view.append(
       mark,
-      onboardingHeading("Your library is empty", "Connect a platform to see your games here."),
+      onboardingHeading(t("app.onboarding.emptyTitle"), t("app.onboarding.emptyBody")),
       rows,
       aside,
     );
@@ -4790,8 +4810,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     view.append(
       onboardingBackButton(),
       onboardingHeading(
-        "Connect a library",
-        "Each store signs you in through its own window. Orivo never sees your password.",
+        t("app.onboarding.connectTitle"),
+        t("app.onboarding.sourcesBody"),
       ),
     );
 
@@ -4853,7 +4873,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       facts.append(
         fact(
           "alert",
-          `Orivo lists and organises ${descriptor.label} games but cannot launch them yet.`,
+          t("app.onboarding.cannotLaunch", { store: descriptor.label }),
         ),
       );
     }
@@ -4880,19 +4900,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const label = document.createElement("span");
       label.textContent =
         provider === "steam" && state.steamAccount.phase === "syncing"
-          ? "Reading your Steam library…"
-          : "Continue in the sign-in window…";
+          ? t("app.onboarding.readingSteam")
+          : t("app.onboarding.continueSignIn");
       waiting.append(spinner, label);
-      actions.append(waiting, onboardingButton("cancel", "Cancel", provider));
+      actions.append(waiting, onboardingButton("cancel", t("app.common.cancel"), provider));
     } else if (connected) {
       // Connected, and the library is still empty. Asking again is the only
       // thing left that can change that, so it is the only thing offered.
       actions.append(
-        onboardingButton("sync", `Sync ${descriptor.label} again`, provider, true),
+        onboardingButton("sync", t("app.onboarding.syncAgain", { store: descriptor.label }), provider, true),
       );
     } else {
       actions.append(
-        onboardingButton("connect", `Connect ${descriptor.label}`, provider, true),
+        onboardingButton("connect", t("app.onboarding.connectStore", { store: descriptor.label }), provider, true),
       );
     }
     view.append(actions);
@@ -5045,7 +5065,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const connectFromOnboarding = async (provider: OnboardingSource): Promise<void> => {
     if (!isTauriRuntime()) {
-      showToast("Connecting a library is available in the Orivo desktop app.");
+      showToast(t("app.onboarding.desktopOnly"));
       return;
     }
     // Both of these repaint through the state their store already owns, which
@@ -5079,17 +5099,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
     settings.loading = true;
-    settings.notice = "Downloading and verifying DXVK-macOS, then preparing the isolated prefix…";
+    settings.notice = t("app.wine.dxvkInstalling");
     settings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("install_dxvk_macos_for_profile", { profileId });
       await refreshWineRunnerSettings(false);
-      settings.notice = "DXVK-macOS is ready. Orivo uses it automatically for compatible DirectX 10/11 games in this profile.";
+      settings.notice = t("app.wine.dxvkReady");
       settings.noticeTone = "success";
       showToast(settings.notice);
     } catch (error) {
-      settings.notice = messageFromError(error, "DXVK-macOS could not be installed for this profile.");
+      settings.notice = messageFromError(error, t("app.wine.dxvkFailed"));
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -5102,17 +5122,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
     settings.loading = true;
-    settings.notice = "Switching back to Wine 3D…";
+    settings.notice = t("app.wine.switching");
     settings.noticeTone = "info";
     renderWineSettingsPanel();
     try {
       await invoke("use_wine_3d_for_profile", { profileId });
       await refreshWineRunnerSettings(false);
-      settings.notice = "This profile now uses Wine 3D. DXVK-macOS stays isolated in this profile.";
+      settings.notice = t("app.wine.switched");
       settings.noticeTone = "success";
       showToast(settings.notice);
     } catch (error) {
-      settings.notice = messageFromError(error, "Switching back to Wine 3D could not be saved.");
+      settings.notice = messageFromError(error, t("app.wine.switchFailed"));
       settings.noticeTone = "error";
     }
     settings.loading = false;
@@ -5136,12 +5156,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // one on screen, which is exactly what a deep link opened before the
     // library loaded would do.
     if (requestedGameId && !requested) {
-      showToast("That game is not in your library yet.");
+      showToast(t("app.launch.notInLibrary"));
       return;
     }
     const game = requested ?? selectedGame();
     if (!isTauriRuntime()) {
-      showToast("Launch is available in the Orivo desktop app.");
+      showToast(t("app.launch.desktopOnly"));
       return;
     }
     // Enter and the controller still reach this while a game is starting; a
@@ -5152,7 +5172,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // Offered beside a stream for an Epic game not yet on the phone: the
       // download itself, answered exactly as the Install button answers it.
       if (launchOption === INSTALL_ON_PHONE_OPTION) {
-        showToast("Starting the download for " + game.title + "…");
+        showToast(t("app.launch.startingDownload", { title: game.title }));
         await invoke("install_epic_game", { gameId: game.id });
         startInstallWatch(INSTALL_WATCH_GRACE_TICKS);
         return;
@@ -5161,14 +5181,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         if (game.source === "steam" && platformFeatures.storeChoices) {
           await offerStoreChoices(game.id, refs.playLaunchMenu, closeLaunchMenu);
         } else if (game.source === "steam") {
-          showToast("Opening Steam to install " + game.title + "…");
+          showToast(t("app.launch.openingSteam", { title: game.title }));
           await invoke("install_steam_game", { gameId: game.id });
         } else if (game.source === "epic" && game.installState === "installing") {
           // The download the launcher is already running is the answer here,
           // not a reason to start a second one.
-          showToast(game.title + " is already downloading.");
+          showToast(t("app.launch.alreadyDownloading", { title: game.title }));
         } else if (game.source === "epic") {
-          showToast("Starting the download for " + game.title + "…");
+          showToast(t("app.launch.startingDownload", { title: game.title }));
           await invoke("install_epic_game", { gameId: game.id });
           // Epic reports nothing back, so Orivo starts watching the launcher's
           // own manifests and paints the percentage itself. The grace ticks
@@ -5178,11 +5198,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           state.launchFeedback = {
             gameId: game.id,
             phase: "failed",
-            message: "This Wine game cannot be launched with that profile.",
+            message: t("app.launch.wineProfile"),
           };
           renderLaunchFeedback();
         } else {
-          showToast("Visual showcase — import a local game to play.");
+          showToast(t("app.launch.showcase"));
         }
         return;
       }
@@ -5190,7 +5210,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         state.launchFeedback = {
           gameId: game.id,
           phase: "launching",
-          message: "Launching with Wine-Staging…",
+          message: t("app.launch.wineLaunching"),
         };
         renderLaunchFeedback();
       }
@@ -5204,7 +5224,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       launchSplash.launched(game.id, readLaunchHandoff(result));
     } catch (error) {
       launchSplash.failed(game.id);
-      const message = messageFromError(error, "Could not launch " + game.title + ".");
+      const message = messageFromError(error, t("app.launch.failed", { title: game.title }));
       if (game.source === "wine") {
         state.launchFeedback = {
           gameId: game.id,
@@ -5224,14 +5244,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     state.launchFeedback = {
       gameId,
       phase: "launching",
-      message: "Preparing the next Wine compatibility mode…",
+      message: t("app.launch.nextCompat"),
     };
     renderLaunchFeedback();
     try {
       await invoke("retry_wine_game_in_compatibility", { gameId });
       await launchGame(gameId);
     } catch (error) {
-      const message = messageFromError(error, "That Wine compatibility mode is not available.");
+      const message = messageFromError(error, t("app.launch.compatUnavailable"));
       state.launchFeedback = { gameId, phase: "failed", message };
       renderLaunchFeedback();
       showToast(message);
@@ -5266,6 +5286,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
     if (startPage) startPage.value = state.preferences.startPage;
     if (storeRegion) storeRegion.value = state.preferences.storeRegion;
+    const language = root.querySelector<HTMLSelectElement>("#preference-language");
+    if (language) language.value = state.preferences.language;
     renderGameStartPreference();
     for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
       input.checked = input.value === state.preferences.motion;
@@ -5380,9 +5402,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const freshness = root.querySelector<HTMLElement>("#derived-cache-freshness");
     if (size) size.textContent = formatDataSize(state.dataUsage.derivedCacheBytes);
     if (entries) {
-      entries.textContent = `${state.dataUsage.derivedCacheEntries.toLocaleString()} derived ${
-        state.dataUsage.derivedCacheEntries === 1 ? "entry" : "entries"
-      }`;
+      entries.textContent = state.dataUsage.derivedCacheEntries === 1
+          ? t("app.data.entryOne", { count: state.dataUsage.derivedCacheEntries.toLocaleString() })
+          : t("app.data.entryMany", { count: state.dataUsage.derivedCacheEntries.toLocaleString() });
     }
     if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
   };
@@ -5399,9 +5421,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const description = isTauriRuntime()
       ? describeUpdateState(state.update)
       : {
-          label: "Updates are installed by the Orivo desktop app.",
-          detail: "Open Orivo on your Mac to check for and install a new version.",
-          buttonLabel: "Check for updates",
+          label: t("app.update.desktopLabel"),
+          detail: t("app.update.desktopDetail"),
+          buttonLabel: t("app.update.check"),
           buttonDisabled: true,
         };
 
@@ -5532,6 +5554,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     playSettingsEntrance(enteringPage);
   };
 
+  /**
+   * The markup is built once in one language, so a different choice — made
+   * here or on another start — takes effect by reloading. Returns whether it did.
+   */
+  const applyLanguagePreference = (): boolean => {
+    if (!rememberLanguagePreference(state.preferences.language)) return false;
+    window.location.reload();
+    return true;
+  };
+
   const loadPreferences = async (request = settingsRequest): Promise<void> => {
     if (!isTauriRuntime()) {
       renderPreferenceControls();
@@ -5542,9 +5574,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (request !== settingsRequest) return;
       state.preferences = preferences;
       renderPreferenceControls();
+      applyLanguagePreference();
     } catch (error) {
       if (request === settingsRequest) {
-        showToast(messageFromError(error, "Preferences could not be loaded."));
+        showToast(messageFromError(error, t("app.prefs.loadFailed")));
       }
     }
   };
@@ -5561,11 +5594,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         await invoke<unknown>("update_preferences", { update }),
       );
       renderPreferenceControls();
-      showToast(update.reset ? "Preferences reset to defaults." : "Preferences saved.");
+      if (applyLanguagePreference()) return;
+      showToast(t(update.reset ? "toast.preferencesReset" : "toast.preferencesSaved"));
     } catch (error) {
       state.preferences = previous;
       renderPreferenceControls();
-      showToast(messageFromError(error, "Preferences could not be saved."));
+      showToast(messageFromError(error, t("toast.preferencesFailed")));
     }
   };
 
@@ -5598,7 +5632,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       renderDataUsage();
     } catch (error) {
       if (request === settingsRequest) {
-        showToast(messageFromError(error, "Data usage could not be loaded."));
+        showToast(messageFromError(error, t("app.data.loadFailed")));
       }
     }
   };
@@ -5624,13 +5658,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     };
     for (const pill of refs.wallpaperPluginPanel.querySelectorAll<HTMLElement>("[data-ws-status]")) {
       const on = ready[pill.dataset.wsStatus ?? ""] === true;
-      pill.textContent = on ? "Connected" : "Needs a key";
+      pill.textContent = on ? t("app.common.connectedState") : t("app.wallpaper.needsKey");
       pill.classList.toggle("ws-pill--on", on);
     }
     refs.wallpaperCredentialsSave.disabled = state.wallpaperCredentialsSaving;
     refs.wallpaperCredentialsSave.textContent = state.wallpaperCredentialsSaving
-      ? "Saving…"
-      : "Save keys";
+      ? t("app.wallpaper.saving")
+      : t("app.wallpaper.save");
   };
 
   /**
@@ -5655,7 +5689,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       renderWallpaperCredentials();
     } catch (error) {
       if (request === settingsRequest && !quiet) {
-        showToast(messageFromError(error, "Wallpaper keys could not be loaded."));
+        showToast(messageFromError(error, t("app.wallpaper.loadFailed")));
       }
     }
   };
@@ -5675,7 +5709,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!isTauriRuntime()) {
       state.wallpaperCredentials = { ...EMPTY_WALLPAPER_CREDENTIALS, ...update };
       renderWallpaperCredentials();
-      showToast("Wallpaper keys are saved in the Orivo desktop app.");
+      showToast(t("app.wallpaper.desktopOnly"));
       return;
     }
     const previous = state.wallpaperCredentials;
@@ -5686,11 +5720,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         await invoke<unknown>("update_wallpaper_credentials", { update }),
       );
       renderWallpaperCredentials();
-      showToast("Wallpaper keys saved.");
+      showToast(t("app.wallpaper.saved"));
     } catch (error) {
       state.wallpaperCredentials = previous;
       renderWallpaperCredentials();
-      showToast(messageFromError(error, "Wallpaper keys could not be saved."));
+      showToast(messageFromError(error, t("app.wallpaper.saveFailed")));
     } finally {
       state.wallpaperCredentialsSaving = false;
       renderWallpaperCredentials();
@@ -5703,9 +5737,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     try {
       if (isTauriRuntime()) await invoke("refresh_store_sources");
       await Promise.all([loadProviderStatuses(), loadDataUsage()]);
-      showToast("Derived data refreshed.");
+      showToast(t("app.data.refreshed"));
     } catch (error) {
-      showToast(messageFromError(error, "Derived data could not be refreshed."));
+      showToast(messageFromError(error, t("app.data.refreshFailed")));
     } finally {
       if (refresh) refresh.disabled = false;
     }
@@ -5721,9 +5755,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         state.dataUsage = { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null };
       }
       renderDataUsage();
-      showToast("Derived cache cleared. Your library and game media were kept.");
+      showToast(t("app.data.cleared"));
     } catch (error) {
-      showToast(messageFromError(error, "Derived cache could not be cleared."));
+      showToast(messageFromError(error, t("app.data.clearFailed")));
     } finally {
       if (clear) clear.disabled = false;
     }
@@ -5782,11 +5816,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // install that has not actually completed.
       state.update = markReady(state.update);
       renderUpdatePanel();
-      showToast("Update installed. Restart Orivo to finish.");
+      showToast(t("app.update.installed"));
     } catch (error) {
       state.update = applyError(state.update, error);
       renderUpdatePanel();
-      showToast(messageFromError(error, "The update could not be installed."));
+      showToast(messageFromError(error, t("app.update.installFailed")));
     }
   };
 
@@ -5799,7 +5833,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // the row keeps offering it. Falling into the error state would send the
       // retry back to a fresh check, which would download the same build again.
       showToast(
-        messageFromError(error, "Orivo could not restart. Quit and reopen it to finish updating."),
+        messageFromError(error, t("app.update.restartFailed")),
       );
     }
   };
@@ -6077,7 +6111,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } else if (action === "complete-login") {
       if (isTauriRuntime()) {
         void invoke("complete_steam_web_login").catch((error) => {
-          state.steamAccount.notice = messageFromError(error, "Steam sign-in could not be checked.");
+          state.steamAccount.notice = messageFromError(error, t("app.steam.checkFailed"));
           state.steamAccount.noticeTone = "error";
           renderSteamAccountPanel();
         });
@@ -6172,13 +6206,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         return;
       }
       state.steamAccount.phase = state.steamAccount.status?.connected ? "connected" : "disconnected";
-      state.steamAccount.notice = "Steam sign-in was cancelled.";
+      state.steamAccount.notice = t("app.steam.cancelled");
       state.steamAccount.noticeTone = "info";
       renderSteamAccountPanel();
     });
     void listen<string>(STEAM_ACCOUNT_LOGIN_FAILED_EVENT, (event) => {
       state.steamAccount.phase = state.steamAccount.status?.connected ? "connected" : "disconnected";
-      state.steamAccount.notice = messageFromError(event.payload, "Steam sign-in could not be saved.");
+      state.steamAccount.notice = messageFromError(event.payload, t("app.steam.signInSaveFailed"));
       state.steamAccount.noticeTone = "error";
       renderSteamAccountPanel();
     });
@@ -6186,7 +6220,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (state.steamAccount.phase !== "connecting") {
         return;
       }
-      state.steamAccount.notice = "Steam sign-in is not complete yet. Finish in the Steam window, then try again.";
+      state.steamAccount.notice = t("app.steam.notComplete");
       state.steamAccount.noticeTone = "info";
       renderSteamAccountPanel();
     });
@@ -6207,7 +6241,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (!isConnectedSource(provider) || !state.sourceAccounts.busy.has(provider)) return;
       setSourceNotice(
         provider,
-        `${connectedSourceDescriptor(provider).label} sign-in was cancelled.`,
+        t("app.source.signInCancelled", { name: connectedSourceDescriptor(provider).label }),
         "info",
       );
       renderSourceAccountsPanel();
@@ -6221,7 +6255,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           provider,
           messageFromError(
             event.payload?.message,
-            `${connectedSourceDescriptor(provider).label} sign-in could not be saved.`,
+            t("app.source.signInSaveFailed", { name: connectedSourceDescriptor(provider).label }),
           ),
           "error",
         );
@@ -6234,7 +6268,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const added = typeof event.payload === "number" ? event.payload : 0;
       if (added <= 0) return;
       void refreshLibrary();
-      showToast(added === 1 ? "1 game added from your games folder." : `${added} games added from your games folder.`);
+      showToast(
+        added === 1 ? t("app.folder.addedOne") : t("app.folder.addedMany", { count: added }),
+      );
     });
     void listen<null>(GAME_PLAY_RECORDED_EVENT, () => {
       void refreshLibrary();
@@ -6295,11 +6331,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         }
         return;
       }
-      const title = state.games.find((game) => game.id === payload.gameId)?.title ?? "The game";
+      const title = state.games.find((game) => game.id === payload.gameId)?.title ?? t("app.launch.theGame");
       state.launchFeedback = {
         gameId: payload.gameId,
         phase: payload.phase === "preparing" ? "launching" : payload.phase,
-        message: payload.phase === "started" ? `${title} is running` : payload.message,
+        message: payload.phase === "started" ? t("app.launch.running", { title }) : payload.message,
       };
       renderLaunchFeedback();
       if (payload.phase === "failed") {
@@ -6327,8 +6363,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const appVersion = root.querySelector<HTMLElement>("#about-app-version");
     const tauriVersion = root.querySelector<HTMLElement>("#about-tauri-version");
     if (!isTauriRuntime()) {
-      if (appVersion) appVersion.textContent = "Development build";
-      if (tauriVersion) tauriVersion.textContent = "Browser preview";
+      if (appVersion) appVersion.textContent = t("app.about.devBuild");
+      if (tauriVersion) tauriVersion.textContent = t("app.about.browserPreview");
       renderUpdatePanel();
       return;
     }
@@ -6366,21 +6402,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // blanked out, because a 352px hole mid-bar reads as a broken layout. Only
     // what the field searches changes.
     if (route.page === "store") {
-      refs.search.placeholder = "Search the store…";
-      refs.search.setAttribute("aria-label", "Search the store");
+      refs.search.placeholder = t("app.search.storePlaceholder");
+      refs.search.setAttribute("aria-label", t("app.search.storeAria"));
       if (document.activeElement !== refs.search) refs.search.value = route.query;
       return;
     }
     if (route.page === "settings") {
-      refs.search.placeholder = "Search settings…";
-      refs.search.setAttribute("aria-label", "Search settings");
+      refs.search.placeholder = t("app.search.settingsPlaceholder");
+      refs.search.setAttribute("aria-label", t("app.search.settingsAria"));
       if (refs.search.value !== state.settingsSearch) refs.search.value = state.settingsSearch;
       return;
     }
     // Library, game detail, and not-found all search the library. From a page
     // that cannot show the results, Enter takes the query to the Library.
-    refs.search.placeholder = "Search games…";
-    refs.search.setAttribute("aria-label", "Search your library");
+    refs.search.placeholder = t("app.search.gamesPlaceholder");
+    refs.search.setAttribute("aria-label", t("app.search.gamesAria"));
     if (refs.search.value !== state.query) refs.search.value = state.query;
   };
 
@@ -6648,7 +6684,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     activate(activation) {
       const route = activation.route;
       refs.notFoundDetail.textContent =
-        route.page === "not-found" ? `Orivo has no page at “${route.path}”.` : "";
+        route.page === "not-found" ? t("app.notFound.detail", { path: route.path }) : "";
       requestAnimationFrame(() => {
         if (!activation.isCurrent()) return;
         refs.notFoundPage
@@ -6729,7 +6765,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     activePage = route.page;
     const restore = returning ? restoreStates.get(route.page) ?? null : null;
     void pageHosts[route.page].activate(route, restore).catch((error: unknown) => {
-      showToast(messageFromError(error, "This page could not be opened."));
+      showToast(messageFromError(error, t("app.page.openFailed")));
     });
   };
 
@@ -6881,6 +6917,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         void savePreferences({ startPage: target.value as StartPage });
       } else if (target.id === "preference-store-region") {
         void savePreferences({ storeRegion: target.value as StoreRegion });
+      } else if (target.id === "preference-language") {
+        void savePreferences({ language: target.value as LanguagePreference });
       } else if (target.id === "preference-game-start") {
         void savePreferences({ onGameStart: target.value as GameStartAction });
       }
@@ -7105,8 +7143,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const source = avatarSource(profile);
     refs.profileAvatar.src = source;
     refs.profilePanelAvatar.src = source;
-    refs.profileButton.setAttribute("aria-label", profile.name ? `Profile: ${profile.name}` : "Profile");
-    refs.profileButton.title = profile.name || "Profile";
+    refs.profileButton.setAttribute("aria-label", profile.name ? t("app.profile.named", { name: profile.name }) : t("app.profile.label"),
+    );
+    refs.profileButton.title = profile.name || t("app.profile.label");
     if (document.activeElement !== refs.profileName) refs.profileName.value = profile.name;
     refs.profileAvatarReset.hidden = !profile.avatar;
   };
@@ -7142,7 +7181,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         saveProfile(profile);
         renderProfile();
       })
-      .catch((error: unknown) => showToast(error instanceof Error ? error.message : "That picture could not be used."));
+      .catch((error: unknown) => showToast(error instanceof Error ? error.message : t("app.profile.pictureFailed")));
   });
   refs.profileAvatarReset.addEventListener("click", () => {
     profile = { ...profile, avatar: "" };
@@ -7738,7 +7777,7 @@ function normaliseWineDirectory(value: unknown): WineDirectory | null {
   }
   return {
     id,
-    label: readString(record, "directoryLabel", "directory_label", "label", "name") || "Game folder",
+    label: readString(record, "directoryLabel", "directory_label", "label", "name") || t("app.wine.gameFolder"),
   };
 }
 
@@ -7791,7 +7830,7 @@ function normaliseWineProfile(value: unknown, fallback?: WineProfile): WineProfi
     record.game_directories;
   return {
     id,
-    displayName: readString(record, "displayName", "display_name", "name") || fallback?.displayName || "Wine profile",
+    displayName: readString(record, "displayName", "display_name", "name") || fallback?.displayName || t("app.wine.profileFallback"),
     enabled: readBoolean(record, "enabled") ?? fallback?.enabled ?? true,
     wineLabel:
       readString(record, "wineLabel", "wine_label", "wineVersion", "wine_version", "version") ||
@@ -7812,7 +7851,7 @@ function normaliseWineProfile(value: unknown, fallback?: WineProfile): WineProfi
     graphicsSummary:
       readString(record, "graphicsSummary", "graphics_summary") ||
       fallback?.graphicsSummary ||
-      "Wine 3D · default compatibility mode",
+      t("app.wine.graphicsDefault"),
   };
 }
 
@@ -7882,19 +7921,16 @@ function normaliseSteamAccountSyncResult(result: unknown): SteamAccountSyncResul
 function steamAccountSyncSummary(result: SteamAccountSyncResult): string {
   const changes = result.importedGames + result.updatedGames;
   if (result.totalGames === 0) {
-    return "Steam is connected, but no owned games were returned.";
+    return t("app.steam.noGames");
   }
   if (changes === 0) {
-    return result.totalGames.toLocaleString() + " Steam games are already up to date.";
+    return t("app.steam.upToDate", { total: result.totalGames.toLocaleString() });
   }
-  return (
-    result.totalGames.toLocaleString() +
-    " owned games synced · " +
-    result.installedGames.toLocaleString() +
-    " installed on " +
-    hostDeviceLabel() +
-    "."
-  );
+  return t("app.steam.synced", {
+    total: result.totalGames.toLocaleString(),
+    installed: result.installedGames.toLocaleString(),
+    device: hostDeviceLabel(),
+  });
 }
 
 function readImportedId(result: unknown): string | undefined {
@@ -7962,7 +7998,7 @@ function readLaunchOptions(record: BackendRecord): LaunchOption[] | undefined {
     if (typeof option.id !== "string" || !option.id) continue;
     options.push({
       id: option.id,
-      label: typeof option.label === "string" && option.label ? option.label : "Play",
+      label: typeof option.label === "string" && option.label ? option.label : t("app.playButton.play"),
       launchable: option.launchable === true,
       remote: option.remote === true,
     });
@@ -8016,40 +8052,40 @@ function shell(): string {
   return `
       <!-- A hairline across the top of the window while artwork is being
            looked for: present, never in the way. -->
-      <div id="artwork-progress" class="artwork-progress" role="progressbar" aria-label="Finding artwork" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
+      <div id="artwork-progress" class="artwork-progress" role="progressbar" aria-label="${t("app.card.findingArtwork")}" aria-valuemin="0" aria-valuemax="100" hidden><span></span></div>
       <!-- The topbar is the document banner, so it sits outside the page
            wrapper: a <header> nested in <main> is not a banner, and each page
            owns the only <main> on screen. -->
-      <header class="topbar" aria-label="Primary navigation" data-tauri-drag-region data-nav-row>
+      <header class="topbar" aria-label="${t("app.nav.primary")}" data-tauri-drag-region data-nav-row>
         <div class="nav-cluster">
           <div class="library-menu-control">
-            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="Open library sources" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
+            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="${t("app.menu.open")}" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
               <img id="brand-mark-ring" class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
               <!-- Rage mode wears the spiral instead of the ring. Both marks
                    live in the markup so the swap is a class, not a fetch. -->
               <img id="brand-mark-spiral" class="brand-mark" src="/media/orivo-spiral-icon.png" alt="" hidden />
             </button>
-            <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="Library sources" hidden>
-              <p class="library-source-menu__label" id="library-sources-label">Sources</p>
+            <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="${t("app.menu.sourcesAria")}" hidden>
+              <p class="library-source-menu__label" id="library-sources-label">${t("app.menu.sources")}</p>
               <!-- The connected sources are rendered on open, so the list always
                    reflects the current library rather than a hardcoded set. -->
               <div id="library-source-list" role="group" aria-labelledby="library-sources-label"></div>
               <button type="button" class="library-source-action" role="menuitem" data-library-action="add-source">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("collections")}</span>
-                <span class="library-source-action__copy"><strong>Add a new source</strong><small>Connect another library to Orivo</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.menu.addSource")}</strong><small>${t("app.menu.addSourceHint")}</small></span>
                 ${icon("chevron-right", "library-source-action__chevron")}
               </button>
-              <p class="library-source-menu__label">${hostDeviceLabel().replace(/^this/, "This")}</p>
+              <p class="library-source-menu__label">${hostDeviceLabel().replace(/^./, (first) => first.toLocaleUpperCase())}</p>
               <button type="button" class="library-source-action" role="menuitem" data-library-action="local">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>Import a local game</strong><small>Pick an app or executable on ${hostDeviceLabel()}</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.onboarding.localTitle")}</strong><small>${t("app.onboarding.localDetail", { device: hostDeviceLabel() })}</small></span>
               </button>
               <!-- Desktop only, for the same reason as the Wine rows: the folder is
                    read by the host, and every game inside it is added on its own.
                    Hidden until the platform features say the host can read it. -->
               <button type="button" class="library-source-action" role="menuitem" data-library-action="game-folder" hidden>
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>Games folder</strong><small>Choose it once; every game in it is added on its own</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.menu.gamesFolder")}</strong><small>${t("app.menu.gamesFolderHint")}</small></span>
               </button>
               <!-- Android only, and deliberately not a desktop no-op: Winlator is
                    an Android application, and the folder chooser this opens does
@@ -8058,7 +8094,7 @@ function shell(): string {
                 isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
                   ? `<button type="button" class="library-source-action" role="menuitem" data-library-action="winlator-folder">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>Winlator shortcuts</strong><small>Review what Winlator exported, and add what you want</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.menu.winlator")}</strong><small>${t("app.menu.winlatorHint")}</small></span>
               </button>`
                   : ""
               }
@@ -8070,7 +8106,7 @@ function shell(): string {
                   ? CONSOLE_EMULATORS.map(
                       (emulator) => `<button type="button" class="library-source-action" role="menuitem" data-library-action="console-folder" data-console-emulator="${emulator.slug}">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
-                <span class="library-source-action__copy"><strong>${emulator.label} games</strong><small>${emulator.description}</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.menu.emulatorGames", { name: emulator.label })}</strong><small>${emulator.description}</small></span>
               </button>`,
                     ).join("")
                   : ""
@@ -8079,27 +8115,27 @@ function shell(): string {
                    Settings › Plugins is where the extensions live. -->
               <button type="button" class="library-source-action" role="menuitem" data-library-action="plugins">
                 <span class="library-source-action__icon" aria-hidden="true">${icon("puzzle")}</span>
-                <span class="library-source-action__copy"><strong>Plugins</strong><small>Browse and install plugins</small></span>
+                <span class="library-source-action__copy"><strong>${t("app.menu.plugins")}</strong><small>${t("app.menu.pluginsHint")}</small></span>
                 ${icon("chevron-right", "library-source-action__chevron")}
               </button>
             </div>
           </div>
           <span class="top-divider" aria-hidden="true"></span>
-          <nav class="primary-nav" aria-label="Orivo navigation">
+          <nav class="primary-nav" aria-label="${t("app.nav.orivo")}">
             <span class="nav-indicator" aria-hidden="true"></span>
             <!-- The labels are the accessible name on desktop and are hidden
                  on a short screen, so each button carries the name itself
                  rather than losing it along with the text. -->
-            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="Library">${icon("library")}<span>Library</span></button>
-            <button type="button" class="nav-link" data-nav-page="store" aria-label="Store">${icon("store")}<span>Store</span></button>
-            <button type="button" class="nav-link" data-nav-page="me" aria-label="Me">${icon("user")}<span>Me</span></button>
-            <button type="button" class="nav-link" data-nav-page="settings" aria-label="Settings">${icon("settings")}<span>Settings</span></button>
+            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="${t("app.nav.library")}">${icon("library")}<span>${t("app.nav.library")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="store" aria-label="${t("app.nav.store")}">${icon("store")}<span>${t("app.nav.store")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="me" aria-label="${t("app.nav.me")}">${icon("user")}<span>${t("app.nav.me")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="settings" aria-label="${t("app.nav.settings")}">${icon("settings")}<span>${t("app.nav.settings")}</span></button>
           </nav>
         </div>
 
         <label class="search-control" id="topbar-search-control">
           ${icon("search")}
-          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search games…" aria-label="Search games" data-nav-reveal />
+          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="${t("app.search.gamesPlaceholder")}" aria-label="${t("app.search.gamesShort")}" data-nav-reveal />
           <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
         </label>
 
@@ -8109,12 +8145,12 @@ function shell(): string {
                moment they are looking at the thing that went wrong. Hidden
                until Sentry is configured, so a source build shows no dead
                control. -->
-          <button id="feedback-button" class="feedback-button" type="button" aria-label="Send feedback" title="Send feedback" hidden>${icon("feedback")}</button>
+          <button id="feedback-button" class="feedback-button" type="button" aria-label="${t("app.feedback.send")}" title="${t("app.feedback.send")}" hidden>${icon("feedback")}</button>
           <!-- The bell. Everything it carries is advice the user can ignore
                forever, so it never interrupts: a notice lands as a dot here and
                waits to be opened. -->
           <div class="notifications-control">
-            <button id="notifications-button" class="notifications-button" type="button" aria-label="Notifications" aria-expanded="false" aria-controls="notifications-panel">
+            <button id="notifications-button" class="notifications-button" type="button" aria-label="${t("app.notifications.title")}" aria-expanded="false" aria-controls="notifications-panel">
               ${icon("bell")}
               <span id="notifications-dot" class="notifications-button__dot" aria-hidden="true" hidden></span>
             </button>
@@ -8123,26 +8159,26 @@ function shell(): string {
                  one would be the loudest thing on the page for the quietest
                  content in the app. The button's aria-expanded and a named
                  group here say everything a dialog role would. -->
-            <div id="notifications-panel" class="notifications-panel" role="group" aria-label="Notifications" hidden>
-              <p class="notifications-panel__title">Notifications</p>
+            <div id="notifications-panel" class="notifications-panel" role="group" aria-label="${t("app.notifications.title")}" hidden>
+              <p class="notifications-panel__title">${t("app.notifications.title")}</p>
               <div id="notifications-list"></div>
             </div>
           </div>
           <!-- The profile: the picture opens a small menu to rename yourself
                and change the picture. Nothing else lives here yet. -->
           <div class="profile-control">
-            <button id="profile-button" class="profile-button" type="button" aria-label="Profile" aria-expanded="false" aria-controls="profile-panel">
+            <button id="profile-button" class="profile-button" type="button" aria-label="${t("app.profile.label")}" aria-expanded="false" aria-controls="profile-panel">
               <img id="profile-avatar" class="avatar" src="/media/steam-avatar.png" alt="" />
             </button>
-            <div id="profile-panel" class="profile-panel" role="group" aria-label="Profile" hidden>
-              <label class="profile-panel__picture" title="Change picture">
+            <div id="profile-panel" class="profile-panel" role="group" aria-label="${t("app.profile.label")}" hidden>
+              <label class="profile-panel__picture" title="${t("app.profile.changePicture")}">
                 <img id="profile-panel-avatar" src="/media/steam-avatar.png" alt="" />
                 <span class="profile-panel__picture-hint">${icon("cover")}</span>
                 <input id="profile-avatar-input" type="file" accept="image/*" hidden />
               </label>
               <div class="profile-panel__fields">
-                <input id="profile-name" class="profile-panel__name" type="text" maxlength="32" placeholder="Your name" aria-label="Your name" autocomplete="off" spellcheck="false" />
-                <button id="profile-avatar-reset" class="profile-panel__reset" type="button">Use the default picture</button>
+                <input id="profile-name" class="profile-panel__name" type="text" maxlength="32" placeholder="${t("app.profile.yourName")}" aria-label="${t("app.profile.yourName")}" autocomplete="off" spellcheck="false" />
+                <button id="profile-avatar-reset" class="profile-panel__reset" type="button">${t("app.profile.reset")}</button>
               </div>
             </div>
           </div>
@@ -8167,8 +8203,8 @@ function shell(): string {
       <!-- The arrows are left and right for the pointer. The keys already are
            left and right, so they walk past these rather than stopping on a
            second way to do what they just did. -->
-      <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="Previous game" data-nav-skip>${icon("chevron-left")}</button>
-      <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="Next game" data-nav-skip>${icon("chevron-right")}</button>
+      <button id="previous-game" class="scene-arrow scene-arrow--previous" type="button" aria-label="${t("app.scene.previous")}" data-nav-skip>${icon("chevron-left")}</button>
+      <button id="next-game" class="scene-arrow scene-arrow--next" type="button" aria-label="${t("app.scene.next")}" data-nav-skip>${icon("chevron-right")}</button>
 
       <section class="hero-content" aria-live="polite">
         <!-- The wordmark when a store published one, the title text when it did
@@ -8192,7 +8228,7 @@ function shell(): string {
                own page, runnability in the Play button. Three rows under the
                wordmark turned the one screen built around artwork into a
                form. -->
-          <div class="hero-meta" aria-label="Game metadata">
+          <div class="hero-meta" aria-label="${t("app.hero.metadata")}">
             <span id="hero-genre" class="genre-chip"></span>
             <span id="hero-studio" class="hero-studio"></span>
           </div>
@@ -8214,34 +8250,34 @@ function shell(): string {
              not a dialog over the page. -->
         <div class="hero-actions" data-nav-steps>
           <div class="play-control">
-            <button id="play-button" class="play-button" type="button" data-kind="play"><span class="play-button__aura" aria-hidden="true"><i></i><i></i><i></i></span><span class="play-button__fill" hidden></span><span class="play-button__icon" aria-hidden="true">${icon("play")}</span><span class="play-button__label">Play</span></button>
-            <div id="play-launch-menu" class="play-launch-menu" role="menu" aria-label="How to start this game" hidden></div>
+            <button id="play-button" class="play-button" type="button" data-kind="play"><span class="play-button__aura" aria-hidden="true"><i></i><i></i><i></i></span><span class="play-button__fill" hidden></span><span class="play-button__icon" aria-hidden="true">${icon("play")}</span><span class="play-button__label">${t("app.playButton.play")}</span></button>
+            <div id="play-launch-menu" class="play-launch-menu" role="menu" aria-label="${t("app.play.menuAria")}" hidden></div>
           </div>
         </div>
       </section>
 
-      <section class="recently-played" aria-label="Library games">
+      <section class="recently-played" aria-label="${t("app.rail.sectionAria")}">
         <div class="rail-header">
           <!-- The heading is the active segment: the rail and its title can
                never disagree about what is on screen. -->
-          <h2 id="recently-played-title">Recently Played</h2>
+          <h2 id="recently-played-title">${t("app.rail.recent")}</h2>
         </div>
-        <div id="game-cards" class="game-cards" role="list" aria-label="Recently Played" data-nav-rail></div>
+        <div id="game-cards" class="game-cards" role="list" aria-label="${t("app.rail.recent")}" data-nav-rail></div>
       </section>
 
       <!-- The browse bar. One button cycles the mode, the row beside it holds
            that mode's segments, and the mark on the left is the app's own
            mood. -->
-      <footer class="browse-bar" aria-label="Library browsing" data-nav-row>
+      <footer class="browse-bar" aria-label="${t("app.browse.barAria")}" data-nav-row>
         <!-- A switch, not a button that happens to remember a state: the role
              says so, and the track says so. -->
         <button id="rage-toggle" class="browse-bar__mood" type="button" role="switch" aria-checked="false">
           <span class="browse-bar__switch" aria-hidden="true"><i></i></span>
           <span id="rage-label">Orivo</span>
         </button>
-        <div id="browse-segments" class="browse-bar__segments" role="group" aria-label="Library segments"></div>
+        <div id="browse-segments" class="browse-bar__segments" role="group" aria-label="${t("app.browse.segmentsAria")}"></div>
         <button id="browse-mode" class="browse-bar__mode" type="button">
-          <span id="browse-mode-label">Activity</span>
+          <span id="browse-mode-label">${t("app.browse.activity")}</span>
         </button>
       </footer>
 
@@ -8250,7 +8286,7 @@ function shell(): string {
            dissolves into the library instead of navigating away from it. The
            scene behind it is taken out of the layout entirely while it shows,
            so nothing under it can be tabbed into. -->
-      <section id="library-onboarding" class="onboarding" aria-label="Welcome to Orivo" hidden>
+      <section id="library-onboarding" class="onboarding" aria-label="${t("app.welcome.aria")}" hidden>
         <div class="onboarding__intro">
           <!-- The wordmark is the brand's own artwork, not type Orivo sets
                itself: a logo redrawn in the app's font drifts from the logo
@@ -8260,14 +8296,14 @@ function shell(): string {
                the intrinsic size on the tag holds the box open before it
                does. -->
           <h1 class="onboarding__title">
-            <span>Welcome to</span>
+            <span>${t("app.welcome.to")}</span>
             <img class="onboarding__wordmark" src="/media/orivo-logo.png" width="1396" height="310" alt="Orivo" />
           </h1>
-          <p class="onboarding__tagline">Your games. <em>Your way.</em></p>
-          <p class="onboarding__lead">Connect your libraries, customise your experience, and play.</p>
+          <p class="onboarding__tagline">${t("app.welcome.tagline1")} <em>${t("app.welcome.tagline2")}</em></p>
+          <p class="onboarding__lead">${t("app.welcome.lead")}</p>
 
           <div class="onboarding__steps">
-            <p class="onboarding__steps-label">Get started in 3 steps</p>
+            <p class="onboarding__steps-label">${t("app.welcome.steps")}</p>
             <ol class="onboarding__steps-list">
               ${ONBOARDING_STEPS.map(
                 (step, index) => `
@@ -8301,8 +8337,8 @@ function shell(): string {
                section's name and nothing else: its description is already the
                line under the page title, so saying it twice cost a second line
                on every tab. -->
-          <nav class="settings-sidebar" aria-label="Settings sections">
-            <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
+          <nav class="settings-sidebar" aria-label="${t("settings.sections")}">
+            <div class="settings-sidebar__list" role="tablist" aria-orientation="vertical" aria-label="${t("settings.sections")}">
               ${SETTINGS_SECTIONS.map(
                 (section) => `
               <button type="button" role="tab" class="settings-section-link" id="settings-tab-${section.id}" data-settings-section="${section.id}" aria-controls="settings-panel-${section.id}" aria-selected="false" tabindex="-1">
@@ -8315,8 +8351,8 @@ function shell(): string {
 
           <div class="settings-content">
             <header class="settings-header">
-              <h1 id="settings-page-title">General</h1>
-              <p id="settings-page-description">Startup and store defaults</p>
+              <h1 id="settings-page-title">${t("settings.general.label")}</h1>
+              <p id="settings-page-description">${t("settings.general.description")}</p>
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
@@ -8326,48 +8362,58 @@ function shell(): string {
               <div class="settings-card" data-settings-searchable>
                 <div class="settings-row">
                   <label class="settings-row__copy" for="preference-start-page">
-                    <strong>Start page</strong>
-                    <small>The page Orivo opens on launch.</small>
+                    <strong>${t("settings.startPage.label")}</strong>
+                    <small>${t("settings.startPage.hint")}</small>
                   </label>
                   <select id="preference-start-page" class="settings-select">
-                    <option value="library">Library</option>
-                    <option value="store">Store</option>
+                    <option value="library">${t("settings.startPage.library")}</option>
+                    <option value="store">${t("settings.startPage.store")}</option>
+                  </select>
+                </div>
+                <div class="settings-row">
+                  <label class="settings-row__copy" for="preference-language">
+                    <strong>${t("language.label")}</strong>
+                    <small>${t("language.hint")}</small>
+                  </label>
+                  <select id="preference-language" class="settings-select">
+                    <option value="system">${t("language.system")}</option>
+                    ${LANGUAGES.map((code) => `<option value="${code}" lang="${code}">${LANGUAGE_NAMES[code]}</option>`).join("")}
                   </select>
                 </div>
                 <div class="settings-row">
                   <label class="settings-row__copy" for="preference-store-region">
-                    <strong>Store region</strong>
-                    <small>Chooses which prices and availability Orivo shows.</small>
+                    <strong>${t("settings.storeRegion.label")}</strong>
+                    <small>${t("settings.storeRegion.hint")}</small>
                   </label>
                   <select id="preference-store-region" class="settings-select">
-                    <option value="automatic">Automatic</option>
-                    <option value="us">United States</option>
-                    <option value="ca">Canada</option>
-                    <option value="gb">United Kingdom</option>
-                    <option value="fr">France</option>
-                    <option value="de">Germany</option>
-                    <option value="jp">Japan</option>
-                    <option value="au">Australia</option>
+                    <option value="automatic">${t("settings.storeRegion.automatic")}</option>
+                    <option value="us">${t("app.region.us")}</option>
+                    <option value="ca">${t("app.region.ca")}</option>
+                    <option value="gb">${t("app.region.gb")}</option>
+                    <option value="fr">${t("app.region.fr")}</option>
+                    <option value="de">${t("app.region.de")}</option>
+                    <option value="jp">${t("app.region.jp")}</option>
+                    <option value="au">${t("app.region.au")}</option>
                   </select>
                 </div>
                 <!-- Desktop only: a phone switches to the game's app by itself, so
                      there is nothing to choose. Shown once the host says it can. -->
                 <div class="settings-row" id="preference-game-start-row" hidden>
                   <label class="settings-row__copy" for="preference-game-start">
-                    <strong>When a game starts</strong>
+                    <strong>${t("settings.gameStart.label")}</strong>
                     <small>${stepAsideCopy().hint}</small>
                   </label>
                   <select id="preference-game-start" class="settings-select">
                     <option value="step-aside">${stepAsideCopy().action}</option>
-                    <option value="stay">Keep Orivo open</option>
+                    <option value="stay">${t("settings.gameStart.stay")}</option>
                   </select>
                 </div>
                 <div class="settings-row">
                   <div class="settings-row__copy">
-                    <strong>Reset preferences</strong>
-                    <small>Restores the start page, store region, what happens when a game starts, and motion preference. Your library, Wine profiles, Steam connection, wishlist, and media are never touched.</small>
+                    <strong>${t("settings.reset.label")}</strong>
+                    <small>${t("settings.reset.hint")}</small>
                   </div>
-                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">Reset preferences</button>
+                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">${t("settings.reset.label")}</button>
                 </div>
               </div>
             </section>
@@ -8381,14 +8427,14 @@ function shell(): string {
                    one store that needs no introduction the loudest thing on the
                    page. Its one extra affordance, signing in, expands under its
                    row. -->
-              <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="Game libraries and providers">
+              <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}">
                 <!-- No title, no pitch: the rows below are their own heading. -->
                 <header class="settings-card__header settings-card__header--actions">
                   <!-- One refresh, not two: re-reading the connected accounts and
                        re-syncing their libraries are the same wish from where the
                        user stands, and a second, icon-only button next to this one
                        only ever asked which of the two they meant. -->
-                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">Refresh all libraries</button>
+                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">${t("app.libraries.refreshAll")}</button>
                 </header>
 
                 <!-- Steam and every other store share one grid of two or three
@@ -8397,7 +8443,7 @@ function shell(): string {
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
                   <div id="steam-account-panel" class="steam-inline-panel" aria-labelledby="steam-account-title" hidden>
-                    <strong id="steam-account-title" class="steam-inline-panel__title">Steam library</strong>
+                    <strong id="steam-account-title" class="steam-inline-panel__title">${t("app.libraries.steamTitle")}</strong>
                     <div id="steam-account-body" class="steam-account-body"></div>
                   </div>
                 </div>
@@ -8414,15 +8460,15 @@ function shell(): string {
                    Play (moonlight_android.rs). -->
               ${
                 isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
-                  ? `<section id="moonlight-stream-panel" class="settings-card" data-settings-searchable aria-label="Stream from your PC">
+                  ? `<section id="moonlight-stream-panel" class="settings-card" data-settings-searchable aria-label="${t("app.moonlight.title")}">
                 <div class="credentials-form">
                   <div class="credentials-form__field">
-                    <label for="moonlight-pc-name">Stream from your PC</label>
-                    <input id="moonlight-pc-name" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="Your PC's name in Moonlight" />
-                    <small>Pair Moonlight with your PC first, then type the name Moonlight shows for it. Every PC game in your library then offers “Stream from” beside Play, and an Epic game you have not downloaded offers both. A game streams when your PC’s Sunshine or Apollo lists it under the same name; Moonlight says so when it does not.</small>
+                    <label for="moonlight-pc-name">${t("app.moonlight.title")}</label>
+                    <input id="moonlight-pc-name" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="${t("app.moonlight.placeholder")}" />
+                    <small>${t("app.moonlight.body")}</small>
                   </div>
                   <div class="credentials-form__actions">
-                    <button id="moonlight-stream-save" type="button" class="settings-button">Save</button>
+                    <button id="moonlight-stream-save" type="button" class="settings-button">${t("app.common.save")}</button>
                     <small id="moonlight-stream-status" role="status"></small>
                   </div>
                 </div>
@@ -8436,25 +8482,25 @@ function shell(): string {
                    Runners", and the two groups below name themselves. -->
               <section id="plugins-catalog-panel" class="settings-card" data-settings-searchable>
                 <div class="plugins-group">
-                  <p class="plugins-group__label">Installed</p>
+                  <p class="plugins-group__label">${t("app.plugin.installed")}</p>
                   <div id="plugins-installed-list" class="plugins-group__list">
                     <div class="settings-row plugin-row">
                       <span class="plugin-tile" aria-hidden="true">${icon("wine")}</span>
                       <div class="settings-row__copy">
                         <strong>Wine</strong>
-                        <small>Wine-Staging runner and isolated profiles</small>
+                        <small>${t("app.plugins.wineSummary")}</small>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="Open Wine settings">${icon("chevron-right")}</button>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="${t("app.plugins.openWine")}">${icon("chevron-right")}</button>
                     </div>
                     <div class="settings-row plugin-row">
                       <span class="plugin-tile" aria-hidden="true">${icon("landscape")}</span>
                       <div class="settings-row__copy">
                         <strong>Wallpaper Searcher</strong>
-                        <small>Finds wallpaper artwork from IGDB and Google Images</small>
+                        <small>${t("app.plugins.wallpaperSummary")}</small>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="Open Wallpaper Searcher settings">${icon("chevron-right")}</button>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="${t("app.plugins.openWallpaper")}">${icon("chevron-right")}</button>
                     </div>
                     ${
                       isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
@@ -8464,10 +8510,10 @@ function shell(): string {
                       <span class="plugin-tile" aria-hidden="true">${icon("android")}</span>
                       <div class="settings-row__copy">
                         <strong>Winlator</strong>
-                        <small>Runs Windows games on this phone</small>
+                        <small>${t("app.plugins.winlatorSummary")}</small>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">Built in</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="winlator" aria-label="Set up Winlator">${icon("chevron-right")}</button>
+                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
+                      <button type="button" class="plugin-open-button" data-plugin-open="winlator" aria-label="${t("app.plugins.setupWinlator")}">${icon("chevron-right")}</button>
                     </div>`
                         : ""
                     }
@@ -8480,31 +8526,31 @@ function shell(): string {
 
                 <div class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
-                    <p class="plugins-group__label">Available</p>
+                    <p class="plugins-group__label">${t("app.plugins.available")}</p>
                     <div class="plugins-group__header-actions">
                       <label class="plugins-automatic-updates">
                         <input id="plugins-automatic-updates" type="checkbox" />
-                        <span>Automatic updates</span>
+                        <span>${t("app.plugins.autoUpdates")}</span>
                       </label>
-                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>Check for updates</span></button>
-                      <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file>${icon("folder")}<span>Install from file…</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>${t("app.update.check")}</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file>${icon("folder")}<span>${t("app.plugins.installFile")}</span></button>
                     </div>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
-                    <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="Search available plugins…" aria-label="Search available plugins" />
+                    <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
                   </label>
                   <div id="plugins-catalog-list" class="plugins-group__list"></div>
-                  <p id="plugins-catalog-empty" class="settings-hint" hidden>No plugins match that search.</p>
+                  <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>
               </section>
 
               <section id="wallpaper-plugin-panel" class="settings-card" aria-labelledby="wallpaper-plugin-title" hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
                   <div class="settings-card__copy">
                     <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
-                    <small>Where Orivo looks for covers, backgrounds and logos</small>
+                    <small>${t("app.wallpaper.intro")}</small>
                   </div>
                 </header>
                 <!-- One block per source: what it brings, what it needs, and
@@ -8513,27 +8559,27 @@ function shell(): string {
                   <div class="ws-source">
                     <div class="ws-source__head">
                       <strong>Steam, Wikimedia Commons, Openverse</strong>
-                      <span class="ws-pill ws-pill--on">Ready</span>
+                      <span class="ws-pill ws-pill--on">${t("app.wallpaper.ready")}</span>
                     </div>
-                    <small>Official store art and free-licence images. No key needed.</small>
+                    <small>${t("app.wallpaper.freeSources")}</small>
                   </div>
                   <div class="ws-source ws-source--recommended">
                     <div class="ws-source__head">
                       <strong>SteamGridDB</strong>
                       <span class="ws-pill" data-ws-status="steamgriddb"></span>
                     </div>
-                    <small>Recommended. Art without the title painted on it, and 4K backgrounds. Free key at <code>steamgriddb.com/profile/preferences/api</code>.</small>
-                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="SteamGridDB API key" />
+                    <small>${t("app.wallpaper.sgdbBody")}</small>
+                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.sgdbKeyAria")}" />
                   </div>
                   <div class="ws-source">
                     <div class="ws-source__head">
                       <strong>IGDB</strong>
                       <span class="ws-pill" data-ws-status="igdb"></span>
                     </div>
-                    <small>Covers and screenshots for most games. Create a Twitch app at <code>dev.twitch.tv/console/apps</code>.</small>
+                    <small>${t("app.wallpaper.igdbBody")}</small>
                     <div class="ws-source__pair">
-                      <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Client ID" aria-label="IGDB client ID" />
-                      <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="Client secret" aria-label="IGDB client secret" />
+                      <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientId")}" aria-label="${t("app.wallpaper.igdbIdAria")}" />
+                      <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientSecret")}" aria-label="${t("app.wallpaper.igdbSecretAria")}" />
                     </div>
                   </div>
                   <div class="ws-source">
@@ -8541,26 +8587,26 @@ function shell(): string {
                       <strong>Google Images</strong>
                       <span class="ws-pill" data-ws-status="google"></span>
                     </div>
-                    <small>Searches the whole web. Needs a Google Cloud key and a Programmable Search Engine.</small>
+                    <small>${t("app.wallpaper.googleBody")}</small>
                     <div class="ws-source__pair">
-                      <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="API key" aria-label="Google API key" />
-                      <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="Search engine ID" aria-label="Google search engine ID" />
+                      <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.googleKeyAria")}" />
+                      <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.engineId")}" aria-label="${t("app.wallpaper.googleEngineAria")}" />
                     </div>
                   </div>
                 </div>
                 <details class="ws-advanced">
-                  <summary>Advanced: search terms</summary>
-                  <small>Used by Google, Wikimedia and Openverse only. <code>{name}</code> becomes the game. Leave empty for Orivo's default.</small>
+                  <summary>${t("app.wallpaper.advanced")}</summary>
+                  <small>${t("app.wallpaper.advancedBody")}</small>
                   <div class="ws-advanced__grid">
-                    <label>Cover<input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' /></label>
-                    <label>Key art<input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' /></label>
-                    <label>Background<input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' /></label>
-                    <label>Logo<input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' /></label>
+                    <label>${t("app.wallpaper.termCover")}<input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' /></label>
+                    <label>${t("app.wallpaper.termKeyArt")}<input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' /></label>
+                    <label>${t("app.wallpaper.termBackground")}<input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' /></label>
+                    <label>${t("app.wallpaper.termLogo")}<input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' /></label>
                   </div>
                 </details>
                 <div class="ws-actions">
-                  <button id="wallpaper-credentials-save" type="button" class="settings-button">Save keys</button>
-                  <small>Applied at once, no restart.</small>
+                  <button id="wallpaper-credentials-save" type="button" class="settings-button">${t("app.wallpaper.save")}</button>
+                  <small>${t("app.wallpaper.applied")}</small>
                 </div>
               </section>
 
@@ -8568,8 +8614,8 @@ function shell(): string {
                 <header class="settings-card__header">
                   <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
                   <div class="settings-card__copy">
-                    <strong id="runners-panel-title">Third-party runners</strong>
-                    <small>Add an emulator: pick its application, the folders it should read, and import your games</small>
+                    <strong id="runners-panel-title">${t("app.runners.title")}</strong>
+                    <small>${t("app.runners.hint")}</small>
                   </div>
                 </header>
                 <div id="runners-panel-body"></div>
@@ -8580,10 +8626,10 @@ function shell(): string {
                    hidden until that row's chevron opens it. -->
               <section id="gamestream-setup-panel" class="settings-card" aria-labelledby="gamestream-setup-title" hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
                   <div class="settings-card__copy">
-                    <strong id="gamestream-setup-title">Game streaming</strong>
-                    <small>Play the games on your gaming PC from your Library</small>
+                    <strong id="gamestream-setup-title">${t("app.purpose.streaming")}</strong>
+                    <small>${t("app.gamestream.hint")}</small>
                   </div>
                 </header>
                 <div id="gamestream-setup-body"></div>
@@ -8591,10 +8637,10 @@ function shell(): string {
 
               <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>
                 <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>← Plugins</button>
+                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
                   <div class="settings-card__copy">
                     <strong id="wine-settings-title">Wine-Staging</strong>
-                    <small>Runner health and isolated Wine profiles</small>
+                    <small>${t("app.wine.hint")}</small>
                   </div>
                 </header>
                 <div id="wine-settings-body" class="wine-settings-body"></div>
@@ -8606,49 +8652,49 @@ function shell(): string {
                    they do, so three more headers above them were the same
                    information set twice. -->
               <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label" id="motion-preference-title">Motion</p>
+                <p class="settings-group__label" id="motion-preference-title">${t("app.motion.title")}</p>
                 <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="full" />
-                    <span><strong>Full</strong><small>Always animate, even when the OS asks for less motion.</small></span>
+                    <span><strong>${t("app.motion.full")}</strong><small>${t("app.motion.fullHint")}</small></span>
                   </label>
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="system" />
-                    <span><strong>System</strong><small>Follow the system's reduced-motion setting.</small></span>
+                    <span><strong>${t("app.motion.system")}</strong><small>${t("app.motion.systemHint")}</small></span>
                   </label>
                   <label class="settings-choice">
                     <input type="radio" name="motion-preference" value="reduced" />
-                    <span><strong>Reduced</strong><small>Always keep motion to a minimum in Orivo.</small></span>
+                    <span><strong>${t("app.motion.reduced")}</strong><small>${t("app.motion.reducedHint")}</small></span>
                   </label>
                 </div>
-                <p class="settings-group__label">Game pages</p>
+                <p class="settings-group__label">${t("app.appearance.gamePages")}</p>
                 <div class="settings-choices">
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-trailer-autoplay" />
-                    <span><strong>Play trailers automatically</strong><small>A game's page starts its first trailer on its own. Off, the trailer waits for you.</small></span>
+                    <span><strong>${t("app.appearance.autoplay")}</strong><small>${t("app.appearance.autoplayHint")}</small></span>
                   </label>
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-trailer-sound" />
-                    <span><strong>Play trailers with sound</strong><small>A trailer that starts by itself plays its sound. Off, it starts muted; one you choose always has sound.</small></span>
+                    <span><strong>${t("app.appearance.sound")}</strong><small>${t("app.appearance.soundHint")}</small></span>
                   </label>
                 </div>
-                <p class="settings-group__label">Beta &amp; debug</p>
+                <p class="settings-group__label">${t("app.appearance.beta")}</p>
                 <div class="settings-choices">
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-show-showcase" />
-                    <span><strong>Show demo games</strong><small>Seeds the library with Elden Ring, Cyberpunk 2077 and other bundled fixtures, so the interface can be tested without importing real games.</small></span>
+                    <span><strong>${t("app.appearance.demo")}</strong><small>${t("app.appearance.demoHint")}</small></span>
                   </label>
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-beta" />
-                    <span><strong>Show the Me dashboard</strong><small>Your play habits, scored and charted. Unfinished, and off until you ask for it.</small></span>
+                    <span><strong>${t("app.appearance.me")}</strong><small>${t("app.appearance.meHint")}</small></span>
                   </label>
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-editorial-games" />
-                    <span><strong>Show the hand-written shelf</strong><small>Puts Orivo's own forty-seven games back in the Store beside what the shops have just released. They were written to stand in for a catalogue that did not exist yet.</small></span>
+                    <span><strong>${t("app.appearance.editorial")}</strong><small>${t("app.appearance.editorialHint")}</small></span>
                   </label>
                   <label class="settings-choice settings-choice--toggle">
                     <input type="checkbox" id="preference-debug-social" />
-                    <span><strong>Show sample achievements &amp; friends</strong><small>Fills game pages that have none with placeholder trophies, a friends rail and an activity feed.</small></span>
+                    <span><strong>${t("app.appearance.social")}</strong><small>${t("app.appearance.socialHint")}</small></span>
                   </label>
                 </div>
               </div>
@@ -8658,16 +8704,16 @@ function shell(): string {
               <div class="settings-card" data-settings-searchable>
                 <div class="settings-row">
                   <div class="settings-row__copy">
-                    <strong>Derived cache</strong>
-                    <small><span id="derived-cache-entries">0 derived entries</span> · <span id="derived-cache-freshness">Not refreshed yet</span></small>
+                    <strong>${t("app.data.cacheTitle")}</strong>
+                    <small><span id="derived-cache-entries">${t("app.data.entryMany", { count: 0 })}</span> · <span id="derived-cache-freshness">${t("app.data.notRefreshed")}</span></small>
                   </div>
                   <span id="derived-cache-size" class="settings-metric">0 B</span>
                 </div>
                 <div class="settings-row settings-row--actions">
-                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">Refresh now</button>
-                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">Clear derived cache</button>
+                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">${t("app.data.refresh")}</button>
+                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">${t("app.data.clear")}</button>
                 </div>
-                <p class="settings-hint">Clearing removes only recomputed store and media data. Your library, Wine profiles, Steam connection, wishlist, and downloaded media stay on ${hostDeviceLabel()}.</p>
+                <p class="settings-hint">${t("app.data.hint", { device: hostDeviceLabel() })}</p>
               </div>
             </section>
 
@@ -8676,35 +8722,35 @@ function shell(): string {
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>Orivo</strong>
-                    <small>A focused, local-first game library.</small>
+                    <small>${t("app.about.tagline")}</small>
                   </div>
                   <span id="about-app-version" class="settings-metric">—</span>
                 </div>
                 <div class="settings-row">
                   <div class="settings-row__copy">
-                    <strong>Tauri runtime</strong>
-                    <small>The desktop shell Orivo runs inside.</small>
+                    <strong>${t("app.about.tauri")}</strong>
+                    <small>${t("app.about.tauriHint")}</small>
                   </div>
                   <span id="about-tauri-version" class="settings-metric">—</span>
                 </div>
                 <div class="settings-row">
                   <div class="settings-row__copy">
-                    <strong>Updates</strong>
+                    <strong>${t("app.about.updates")}</strong>
                     <small id="update-status" class="update-status"></small>
-                    <div id="update-progress" class="update-progress" role="progressbar" aria-label="Update download progress" aria-valuemin="0" aria-valuemax="100" hidden>
+                    <div id="update-progress" class="update-progress" role="progressbar" aria-label="${t("app.about.updateProgress")}" aria-valuemin="0" aria-valuemax="100" hidden>
                       <span class="update-progress__fill"></span>
                     </div>
                   </div>
-                  <button id="check-updates-button" type="button" class="settings-button" data-settings-action="check-updates">Check for updates</button>
+                  <button id="check-updates-button" type="button" class="settings-button" data-settings-action="check-updates">${t("app.update.check")}</button>
                 </div>
               </div>
               <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label">Attributions</p>
+                <p class="settings-group__label">${t("app.about.attributions")}</p>
                 <ul class="settings-attributions">
-                  <li>Steam and the Steam logo are trademarks of Valve Corporation. Orivo is not affiliated with or endorsed by Valve.</li>
-                  <li>Wine and Wine-Staging are provided by the WineHQ project under the LGPL.</li>
-                  <li>DXVK-macOS is provided by the DXVK project contributors.</li>
-                  <li>Store listings, artwork, and prices remain the property of their respective providers.</li>
+                  <li>${t("app.about.steamTrademark")}</li>
+                  <li>${t("app.about.wine")}</li>
+                  <li>${t("app.about.dxvk")}</li>
+                  <li>${t("app.about.listings")}</li>
                 </ul>
               </div>
             </section>
@@ -8715,9 +8761,9 @@ function shell(): string {
       <div id="app-page-not-found" class="app-page app-page--scroll app-page--not-found">
         <section class="not-found">
           <p class="not-found__code">404</p>
-          <h1 class="not-found__title">This page does not exist</h1>
+          <h1 class="not-found__title">${t("app.notFound.title")}</h1>
           <p id="not-found-detail" class="not-found__detail"></p>
-          <button type="button" class="settings-button settings-button--primary" data-app-action="go-library">Back to Library</button>
+          <button type="button" class="settings-button settings-button--primary" data-app-action="go-library">${t("app.notFound.back")}</button>
         </section>
       </div>
 

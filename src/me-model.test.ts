@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setLanguage } from "./i18n";
 import type { LibraryGame } from "./mock-library";
 import { fallbackLibrary } from "./mock-library";
 import {
@@ -234,11 +235,22 @@ describe("computeCognitiveProfile", () => {
 });
 
 describe("describePlayerProfile", () => {
+  beforeEach(() => setLanguage("en"));
+  afterEach(() => setLanguage("en"));
+
   it("génère un résumé non vide mentionnant le volume de jeu", () => {
     const summary = describePlayerProfile(computeCognitiveProfile(fallbackLibrary));
     expect(summary.length).toBeGreaterThan(0);
-    expect(summary).toContain("heures");
+    expect(summary).toContain("hours");
     expect(summary).toContain(String(fallbackLibrary.length));
+  });
+
+  it("speaks French when the interface language is French", () => {
+    setLanguage("fr");
+    const profile = computeCognitiveProfile(fallbackLibrary);
+    expect(describePlayerProfile(profile)).toContain("heures");
+    expect(profile.metrics[0].label).toBe("Temps de jeu");
+    expect(describePlayerProfile(computeCognitiveProfile([]))).toContain("Aucune donnée");
   });
 
   it("est déterministe pour un même profil", () => {
@@ -248,7 +260,7 @@ describe("describePlayerProfile", () => {
 
   it("explique l'absence de données pour une bibliothèque vide", () => {
     const summary = describePlayerProfile(computeCognitiveProfile([]));
-    expect(summary).toContain("Aucune donnée");
+    expect(summary).toContain("No play data");
   });
 });
 

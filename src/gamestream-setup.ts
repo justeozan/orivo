@@ -18,6 +18,7 @@
    --------------------------------------------------------------------------- */
 
 import { gameStreamErrorMessage, type GameStreamClient } from "./gamestream-settings";
+import { t } from "./i18n";
 import {
   GAMESTREAM_PLUGIN_ID,
   runnerErrorMessage,
@@ -108,14 +109,14 @@ export function tidyHostInput(input: string): string {
 }
 
 function gameCount(count: number): string {
-  return count === 1 ? "1 game" : `${count} games`;
+  return count === 1 ? t("runners.setup.gameOne") : t("runners.setup.gameMany", { count });
 }
 
 /** "this Mac", "this PC": what the person is sitting at. */
 export function thisComputerName(userAgent: string): string {
-  if (/Mac/i.test(userAgent)) return "this Mac";
-  if (/Windows/i.test(userAgent)) return "this PC";
-  return "this computer";
+  if (/Mac/i.test(userAgent)) return t("runners.setup.thisMac");
+  if (/Windows/i.test(userAgent)) return t("runners.setup.thisPc");
+  return t("runners.setup.thisComputer");
 }
 
 /* ---------------------------------------------------------------------------
@@ -123,20 +124,15 @@ export function thisComputerName(userAgent: string): string {
    --------------------------------------------------------------------------- */
 
 export const SETUP_COPY = {
-  needHost: "Type your PC's name or address first.",
-  unreachable:
-    "Can't reach this PC. Check it's on, on the same network, and running Sunshine or Apollo.",
-  clientGone:
-    "Moonlight isn't installed anymore. Reinstall it or choose it again to keep going.",
-  savedAnyway: "Saved. Press Connect when your PC is on.",
-  pairingFailed: "Pairing didn't finish. Try again.",
-  pairingLostContact:
-    "Lost contact with your PC. Check it's still on; Orivo keeps waiting for a minute or two.",
-  certificate:
-    "Your browser may warn about the certificate. That's expected: Sunshine makes its own.",
-  noGames:
-    "Your PC didn't list any games. Add some in Sunshine under Applications, then refresh.",
-  stillNotFound: "Still not found. If it's installed somewhere unusual, choose the app.",
+  needHost: t("runners.setup.needHost"),
+  unreachable: t("runners.setup.unreachable"),
+  clientGone: t("runners.setup.clientGone"),
+  savedAnyway: t("runners.setup.savedAnyway"),
+  pairingFailed: t("runners.setup.pairingFailed"),
+  pairingLostContact: t("runners.setup.pairingLostContact"),
+  certificate: t("runners.setup.certificate"),
+  noGames: t("runners.setup.noGames"),
+  stillNotFound: t("runners.setup.stillNotFound"),
 } as const;
 
 /** The picker's refusal when the user simply closed it. Not worth a message. */
@@ -344,7 +340,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
       if (job.phase === "running") phase = "importing";
       else if (job.phase === "failed") {
         phase = "failed";
-        message = job.message || "Orivo couldn't get your games. Try again.";
+        message = job.message || t("runners.setup.gamesFailed");
       } else if (job.phase === "ready") phase = count > 0 ? "ready" : "empty";
       else phase = "idle";
     } else if (count > 0) {
@@ -361,7 +357,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
       loading,
       pluginIssue:
         entry && entry.state !== "ready"
-          ? entry.message || "The game streaming plugin can't run right now."
+          ? entry.message || t("runners.setup.pluginCantRun")
           : null,
       profile: profile(),
       computerName,
@@ -865,25 +861,27 @@ export function mountGameStreamSetup(
   setup: GameStreamSetup,
 ): { render: () => void } {
   const STEP_TITLES: Record<SetupStepId, (computer: string) => string> = {
-    client: (computer) => `Moonlight on ${computer}`,
-    host: () => "Your gaming PC",
-    pair: () => "Pair",
-    games: () => "Your games",
+    client: (computer) => t("runners.setup.stepClient", { computer }),
+    host: () => t("runners.setup.stepHost"),
+    pair: () => t("runners.setup.stepPair"),
+    games: () => t("runners.setup.stepGames"),
   };
 
   function statusLine(step: SetupStepId, view: SetupSnapshot): string {
     const status = view.statuses[step];
     switch (step) {
       case "client":
-        return status === "done" ? `Moonlight found (${view.client.label})` : "Not installed yet";
+        return status === "done"
+          ? t("runners.setup.clientFoundStatus", { label: view.client.label })
+          : t("runners.setup.clientMissingStatus");
       case "host":
-        if (view.host.checking) return "Checking your PC…";
-        return status === "done" ? view.host.saved : "Where is it?";
+        if (view.host.checking) return t("runners.setup.checkingPc");
+        return status === "done" ? view.host.saved : t("runners.setup.whereIsIt");
       case "pair":
-        return status === "done" ? "Paired" : "Lets this computer stream from your PC";
+        return status === "done" ? t("runners.setup.paired") : t("runners.setup.pairHint");
       case "games":
         if (view.games.phase === "ready") return gameCount(view.games.count);
-        return status === "done" ? gameCount(view.games.count) : "Added to your Library";
+        return status === "done" ? gameCount(view.games.count) : t("runners.setup.addedToLibraryHint");
     }
   }
 
@@ -891,11 +889,11 @@ export function mountGameStreamSetup(
     const body = element("div", "gs-step__content");
     const found = view.client.clients.length > 0 || view.facts.clientFound;
     if (found) {
-      body.append(element("p", "gs-step__text", `Moonlight found: ${view.client.label}.`));
+      body.append(element("p", "gs-step__text", t("runners.setup.clientFound", { label: view.client.label })));
       if (view.client.clients.length > 1) {
         const select = element("select", "settings-select");
         select.id = "gs-client-select";
-        select.setAttribute("aria-label", "Streaming app");
+        select.setAttribute("aria-label", t("runners.setup.streamingApp"));
         for (const client of view.client.clients) {
           const option = element("option", "", client.label);
           option.value = client.id;
@@ -910,7 +908,7 @@ export function mountGameStreamSetup(
         element(
           "p",
           "gs-step__text",
-          `Moonlight is the free app that shows your PC's games on ${view.computerName}. Install it, then come back and check again.`,
+          t("runners.setup.clientIntro", { computer: view.computerName }),
         ),
       );
       if (view.client.stillMissing) {
@@ -919,20 +917,20 @@ export function mountGameStreamSetup(
     }
     const actions = element("div", "gs-step__actions");
     if (!found) {
-      const install = action("Install Moonlight", "install-moonlight", "primary");
+      const install = action(t("runners.setup.installMoonlight"), "install-moonlight", "primary");
       install.addEventListener("click", () => void setup.installMoonlight());
       actions.append(install);
-      const again = action("Check again", "check-again");
+      const again = action(t("runners.setup.checkAgain"), "check-again");
       again.disabled = view.client.busy;
       again.addEventListener("click", () => void setup.checkAgain());
       actions.append(again);
     }
-    const choose = action("Choose the app…", "choose-client");
+    const choose = action(t("runners.setup.chooseApp"), "choose-client");
     choose.disabled = view.client.busy;
     choose.addEventListener("click", () => void setup.chooseClientByHand());
     actions.append(choose);
     if (found && view.editing === "client") {
-      const done = action("Done", "done-editing");
+      const done = action(t("runners.setup.done"), "done-editing");
       done.addEventListener("click", () => setup.stopEditing());
       actions.append(done);
     }
@@ -943,14 +941,14 @@ export function mountGameStreamSetup(
   function hostBody(view: SetupSnapshot): HTMLElement {
     const body = element("div", "gs-step__content");
     const field = element("div", "credentials-form__field");
-    const label = element("label", "", "PC name or address");
+    const label = element("label", "", t("runners.setup.hostLabel"));
     label.htmlFor = "gs-host";
     const input = element("input", "credentials-form__input");
     input.id = "gs-host";
     input.type = "text";
     input.autocomplete = "off";
     input.spellcheck = false;
-    input.placeholder = "my-pc.local or 192.168.1.20";
+    input.placeholder = t("runners.setup.hostPlaceholder");
     input.value = view.host.input;
     input.disabled = view.host.busy;
     input.addEventListener("input", () => setup.setHostInput(input.value));
@@ -972,24 +970,24 @@ export function mountGameStreamSetup(
     const hint = element(
       "small",
       "",
-      "The computer you play on, with Sunshine or Apollo running. You can paste its web address too.",
+      t("runners.setup.hostHint"),
     );
     field.append(label, input, hint);
     body.append(field);
 
     const actions = element("div", "gs-step__actions");
-    const connect = action(view.host.busy ? "Connecting…" : "Connect", "connect", "primary");
+    const connect = action(view.host.busy ? t("runners.setup.connecting") : t("runners.setup.connect"), "connect", "primary");
     connect.disabled = view.host.busy;
     connect.addEventListener("click", () => void setup.connect());
     actions.append(connect);
     if (view.host.canSaveAnyway) {
-      const anyway = action("Save anyway", "save-anyway");
+      const anyway = action(t("runners.setup.saveAnyway"), "save-anyway");
       anyway.disabled = view.host.busy;
       anyway.addEventListener("click", () => void setup.saveAnyway());
       actions.append(anyway);
     }
     if (view.editing === "host" && view.facts.hostSaved) {
-      const cancel = action("Cancel", "done-editing");
+      const cancel = action(t("runners.setup.cancel"), "done-editing");
       cancel.addEventListener("click", () => setup.stopEditing());
       actions.append(cancel);
     }
@@ -1016,15 +1014,15 @@ export function mountGameStreamSetup(
         element(
           "p",
           "gs-step__text",
-          `On your PC, open Sunshine (or Apollo) › PIN, type ${pairing.pin} and a name.`,
+          t("runners.setup.pinInstructions", { pin: pairing.pin }),
         ),
       );
       const actions = element("div", "gs-step__actions");
-      const open = action("Open Sunshine's PIN page", "open-pin-page", "primary");
+      const open = action(t("runners.setup.openPinPage"), "open-pin-page", "primary");
       open.addEventListener("click", () => void setup.openPinPage());
       actions.append(open);
       body.append(actions, element("p", "gs-step__note", SETUP_COPY.certificate));
-      const waiting = element("p", "gs-step__status", "Waiting for your PC…");
+      const waiting = element("p", "gs-step__status", t("runners.setup.waitingPc"));
       waiting.setAttribute("role", "status");
       body.append(waiting);
       if (pairing.lostContact) {
@@ -1033,7 +1031,7 @@ export function mountGameStreamSetup(
       return body;
     }
     if (pairing.phase === "starting") {
-      const status = element("p", "gs-step__status", "Getting a PIN…");
+      const status = element("p", "gs-step__status", t("runners.setup.gettingPin"));
       status.setAttribute("role", "status");
       body.append(status);
       return body;
@@ -1043,20 +1041,20 @@ export function mountGameStreamSetup(
         "p",
         "gs-step__text",
         pairing.phase === "idle"
-          ? `Pairing lets ${view.computerName} stream from your PC. Orivo gives you a PIN to type on the PC.`
+          ? t("runners.setup.pairIntro", { computer: view.computerName })
           : (pairing.message ?? SETUP_COPY.pairingFailed),
       ),
     );
     const actions = element("div", "gs-step__actions");
     const start = action(
-      pairing.phase === "idle" ? "Pair with this PC" : "Try again",
+      pairing.phase === "idle" ? t("runners.setup.pairWithPc") : t("runners.setup.tryAgain"),
       "start-pairing",
       "primary",
     );
     start.addEventListener("click", () => void setup.startPairing());
     actions.append(start);
     if (pairing.phase === "clientMissing") {
-      const choose = action("Choose the app…", "choose-client");
+      const choose = action(t("runners.setup.chooseApp"), "choose-client");
       choose.addEventListener("click", () => void setup.chooseClientByHand());
       actions.append(choose);
     }
@@ -1078,34 +1076,34 @@ export function mountGameStreamSetup(
       case "importing": {
         const text =
           games.phase === "importing" && games.found > 0
-            ? `Found ${gameCount(games.found)}…`
-            : "Looking for games on your PC…";
+            ? t("runners.setup.foundGames", { games: gameCount(games.found) })
+            : t("runners.setup.lookingForGames");
         const status = element("p", "gs-step__status", text);
         status.setAttribute("role", "status");
         body.append(status);
         break;
       }
       case "ready": {
-        body.append(element("p", "gs-step__text", `${gameCount(games.count)} added to your Library.`));
+        body.append(element("p", "gs-step__text", t("runners.setup.addedToLibrary", { games: gameCount(games.count) })));
         if (games.findingArtwork) {
-          body.append(element("p", "gs-step__note", "Finding artwork…"));
+          body.append(element("p", "gs-step__note", t("runners.setup.findingArtwork")));
         }
-        const library = action("Open Library", "open-library", "primary");
+        const library = action(t("runners.setup.openLibrary"), "open-library", "primary");
         library.addEventListener("click", () => setup.openLibrary());
-        actions.append(library, refresh("Refresh games"));
+        actions.append(library, refresh(t("runners.setup.refreshGames")));
         break;
       }
       case "empty":
         body.append(element("p", "gs-step__text", SETUP_COPY.noGames));
-        actions.append(refresh("Refresh games"));
+        actions.append(refresh(t("runners.setup.refreshGames")));
         break;
       case "failed": {
         const error = element("p", "gs-step__error", games.message ?? "");
         error.setAttribute("role", "alert");
         body.append(error);
-        const retry = action("Try again", "refresh-games", "primary");
+        const retry = action(t("runners.setup.tryAgain"), "refresh-games", "primary");
         retry.addEventListener("click", () => void setup.getGames());
-        const check = action("Check my PC", "recheck");
+        const check = action(t("runners.setup.checkMyPc"), "recheck");
         check.addEventListener("click", () => void setup.recheck());
         actions.append(retry, check);
         break;
@@ -1115,10 +1113,10 @@ export function mountGameStreamSetup(
           element(
             "p",
             "gs-step__text",
-            "Orivo asks your PC which games it can stream and adds them to your Library.",
+            t("runners.setup.gamesIntro"),
           ),
         );
-        const get = action("Get my games", "refresh-games", "primary");
+        const get = action(t("runners.setup.getGames"), "refresh-games", "primary");
         get.addEventListener("click", () => void setup.getGames());
         actions.append(get);
         break;
@@ -1151,7 +1149,7 @@ export function mountGameStreamSetup(
     );
     head.append(mark, copy);
     if (status === "done" && view.editing !== step && step !== "games" && step !== "pair") {
-      const change = action("Change", `edit-${step}`);
+      const change = action(t("runners.setup.change"), `edit-${step}`);
       change.addEventListener("click", () => setup.edit(step));
       head.append(change);
     }
@@ -1187,7 +1185,7 @@ export function mountGameStreamSetup(
         : null;
 
     if (view.loading) {
-      const loading = element("p", "settings-hint", "Looking at your setup…");
+      const loading = element("p", "settings-hint", t("runners.setup.loading"));
       loading.setAttribute("role", "status");
       root.replaceChildren(loading);
       return;

@@ -19,6 +19,7 @@ import {
   type RunnerManagerController,
   type RunnerProfileView,
 } from "./runner-manager";
+import { t } from "./i18n";
 
 export interface RunnerPanelHandlers {
   showToast(message: string): void;
@@ -26,7 +27,7 @@ export interface RunnerPanelHandlers {
 
 function pluginStateLabel(runner: InstalledRunnerView): string {
   if (runner.state === "ready") return "";
-  return runner.state === "incompatible" ? "Incompatible" : "Invalid";
+  return runner.state === "incompatible" ? t("runners.view.incompatible") : t("runners.view.invalid");
 }
 
 function iconButton(label: string, kind: "icon" | "text" = "text"): HTMLButtonElement {
@@ -65,13 +66,13 @@ export function mountRunnerPanel(
     if (!directory.granted) {
       const revoked = document.createElement("small");
       revoked.className = "runner-directory-row__revoked";
-      revoked.textContent = "Access removed";
+      revoked.textContent = t("runners.view.accessRemoved");
       row.append(label, revoked);
     } else {
       row.append(label);
     }
     if (directory.granted) {
-      const revoke = iconButton("Remove access", "icon");
+      const revoke = iconButton(t("runners.view.removeAccess"), "icon");
       revoke.disabled = busy.has(`revoke:${profile.id}:${directory.id}`);
       revoke.addEventListener("click", () => {
         void withBusy(`revoke:${profile.id}:${directory.id}`, () =>
@@ -112,7 +113,7 @@ export function mountRunnerPanel(
       void withBusy(`enable:${profile.id}`, () => controller.setEnabled(profile.id, toggle.checked));
     });
     const toggleText = document.createElement("span");
-    toggleText.textContent = "Enabled";
+    toggleText.textContent = t("runners.view.enabled");
     toggleLabel.append(toggle, toggleText);
 
     // What this profile is allowed to launch. It is a permission over the
@@ -122,13 +123,13 @@ export function mountRunnerPanel(
     const modeLabel = document.createElement("label");
     modeLabel.className = "runner-profile-card__mode";
     const modeText = document.createElement("span");
-    modeText.textContent = "Launches";
+    modeText.textContent = t("runners.view.launches");
     const mode = document.createElement("select");
     mode.className = "settings-select";
     mode.dataset.runnerLaunchMode = profile.id;
     for (const [value, label] of [
-      ["default", "Games in its folders"],
-      ["stream", "Streams from another machine"],
+      ["default", t("runners.view.modeDefault")],
+      ["stream", t("runners.view.modeStream")],
     ] as const) {
       const option = document.createElement("option");
       option.value = value;
@@ -151,7 +152,7 @@ export function mountRunnerPanel(
     directories.className = "runner-directory-list";
     for (const directory of profile.directories) directories.append(renderDirectory(profile, directory));
 
-    const addFolder = iconButton("Add a game folder…");
+    const addFolder = iconButton(t("runners.view.addFolder"));
     addFolder.disabled = busy.has(`grant:${profile.id}`);
     addFolder.addEventListener("click", () => {
       void withBusy(`grant:${profile.id}`, () => controller.grantDirectory(profile.id));
@@ -166,19 +167,23 @@ export function mountRunnerPanel(
     summary.textContent =
       runnerImportSummary(job) ||
       (profile.gameCount > 0
-        ? `${profile.gameCount} game(s) imported.`
+        ? t("runners.view.imported", { count: profile.gameCount })
         : grantedFolders
-          ? "No games imported yet."
-          : "Add a game folder before importing.");
+          ? t("runners.view.noneYet")
+          : t("runners.view.addFolderFirst"));
     // Artwork is looked for after the games are in, and it is slow: a request
     // and up to four downloads per card. Saying so is the difference between
     // "still working" and "nothing happened".
     const findingArtwork = controller.isFindingArtwork(profile.id);
     if (findingArtwork) {
-      summary.textContent = `${profile.gameCount} game(s) imported. Finding artwork…`;
+      summary.textContent = t("runners.view.findingArtwork", { count: profile.gameCount });
     }
     const importButton = iconButton(
-      running ? "Cancel import" : profile.importResumable ? "Continue import" : "Import games",
+      running
+        ? t("runners.view.cancelImport")
+        : profile.importResumable
+          ? t("runners.view.continueImport")
+          : t("runners.view.importGames"),
     );
     importButton.disabled =
       !running && (findingArtwork || !grantedFolders || busy.has(`import:${profile.id}`));
@@ -200,7 +205,7 @@ export function mountRunnerPanel(
       importSection.append(bar);
     }
 
-    const remove = iconButton("Remove profile", "icon");
+    const remove = iconButton(t("runners.view.removeProfile"), "icon");
     remove.disabled = busy.has(`delete:${profile.id}`);
     remove.addEventListener("click", () => {
       void withBusy(`delete:${profile.id}`, () => controller.deleteProfile(profile.id));
@@ -239,7 +244,7 @@ export function mountRunnerPanel(
 
     const adders = document.createElement("div");
     adders.className = "runner-group__adders";
-    const addProfile = iconButton("+ Add an emulator");
+    const addProfile = iconButton(t("runners.view.addEmulator"));
     addProfile.disabled = runner.state !== "ready" || busy.has(`create:${runner.id}`);
     addProfile.addEventListener("click", () => {
       void withBusy(`create:${runner.id}`, () => controller.createProfile(runner.id, runner.name));
@@ -265,7 +270,7 @@ export function mountRunnerPanel(
     if (runners.length === 0) {
       const empty = document.createElement("p");
       empty.className = "settings-hint";
-      empty.textContent = "Install a runner plugin to add an emulator here.";
+      empty.textContent = t("runners.view.empty");
       root.append(empty);
       return;
     }

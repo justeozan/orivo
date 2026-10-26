@@ -10,6 +10,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { t } from "./i18n";
 
 /** How the host graded a package it found on disk. */
 export type PluginState = "ready" | "incompatible" | "invalid";
@@ -166,7 +167,7 @@ function assertActive(signal: AbortSignal): void {
 export function pluginErrorMessage(error: unknown): string {
   if (typeof error === "string" && error.trim()) return error.trim();
   if (error instanceof Error && error.message.trim()) return error.message.trim();
-  return "That did not work. Try again.";
+  return t("runners.plugin.error");
 }
 
 /* ---------------------------------------------------------------------------
@@ -277,7 +278,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
       // Deliberately not caught, here and below: a refused install is news the
       // user needs, and the row has a place to print it.
       if (!isTauriRuntime()) {
-        throw new Error("Installing plugins needs the Orivo desktop app.");
+        throw new Error(t("runners.plugin.installDesktopOnly"));
       }
       assertActive(signal);
       await invoke("install_plugin_from_registry", { pluginId });
@@ -307,7 +308,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
 
     async update(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Installing plugins needs the Orivo desktop app.");
+        throw new Error(t("runners.plugin.installDesktopOnly"));
       }
       assertActive(signal);
       await invoke("update_plugin", { pluginId });
@@ -315,7 +316,7 @@ export function createDefaultPluginManagerClient(): PluginManagerClient {
 
     async rollback(pluginId, signal) {
       if (!isTauriRuntime()) {
-        throw new Error("Going back to a previous version needs the Orivo desktop app.");
+        throw new Error(t("runners.plugin.rollbackDesktopOnly"));
       }
       assertActive(signal);
       return await invoke<string>("rollback_plugin", { pluginId });
@@ -382,29 +383,29 @@ export function isPluginInstallBusy(progress: PluginInstallProgress | null): boo
 export function formatPluginStatus(plugin: InstalledPluginView): string {
   const state =
     plugin.state === "ready"
-      ? "Installed"
+      ? t("runners.plugin.installed")
       : plugin.state === "incompatible"
-        ? "Incompatible"
-        : "Invalid";
-  return plugin.trusted ? state : `${state} · unsigned`;
+        ? t("runners.view.incompatible")
+        : t("runners.view.invalid");
+  return plugin.trusted ? state : t("runners.plugin.unsigned", { state });
 }
 
 export function formatInstallLabel(
   progress: PluginInstallProgress | null,
   available: AvailablePluginView,
 ): string {
-  if (!progress) return available.installed ? "Installed" : "Install";
+  if (!progress) return available.installed ? t("runners.plugin.installed") : t("runners.plugin.install");
   switch (progress.phase) {
     case "downloading":
-      return `Downloading ${pluginPercent(progress)}%`;
+      return t("runners.plugin.downloading", { percent: pluginPercent(progress) });
     case "verifying":
-      return "Verifying…";
+      return t("runners.plugin.verifying");
     case "installing":
-      return "Installing…";
+      return t("runners.plugin.installing");
     case "installed":
-      return "Installed";
+      return t("runners.plugin.installed");
     case "failed":
-      return "Retry";
+      return t("runners.plugin.retry");
   }
 }
 

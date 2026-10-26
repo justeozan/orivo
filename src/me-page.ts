@@ -2,6 +2,7 @@ import "./me-page.css";
 import type { PageRestoreState } from "./contracts";
 import type { LibraryGame } from "./mock-library";
 import { fallbackLibrary } from "./mock-library";
+import { t } from "./i18n";
 import { computeCognitiveProfile, type CognitiveProfile } from "./me-model";
 import { prefersReducedMotion } from "./motion";
 import type { AppPage, PageActivation } from "./page-lifecycle";
@@ -159,11 +160,11 @@ function buildAxes(profile: CognitiveProfile): CognitiveAxis[] {
     return Math.round((metric?.score ?? 0) / 10 * 10) / 10;
   };
   return [
-    { id: "focus", label: "Focus", value: score("focus"), description: "Capacité à maintenir l'attention" },
-    { id: "reflexion", label: "Réflexion", value: score("reflexion"), description: "Analyse et résolution de problèmes" },
-    { id: "memoire", label: "Mémoire", value: score("memoire"), description: "Rétention et rappel d'informations" },
-    { id: "creativite", label: "Créativité", value: score("creativite"), description: "Pensée originale et adaptabilité" },
-    { id: "reflexes", label: "Réflexes", value: score("reflexes"), description: "Vitesse et précision d'exécution" },
+    { id: "focus", label: t("me.axis.focus.label"), value: score("focus"), description: t("me.axis.focus.description") },
+    { id: "reflexion", label: t("me.axis.reflexion.label"), value: score("reflexion"), description: t("me.axis.reflexion.description") },
+    { id: "memoire", label: t("me.axis.memoire.label"), value: score("memoire"), description: t("me.axis.memoire.description") },
+    { id: "creativite", label: t("me.axis.creativite.label"), value: score("creativite"), description: t("me.axis.creativite.description") },
+    { id: "reflexes", label: t("me.axis.reflexes.label"), value: score("reflexes"), description: t("me.axis.reflexes.description") },
   ];
 }
 
@@ -174,14 +175,14 @@ function globalScore(axes: CognitiveAxis[]): number {
 }
 
 function scoreLabel(value: number): string {
-  if (value >= 8.5) return "Excellent";
-  if (value >= 7) return "Très Bon";
-  if (value >= 5) return "Bon";
-  if (value >= 2.5) return "Modéré";
-  return "Faible";
+  if (value >= 8.5) return t("me.band.excellent");
+  if (value >= 7) return t("me.band.veryGood");
+  if (value >= 5) return t("me.band.good");
+  if (value >= 2.5) return t("me.band.moderate");
+  return t("me.band.low");
 }
 
-function formatPlayFr(totalSeconds: number): string {
+function formatPlay(totalSeconds: number): string {
   const minutes = Math.max(0, Math.round(totalSeconds / 60));
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
@@ -633,18 +634,18 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   const renderHeader = (): HTMLElement => {
     const header = element("header", "me-head");
     header.append(
-      element("h1", "me-head__title", "Performance Cognitive"),
-      element("p", "me-head__sub", "Suivi de vos capacités et bien-être mental"),
+      element("h1", "me-head__title", t("me.head.title")),
+      element("p", "me-head__sub", t("me.head.subtitle")),
     );
     const select = element("button", "me-head__select");
     select.type = "button";
-    select.append(element("span", "", "Vue d'ensemble"), glyph("chevronDown"));
+    select.append(element("span", "", t("me.head.overview")), glyph("chevronDown"));
     header.append(select);
     return header;
   };
 
   const renderScoreCard = (axes: CognitiveAxis[]): HTMLElement => {
-    const section = card("me-score", "Score Cognitif Global");
+    const section = card("me-score", t("me.score.title"));
     const total = globalScore(axes);
     const centre = element("span", "");
     const value = element("strong", "me-score__value");
@@ -654,7 +655,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     const copy = element("div", "me-score__copy");
     copy.append(
       element("strong", "me-score__band", scoreLabel(total)),
-      element("span", "me-score__delta", "+0.6 ce mois-ci"),
+      element("span", "me-score__delta", t("me.score.delta")),
       buildSparkline(tweens),
     );
     row.append(copy);
@@ -666,7 +667,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   };
 
   const renderDailyCard = (profile: CognitiveProfile): HTMLElement => {
-    const section = card("me-daily", "Résumé Quotidien");
+    const section = card("me-daily", t("me.daily.title"));
     const list = element("ul", "me-daily__list");
     const row = (
       name: keyof typeof GLYPHS,
@@ -685,10 +686,10 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       return item;
     };
     list.append(
-      row("session", "#8a5cff", "Sessions", (p) => String(Math.round(2 * p))),
-      row("clock", "#4aa8ff", "Temps de jeu", (p) => formatPlayFr(profile.totalPlayTimeSeconds * p)),
-      row("screen", "#43d98c", "Jeux joués", (p) => String(Math.round(profile.gameCount * p))),
-      row("pause", "#ef6bcb", "Pause moyenne", (p) => `${Math.round(45 * p)}m`),
+      row("session", "#8a5cff", t("me.daily.sessions"), (p) => String(Math.round(2 * p))),
+      row("clock", "#4aa8ff", t("me.daily.playTime"), (p) => formatPlay(profile.totalPlayTimeSeconds * p)),
+      row("screen", "#43d98c", t("me.daily.gamesPlayed"), (p) => String(Math.round(profile.gameCount * p))),
+      row("pause", "#ef6bcb", t("me.daily.averageBreak"), (p) => `${Math.round(45 * p)}m`),
     );
     section.append(list);
     return section;
@@ -697,7 +698,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   const renderEnergyCard = (): HTMLElement => {
     const section = card("me-energy");
     const head = element("div", "me-card__titlerow");
-    head.append(element("h2", "me-card__title", "Énergie Mentale"), glyph("info", "me-card__hint"));
+    head.append(element("h2", "me-card__title", t("me.energy.title")), glyph("info", "me-card__hint"));
     section.append(head);
     const row = element("div", "me-energy__row");
     row.append(buildWave(tweens));
@@ -705,7 +706,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     const figure = element("span", "me-energy__figure");
     const value = element("strong", "", "");
     figure.append(value, element("span", "", "%"));
-    copy.append(figure, element("span", "me-energy__band", "Élevée"), element("span", "me-energy__delta", "+12% vs hier"));
+    copy.append(figure, element("span", "me-energy__band", t("me.energy.band")), element("span", "me-energy__delta", t("me.energy.delta")));
     row.append(copy);
     section.append(row);
     tweens.push((progress) => {
@@ -716,28 +717,28 @@ export function createMePage(options: MePageOptions = {}): AppPage {
 
   const renderRadarSection = (axes: CognitiveAxis[]): HTMLElement => {
     const section = element("section", "me-schema");
-    section.setAttribute("aria-label", "Schéma cognitif");
+    section.setAttribute("aria-label", t("me.schema.label"));
     const head = element("div", "me-schema__head");
     head.append(
-      element("h2", "me-schema__title", "Schéma Cognitif"),
-      element("p", "me-schema__sub", "Vos capacités mentales clés"),
+      element("h2", "me-schema__title", t("me.schema.title")),
+      element("p", "me-schema__sub", t("me.schema.subtitle")),
     );
     section.append(head, buildRadar(axes, tweens));
     const detail = element("button", "me-schema__detail");
     detail.type = "button";
-    detail.append(element("span", "", "Voir le détail par capacité"), glyph("chevronDown"));
+    detail.append(element("span", "", t("me.schema.detail")), glyph("chevronDown"));
     section.append(detail);
     return section;
   };
 
   const renderChargeCard = (percent: number): HTMLElement => {
-    const section = card("me-charge", "Charge Cognitive");
+    const section = card("me-charge", t("me.charge.title"));
     const row = element("div", "me-charge__row");
     row.append(buildArcGauge("charge", percent, ["#43e0ff", "#3f7bff"], tweens));
     const copy = element("div", "me-charge__copy");
     copy.append(
-      element("strong", "", percent >= 70 ? "Charge Élevée" : percent >= 35 ? "Charge Modérée" : "Charge Faible"),
-      element("span", "", percent >= 70 ? "À surveiller" : "Bonne gestion"),
+      element("strong", "", percent >= 70 ? t("me.charge.high") : percent >= 35 ? t("me.charge.moderate") : t("me.charge.low")),
+      element("span", "", percent >= 70 ? t("me.charge.watch") : t("me.charge.fine")),
     );
     row.append(copy);
     section.append(row);
@@ -745,12 +746,12 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   };
 
   const renderSaturationCard = (percent: number): HTMLElement => {
-    const section = card("me-saturation", "Saturation Dopaminergique");
+    const section = card("me-saturation", t("me.saturation.title"));
     const figure = element("div", "me-saturation__figure");
     const value = element("strong", "");
     const number = element("span", "me-saturation__number");
     value.append(number, element("span", "me-saturation__unit", "%"));
-    figure.append(value, element("span", "me-saturation__band", percent >= 60 ? "Élevée" : "Modérée"));
+    figure.append(value, element("span", "me-saturation__band", percent >= 60 ? t("me.saturation.high") : t("me.saturation.moderate")));
     section.append(figure);
     const bar = element("div", "me-saturation__bar");
     bar.setAttribute("role", "meter");
@@ -768,11 +769,11 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       (() => {
         const copy = element("div", "me-saturation__notice-copy");
         copy.append(
-          element("strong", "", "Risque de surcharge dopaminergique"),
+          element("strong", "", t("me.saturation.warning")),
           element(
             "p",
             "",
-            "Limitez les récompenses instantanées (jeux, réseaux sociaux, contenu court).",
+            t("me.saturation.advice"),
           ),
         );
         return copy;
@@ -788,18 +789,18 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   };
 
   const renderRiskCard = (percent: number): HTMLElement => {
-    const section = card("me-risk", "Risque d'Addiction");
+    const section = card("me-risk", t("me.risk.title"));
     const row = element("div", "me-risk__row");
     row.append(buildArcGauge("risk", percent, ["#ffd25e", "#ff8a3d"], tweens));
     const copy = element("div", "me-risk__copy");
     copy.append(
-      element("strong", "", percent >= 60 ? "Risque Élevé" : percent >= 25 ? "Risque Modéré" : "Risque Faible"),
-      element("span", "", percent >= 25 ? "Surveillance conseillée" : "Rien à signaler"),
+      element("strong", "", percent >= 60 ? t("me.risk.high") : percent >= 25 ? t("me.risk.moderate") : t("me.risk.low")),
+      element("span", "", percent >= 25 ? t("me.risk.watch") : t("me.risk.clear")),
     );
     row.append(copy);
     section.append(row);
     const signals = element("div", "me-risk__signals");
-    signals.append(element("h3", "me-risk__signals-title", "Signes Détectés"));
+    signals.append(element("h3", "me-risk__signals-title", t("me.risk.signsTitle")));
     const list = element("ul", "me-risk__list");
     const item = (tint: string, label: string): HTMLElement => {
       const entry = element("li", "me-risk__item");
@@ -809,14 +810,14 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       return entry;
     };
     list.append(
-      item("#ffd25e", "Sessions prolongées fréquentes"),
-      item("#4aa8ff", "Baisse de motivation hors-jeu"),
-      item("#ef6bcb", "Recherche de dopamine rapide"),
+      item("#ffd25e", t("me.risk.sign.longSessions")),
+      item("#4aa8ff", t("me.risk.sign.motivation")),
+      item("#ef6bcb", t("me.risk.sign.dopamine")),
     );
     signals.append(list);
     const more = element("button", "me-risk__more");
     more.type = "button";
-    more.setAttribute("aria-label", "Voir tous les signes détectés");
+    more.setAttribute("aria-label", t("me.risk.seeAll"));
     more.append(glyph("chevronRight"));
     signals.append(more);
     section.append(signals);
@@ -827,8 +828,8 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     const section = card("me-evolution");
     const head = element("div", "me-card__titlerow");
     head.append(
-      element("h2", "me-card__title", "Évolution Cognitive"),
-      element("span", "me-evolution__period", "(30 derniers jours)"),
+      element("h2", "me-card__title", t("me.evolution.title")),
+      element("span", "me-evolution__period", t("me.evolution.period")),
     );
     section.append(head, buildEvolution(axes, tweens));
     const legend = element("ul", "me-evolution__legend");
@@ -847,14 +848,14 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   };
 
   const renderWearCard = (percent: number): HTMLElement => {
-    const section = card("me-wear", "Usure Cognitive");
+    const section = card("me-wear", t("me.wear.title"));
     const row = element("div", "me-wear__row");
     const centre = element("span", "");
     const value = element("strong", "me-wear__value");
-    centre.append(value, element("span", "me-wear__band", percent >= 55 ? "Usure Élevée" : "Usure Modérée"));
+    centre.append(value, element("span", "me-wear__band", percent >= 55 ? t("me.wear.high") : t("me.wear.moderate")));
     row.append(buildRing("wear", percent / 100, ["#43d98c", "#ffd25e", "#ff8a3d"], centre, tweens));
     const causes = element("div", "me-wear__causes");
-    causes.append(element("h3", "me-wear__causes-title", "Causes principales"));
+    causes.append(element("h3", "me-wear__causes-title", t("me.wear.causesTitle")));
     const list = element("ul", "me-wear__list");
     const item = (tint: string, label: string): HTMLElement => {
       const entry = element("li", "me-wear__item");
@@ -864,9 +865,9 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       return entry;
     };
     list.append(
-      item("#ffd25e", "Manque de sommeil"),
-      item("#4aa8ff", "Sessions tardives"),
-      item("#8a5cff", "Surcharge d'informations"),
+      item("#ffd25e", t("me.wear.cause.sleep")),
+      item("#4aa8ff", t("me.wear.cause.lateSessions")),
+      item("#8a5cff", t("me.wear.cause.overload")),
     );
     causes.append(list);
     row.append(causes);
@@ -878,7 +879,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
   };
 
   const renderRecommendationsCard = (): HTMLElement => {
-    const section = card("me-reco", "Recommandations Personnalisées");
+    const section = card("me-reco", t("me.reco.title"));
     const list = element("ul", "me-reco__list");
     const row = (name: keyof typeof GLYPHS, tint: string, label: string): HTMLElement => {
       const item = element("li", "me-reco__item");
@@ -891,9 +892,9 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       return item;
     };
     list.append(
-      row("timer", "#4aa8ff", "Prendre une pause de 15 min"),
-      row("runner", "#ef6bcb", "Activité physique recommandée"),
-      row("lotus", "#43d98c", "Pratique de la méditation"),
+      row("timer", "#4aa8ff", t("me.reco.pause")),
+      row("runner", "#ef6bcb", t("me.reco.activity")),
+      row("lotus", "#43d98c", t("me.reco.meditation")),
     );
     section.append(list);
     return section;
@@ -904,7 +905,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
     const pill = element("div", "me-objective__pill");
     pill.append(
       glyph("target", "me-objective__glyph"),
-      element("p", "me-objective__copy", "Prochain objectif : Améliorer la mémoire à 7.5+"),
+      element("p", "me-objective__copy", t("me.objective.copy")),
     );
     const progressRow = element("div", "me-objective__progress");
     const track = element("span", "me-objective__track");
@@ -1000,7 +1001,7 @@ export function createMePage(options: MePageOptions = {}): AppPage {
       // this page root is that landmark (same rule as the Store page).
       pageRoot = element("main", "me-page");
       pageRoot.tabIndex = -1;
-      pageRoot.setAttribute("aria-label", "Moi");
+      pageRoot.setAttribute("aria-label", t("me.page.label"));
       container.replaceChildren(pageRoot);
       render();
     },

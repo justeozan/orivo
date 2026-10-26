@@ -81,7 +81,7 @@ test.describe("Store filters", () => {
     await openRoute(page, "#/store?q=zzzznotfound", "store");
 
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(0);
-    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("Aucun jeu ne correspond");
+    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("No game matches");
     await expect(page.locator(`${storeHost} .store-card__price`)).toHaveCount(0);
   });
 });
@@ -228,7 +228,7 @@ test.describe("Store return state", () => {
     // no title of its own. Its accessible name is what says which game it is.
     await expect(page.locator(`${storeHost} .store-card__open`)).toHaveAttribute(
       "aria-label",
-      "Ouvrir Hades",
+      "Open Hades",
     );
     await expect(host(page, "store")).toBeVisible();
   });

@@ -12,6 +12,7 @@ import type {
   WallpaperSearchPhase,
   WallpaperSearchView,
 } from "./contracts";
+import { currentLanguage, t } from "./i18n";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import { displayTitle } from "./game-title";
 import { backgroundMedia } from "./media-role";
@@ -259,10 +260,10 @@ export type GameDetailSection =
 /* -------------------------------------------------------------------------- */
 
 export const GAME_MEDIA_KINDS: readonly GameDetailMediaKindOption[] = [
-  { id: "wallpaper", label: "Wallpaper" },
-  { id: "video", label: "Video" },
-  { id: "icon", label: "Icon" },
-  { id: "cover", label: "Cover" },
+  { id: "wallpaper", label: t("detail.media.wallpaper") },
+  { id: "video", label: t("detail.media.video") },
+  { id: "icon", label: t("detail.media.icon") },
+  { id: "cover", label: t("detail.media.cover") },
 ];
 
 const MEDIA_KIND_IDS: readonly GameMediaKind[] = GAME_MEDIA_KINDS.map(
@@ -407,7 +408,7 @@ export function normaliseStoreMedia(value: unknown): StoreMediaView {
     for (const entry of value.movies) {
       if (!isRecord(entry)) continue;
       const movie: StoreMovieView = {
-        title: text(entry.title, "Trailer"),
+        title: text(entry.title, t("detail.fallback.trailer")),
         thumbUrl: text(entry.thumbUrl),
       };
       const mp4Url = optionalText(entry.mp4Url);
@@ -450,7 +451,7 @@ export function normaliseGameMedia(value: unknown): GameMediaView[] {
     const item: GameMediaView = {
       id,
       kind: entry.kind as GameMediaKind,
-      title: text(entry.title, "Untitled media"),
+      title: text(entry.title, t("detail.fallback.untitledMedia")),
       previewUrl,
       origin: oneOf(entry.origin, MEDIA_ORIGINS, "provider"),
       selected: entry.selected === true,
@@ -499,7 +500,7 @@ function normaliseWallpaperCandidates(
     seen.add(id);
     const candidate: WallpaperCandidateView = {
       id,
-      title: text(entry.title, "Wallpaper"),
+      title: text(entry.title, t("detail.media.wallpaper")),
       thumbnailUrl,
       // A candidate inherits the row it was fetched for unless it says
       // otherwise, so a backend that omits the field still lands correctly.
@@ -550,7 +551,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
   );
   return {
     id,
-    title: displayTitle(text(value.title, "Untitled game")),
+    title: displayTitle(text(value.title, t("detail.fallback.untitledGame"))),
     source: oneOf(
       value.source,
       [
@@ -608,7 +609,7 @@ function normaliseOffers(value: unknown): StoreOffer[] {
         ] as const,
         "steam",
       ),
-      providerLabel: text(entry.providerLabel, "Store"),
+      providerLabel: text(entry.providerLabel, t("detail.fallback.store")),
       priceMinor:
         typeof entry.priceMinor === "number" &&
         Number.isFinite(entry.priceMinor)
@@ -638,7 +639,7 @@ function normaliseAchievements(value: unknown): GameDetailView["achievements"] {
         .filter(isRecord)
         .map((item) => ({
           id: text(item.id),
-          title: text(item.title, "Achievement"),
+          title: text(item.title, t("detail.fallback.achievement")),
           iconUrl: text(item.iconUrl),
         }))
         .filter((item) => item.id !== "")
@@ -913,14 +914,14 @@ export function blockedRunsOnLabel(game: HostFitInput): string {
     (platform) => platform !== host,
   );
   if (elsewhere.length > 0) {
-    return (
-      elsewhere.map((platform) => HOST_NAMES[platform]).join(" / ") + " only"
-    );
+    return t("detail.platform.only", {
+      platforms: elsewhere.map((platform) => HOST_NAMES[platform]).join(" / "),
+    });
   }
   // No matrix: the macOS answer's shadow. Epic's non-Mac entitlements are
   // Windows builds, which is what has always made this label safe.
-  if (game.macCompatibility === "not-native") return "Windows only";
-  return "Unavailable";
+  if (game.macCompatibility === "not-native") return t("detail.platform.only", { platforms: HOST_NAMES.windows });
+  return t("detail.action.unavailable");
 }
 
 export function resolvePrimaryAction(
@@ -937,13 +938,13 @@ export function resolvePrimaryAction(
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
     kind: "unavailable",
-    label: "Unavailable",
+    label: t("detail.action.unavailable"),
     icon: "alert",
     intent: "none",
     route: null,
     offerId: null,
     disabled: true,
-    hint: "This game cannot be started on this device yet.",
+    hint: t("detail.action.unavailableHint"),
   };
   if (!detail || !gameId) return base;
   // No build for this machine's OS: the button states where the game does
@@ -953,7 +954,7 @@ export function resolvePrimaryAction(
     return {
       ...base,
       label: blockedRunsOnLabel(detail),
-      hint: `${detail.title} ships no build for this machine's OS.`,
+      hint: t("detail.action.noBuildHint", { title: detail.title }),
     };
   }
   switch (detail.primaryAction) {
@@ -961,11 +962,11 @@ export function resolvePrimaryAction(
       return {
         ...base,
         kind: "play",
-        label: "Play",
+        label: t("detail.action.play"),
         icon: "play",
         intent: "play",
         disabled: false,
-        hint: `Start ${detail.title}`,
+        hint: t("detail.action.playHint", { title: detail.title }),
       };
     case "install-steam": {
       // Steam cannot install anything on an iPhone. The same word the Library
@@ -974,25 +975,25 @@ export function resolvePrimaryAction(
         return {
           ...base,
           kind: "install-steam",
-          label: "Install",
+          label: t("detail.action.install"),
           icon: "download",
           intent: "store-choices",
           disabled: false,
-          hint: `Shows where you can get ${detail.title} on this device.`,
+          hint: t("detail.action.storeChoicesHint", { title: detail.title }),
         };
       }
       const offer = selectActionOffer(detail, "steam");
       return {
         ...base,
         kind: "install-steam",
-        label: "Install via Steam",
+        label: t("detail.action.installSteam"),
         icon: "steam",
         intent: offer ? "open-offer" : "none",
         offerId: offer?.id ?? null,
         disabled: !offer,
         hint: offer
-          ? "Opens the Steam store page for this game."
-          : "No Steam offer is available for this game.",
+          ? t("detail.action.steamOfferHint")
+          : t("detail.action.steamNoOffer"),
       };
     }
     case "install-epic": {
@@ -1007,19 +1008,19 @@ export function resolvePrimaryAction(
           kind: "install-epic",
           label:
             typeof percent === "number"
-              ? `Downloading ${percent}%`
-              : "Downloading",
+              ? t("detail.action.downloadingPercent", { percent })
+              : t("detail.action.downloading"),
           progress: percent ?? 0,
           icon: "download",
           intent: "none",
           disabled: true,
-          hint: `${detail.title} is downloading in the Epic Games Launcher`,
+          hint: t("detail.action.epicDownloadingHint", { title: detail.title }),
         };
       }
       return {
         ...base,
         kind: "install-epic",
-        label: "Install",
+        label: t("detail.action.install"),
         progress: null,
         icon: "download",
         // Epic owns the download: Orivo asks its launcher to start one and
@@ -1027,33 +1028,33 @@ export function resolvePrimaryAction(
         // run the transfer itself.
         intent: "install-epic",
         disabled: false,
-        hint: `Ask the Epic Games Launcher to download ${detail.title}`,
+        hint: t("detail.action.epicInstallHint", { title: detail.title }),
       };
     }
     case "configure-wine":
       return {
         ...base,
         kind: "configure-wine",
-        label: "Configure Wine",
+        label: t("detail.action.configureWine"),
         icon: "settings",
         intent: "navigate",
         route: { page: "settings", section: "plugins", attachGameId: gameId },
         disabled: false,
-        hint: "Set up a Wine profile before this game can run.",
+        hint: t("detail.action.wineHint"),
       };
     case "view-offer": {
       const offer = selectActionOffer(detail);
       return {
         ...base,
         kind: "view-offer",
-        label: "View offer",
+        label: t("detail.action.viewOffer"),
         icon: "store",
         intent: offer ? "open-offer" : "none",
         offerId: offer?.id ?? null,
         disabled: !offer,
         hint: offer
-          ? `Opens the ${offer.providerLabel} offer.`
-          : "No offer is available yet.",
+          ? t("detail.action.offerOpens", { provider: offer.providerLabel })
+          : t("detail.action.noOffer"),
       };
     }
     case "unavailable":
@@ -1153,37 +1154,39 @@ export function shouldOfferAboutToggle(about: string): boolean {
 /* -------------------------------------------------------------------------- */
 
 export function formatPlayTime(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "Not played yet";
+  if (!Number.isFinite(seconds) || seconds <= 0) return t("detail.played.never");
   if (seconds < 3_600)
-    return `Played ${Math.max(1, Math.round(seconds / 60))} min`;
-  return `Played ${Math.round(seconds / 3_600)}h`;
+    return t("detail.played.minutes", {
+      minutes: Math.max(1, Math.round(seconds / 60)),
+    });
+  return t("detail.played.hours", { hours: Math.round(seconds / 3_600) });
 }
 
 export function formatLastPlayed(
   value: string | null,
   now = Date.now(),
 ): string {
-  if (!value) return "Never played";
+  if (!value) return t("detail.last.never");
   const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "Last played recently";
+  if (!Number.isFinite(timestamp)) return t("detail.last.recently");
   const elapsed = Math.max(0, now - timestamp);
   const minutes = Math.round(elapsed / 60_000);
-  if (minutes < 2) return "Last played just now";
-  if (minutes < 60) return `Last played ${minutes} min ago`;
+  if (minutes < 2) return t("detail.last.justNow");
+  if (minutes < 60) return t("detail.last.minutes", { minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `Last played ${hours}h ago`;
+  if (hours < 24) return t("detail.last.hours", { hours });
   const days = Math.round(hours / 24);
-  if (days === 1) return "Last played yesterday";
-  if (days < 30) return `Last played ${days} days ago`;
-  return `Last played ${formatReleaseDate(value)}`;
+  if (days === 1) return t("detail.last.yesterday");
+  if (days < 30) return t("detail.last.days", { days });
+  return t("detail.last.date", { date: formatReleaseDate(value) });
 }
 
 export function formatReleaseDate(value: string | null): string {
-  if (!value) return "Release date unknown";
+  if (!value) return t("detail.release.unknown");
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return value;
   try {
-    return new Intl.DateTimeFormat("en-US", {
+    return new Intl.DateTimeFormat(currentLanguage(), {
       year: "numeric",
       month: "long",
       day: "numeric",
@@ -1211,7 +1214,10 @@ export function formatAchievementProgress(
     (achievements.unlocked / achievements.total) * 100,
   );
   return {
-    label: `${achievements.unlocked}/${achievements.total} unlocked`,
+    label: t("detail.achievements.unlockedOf", {
+      unlocked: achievements.unlocked,
+      total: achievements.total,
+    }),
     percent: Math.min(100, Math.max(0, percent)),
   };
 }
@@ -1243,7 +1249,7 @@ export function statusChips(
   // second as the bar filling behind it — and a second place to read the same
   // thing is noise, not emphasis.
   if (detail.installState === "installed") {
-    chips.push({ id: "install", label: "Installed", icon: "check", tone: "ready" });
+    chips.push({ id: "install", label: t("detail.chip.installed"), icon: "check", tone: "ready" });
   }
 
   const host = detail.hostPlatform;
@@ -1256,14 +1262,16 @@ export function statusChips(
     if (platforms.includes(host)) {
       chips.push({
         id: "mac",
-        label: `${HOST_NAMES[host]} native`,
+        label: t("detail.platform.native", { platform: HOST_NAMES[host] }),
         icon: "check",
         tone: "ready",
       });
     } else {
       chips.push({
         id: "mac",
-        label: `${platforms.map((platform) => HOST_NAMES[platform]).join(" / ")} only`,
+        label: t("detail.platform.only", {
+          platforms: platforms.map((platform) => HOST_NAMES[platform]).join(" / "),
+        }),
         icon: platforms.includes("windows") ? "windows" : "check",
         tone: "warn",
       });
@@ -1280,7 +1288,7 @@ export function statusChips(
     case "native":
       chips.push({
         id: "mac",
-        label: "Mac native",
+        label: t("detail.chip.macNative"),
         icon: "check",
         tone: "ready",
       });
@@ -1290,7 +1298,7 @@ export function statusChips(
       // Epic's entitlement list happens to be missing.
       chips.push({
         id: "mac",
-        label: "Windows only",
+        label: t("detail.platform.only", { platforms: HOST_NAMES.windows }),
         icon: "windows",
         tone: "warn",
       });
@@ -1404,11 +1412,14 @@ export function buildStatFacts(
     });
   }
   const progress = formatAchievementProgress(detail.achievements);
-  if (progress) {
+  const counts = detail.achievements;
+  if (progress && counts) {
     facts.push({
       id: "achievements",
       icon: "trophy",
-      text: `Achievements ${progress.label.replace(" unlocked", "")}`,
+      text: t("detail.achievements.stat", {
+        progress: `${counts.unlocked}/${counts.total}`,
+      }),
     });
   }
   return facts;
@@ -1423,10 +1434,10 @@ export function formatRelativeTime(
   if (!Number.isFinite(timestamp)) return "";
   const elapsed = Math.max(0, now - timestamp);
   const minutes = Math.round(elapsed / 60_000);
-  if (minutes < 60) return `${Math.max(1, minutes)}m ago`;
+  if (minutes < 60) return t("detail.ago.minutes", { minutes: Math.max(1, minutes) });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
+  if (hours < 24) return t("detail.ago.hours", { hours });
+  return t("detail.ago.days", { days: Math.round(hours / 24) });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1589,7 +1600,7 @@ export function reduceGameDetailState(
         statusMessage: "",
         errorMessage: action.online
           ? ""
-          : "You are offline. Showing the last saved details.",
+          : t("detail.offline.savedDetails"),
         pendingRestore: action.restore,
       };
     }
@@ -1834,7 +1845,7 @@ export function reduceGameDetailState(
         : {
             ...state,
             phase: "offline",
-            errorMessage: "You are offline. Showing the last saved details.",
+            errorMessage: t("detail.offline.savedDetails"),
           };
   }
 }

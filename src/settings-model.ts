@@ -6,6 +6,7 @@ import type {
   WallpaperCredentials,
 } from "./contracts";
 import type { IconName } from "./icons";
+import { LANGUAGE_PREFERENCES, t, type LanguagePreference } from "./i18n";
 
 export const START_PAGES = ["library", "store"] as const;
 export const STORE_REGIONS = ["automatic", "us", "ca", "gb", "fr", "de", "jp", "au"] as const;
@@ -23,6 +24,8 @@ export type GameStartAction = (typeof GAME_START_ACTIONS)[number];
 
 export interface Preferences {
   startPage: StartPage;
+  /** "system" follows the OS; see i18n.ts. */
+  language: LanguagePreference;
   storeRegion: StoreRegion;
   motion: MotionPreference;
   onGameStart: GameStartAction;
@@ -47,6 +50,7 @@ export interface Preferences {
 
 export interface PreferencesUpdate {
   startPage?: StartPage;
+  language?: LanguagePreference;
   storeRegion?: StoreRegion;
   motion?: MotionPreference;
   onGameStart?: GameStartAction;
@@ -67,6 +71,7 @@ export interface DataUsage {
 
 export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   startPage: "library",
+  language: "system",
   storeRegion: "automatic",
   motion: "system",
   onGameStart: "step-aside",
@@ -87,24 +92,24 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   icon: IconName;
   description: string;
 }> = [
-  { id: "general", label: "General", tab: "General", icon: "cog", description: "Startup and store defaults" },
-  {
-    id: "libraries",
-    label: "Libraries & Sources",
-    tab: "Libraries",
-    icon: "folder",
-    description: "Accounts, imports, and providers",
-  },
-  {
-    id: "plugins",
-    label: "Plugins & Runners",
-    tab: "Plugins",
-    icon: "puzzle",
-    description: "Wine profiles and plugin health",
-  },
-  { id: "appearance", label: "Appearance", tab: "Appearance", icon: "palette", description: "Motion preferences" },
-  { id: "data", label: "Data", tab: "Data", icon: "database", description: "Derived cache usage" },
-  { id: "about", label: "About", tab: "About", icon: "info", description: "Versions and attributions" },
+  // Read through t() at import: the language is settled before this module
+  // loads (i18n.ts reads it synchronously), and a change reloads the page.
+  ...(
+    [
+      ["general", "cog"],
+      ["libraries", "folder"],
+      ["plugins", "puzzle"],
+      ["appearance", "palette"],
+      ["data", "database"],
+      ["about", "info"],
+    ] as const
+  ).map(([id, icon]) => ({
+    id,
+    label: t(`settings.${id}.label`),
+    tab: t(`settings.${id}.tab`),
+    icon,
+    description: t(`settings.${id}.description`),
+  })),
 ] as const;
 
 const providerLabels: Record<StoreProvider, string> = {
@@ -135,6 +140,7 @@ export function normalisePreferences(value: unknown): Preferences {
   const record = asRecord(value);
   return {
     startPage: readEnum(record, ["startPage", "start_page"], START_PAGES, DEFAULT_PREFERENCES.startPage),
+    language: readEnum(record, ["language"], LANGUAGE_PREFERENCES, DEFAULT_PREFERENCES.language),
     storeRegion: readEnum(
       record,
       ["storeRegion", "store_region"],
@@ -267,10 +273,10 @@ export function defaultProviderStatuses(): ProviderStatus[] {
     health: provider === "apple" ? "available" : "not-configured",
     message:
       provider === "apple"
-        ? "Public search is available."
+        ? t("misc.provider.apple")
         : provider === "steam"
-          ? "Connect Steam to enable account-backed data."
-          : "An authorised provider feed is not configured.",
+          ? t("misc.provider.steam")
+          : t("misc.provider.other"),
     refreshedAt: null,
   }));
 }
@@ -289,31 +295,32 @@ export function defaultProviderStatuses(): ProviderStatus[] {
 export function providerHealthLabel(health: ProviderHealth): string {
   switch (health) {
     case "available":
-      return "Available";
+      return t("misc.provider.available");
     case "degraded":
-      return "Degraded";
+      return t("misc.provider.degraded");
     default:
-      return "Soon";
+      return t("misc.provider.soon");
   }
 }
 
 export function formatDataSize(bytes: number): string {
   const safe = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
-  if (safe < 1_024) return `${safe.toFixed(0)} B`;
-  if (safe < 1_024 ** 2) return `${(safe / 1_024).toFixed(1)} KB`;
-  if (safe < 1_024 ** 3) return `${(safe / 1_024 ** 2).toFixed(1)} MB`;
-  return `${(safe / 1_024 ** 3).toFixed(1)} GB`;
+  const decimal = (value: number): string => value.toFixed(1).replace(".", t("misc.size.decimal"));
+  if (safe < 1_024) return t("misc.size.b", { value: safe.toFixed(0) });
+  if (safe < 1_024 ** 2) return t("misc.size.kb", { value: decimal(safe / 1_024) });
+  if (safe < 1_024 ** 3) return t("misc.size.mb", { value: decimal(safe / 1_024 ** 2) });
+  return t("misc.size.gb", { value: decimal(safe / 1_024 ** 3) });
 }
 
 export function formatFreshness(value: string | null, now = Date.now()): string {
-  if (!value) return "Not refreshed yet";
+  if (!value) return t("misc.freshness.never");
   const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "Refresh time unavailable";
+  if (!Number.isFinite(timestamp)) return t("misc.freshness.invalid");
   const elapsed = Math.max(0, now - timestamp);
-  if (elapsed < 60_000) return "Refreshed just now";
-  if (elapsed < 3_600_000) return `Refreshed ${Math.floor(elapsed / 60_000)} min ago`;
-  if (elapsed < 86_400_000) return `Refreshed ${Math.floor(elapsed / 3_600_000)} hr ago`;
-  return `Refreshed ${Math.floor(elapsed / 86_400_000)} d ago`;
+  if (elapsed < 60_000) return t("misc.freshness.justNow");
+  if (elapsed < 3_600_000) return t("misc.freshness.minutes", { count: Math.floor(elapsed / 60_000) });
+  if (elapsed < 86_400_000) return t("misc.freshness.hours", { count: Math.floor(elapsed / 3_600_000) });
+  return t("misc.freshness.days", { count: Math.floor(elapsed / 86_400_000) });
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

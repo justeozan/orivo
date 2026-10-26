@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 /**
  * What a folder on shared storage is allowed to say for itself.
  *
@@ -88,7 +90,7 @@ function reviewOrigin(file: ReviewedFile, folderLabel: string | null): string {
 }
 
 export function collisionSentence(collision: TitleCollision): string | null {
-  if (collision === "library") return "A game already in your library uses this name";
-  if (collision === "folder") return "Another file in this folder uses this name";
+  if (collision === "library") return t("misc.review.collision.library");
+  if (collision === "folder") return t("misc.review.collision.folder");
   return null;
 }

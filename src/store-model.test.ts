@@ -184,7 +184,7 @@ describe("reduceStorePageState", () => {
     });
 
     expect(next.phase).toBe("offline");
-    expect(next.errorMessage).toMatch(/hors ligne/i);
+    expect(next.errorMessage).toMatch(/offline/i);
     expect(next.home.games.length).toBeGreaterThan(0);
   });
 
@@ -367,7 +367,7 @@ describe("reduceStorePageState", () => {
       online: false,
     });
     expect(offline.phase).toBe("offline");
-    expect(offline.errorMessage).toMatch(/hors ligne/i);
+    expect(offline.errorMessage).toMatch(/offline/i);
 
     const recovered = reduceStorePageState(offline, { type: "connectivity-changed", online: true });
     expect(recovered.phase).toBe("degraded");
@@ -548,15 +548,15 @@ describe("fitStats", () => {
 });
 
 describe("storeCategoryLabel", () => {
-  it("labels every known category in French", () => {
+  it("labels every known category", () => {
     expect(STORE_CATEGORIES.map((option) => storeCategoryLabel(option.id))).toEqual([
-      "Pour toi",
-      "Tous les jeux",
+      "For you",
+      "All games",
     ]);
   });
 
   it("falls back to every game for an unknown category", () => {
-    expect(storeCategoryLabel("mystery" as never)).toBe("Tous les jeux");
+    expect(storeCategoryLabel("mystery" as never)).toBe("All games");
   });
 });
 
