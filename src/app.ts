@@ -8135,7 +8135,7 @@ function shell(): string {
 
         <label class="search-control" id="topbar-search-control">
           ${icon("search")}
-          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="${t("app.search.gamesPlaceholder")}" aria-label="${t("app.search.gamesShort")}" />
+          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="${t("app.search.gamesPlaceholder")}" aria-label="${t("app.search.gamesShort")}" data-nav-reveal />
           <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
         </label>
 

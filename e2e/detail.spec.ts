@@ -82,56 +82,26 @@ test.describe("game detail sections", () => {
   });
 });
 
-test.describe("game detail wallpaper rail", () => {
-  const HERO_MEDIA = "media-media_fallback_wallpaper_hero";
-  const LANDSCAPE_MEDIA = "media-media_fallback_wallpaper_landscape";
-
-  test("only wallpapers are offered, and adding one lives in the … menu", async ({ page }) => {
+test.describe("game detail media rail", () => {
+  // The rail shows the game's trailers and screenshots from its store page
+  // (`37d5d89`), not the chosen wallpapers. The browser fallback has no store
+  // to ask, so it has no rail; the rail itself is covered by
+  // `game-detail-page.test.ts`.
+  test("a game the store knows nothing about has no rail, and its wallpaper lives in the … menu", async ({
+    page,
+  }) => {
     await openRoute(page, DETAIL_ROUTE, "game");
 
-    // The fallback now ships fourteen bundled wallpapers (two named plates
-    // plus twelve filler tiles), not two.
-    const tiles = page.locator(`${detailHost} .gd-gallery__tile`);
-    await expect(tiles).toHaveCount(14);
-    await expect(tiles.first().locator(".gd-gallery__tile-image")).toBeVisible();
-    // No media tabs, no icon or cover slots, no video.
-    await expect(page.locator(`${detailHost} .gd-media__tab`)).toHaveCount(0);
-    await expect(page.locator(`${detailHost} video`)).toHaveCount(0);
-    // "Search cover & images" is gone from the rail itself: changing a
-    // wallpaper is a "…" menu action now (`renderMoreButton`), so the group
-    // never fetched art alongside the cover and the logo can end up wearing
-    // each other's images.
-    await expect(page.locator(`${detailHost} .gd-gallery__search`)).toHaveCount(0);
-    await expect(page.locator(`${detailHost} [data-focus-key='more-actions']`)).toBeVisible();
-  });
-
-  test("a rail click previews the wallpaper without persisting it", async ({ page }) => {
-    await openRoute(page, DETAIL_ROUTE, "game");
-
-    const heroImage = page.locator(`${detailHost} .gd-hero__image`);
-    await expect(heroImage).toHaveAttribute("src", "/media/igdb/heroes/elden-ring-wallpaper.jpg");
-
-    const landscapeTile = page.locator(`${detailHost} .gd-gallery [data-focus-key='${LANDSCAPE_MEDIA}']`);
-    await landscapeTile.click();
-
-    // The click swaps the hero art and the rail's own selection…
-    await expect(heroImage).toHaveAttribute("src", "/media/igdb/landscapes/elden-ring.jpg");
-    await expect(landscapeTile).toHaveClass(/gd-gallery__tile--selected/);
-    await expect(
-      page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`),
-    ).not.toHaveClass(/gd-gallery__tile--selected/);
-
-    // …but a reload proves the browser fallback never wrote it anywhere.
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await waitForPage(page, "game");
-
+    // The hero wears the saved wallpaper rather than cycling store screenshots.
     await expect(page.locator(`${detailHost} .gd-hero__image`)).toHaveAttribute(
       "src",
       "/media/igdb/heroes/elden-ring-wallpaper.jpg",
     );
-    await expect(page.locator(`${detailHost} .gd-gallery [data-focus-key='${HERO_MEDIA}']`)).toHaveClass(
-      /gd-gallery__tile--selected/,
-    );
+    await expect(page.locator(`${detailHost} .gd-gallery`)).toHaveCount(0);
+    await expect(page.locator(`${detailHost} .gd-media__tab`)).toHaveCount(0);
+    await expect(page.locator(`${detailHost} video`)).toHaveCount(0);
+    // Changing a wallpaper is a "…" menu action (`renderMoreButton`).
+    await expect(page.locator(`${detailHost} [data-focus-key='more-actions']`)).toBeVisible();
   });
 });
 
@@ -193,12 +163,13 @@ test.describe("game detail change-wallpaper dialog", () => {
     await apply.click();
 
     // The browser fallback's importer always answers with the same stand-in
-    // media (`createFallbackImportedWallpaper()`), which becomes the rail's
-    // only tile and the new hero art; the dialog closes on commit.
+    // media (`createFallbackImportedWallpaper()`), which becomes the new hero
+    // art; the dialog closes on commit.
     await expect(page.locator(`${detailHost} .gd-modal`)).toHaveCount(0);
-    const imported = page.locator(`${detailHost} [data-focus-key='media-media_fallback_wallpaper_searched']`);
-    await expect(imported).toBeVisible();
-    await expect(imported).toHaveClass(/gd-gallery__tile--selected/);
+    await expect(page.locator(`${detailHost} .gd-hero__image`)).toHaveAttribute(
+      "src",
+      "/media/igdb/landscapes/cyberpunk-2077.webp",
+    );
   });
 });
 

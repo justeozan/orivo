@@ -30,6 +30,8 @@
  *   it is.
  * - `data-nav-skip` is a pointer affordance the keys already cover, like the
  *   scene's previous and next arrows. It stays clickable and tabbable.
+ * - `data-nav-reveal` is a control kept transparent until focus reveals it,
+ *   like the topbar's resting search field. It is still a stop for the keys.
  * - `role="tablist"` is a band too, walked with up and down when its tabs are
  *   stacked, and entered on the selected tab.
  *
@@ -172,7 +174,8 @@ const isVisible = (element: HTMLElement): boolean => {
   const rect = element.getBoundingClientRect();
   if (rect.width < 2 || rect.height < 2) return false;
   const style = window.getComputedStyle(element);
-  return style.visibility !== "hidden" && style.display !== "none" && style.opacity !== "0";
+  if (style.visibility === "hidden" || style.display === "none") return false;
+  return style.opacity !== "0" || element.hasAttribute("data-nav-reveal");
 };
 
 /**
