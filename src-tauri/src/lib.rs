@@ -3,6 +3,7 @@ mod artwork_backfill;
 mod catalog;
 mod console_runner;
 mod console_saf;
+mod crash_reporting;
 mod epic_android;
 mod epic_download;
 mod epic_install;
@@ -894,6 +895,8 @@ pub fn run() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
     }
+    // Held to the end of `run` so the client stays alive for the whole session.
+    let _crash_reporting = crash_reporting::init();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // The updater downloads and verifies signed releases; `process` is what

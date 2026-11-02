@@ -172,6 +172,10 @@ jobs:
           # what a build from source does, and what every official build did
           # until this was passed through.
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          # Uploads the source maps so a crash report reads as `app.ts:7450`
+          # instead of a minified column. Optional: unset, the build is the
+          # same and reports stay minified.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.version && format('v{0}', inputs.version) || 'v__VERSION__') }}
           releaseName: 'Orivo __VERSION__'

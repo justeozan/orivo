@@ -13,6 +13,7 @@ function fakeSdk() {
     setTag: vi.fn(),
     captureException: vi.fn(),
     feedbackIntegration: vi.fn(() => ({ name: "Feedback" })),
+    replayIntegration: vi.fn(() => ({ name: "Replay" })),
     getFeedback: vi.fn(() => feedback),
     feedback,
   };
@@ -69,6 +70,21 @@ describe("initErrorReporting", () => {
 
     await vi.waitFor(() => expect(sdk.init).toHaveBeenCalledTimes(1));
     expect(sdk.setTag).toHaveBeenCalledWith("runtime", "desktop");
+  });
+
+  it("records replays with every piece of content masked", async () => {
+    const { initErrorReporting } = await freshModule();
+    const sdk = fakeSdk();
+
+    initErrorReporting("desktop", { dsn: "https://k@o.test/1", load: load(sdk) });
+    await vi.waitFor(() => expect(sdk.init).toHaveBeenCalledTimes(1));
+
+    expect(sdk.replayIntegration).toHaveBeenCalledWith(
+      expect.objectContaining({ maskAllText: true, maskAllInputs: true, blockAllMedia: true }),
+    );
+    expect(sdk.init).toHaveBeenCalledWith(
+      expect.objectContaining({ replaysSessionSampleRate: 0.1, replaysOnErrorSampleRate: 1.0 }),
+    );
   });
 
   it("starts only once", async () => {

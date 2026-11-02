@@ -25,7 +25,8 @@ updater silently stops working. The third is optional.
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | The **entire contents** of the minisign private key file `~/.orivo/orivo-updater.key`, including the `untrusted comment:` first line and the trailing newline. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | An **empty string**. The key was generated without a password, so the secret exists but has no value. |
-| `VITE_SENTRY_DSN` | Optional. The Sentry DSN from Sentry › Settings › Projects › _project_ › Client Keys (DSN). Vite inlines it at build time, so it has to exist before the build, not after. |
+| `VITE_SENTRY_DSN` | Optional. The Sentry DSN from Sentry › Settings › Projects › _project_ › Client Keys (DSN). Vite inlines it at build time, so it has to exist before the build, not after. The Rust side reads the same variable at compile time to report panics. |
+| `SENTRY_AUTH_TOKEN` | Optional. A Sentry auth token with `project:releases` and `org:read` (Settings › Auth Tokens). With it the desktop release uploads source maps for `orivo@<version>`; without it nothing changes and stack traces stay minified. |
 
 With the GitHub CLI:
 
@@ -33,6 +34,7 @@ With the GitHub CLI:
 gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.orivo/orivo-updater.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
 gh secret set VITE_SENTRY_DSN --body "https://…@…ingest.de.sentry.io/…"
+gh secret set SENTRY_AUTH_TOKEN --body "sntrys_…"
 ```
 
 Leave `VITE_SENTRY_DSN` unset and every official build behaves exactly like a

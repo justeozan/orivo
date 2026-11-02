@@ -131,6 +131,7 @@ workflow sets it from a repository secret.
 | --- | --- | --- | --- | --- |
 | Diagnostics | Crash Data | Sentry error reports | App Functionality | No |
 | Diagnostics | Performance Data | Sentry traces, 10 % of sessions | App Functionality | No |
+| Usage Data | Product Interaction | Sentry Session Replay (clicks and scrolling, text and media masked), 10 % of sessions and every session with an error | App Functionality | No |
 | Contact Info | Name | optional field of the Feedback form | App Functionality | Yes |
 | Contact Info | Email Address | optional field of the Feedback form | App Functionality | Yes |
 | User Content | Customer Support | the Feedback message and its optional screenshot | App Functionality | Yes |

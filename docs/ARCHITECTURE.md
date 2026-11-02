@@ -669,7 +669,7 @@ Choix structurants a ne pas re-ouvrir:
 | Poids 1er ecran 83 kB gzip | ~78-85 kB gzip | **Neutre a legerement meilleur** -- pas de taxe |
 
 Ce que ca **n'ameliorera pas**: le runtime (meme DOM direct), les 19 262 lignes
-de logique TS, ni le poids de `sentry-sdk` (49 kB gzip).
+de logique TS, ni le poids de `sentry-sdk` (93 kB gzip depuis Session Replay).
 
 ### 15.8 Quand l'implementer
 

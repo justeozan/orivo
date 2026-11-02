@@ -51,6 +51,11 @@ serde_json = "1"
 # `sha2`; MIT OR Apache-2.0.
 sha1 = "0.10"
 sha2 = "0.10"
+# Panics in the Rust half, which the browser SDK cannot see. Same rule as the
+# frontend: no DSN at build time, no client, no socket. `rustls` rather than the
+# default `native-tls`, so the transport shares the TLS stack `reqwest` already
+# uses and nothing links OpenSSL on Linux or Android.
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 tauri = { version = "2.11.5", features = ["protocol-asset"] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"

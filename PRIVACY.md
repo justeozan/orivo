@@ -47,6 +47,12 @@ Orivo asks Sentry not to attach names or IP addresses to these reports. A small
 share of sessions also sends performance measurements, such as how long a
 screen took to load.
 
+A small share of sessions, and every session in which an error occurs, also sends
+a replay: a recording of where the window was clicked and scrolled, which is how
+we notice a screen that frustrates people. Text, form fields and images are
+blanked on your machine before anything is sent, so a replay shows the layout
+and the clicks, not your game titles, folder names or accounts.
+
 The Feedback button sends us the message you write. Adding your name, your
 email address or a screenshot is optional and only happens if you choose to.
 We use them only to answer you and to fix the problem.

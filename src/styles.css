@@ -575,6 +575,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 
 .feedback-button {
   display: grid;
+  flex: none;
   width: var(--tap-round);
   height: var(--tap-round);
   padding: 0;
@@ -3422,10 +3423,11 @@ html[data-device="phone"] .topbar.is-library-menu-open .primary-nav { transition
 
 /* Out of the mark the pills are buttons over the artwork, and an icon has no
    text shadow to stand on: each wears the glass plate the current page's pill
-   already has, a shade lighter. So does the bell, a third of the bar here — a
-   white glyph on a white glint was a dot floating on its own. */
+   already has, a shade lighter. So do the feedback button and the bell beside
+   it — a white glyph on a white glint was a dot floating on its own. */
 html[data-device="phone"] .primary-nav { gap: 6px; }
 html[data-device="phone"] .nav-link:not(.is-active),
+html[data-device="phone"] .feedback-button,
 html[data-device="phone"] .notifications-button {
   border: 1px solid rgba(255,255,255,.12);
   color: #e4e1e8;
@@ -3434,6 +3436,7 @@ html[data-device="phone"] .notifications-button {
   backdrop-filter: blur(18px) saturate(130%);
 }
 html[data-device="phone"] .nav-link:not(.is-active)[data-nav-focus],
+html[data-device="phone"] .feedback-button[data-nav-focus],
 html[data-device="phone"] .notifications-button[data-nav-focus],
 html[data-device="phone"] .notifications-button[aria-expanded="true"] {
   border-color: rgba(255,255,255,.28);
