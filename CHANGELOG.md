@@ -11,6 +11,7 @@
 - Play history. Every launch records when the game was played, and games Orivo starts itself also record how long they ran, so Recently Played, Most Played, Resume and Never Played finally sort your library.
 - A profile menu. The avatar opens a small card to set your name and picture.
 - Wallpaper picker: a quality badge on every image (4K, 1440p, 1080p…), a "4K only" switch for backgrounds, and logos in your own language.
+- Sentry sees more, in builds that have a DSN. Panics in the Rust half are reported with the frontend's release string, and a small share of sessions (plus every session with an error) records a replay of the clicks with all text, fields and images blanked on your machine, which is how rage clicks are spotted. A feedback sent after a quick-vanishing bug carries the minute before it, so a screenshot is no longer needed. Release builds upload source maps when `SENTRY_AUTH_TOKEN` is set, so stack traces read as source.
 
 ### Changed
 
