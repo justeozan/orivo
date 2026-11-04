@@ -3547,12 +3547,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // exactly when Settings is not. Repainting it here is what lets a sign-in
     // window opened from the first-run panel report back into that panel.
     renderOnboardingPanel();
-    refs.steamAccountPanel.hidden = !account.open;
+    // The row already carries a connected account: its name, the sync glyph, and
+    // Disconnect on hover. The panel is only for signing in, or for an error the
+    // row has no room to say.
+    const signedIn = account.status?.connected === true;
+    const signingIn =
+      account.phase === "connecting" ||
+      account.phase === "api-key" ||
+      account.phase === "saving-api-key";
+    refs.steamAccountPanel.hidden =
+      !account.open || (signedIn && !signingIn && account.noticeTone !== "error");
     refs.steamAccountPanel.setAttribute(
       "aria-busy",
       String(account.phase === "loading" || account.phase === "connecting" || account.phase === "syncing" || account.phase === "saving-api-key"),
     );
-    if (!account.open) {
+    if (refs.steamAccountPanel.hidden) {
       return;
     }
 
@@ -3688,58 +3697,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
 
-    const status = account.status;
-    const connectedStatus = status?.connected ? status : null;
-    const connected = connectedStatus !== null;
-    const overview = document.createElement("section");
-    overview.className = "steam-account-overview";
-    const badge = document.createElement("span");
-    badge.className = "steam-state__icon";
-    badge.innerHTML = icon(connected ? "steam" : "alert");
-    badge.setAttribute("aria-hidden", "true");
-    const copy = document.createElement("div");
-    const heading = document.createElement("h2");
-    heading.textContent = connected ? t("app.steam.connected") : t("app.steam.connect");
-    const message = document.createElement("p");
-    if (connectedStatus) {
-      const suffix = connectedStatus.steamId.length > 4 ? "••••" + connectedStatus.steamId.slice(-4) : connectedStatus.steamId;
-      message.textContent = t("app.steam.accountLine", {
-        suffix,
-        method: connectedStatus.method === "api_key" ? t("app.steam.methodApiKey") : t("app.steam.methodWeb"),
-      });
-    } else {
-      message.textContent = t("app.steam.seeGames", { device: hostDeviceLabel() });
-    }
-    copy.append(heading, message);
-    overview.append(badge, copy);
-    body.append(overview);
     appendNotice();
-
-    if (connected && account.lastSync) {
-      const summary = document.createElement("p");
-      summary.className = "steam-account-sync-summary";
-      const installed = account.lastSync.installedGames;
-      summary.textContent = t("app.steam.syncSummary", {
-        total: account.lastSync.totalGames.toLocaleString(),
-        installed: installed.toLocaleString(),
-        device: hostDeviceLabel(),
-      });
-      body.append(summary);
+    if (signedIn) {
+      if (restoreFocus) {
+        focusSteamAccountPanel();
+      }
+      return;
     }
 
     const actions = document.createElement("div");
     actions.className = "steam-account-actions";
-    if (connected) {
-      actions.append(
-        accountActionButton("sync", t("app.steam.sync"), "steam-import-button", "refresh"),
-        accountActionButton("disconnect", t("app.common.disconnect"), "steam-secondary-button", "close"),
-      );
-    } else {
-      actions.append(
-        accountActionButton("connect", t("app.steam.continueWith"), "steam-import-button", "steam"),
-        accountActionButton("api-key", t("app.steam.useApiKey"), "steam-secondary-button", "settings"),
-      );
-    }
+    actions.append(
+      accountActionButton("connect", t("app.steam.continueWith"), "steam-import-button", "steam"),
+      accountActionButton("api-key", t("app.steam.useApiKey"), "steam-secondary-button", "settings"),
+    );
     body.append(actions);
     if (restoreFocus) {
       focusSteamAccountPanel();
@@ -8442,8 +8413,7 @@ function shell(): string {
                 <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
-                  <div id="steam-account-panel" class="steam-inline-panel" aria-labelledby="steam-account-title" hidden>
-                    <strong id="steam-account-title" class="steam-inline-panel__title">${t("app.libraries.steamTitle")}</strong>
+                  <div id="steam-account-panel" class="steam-inline-panel" aria-label="${t("app.libraries.steamTitle")}" hidden>
                     <div id="steam-account-body" class="steam-account-body"></div>
                   </div>
                 </div>

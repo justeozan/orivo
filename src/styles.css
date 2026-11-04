@@ -1063,11 +1063,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 }
 .steam-account-body::-webkit-scrollbar { width: 8px; }
 .steam-account-body::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgba(210,200,255,.28); background-clip: padding-box; }
-.steam-account-overview { display: flex; align-items: flex-start; gap: 12px; padding: 2px 1px 17px; }
-.steam-account-overview .steam-state__icon { width: 43px; height: 43px; flex: none; border-radius: 13px; }
-.steam-account-overview h2, .steam-account-intro h2 { margin: 2px 0 6px; color: #f4f1f8; font-size: 16px; font-weight: 640; letter-spacing: -.018em; line-height: 1.2; }
-.steam-account-overview p, .steam-account-intro p { margin: 0; color: #aaa5b0; font-size: 12px; line-height: 1.5; }
-.steam-account-sync-summary { margin: 0 0 16px; padding: 10px 11px; border: 1px solid rgba(198,184,255,.14); border-radius: 10px; color: #d0c8de; background: rgba(127,101,229,.1); font-size: 12px; line-height: 1.4; }
+.steam-account-intro h2 { margin: 2px 0 6px; color: #f4f1f8; font-size: 16px; font-weight: 640; letter-spacing: -.018em; line-height: 1.2; }
+.steam-account-intro p { margin: 0; color: #aaa5b0; font-size: 12px; line-height: 1.5; }
 .steam-account-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: auto; padding-top: 4px; }
 .steam-account-actions .steam-import-button, .steam-account-actions .steam-secondary-button { min-height: 36px; }
 .steam-account-intro { padding: 2px 1px 16px; }
@@ -2871,7 +2868,6 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
   border-bottom: 1px solid rgba(255,255,255,.08);
 }
 .steam-inline-panel[hidden] { display: none !important; }
-.steam-inline-panel__title { font-size: 15px; }
 
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
@@ -3525,8 +3521,13 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 
 /* Centred on every card, the paired marks as a group, whatever wraps them
    (Steam's row sits one level deeper, inside its own block). */
-.source-grid .steam-source-block,
 .source-grid #steam-source-row { display: block; width: 100%; height: 100%; }
+/* Steam's block is unwrapped, like the other lists, so its card is one cell of
+   the grid and the panel it opens is a row of its own. Left inside the card's
+   cell, the panel overflowed it (the card is 100% of the cell tall) and slid
+   under the next cards, which covered its buttons. */
+.source-grid .steam-source-block { display: contents; }
+.source-grid .steam-inline-panel { grid-column: 1 / -1; }
 .source-grid .source-account-row { width: 100%; box-sizing: border-box; }
 .source-grid .source-account-row__mark { align-self: center; margin-inline: auto; place-items: center; justify-content: center; }
 .source-grid .source-account-row__mark .icon,
