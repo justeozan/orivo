@@ -32,18 +32,28 @@ pub struct PlatformFeatures {
     pub self_updates: bool,
 }
 
-pub const CURRENT: PlatformFeatures = for_target(cfg!(target_os = "ios"), cfg!(mobile));
+pub const CURRENT: PlatformFeatures = for_target(
+    cfg!(target_os = "ios"),
+    cfg!(mobile),
+    cfg!(feature = "app-store"),
+);
 
-/// The features of an iOS build, an Android build, or a desktop one. A
-/// function of the target so that each answer can be tested on the machine
-/// that builds it.
-pub const fn for_target(ios: bool, mobile: bool) -> PlatformFeatures {
+/// The features of an iOS build, an Android build, or a desktop one, and of
+/// the Mac App Store edition (`app_store`). A function of the target so that
+/// each answer can be tested on the machine that builds it.
+///
+/// The Mac App Store edition runs in the App Sandbox and goes through the same
+/// review as iOS: no downloaded code (2.5.2), no update other than the App
+/// Store's (2.4.5), and a sandboxed process cannot run Wine or a store's own
+/// downloader. It still hands games to Steam and steps aside for them.
+pub const fn for_target(ios: bool, mobile: bool, app_store: bool) -> PlatformFeatures {
+    let store_reviewed = ios || app_store;
     PlatformFeatures {
-        downloadable_plugins: !ios,
-        local_runners: !ios,
+        downloadable_plugins: !store_reviewed,
+        local_runners: !store_reviewed,
         store_choices: ios,
         steps_aside: !mobile,
-        self_updates: !mobile,
+        self_updates: !mobile && !app_store,
     }
 }
 
@@ -59,7 +69,7 @@ mod tests {
     #[test]
     fn an_ios_build_downloads_no_code_and_runs_nothing_itself() {
         assert_eq!(
-            for_target(true, true),
+            for_target(true, true, false),
             PlatformFeatures {
                 downloadable_plugins: false,
                 local_runners: false,
@@ -73,7 +83,7 @@ mod tests {
     #[test]
     fn an_android_build_keeps_plugins_and_runners_and_lets_the_system_switch_apps() {
         assert_eq!(
-            for_target(false, true),
+            for_target(false, true, false),
             PlatformFeatures {
                 downloadable_plugins: true,
                 local_runners: true,
@@ -87,7 +97,7 @@ mod tests {
     #[test]
     fn a_desktop_build_keeps_plugins_and_runners_and_steps_aside_for_a_game() {
         assert_eq!(
-            for_target(false, false),
+            for_target(false, false, false),
             PlatformFeatures {
                 downloadable_plugins: true,
                 local_runners: true,
@@ -99,8 +109,22 @@ mod tests {
     }
 
     #[test]
+    fn the_mac_app_store_edition_downloads_no_code_runs_nothing_and_leaves_updates_to_the_store() {
+        assert_eq!(
+            for_target(false, false, true),
+            PlatformFeatures {
+                downloadable_plugins: false,
+                local_runners: false,
+                store_choices: false,
+                steps_aside: true,
+                self_updates: false,
+            }
+        );
+    }
+
+    #[test]
     fn the_webview_reads_camel_case() {
-        let json = serde_json::to_value(for_target(true, true)).unwrap();
+        let json = serde_json::to_value(for_target(true, true, false)).unwrap();
         assert_eq!(
             json,
             serde_json::json!({

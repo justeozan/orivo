@@ -313,11 +313,10 @@ fn percent_of(installed_bytes: u64, total_bytes: u64) -> u8 {
 fn manifest_directory() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join("Library/Application Support/Epic/EpicGamesLauncher/Data/Manifests"),
-        )
+        // The App Store sandbox reads it only once the player has granted the
+        // Epic folder (see `folder_access`).
+        crate::folder_access::store_root(crate::folder_access::StoreFolder::Epic)
+            .map(|epic| epic.join("EpicGamesLauncher/Data/Manifests"))
     }
     #[cfg(target_os = "windows")]
     {

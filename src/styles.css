@@ -2371,6 +2371,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .settings-row__copy { display: grid; min-width: 0; gap: 5px; }
 .settings-row__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
 .settings-row__copy small { color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.settings-card__intro { margin: 0 0 8px; color: #d0cadf; font-size: 13px; line-height: 1.55; }
 
 /* `appearance: none` is what stops macOS from drawing its own double caret on
    top of the chevron below. The control is the word plus its caret: one hairline

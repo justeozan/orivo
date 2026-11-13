@@ -386,15 +386,17 @@ fn steamapps_path(root: &Path) -> PathBuf {
 
 fn default_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    // In the App Store sandbox `$HOME` is the app's container: Steam's folder
+    // is only readable once the player has granted it (see `folder_access`).
+    #[cfg(target_os = "macos")]
+    roots.extend(crate::folder_access::store_root(
+        crate::folder_access::StoreFolder::Steam,
+    ));
+    #[cfg(target_os = "linux")]
     if let Some(home) = env::var_os("HOME") {
         let home = PathBuf::from(home);
-        #[cfg(target_os = "macos")]
-        roots.push(home.join("Library/Application Support/Steam"));
-        #[cfg(target_os = "linux")]
-        {
-            roots.push(home.join(".steam/steam"));
-            roots.push(home.join(".local/share/Steam"));
-        }
+        roots.push(home.join(".steam/steam"));
+        roots.push(home.join(".local/share/Steam"));
     }
     #[cfg(target_os = "windows")]
     if let Some(program_files) = env::var_os("PROGRAMFILES(X86)") {

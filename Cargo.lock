@@ -3347,6 +3347,8 @@ dependencies = [
  "keyring-core",
  "libc",
  "ndk-context",
+ "objc2",
+ "objc2-foundation",
  "object 0.39.1",
  "orivo-plugin-quiky-host",
  "plist",

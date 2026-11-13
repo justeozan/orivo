@@ -169,6 +169,7 @@ import {
   mountGameStreamSetup,
 } from "./gamestream-setup";
 import { createDefaultQuikyClient } from "./quiky-install";
+import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
 import { createStoreChoicesClient, fillStoreChoiceMenu, type StoreChoice } from "./store-choices";
 import {
@@ -6049,6 +6050,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   // Steam's row and the panel it expands share one card, so the listener
   // sits on the card rather than on the panel.
+  const storeFoldersPanel = document.querySelector<HTMLElement>("#store-folders-panel");
+  const loadStoreFolders = async (): Promise<void> => {
+    if (!storeFoldersPanel || !isTauriRuntime()) return;
+    renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
+  };
+  storeFoldersPanel?.addEventListener("click", (event) => {
+    const store = (event.target as Element | null)?.closest<HTMLButtonElement>(
+      "[data-store-folder-grant]",
+    )?.dataset.storeFolderGrant;
+    if (store !== "steam" && store !== "epic") return;
+    void grantStoreFolder(store).then(
+      (access) => {
+        renderStoreFolders(storeFoldersPanel, access);
+        if (access[store]) void resyncEveryLibrary();
+      },
+      (error) => showToast(messageFromError(error, t("app.storeFolders.failed"))),
+    );
+  });
+
   refs.sourceAccountsPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
     const action = target?.closest<HTMLButtonElement>("[data-steam-row-action]")?.dataset.steamRowAction;
@@ -6600,6 +6620,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
+        void loadStoreFolders();
       } else if (state.steamAccount.open) {
         setSteamAccountPanelOpen(false);
       }
@@ -8432,6 +8453,9 @@ function shell(): string {
                   <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
               </section>
+              <!-- Mac App Store edition only (store-folders.ts): the sandbox
+                   reads Steam's and Epic's folders once the player allows it. -->
+              <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside
