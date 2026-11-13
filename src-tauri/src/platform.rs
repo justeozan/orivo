@@ -25,6 +25,11 @@ pub struct PlatformFeatures {
     /// Windows and Linux (`step_aside_for_game`). A phone switches to the
     /// game's app by itself, so there it is not a choice to offer.
     pub steps_aside: bool,
+    /// Orivo checks for, downloads and installs its own new versions. Desktop
+    /// only: Tauri's updater has no installer on iOS or Android, where a new
+    /// version comes from the store, and an App Store app may not offer to
+    /// update itself any other way.
+    pub self_updates: bool,
 }
 
 pub const CURRENT: PlatformFeatures = for_target(cfg!(target_os = "ios"), cfg!(mobile));
@@ -38,6 +43,7 @@ pub const fn for_target(ios: bool, mobile: bool) -> PlatformFeatures {
         local_runners: !ios,
         store_choices: ios,
         steps_aside: !mobile,
+        self_updates: !mobile,
     }
 }
 
@@ -59,6 +65,7 @@ mod tests {
                 local_runners: false,
                 store_choices: true,
                 steps_aside: false,
+                self_updates: false,
             }
         );
     }
@@ -72,6 +79,7 @@ mod tests {
                 local_runners: true,
                 store_choices: false,
                 steps_aside: false,
+                self_updates: false,
             }
         );
     }
@@ -85,6 +93,7 @@ mod tests {
                 local_runners: true,
                 store_choices: false,
                 steps_aside: true,
+                self_updates: true,
             }
         );
     }
@@ -99,6 +108,7 @@ mod tests {
                 "localRunners": false,
                 "storeChoices": true,
                 "stepsAside": false,
+                "selfUpdates": false,
             })
         );
     }

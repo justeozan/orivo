@@ -51,6 +51,12 @@ xcrun altool --upload-package <the exported .ipa> --type ios \
   --api-key <key id> --api-issuer <issuer id>
 ```
 
+The build number (`CFBundleVersion`) is the app version unless told
+otherwise, and App Store Connect refuses a second upload under the same one.
+To send another build of a version already uploaded, give it a higher number
+for that build only, without touching the committed config:
+`pnpm tauri ios build … --config '{"bundle":{"iOS":{"bundleVersion":"2"}}}'`.
+
 Export compliance is answered in `src-tauri/Info.ios.plist`
 (`ITSAppUsesNonExemptEncryption`), so a build needs no questionnaire.
 

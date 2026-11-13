@@ -6868,7 +6868,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void refreshDerivedData();
     } else if (action === "clear-derived") {
       void clearDerivedData();
-    } else if (action === "check-updates") {
+    } else if (action === "check-updates" && platformFeatures.selfUpdates) {
       void runUpdateAction();
     }
 
@@ -7460,12 +7460,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     },
     { signal: attached.signal },
   );
-  void loadPlatformFeatures().then((features) => {
+  const platformFeaturesLoaded = loadPlatformFeatures().then((features) => {
     platformFeatures = features;
     renderPluginList();
     renderGameStartPreference();
     const gameFolderRow = document.querySelector<HTMLElement>('[data-library-action="game-folder"]');
     if (gameFolderRow) gameFolderRow.hidden = !features.localRunners;
+    const updatesRow = document.querySelector<HTMLElement>("#updates-row");
+    if (updatesRow) updatesRow.hidden = !features.selfUpdates;
   });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
@@ -7501,17 +7503,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // `requestIdleCallback` takes an options object, `setTimeout` takes
     // milliseconds. Passing the object to both meant the fallback coerced it to
     // NaN and fired immediately, which is the opposite of waiting for quiet.
+    //
+    // Where a store delivers new versions there is nothing to check for, and
+    // asking anyway would leave an error in Settings: the features are awaited
+    // rather than read, so a host slow to answer cannot let the check through.
     window.setTimeout(() => {
-      if (!stillMounted()) return;
-      const idle = window.requestIdleCallback;
-      if (idle) {
-        idle(
-          () => {
-            if (stillMounted()) void checkForUpdates();
-          },
-          { timeout: 2_000 },
-        );
-      } else void checkForUpdates();
+      void platformFeaturesLoaded.then(() => {
+        if (!stillMounted() || !platformFeatures.selfUpdates) return;
+        const idle = window.requestIdleCallback;
+        if (idle) {
+          idle(
+            () => {
+              if (stillMounted()) void checkForUpdates();
+            },
+            { timeout: 2_000 },
+          );
+        } else void checkForUpdates();
+      });
     }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   }
 
@@ -8703,7 +8711,7 @@ function shell(): string {
                   </div>
                   <span id="about-tauri-version" class="settings-metric">—</span>
                 </div>
-                <div class="settings-row">
+                <div id="updates-row" class="settings-row">
                   <div class="settings-row__copy">
                     <strong>${t("app.about.updates")}</strong>
                     <small id="update-status" class="update-status"></small>
