@@ -85,6 +85,10 @@ ndk-context = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.25"
+# Security-scoped bookmarks for the App Store edition (`folder_access.rs`).
+# Both already in the lockfile through tao and rfd.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"] }
 # The privileged half of the Quiky plugin. The `.orivo-plugin` archive is
 # deliberately data-only, so the FitGirl search/scrape/aria2/Wine pipeline lives
 # in a host crate that is linked into Orivo at build time. It is vendored from
@@ -125,3 +129,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 wit-parser = "=0.246.2"
 
+[features]
+# The Mac App Store edition: sandboxed, updated by the App Store, no downloaded
+# plugins, no runners, no Quiky. See `platform.rs` and docs/app-store.md.
+app-store = []

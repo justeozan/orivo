@@ -1,3 +1,6 @@
+// Quiky is the only caller of a few installer helpers; the App Store edition
+// leaves it out, and those helpers with it.
+#![cfg_attr(feature = "app-store", allow(dead_code))]
 mod android_games;
 mod artwork_backfill;
 mod catalog;
@@ -7,6 +10,7 @@ mod crash_reporting;
 mod epic_android;
 mod epic_download;
 mod epic_install;
+mod folder_access;
 mod game_artwork;
 mod game_detail;
 mod game_folder;
@@ -36,6 +40,8 @@ mod platform;
 mod plugin_scheduler;
 mod plugin_update;
 mod preferences;
+// Quiky is not part of the App Store edition at all: not hidden, not built.
+#[cfg(not(feature = "app-store"))]
 mod quiky_installer;
 mod runner_commands;
 mod runner_host;
@@ -897,12 +903,15 @@ pub fn run() {
     }
     // Held to the end of `run` so the client stays alive for the whole session.
     let _crash_reporting = crash_reporting::init();
-    tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        // The updater downloads and verifies signed releases; `process` is what
-        // lets the frontend relaunch into the version it just installed.
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    // The updater downloads and verifies signed releases; `process` is what
+    // lets the frontend relaunch into the version it just installed. The App
+    // Store edition is updated by the App Store and carries neither.
+    #[cfg(not(feature = "app-store"))]
+    let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_process::init());
+    builder
         // The one Android call Orivo cannot make from Rust: receiving the folder
         // the system chooser returns. See `tauri-plugin-orivo-saf/README.md`.
         .plugin(tauri_plugin_orivo_saf::init())
@@ -936,6 +945,9 @@ pub fn run() {
             }
             let state = AppState::load(app.handle())?;
             let app_data = app.path().app_data_dir()?;
+            // Before anything scans Steam or Epic: the App Store sandbox reads
+            // their folders only through the grants reopened here.
+            folder_access::restore(&app_data);
 
             // The detail projection is derived from the catalog that was just
             // loaded. Reading `catalog.json` a second time could observe a
@@ -1054,6 +1066,7 @@ pub fn run() {
             // Acquisition is optional. The service is always constructed, but
             // it reports itself unavailable until a plugin declaring the
             // installer extension is present, so Orivo never depends on one.
+            #[cfg(not(feature = "app-store"))]
             let games_root = app
                 .path()
                 .home_dir()
@@ -1112,6 +1125,7 @@ pub fn run() {
             // awaited: the first promise of the plugin plan is that the shell
             // appears without waiting for a plugin.
             plugin_installer::start_background_maintenance(app.handle().clone(), plugin_installer);
+            #[cfg(not(feature = "app-store"))]
             app.manage(Arc::new(quiky_installer::QuikyService::new(
                 app_data.join(PLUGINS_DIRECTORY),
                 app_data.join(WINE_PREFIXES_DIRECTORY),
@@ -1200,6 +1214,8 @@ pub fn run() {
             get_store_choices,
             open_store_choice,
             platform::get_platform_features,
+            folder_access::get_store_folder_access,
+            folder_access::grant_store_folder_access,
             install_epic_game,
             uninstall_epic_game,
             sync_android_games,
@@ -1224,11 +1240,17 @@ pub fn run() {
             preferences::update_preferences,
             preferences::get_data_usage,
             preferences::clear_derived_cache,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::get_quiky_status,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::search_quiky,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::get_quiky_progress,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::start_quiky_install,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::cancel_quiky_install,
+            #[cfg(not(feature = "app-store"))]
             quiky_installer::get_quiky_diagnostics,
             plugin_installer::get_plugin_catalog,
             plugin_installer::refresh_plugin_registry,

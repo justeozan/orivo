@@ -337,6 +337,11 @@ export const en = {
   "app.libraries.refreshAll": "Refresh all libraries",
   "app.libraries.panelAria": "Game libraries and providers",
   "app.libraries.steamTitle": "Steam library",
+  "app.storeFolders.intro": "Your libraries come from your accounts. To show which games are installed on this Mac, Orivo needs to read each store's folder once.",
+  "app.storeFolders.hint": "Opens {store}'s folder: click Open to allow it.",
+  "app.storeFolders.granted": "Installed games are shown.",
+  "app.storeFolders.allow": "Allow",
+  "app.storeFolders.failed": "This folder could not be used.",
   "app.moonlight.title": "Stream from your PC",
   "app.moonlight.placeholder": "Your PC's name in Moonlight",
   "app.moonlight.body":
@@ -783,6 +788,11 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.libraries.refreshAll": "Actualiser toutes les bibliothèques",
   "app.libraries.panelAria": "Bibliothèques de jeux et fournisseurs",
   "app.libraries.steamTitle": "Bibliothèque Steam",
+  "app.storeFolders.intro": "Tes bibliothèques viennent de tes comptes. Pour montrer quels jeux sont installés sur ce Mac, Orivo doit lire une fois le dossier de chaque boutique.",
+  "app.storeFolders.hint": "Ouvre le dossier de {store} : clique sur Ouvrir pour l'autoriser.",
+  "app.storeFolders.granted": "Les jeux installés sont affichés.",
+  "app.storeFolders.allow": "Autoriser",
+  "app.storeFolders.failed": "Ce dossier n'a pas pu être utilisé.",
   "app.moonlight.title": "Streamer depuis ton PC",
   "app.moonlight.placeholder": "Nom de ton PC dans Moonlight",
   "app.moonlight.body":

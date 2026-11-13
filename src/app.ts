@@ -169,6 +169,7 @@ import {
   mountGameStreamSetup,
 } from "./gamestream-setup";
 import { createDefaultQuikyClient } from "./quiky-install";
+import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
 import { createStoreChoicesClient, fillStoreChoiceMenu, type StoreChoice } from "./store-choices";
 import {
@@ -3547,12 +3548,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // exactly when Settings is not. Repainting it here is what lets a sign-in
     // window opened from the first-run panel report back into that panel.
     renderOnboardingPanel();
-    refs.steamAccountPanel.hidden = !account.open;
+    // The row already carries a connected account: its name, the sync glyph, and
+    // Disconnect on hover. The panel is only for signing in, or for an error the
+    // row has no room to say.
+    const signedIn = account.status?.connected === true;
+    const signingIn =
+      account.phase === "connecting" ||
+      account.phase === "api-key" ||
+      account.phase === "saving-api-key";
+    refs.steamAccountPanel.hidden =
+      !account.open || (signedIn && !signingIn && account.noticeTone !== "error");
     refs.steamAccountPanel.setAttribute(
       "aria-busy",
       String(account.phase === "loading" || account.phase === "connecting" || account.phase === "syncing" || account.phase === "saving-api-key"),
     );
-    if (!account.open) {
+    if (refs.steamAccountPanel.hidden) {
       return;
     }
 
@@ -3688,58 +3698,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
 
-    const status = account.status;
-    const connectedStatus = status?.connected ? status : null;
-    const connected = connectedStatus !== null;
-    const overview = document.createElement("section");
-    overview.className = "steam-account-overview";
-    const badge = document.createElement("span");
-    badge.className = "steam-state__icon";
-    badge.innerHTML = icon(connected ? "steam" : "alert");
-    badge.setAttribute("aria-hidden", "true");
-    const copy = document.createElement("div");
-    const heading = document.createElement("h2");
-    heading.textContent = connected ? t("app.steam.connected") : t("app.steam.connect");
-    const message = document.createElement("p");
-    if (connectedStatus) {
-      const suffix = connectedStatus.steamId.length > 4 ? "••••" + connectedStatus.steamId.slice(-4) : connectedStatus.steamId;
-      message.textContent = t("app.steam.accountLine", {
-        suffix,
-        method: connectedStatus.method === "api_key" ? t("app.steam.methodApiKey") : t("app.steam.methodWeb"),
-      });
-    } else {
-      message.textContent = t("app.steam.seeGames", { device: hostDeviceLabel() });
-    }
-    copy.append(heading, message);
-    overview.append(badge, copy);
-    body.append(overview);
     appendNotice();
-
-    if (connected && account.lastSync) {
-      const summary = document.createElement("p");
-      summary.className = "steam-account-sync-summary";
-      const installed = account.lastSync.installedGames;
-      summary.textContent = t("app.steam.syncSummary", {
-        total: account.lastSync.totalGames.toLocaleString(),
-        installed: installed.toLocaleString(),
-        device: hostDeviceLabel(),
-      });
-      body.append(summary);
+    if (signedIn) {
+      if (restoreFocus) {
+        focusSteamAccountPanel();
+      }
+      return;
     }
 
     const actions = document.createElement("div");
     actions.className = "steam-account-actions";
-    if (connected) {
-      actions.append(
-        accountActionButton("sync", t("app.steam.sync"), "steam-import-button", "refresh"),
-        accountActionButton("disconnect", t("app.common.disconnect"), "steam-secondary-button", "close"),
-      );
-    } else {
-      actions.append(
-        accountActionButton("connect", t("app.steam.continueWith"), "steam-import-button", "steam"),
-        accountActionButton("api-key", t("app.steam.useApiKey"), "steam-secondary-button", "settings"),
-      );
-    }
+    actions.append(
+      accountActionButton("connect", t("app.steam.continueWith"), "steam-import-button", "steam"),
+      accountActionButton("api-key", t("app.steam.useApiKey"), "steam-secondary-button", "settings"),
+    );
     body.append(actions);
     if (restoreFocus) {
       focusSteamAccountPanel();
@@ -6078,6 +6050,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   // Steam's row and the panel it expands share one card, so the listener
   // sits on the card rather than on the panel.
+  const storeFoldersPanel = document.querySelector<HTMLElement>("#store-folders-panel");
+  const loadStoreFolders = async (): Promise<void> => {
+    if (!storeFoldersPanel || !isTauriRuntime()) return;
+    renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
+  };
+  storeFoldersPanel?.addEventListener("click", (event) => {
+    const store = (event.target as Element | null)?.closest<HTMLButtonElement>(
+      "[data-store-folder-grant]",
+    )?.dataset.storeFolderGrant;
+    if (store !== "steam" && store !== "epic") return;
+    void grantStoreFolder(store).then(
+      (access) => {
+        renderStoreFolders(storeFoldersPanel, access);
+        if (access[store]) void resyncEveryLibrary();
+      },
+      (error) => showToast(messageFromError(error, t("app.storeFolders.failed"))),
+    );
+  });
+
   refs.sourceAccountsPanel.addEventListener("click", (event) => {
     const target = event.target as Element | null;
     const action = target?.closest<HTMLButtonElement>("[data-steam-row-action]")?.dataset.steamRowAction;
@@ -6629,6 +6620,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
+        void loadStoreFolders();
       } else if (state.steamAccount.open) {
         setSteamAccountPanelOpen(false);
       }
@@ -6897,7 +6889,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void refreshDerivedData();
     } else if (action === "clear-derived") {
       void clearDerivedData();
-    } else if (action === "check-updates") {
+    } else if (action === "check-updates" && platformFeatures.selfUpdates) {
       void runUpdateAction();
     }
 
@@ -7489,12 +7481,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     },
     { signal: attached.signal },
   );
-  void loadPlatformFeatures().then((features) => {
+  const platformFeaturesLoaded = loadPlatformFeatures().then((features) => {
     platformFeatures = features;
     renderPluginList();
     renderGameStartPreference();
     const gameFolderRow = document.querySelector<HTMLElement>('[data-library-action="game-folder"]');
     if (gameFolderRow) gameFolderRow.hidden = !features.localRunners;
+    const updatesRow = document.querySelector<HTMLElement>("#updates-row");
+    if (updatesRow) updatesRow.hidden = !features.selfUpdates;
   });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
@@ -7530,17 +7524,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // `requestIdleCallback` takes an options object, `setTimeout` takes
     // milliseconds. Passing the object to both meant the fallback coerced it to
     // NaN and fired immediately, which is the opposite of waiting for quiet.
+    //
+    // Where a store delivers new versions there is nothing to check for, and
+    // asking anyway would leave an error in Settings: the features are awaited
+    // rather than read, so a host slow to answer cannot let the check through.
     window.setTimeout(() => {
-      if (!stillMounted()) return;
-      const idle = window.requestIdleCallback;
-      if (idle) {
-        idle(
-          () => {
-            if (stillMounted()) void checkForUpdates();
-          },
-          { timeout: 2_000 },
-        );
-      } else void checkForUpdates();
+      void platformFeaturesLoaded.then(() => {
+        if (!stillMounted() || !platformFeatures.selfUpdates) return;
+        const idle = window.requestIdleCallback;
+        if (idle) {
+          idle(
+            () => {
+              if (stillMounted()) void checkForUpdates();
+            },
+            { timeout: 2_000 },
+          );
+        } else void checkForUpdates();
+      });
     }, AUTOMATIC_UPDATE_CHECK_DELAY_MS);
   }
 
@@ -8442,8 +8442,7 @@ function shell(): string {
                 <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
-                  <div id="steam-account-panel" class="steam-inline-panel" aria-labelledby="steam-account-title" hidden>
-                    <strong id="steam-account-title" class="steam-inline-panel__title">${t("app.libraries.steamTitle")}</strong>
+                  <div id="steam-account-panel" class="steam-inline-panel" aria-label="${t("app.libraries.steamTitle")}" hidden>
                     <div id="steam-account-body" class="steam-account-body"></div>
                   </div>
                 </div>
@@ -8454,6 +8453,9 @@ function shell(): string {
                   <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
               </section>
+              <!-- Mac App Store edition only (store-folders.ts): the sandbox
+                   reads Steam's and Epic's folders once the player allows it. -->
+              <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside
@@ -8733,7 +8735,7 @@ function shell(): string {
                   </div>
                   <span id="about-tauri-version" class="settings-metric">—</span>
                 </div>
-                <div class="settings-row">
+                <div id="updates-row" class="settings-row">
                   <div class="settings-row__copy">
                     <strong>${t("app.about.updates")}</strong>
                     <small id="update-status" class="update-status"></small>
