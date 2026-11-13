@@ -176,6 +176,11 @@ import {
   createGameStreamSetup,
   mountGameStreamSetup,
 } from "./gamestream-setup";
+import {
+  createBuiltinStreamClient,
+  createBuiltinStreamSetup,
+  mountBuiltinStreamSetup,
+} from "./builtin-stream-setup";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
@@ -265,7 +270,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher" | "game-streaming";
+type PluginId = "wine" | "wallpaper-searcher" | "game-streaming" | "builtin-streaming";
 /**
  * `list` is the browser with nothing open beside it; a PluginId opens a
  * built-in's detail, and `plugin:<id>` the detail of one the registry
@@ -528,7 +533,7 @@ const EMULATOR_RUNNERS = new Set(["com.orivo.ryujinx", "com.orivo.retroarch", "c
  */
 function playKindFor(game: LibraryGame): "play" | "stream" | "emulate" {
   if (game.runner && EMULATOR_RUNNERS.has(game.runner)) return "emulate";
-  if (game.runner === "com.orivo.gamestream") return "stream";
+  if (game.runner === "com.orivo.gamestream" || game.source === "stream") return "stream";
   const options = (game.launchOptions ?? []).filter((option) => option.launchable);
   if (options.length > 0 && options.every((option) => option.remote)) return "stream";
   return "play";
@@ -704,6 +709,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     gamestreamSetupPanel: get<HTMLElement>("#gamestream-setup-panel"),
     gamestreamSetupBody: get<HTMLElement>("#gamestream-setup-body"),
+    builtinStreamPanel: get<HTMLElement>("#builtin-stream-panel"),
+    builtinStreamBody: get<HTMLElement>("#builtin-stream-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
@@ -2781,6 +2788,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   });
   mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
   let gamestreamSetupOpen = false;
+  // Orivo Streaming is the client built into Orivo (`builtin_stream.rs`): no
+  // plugin and no Moonlight, so it is set up on every platform, iOS included.
+  const builtinStreamSetup = createBuiltinStreamSetup({
+    client: createBuiltinStreamClient(),
+    refreshLibrary: () => refreshLibrary(),
+    openLibrary: () => navigate({ page: "library" }),
+  });
+  mountBuiltinStreamSetup(refs.builtinStreamBody, builtinStreamSetup);
+  let builtinStreamSetupOpen = false;
 
   /** The view a registry plugin's card opens: streaming opens its own setup. */
   const managedPluginView = (pluginId: string): PluginView =>
@@ -3200,6 +3216,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       cards.push(renderBuiltInCard("wine", "Wine", t("app.plugins.openWine")));
     }
     cards.push(renderBuiltInCard("wallpaper-searcher", "Wallpaper Searcher", t("app.plugins.openWallpaper")));
+    // Orivo Streaming is compiled into Orivo, so it is offered everywhere.
+    cards.push(
+      renderBuiltInCard("builtin-streaming", t("app.plugins.builtinStreaming"), t("app.plugins.openBuiltinStreaming")),
+    );
     // On Android, Winlator is the runner Orivo ships with: it is set up where
     // its games come from, under Libraries.
     if (winlator) cards.push(renderBuiltInCard("winlator", "Winlator", t("app.plugins.setupWinlator")));
@@ -3335,6 +3355,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } else if (!settingUp && gamestreamSetupOpen) {
       gamestreamSetupOpen = false;
       gamestreamSetup.close();
+    }
+    // Orivo Streaming is built in, so its setup opens on every platform.
+    refs.builtinStreamPanel.hidden = view !== "builtin-streaming";
+    const settingUpBuiltin = view === "builtin-streaming";
+    if (settingUpBuiltin && !builtinStreamSetupOpen) {
+      builtinStreamSetupOpen = true;
+      void builtinStreamSetup.open();
+    } else if (!settingUpBuiltin && builtinStreamSetupOpen) {
+      builtinStreamSetupOpen = false;
+      builtinStreamSetup.close();
     }
     const managed = installed.find((plugin) => plugin.id === openManagedPluginId());
     const runs = Boolean(managed?.extensions.some((kind) => kind.toLocaleLowerCase().includes("runner")));
@@ -6967,6 +6997,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       pluginId === "wine" ||
       pluginId === "wallpaper-searcher" ||
       pluginId === "game-streaming" ||
+      pluginId === "builtin-streaming" ||
       pluginId?.startsWith(MANAGED_PLUGIN_VIEW)
     ) {
       openPluginDetail(pluginId as PluginView);
@@ -7833,7 +7864,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   const artworkFallback = fixture;
   const rawSource = readString(record, "source");
   const source: LibraryGame["source"] =
-    rawSource === "steam" || rawSource === "local" || rawSource === "android"
+    rawSource === "steam" || rawSource === "local" || rawSource === "android" || rawSource === "stream"
       ? rawSource
       : isConnectedSource(rawSource)
         ? rawSource
@@ -8795,6 +8826,21 @@ function shell(): string {
                         <div class="plugin-detail__actions"></div>
                       </header>
                       <div id="gamestream-setup-body"></div>
+                    </section>
+
+                    <!-- Orivo Streaming, the GameStream client built into
+                         Orivo: no plugin and no Moonlight, every platform. -->
+                    <section id="builtin-stream-panel" class="plugin-detail plugin-detail--setup" aria-labelledby="builtin-stream-title" hidden>
+                      <header class="plugin-detail__header">
+                        <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
+                        <span class="plugin-icon" data-category="streaming" aria-hidden="true">${icon("cast")}</span>
+                        <div class="plugin-detail__title">
+                          <strong id="builtin-stream-title">${t("app.plugins.builtinStreaming")}</strong>
+                          <span class="plugin-pill" data-category="streaming">${t("app.pluginCategory.streaming")}</span>
+                        </div>
+                        <div class="plugin-detail__actions"></div>
+                      </header>
+                      <div id="builtin-stream-body" class="builtin-stream-body"></div>
                     </section>
 
                     <!-- Runner profiles ("Add an emulator") open inside the

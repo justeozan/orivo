@@ -2916,7 +2916,10 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
    to a line with a tick; the one in front of the person is open; the rest wait,
    numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
    so nothing here is a new kind of control. */
-#gamestream-setup-body { padding: 0; }
+#gamestream-setup-body,
+#builtin-stream-body { padding: 0; }
+.bs-forget { margin-top: 14px; align-items: center; flex-wrap: wrap; }
+.bs-forget small { flex: 1 1 220px; }
 .gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
 .gs-step { display: grid; gap: 10px; padding: 14px 0; }
 .gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }

@@ -17,7 +17,7 @@ export interface LibraryGame {
   id: string;
   title: string;
   /** Presentation source returned by the desktop catalog; fixture entries can omit it. */
-  source?: "steam" | "wine" | "local" | "showcase" | "android" | ConnectedSource;
+  source?: "steam" | "wine" | "local" | "showcase" | "android" | "stream" | ConnectedSource;
   description: string;
   metadata: string;
   /** The studio, as the store named it. Empty when no store named one. */

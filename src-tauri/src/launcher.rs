@@ -271,6 +271,12 @@ pub fn provider_launchable(provider: &str) -> bool {
     if cfg!(target_os = "android") && provider == crate::android_games::PROVIDER {
         return true;
     }
+    // A game on the person's gaming PC is streamed by Orivo itself, so there is
+    // no client to look for. Whether the PC is on is only known by asking it,
+    // which the launch does.
+    if provider == crate::builtin_stream::PROVIDER {
+        return true;
+    }
     provider_client(provider).is_some_and(|client| client.installed())
 }
 

@@ -2,6 +2,7 @@
 // leaves it out, and those helpers with it.
 #![cfg_attr(feature = "app-store", allow(dead_code))]
 mod android_games;
+mod builtin_stream;
 mod artwork_backfill;
 mod catalog;
 mod console_runner;
@@ -1001,6 +1002,12 @@ pub fn run() {
                 app_data.join(gamestream::SETTINGS_FILE),
             ));
             app.manage(Arc::clone(&gamestream));
+            // Streaming built into Orivo keeps its own address and pairings:
+            // a client certificate the gaming PC trusts is a secret of this
+            // install, not a setting the Moonlight setup shares.
+            app.manage(Arc::new(builtin_stream::BuiltinStreamService::load(
+                app_data.join(builtin_stream::STATE_FILE),
+            )));
             // Two live services would let one instance answer the WebView while
             // catalog writes refresh the other, so a second setup is a hard
             // startup failure rather than a silently divergent projection.
@@ -1236,6 +1243,13 @@ pub fn run() {
             install_epic_game,
             uninstall_epic_game,
             sync_android_games,
+            sync_stream_games,
+            builtin_stream::get_builtin_stream_settings,
+            builtin_stream::probe_builtin_stream_host,
+            builtin_stream::begin_builtin_stream_pairing,
+            builtin_stream::builtin_stream_pairing_status,
+            builtin_stream::cancel_builtin_stream_pairing,
+            builtin_stream::forget_builtin_stream,
             get_moonlight_stream_settings,
             set_moonlight_stream_settings,
             get_epic_install_status,
@@ -8500,6 +8514,17 @@ async fn launch_game_inner(
         });
     }
 
+    // A game on the person's gaming PC is streamed by Orivo itself. The player
+    // is the next piece of this work; until it lands, say so rather than fail
+    // somewhere less clear.
+    if let LaunchTarget::Provider { provider, .. } = &game.launch_target
+        && provider == builtin_stream::PROVIDER
+    {
+        return Err(format!(
+            "Playing {title} from your gaming PC inside Orivo is coming next. Your PC's games are already in your library."
+        ));
+    }
+
     // A game that is an app on this phone starts the way its home-screen icon
     // does, through the launch intent its own package declares.
     if cfg!(target_os = "android")
@@ -8779,6 +8804,44 @@ async fn sync_android_games(
             .map_err(|_| "The game catalog is temporarily unavailable".to_string())? = next;
     }
     Ok(AndroidGamesSync {
+        games: count,
+        changed,
+    })
+}
+
+/// Bring the library's streamed games in line with what the gaming PC lists.
+/// Asked by the built-in streaming setup once the PC accepts this client.
+#[tauri::command]
+async fn sync_stream_games(
+    state: State<'_, AppState>,
+    service: State<'_, Arc<builtin_stream::BuiltinStreamService>>,
+) -> Result<builtin_stream::StreamGamesSync, String> {
+    let service = Arc::clone(&service);
+    let apps = tauri::async_runtime::spawn_blocking(move || service.list_games())
+        .await
+        .map_err(|_| "Orivo could not ask your gaming PC for its games.".to_string())?
+        .map_err(|error| error.to_string())?;
+    let games = builtin_stream::games_from(&apps);
+    let count = games.len();
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    let changed = builtin_stream::apply(&mut next, games);
+    if changed {
+        persist_catalog(&next, &state.catalog_path).map_err(|error| error.to_string())?;
+        *state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())? = next;
+    }
+    Ok(builtin_stream::StreamGamesSync {
         games: count,
         changed,
     })
@@ -9695,6 +9758,9 @@ fn launch_option_label(target: &LaunchTarget, catalog: &Catalog) -> String {
         }
         LaunchTarget::Provider { provider, .. } if provider == android_games::PROVIDER => {
             "This phone".into()
+        }
+        LaunchTarget::Provider { provider, .. } if provider == builtin_stream::PROVIDER => {
+            "Your gaming PC".into()
         }
         LaunchTarget::Provider { provider, .. } => sources::SourceProvider::from_token(provider)
             .map(|provider| provider.label().to_owned())

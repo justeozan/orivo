@@ -56,6 +56,14 @@ sha2 = "0.10"
 # default `native-tls`, so the transport shares the TLS stack `reqwest` already
 # uses and nothing links OpenSSL on Linux or Android.
 sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
+# Game streaming built into Orivo (`builtin_stream.rs`): pairing, the host's game
+# list and, later, the stream itself, with no Moonlight and no plugin. Starfire is
+# a clean-room Rust GameStream client, Apache-2.0, with no GPL anywhere in its
+# tree (its CI enforces that with cargo-deny). Moonlight's own core is GPLv3 and
+# so cannot be linked here (CONTRIBUTING.md). Pinned to Orivo's fork, which
+# carries the fixes found while integrating it (device-name encoding, a PIN
+# wait a person can meet, a pairing kept across runs), until they land upstream.
+starfire-core = { git = "https://github.com/justeozan/starfire", tag = "orivo-2026.11.13" }
 tauri = { version = "2.11.5", features = ["protocol-asset"] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"

@@ -1,4 +1,10 @@
 export const en = {
+  "runners.builtin.appOnly": "Game streaming needs the Orivo app.",
+  "runners.builtin.forget": "Forget this PC",
+  "runners.builtin.forgetHint": "Orivo forgets the pairing. To remove it from the PC too, delete Orivo in Sunshine › Clients.",
+  "runners.builtin.thisIpad": "this iPad",
+  "runners.builtin.thisIphone": "this iPhone",
+  "runners.builtin.thisPhone": "this phone",
   "runners.error.addDesktopOnly": "Adding an emulator is only available in the Orivo desktop app.",
   "runners.error.checkPairing": "Orivo could not check the pairing. Try again.",
   "runners.error.checkPc": "Orivo could not check your PC. Try again.",
@@ -145,6 +151,12 @@ export const en = {
 };
 
 export const fr: Partial<Record<keyof typeof en, string>> = {
+  "runners.builtin.appOnly": "Le streaming de jeux demande l’app Orivo.",
+  "runners.builtin.forget": "Oublier ce PC",
+  "runners.builtin.forgetHint": "Orivo oublie l’appairage. Pour le retirer aussi du PC, supprime Orivo dans Sunshine › Clients.",
+  "runners.builtin.thisIpad": "cet iPad",
+  "runners.builtin.thisIphone": "cet iPhone",
+  "runners.builtin.thisPhone": "ce téléphone",
   "runners.error.addDesktopOnly": "Ajouter un émulateur n’est possible que dans l’app de bureau Orivo.",
   "runners.error.checkPairing": "Orivo n’a pas pu vérifier l’association. Réessaie.",
   "runners.error.checkPc": "Orivo n’a pas pu vérifier ton PC. Réessaie.",
