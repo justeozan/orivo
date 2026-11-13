@@ -60,6 +60,7 @@ jobs:
           - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
           - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
           - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
+          - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
 
           The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
           The `.aab` (Android App Bundle) is for Google Play uploads.
@@ -186,6 +187,7 @@ jobs:
             - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
             - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
             - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
+            - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
 
             The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
             The `.aab` (Android App Bundle) is for Google Play uploads.
@@ -356,6 +358,103 @@ jobs:
           staged="$RUNNER_TEMP/Orivo_${version}_android.apk"
           cp "$apk" "$staged"
           gh release upload "$tag" "$staged" "$aab" --clobber
+
+  ios-sideload:
+    name: Build iOS sideload edition (unsigned .ipa)
+    runs-on: macos-latest
+    needs: prepare-draft
+    # The App Store app under another identifier, unsigned, for AltStore,
+    # SideStore and Sideloadly to sign with the player's own Apple ID; see
+    # docs/ios-sideload.md. orivo.evey.run builds its AltStore source from the
+    # `.ipa` and the `.json` this job attaches.
+    #
+    # Not a release gate yet, for the reason the Android job once was not
+    # (#56): it has only been built on a workstation, and a build this
+    # repository has not proved on a runner must not hold back the platforms it
+    # has. A failure costs that release its sideload build and nothing else —
+    # the source skips a release without one. Once it has passed on a real
+    # release, make it a gate the way `android` is: list it in
+    # `verify-updater-manifest`'s `needs`, require the `.ipa` there, and drop
+    # `continue-on-error`.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Check the app version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${REF_TAG#v}"
+          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$conf" != "$expected" ] || [ "$pkg" != "$expected" ]; then
+            echo "::error::Tag $REF_TAG does not match the app version (src-tauri/tauri.conf.json: $conf, package.json: $pkg)."
+            exit 1
+          fi
+          echo "App version $expected matches tag $REF_TAG."
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # llvm-tools carries the llvm-objcopy that build-ios-sideload.sh needs
+      # under Xcode 27 (see "Xcode 27 and swift-rs" in docs/app-store.md).
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+          components: llvm-tools
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: ios-sideload
+
+      # `tauri ios init` writes the Xcode project through XcodeGen, which the
+      # runner image does not ship. `gen/apple` is gitignored, so every run
+      # generates it.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # No VITE_SENTRY_DSN, unlike the desktop builds: this is the App Store
+      # app, and the App Store build is answered "Data Not Collected".
+      - name: Build the sideload edition
+        run: scripts/build-ios-sideload.sh "$RUNNER_TEMP/ios-sideload"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_TAG" ]; then
+            tag="$REF_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          out="$RUNNER_TEMP/ios-sideload"
+          # prepare-draft created the release before this job started.
+          gh release upload "$tag" "$out/Orivo_${version}_ios-sideload.ipa" \
+            "$out/Orivo_${version}_ios-sideload.json" --clobber
 
   verify-updater-manifest:
     name: Verify staged release

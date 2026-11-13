@@ -29,6 +29,10 @@ it Tauri's logo as the app icon. After an init, before any iOS build:
 scripts/sync-ios-project.sh   # identifier + Orivo's icon (run-ios-simulator.sh runs it)
 ```
 
+The sideload edition ([`ios-sideload.md`](ios-sideload.md)) is another app,
+`run.evey.orivo.sideload`, built unsigned by the release workflow: nothing in
+this record refers to it, and the App Store app never mentions it.
+
 The icon set in `src-tauri/icons/ios` is RGB on purpose. `tauri icon` writes
 RGBA even from an opaque source, and App Store Connect rejects the channel
 itself (ITMS-90717); `src/ios-app-store.test.ts` fails if one comes back.
