@@ -119,8 +119,11 @@ export interface GameDetailPageClient {
    * error, when the game has none or the store cannot be reached.
    */
   getStoreMedia(gameId: string, signal: AbortSignal): Promise<StoreMediaView>;
-  /** Remove a game from the library (does not touch the game's own files). */
-  removeGame(gameId: string, signal: AbortSignal): Promise<void>;
+  /**
+   * Remove a game from the library (does not touch the game's own files).
+   * Resolves `true` when a games folder still holds it, so it will come back.
+   */
+  removeGame(gameId: string, signal: AbortSignal): Promise<boolean | void>;
   setGameHidden(
     gameId: string,
     hidden: boolean,
@@ -394,8 +397,9 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       );
     },
     async removeGame(gameId, signal) {
-      if (!isTauriRuntime()) return;
-      await invokeWhileActive("remove_game", { gameId }, signal);
+      if (!isTauriRuntime()) return false;
+      const result = await invokeWhileActive<unknown>("remove_game", { gameId }, signal);
+      return (result as { returnsFromGamesFolder?: unknown } | null)?.returnsFromGamesFolder === true;
     },
     async setGameHidden(gameId, hidden, signal) {
       if (!isTauriRuntime()) return;
@@ -885,10 +889,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = state.detail?.title ?? t("detail.thisGame");
     if (!isActive(context) || !gameId) return;
     try {
-      await client.removeGame(gameId, context.signal);
+      const returns = await client.removeGame(gameId, context.signal);
       if (!isActive(context)) return;
       options.onLibraryChanged?.();
-      showTransientStatus(t("detail.remove.done", { title }));
+      showTransientStatus(t(returns === true ? "detail.remove.returns" : "detail.remove.done", { title }));
       options.back();
     } catch (error) {
       if (!isActive(context) || isUserCancellation(error)) return;
