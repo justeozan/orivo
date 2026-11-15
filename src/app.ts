@@ -50,6 +50,12 @@ import type { BootSplash } from "./boot-splash";
 import { brandLogoFor } from "./brand-logos";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
+  gameFolderScanMessage,
+  readGameFolderScan,
+  readGameFolders,
+  type GameFolderView,
+} from "./game-folders";
+import {
   isWinlatorHost,
   normaliseWinlatorExportFolder,
   normaliseWinlatorImportResult,
@@ -637,6 +643,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    * the moment the host has said — on iOS, long before Settings or Install.
    */
   let platformFeatures: PlatformFeatures = { ...DESKTOP_FEATURES };
+  // The games folders the host watches, by name and opaque id only.
+  let gameFolders: GameFolderView[] = [];
   const storeChoices = createStoreChoicesClient();
   const state: State = {
     // Deliberately empty until the first load answers. Seeding the showcase
@@ -734,6 +742,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
     librarySourceList: get<HTMLElement>("#library-source-list"),
+    libraryGameFolders: get<HTMLElement>("#library-game-folders"),
     primaryNav: get<HTMLElement>(".primary-nav"),
     navIndicator: get<HTMLElement>(".nav-indicator"),
     toast: get<HTMLElement>("#toast"),
@@ -2252,6 +2261,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.topbar.classList.toggle("is-library-menu-open", open);
     if (open) {
       renderLibrarySources();
+      void loadGameFolders();
     }
 
     if (open && focus) {
@@ -2441,16 +2451,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     try {
       const result = await invoke<unknown>("import_game");
       const importedId = readImportedId(result);
+      const importedIds = readImportedIds(result, importedId);
       await refreshLibrary(importedId);
-      if (importedId) {
-        showToast(t("app.import.added"));
+      if (importedIds.length > 0) {
+        const added =
+          importedIds.length === 1
+            ? t("app.import.added")
+            : t("app.import.addedMany", { count: importedIds.length });
+        const failed = readFailedImports(result);
+        showToast(
+          failed === 0
+            ? added
+            : `${added} ${failed === 1 ? t("app.import.skippedOne") : t("app.import.skippedMany", { count: failed })}`,
+        );
         // A manual import rarely ships its own artwork, so look one up in the
-        // background and refresh the card once it lands.
-        void invoke("fetch_game_artwork", { gameId: importedId, force: false })
-          .then(() => refreshLibrary(importedId))
-          .catch(() => {
-            // Best-effort: a game with no online match keeps its placeholder.
-          });
+        // background and refresh the cards as it lands.
+        fetchArtworkFor(importedIds, importedId);
       }
     } catch (error) {
       showToast(messageFromError(error, t("app.import.failed")));
@@ -2468,9 +2484,113 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // Null means the dialog was cancelled. Otherwise the host is scanning now,
       // and the GAME_FOLDER_SCANNED_EVENT listener reports what it added.
       const folder = await invoke<string | null>("choose_game_folder");
-      if (folder) showToast(t("app.folder.looking", { folder }));
+      if (folder) {
+        showToast(t("app.folder.looking", { folder }));
+        void loadGameFolders();
+      }
     } catch (error) {
       showToast(messageFromError(error, t("app.folder.useFailed")));
+    }
+  };
+
+  /**
+   * Artwork for freshly added cards, a few lookups at a time so a folder of
+   * fifty shortcuts does not fire fifty requests at once. Best-effort: a game
+   * with no online match keeps its placeholder.
+   */
+  const fetchArtworkFor = (gameIds: string[], selectId?: string): void => {
+    const queue = [...gameIds];
+    const worker = async (): Promise<void> => {
+      for (let gameId = queue.shift(); gameId; gameId = queue.shift()) {
+        try {
+          await invoke("fetch_game_artwork", { gameId, force: false });
+          await refreshLibrary(selectId);
+        } catch {
+          // Nothing found for this one; the next still gets its turn.
+        }
+      }
+    };
+    for (let index = 0; index < Math.min(3, queue.length); index += 1) void worker();
+  };
+
+  const loadGameFolders = async (): Promise<void> => {
+    if (!isTauriRuntime() || !platformFeatures.localRunners) {
+      gameFolders = [];
+    } else {
+      try {
+        gameFolders = readGameFolders(await invoke<unknown>("list_game_folders"));
+      } catch {
+        // A host from before the list existed: the row still adds a folder.
+        gameFolders = [];
+      }
+    }
+    renderGameFolders();
+  };
+
+  /**
+   * One row per watched folder, under "Games folders": pressing it looks in
+   * the folder again, and the small button beside it stops watching it. The
+   * names come from the disk, so they go in through `textContent`.
+   */
+  const renderGameFolders = (): void => {
+    const list = refs.libraryGameFolders;
+    list.replaceChildren();
+    list.hidden = gameFolders.length === 0 || !platformFeatures.localRunners;
+    for (const folder of gameFolders) {
+      const row = document.createElement("div");
+      row.className = "library-game-folder";
+
+      const rescan = document.createElement("button");
+      rescan.type = "button";
+      rescan.className = "library-source-action library-game-folder__scan";
+      rescan.setAttribute("role", "menuitem");
+      rescan.dataset.libraryAction = "game-folder-rescan";
+      rescan.dataset.folderId = folder.id;
+      rescan.setAttribute("aria-label", t("app.folder.rescan", { folder: folder.label }));
+      rescan.title = t("app.folder.rescan", { folder: folder.label });
+      const copy = document.createElement("span");
+      copy.className = "library-source-action__copy";
+      const name = document.createElement("strong");
+      name.textContent = folder.label;
+      const hint = document.createElement("small");
+      hint.textContent = folder.available ? t("app.folder.watching") : t("app.folder.unavailable");
+      copy.append(name, hint);
+      rescan.append(copy);
+
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "library-game-folder__remove";
+      remove.setAttribute("role", "menuitem");
+      remove.dataset.libraryAction = "game-folder-remove";
+      remove.dataset.folderId = folder.id;
+      remove.setAttribute("aria-label", t("app.folder.remove", { folder: folder.label }));
+      remove.title = t("app.folder.remove", { folder: folder.label });
+      remove.innerHTML = icon("close");
+
+      row.append(rescan, remove);
+      list.append(row);
+    }
+  };
+
+  const rescanGameFolder = (folderId: string): void => {
+    closeLibraryMenu();
+    const folder = gameFolders.find((entry) => entry.id === folderId);
+    if (!folder) return;
+    showToast(t("app.folder.looking", { folder: folder.label }));
+    void invoke("scan_game_folders", { folderId }).catch((error: unknown) => {
+      showToast(messageFromError(error, t("app.folder.useFailed")));
+    });
+  };
+
+  const removeGameFolder = async (folderId: string): Promise<void> => {
+    const folder = gameFolders.find((entry) => entry.id === folderId);
+    try {
+      gameFolders = readGameFolders(await invoke<unknown>("remove_game_folder", { folderId }));
+      renderGameFolders();
+      if (folder) showToast(t("app.folder.removed", { folder: folder.label }));
+      requestAnimationFrame(() => focusLibraryMenuItem("first"));
+    } catch (error) {
+      showToast(messageFromError(error, t("app.folder.removeFailed")));
     }
   };
 
@@ -4756,6 +4876,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         chevron: false,
       }),
     );
+    // A whole folder of games or shortcuts in one go, where the host can read
+    // one: the same door as the menu's "Games folders".
+    if (platformFeatures.localRunners) {
+      rows.append(
+        onboardingRow({
+          action: "game-folder",
+          mark: icon("folder"),
+          title: t("app.onboarding.folderTitle"),
+          detail: t("app.onboarding.folderDetail"),
+          chevron: false,
+        }),
+      );
+    }
 
     const aside = document.createElement("p");
     aside.className = "onboarding__aside";
@@ -4907,6 +5040,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return JSON.stringify([
       view,
       isTauriRuntime(),
+      platformFeatures.localRunners,
       store
         ? [
             onboardingConnected(store),
@@ -5947,6 +6081,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void importGame();
     } else if (action === "game-folder") {
       void chooseGameFolder();
+    } else if (action === "game-folder-rescan" && trigger.dataset.folderId) {
+      rescanGameFolder(trigger.dataset.folderId);
+    } else if (action === "game-folder-remove" && trigger.dataset.folderId) {
+      void removeGameFolder(trigger.dataset.folderId);
     } else if (action === "winlator-folder") {
       void connectWinlatorExportFolder();
     } else if (action === "winlator-import") {
@@ -6255,13 +6393,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     );
     // The host scans the games folder in the background; a scan that found new
     // games says so here, and the library is pulled again to show them.
-    void listen<number>(GAME_FOLDER_SCANNED_EVENT, (event) => {
-      const added = typeof event.payload === "number" ? event.payload : 0;
-      if (added <= 0) return;
-      void refreshLibrary();
-      showToast(
-        added === 1 ? t("app.folder.addedOne") : t("app.folder.addedMany", { count: added }),
-      );
+    // A scan the player asked for is answered even when it found nothing, so
+    // choosing a folder never ends in silence.
+    void listen<unknown>(GAME_FOLDER_SCANNED_EVENT, (event) => {
+      const scan = readGameFolderScan(event.payload);
+      if (scan.added > 0 || scan.repointed + scan.hidden > 0) void refreshLibrary();
+      if (scan.added > 0) fetchArtworkFor(scan.addedIds);
+      const message = gameFolderScanMessage(scan);
+      if (message) showToast(message);
+      if (scan.requested) void loadGameFolders();
     });
     void listen<null>(GAME_PLAY_RECORDED_EVENT, () => {
       void refreshLibrary();
@@ -7108,6 +7248,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       case "local":
         void importGame();
         break;
+      case "game-folder":
+        void chooseGameFolder();
+        break;
       case "connect":
         if (provider) void connectFromOnboarding(provider);
         break;
@@ -7487,6 +7630,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderGameStartPreference();
     const gameFolderRow = document.querySelector<HTMLElement>('[data-library-action="game-folder"]');
     if (gameFolderRow) gameFolderRow.hidden = !features.localRunners;
+    renderGameFolders();
+    renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
   });
@@ -7933,6 +8078,19 @@ function steamAccountSyncSummary(result: SteamAccountSyncResult): string {
   });
 }
 
+/** Every card an import added; an older host named only the one to select. */
+function readImportedIds(result: unknown, importedId: string | undefined): string[] {
+  const ids = isRecord(result) && Array.isArray(result.importedIds)
+    ? result.importedIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
+  return ids.length > 0 ? ids : importedId ? [importedId] : [];
+}
+
+function readFailedImports(result: unknown): number {
+  const failed = isRecord(result) ? result.failed : 0;
+  return typeof failed === "number" && failed > 0 ? Math.floor(failed) : 0;
+}
+
 function readImportedId(result: unknown): string | undefined {
   if (typeof result === "string") {
     return result;
@@ -8087,6 +8245,8 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>${t("app.menu.gamesFolder")}</strong><small>${t("app.menu.gamesFolderHint")}</small></span>
               </button>
+              <!-- The folders already watched, filled in when the menu opens. -->
+              <div id="library-game-folders" class="library-game-folders" role="group" aria-label="${t("app.menu.gamesFolder")}" hidden></div>
               <!-- Android only, and deliberately not a desktop no-op: Winlator is
                    an Android application, and the folder chooser this opens does
                    not exist anywhere else. -->

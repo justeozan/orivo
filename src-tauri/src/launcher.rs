@@ -44,6 +44,11 @@ pub enum LaunchError {
     RunnerUnavailable {
         runner_id: String,
     },
+    /// A shortcut that does not open a game launcher, or one only another
+    /// operating system can open (a Windows `.lnk` on a Mac).
+    ShortcutUnsupported(PathBuf),
+    /// The operating system's opener refused the shortcut's address.
+    ShortcutDispatchFailed(ExitStatus),
     Process(io::Error),
 }
 
@@ -91,6 +96,17 @@ impl std::fmt::Display for LaunchError {
                 f,
                 "{label} does not let another app start a download. Install this game in {label} itself."
             ),
+            Self::ShortcutUnsupported(path) => write!(
+                f,
+                "This shortcut cannot be opened on this device: {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            Self::ShortcutDispatchFailed(status) => {
+                write!(
+                    f,
+                    "The game's launcher could not accept the request ({status})"
+                )
+            }
             Self::Process(error) => write!(f, "process could not be started: {error}"),
         }
     }
@@ -108,7 +124,12 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
 /// client owns the game, so how long it ran is not Orivo's to know.
 pub fn launch_owned(game: &Game) -> Result<Option<std::process::Child>, LaunchError> {
     match &game.launch_target {
-        LaunchTarget::Direct => launch_direct(game).map(Some),
+        LaunchTarget::Direct => match game.executable_path.as_deref() {
+            // A shortcut the player kept is opened, as a double-click would:
+            // the launcher or the shell it hands off to owns the game.
+            Some(path) if is_shortcut_file(path) => open_shortcut(path).map(|()| None),
+            _ => launch_direct(game).map(Some),
+        },
         LaunchTarget::Steam { app_id } => {
             if !game
                 .installation_path
@@ -418,6 +439,126 @@ fn launch_direct(game: &Game) -> Result<std::process::Child, LaunchError> {
     command.spawn().map_err(LaunchError::Process)
 }
 
+/// Whether a Direct game's file is a shortcut Orivo opens rather than runs:
+/// a `.url` to a game launcher, or a Windows `.lnk` only the shell can follow.
+pub fn is_shortcut_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("url") || extension.eq_ignore_ascii_case("lnk")
+        })
+}
+
+fn open_shortcut(path: &Path) -> Result<(), LaunchError> {
+    if !path.is_file() {
+        return Err(LaunchError::MissingExecutable(path.to_path_buf()));
+    }
+    let is_url = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("url"));
+    if is_url {
+        // Read again at every launch, and checked again: the file may have
+        // changed since it was imported, and only a launcher address is ever
+        // handed to the opener.
+        let url = crate::shortcut::launcher_url(path)
+            .ok_or_else(|| LaunchError::ShortcutUnsupported(path.to_path_buf()))?;
+        dispatch_shortcut_url(&url)
+    } else {
+        open_shell_link(path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dispatch_shortcut_url(url: &str) -> Result<(), LaunchError> {
+    let status = shortcut_url_command(url)
+        .spawn()
+        .map_err(LaunchError::Process)?
+        .wait()
+        .map_err(LaunchError::Process)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LaunchError::ShortcutDispatchFailed(status))
+    }
+}
+
+/// A Steam address goes to the Steam bundle itself, as Orivo's own Steam
+/// launches do; other launchers through their registered scheme.
+#[cfg(target_os = "macos")]
+fn shortcut_url_command(url: &str) -> Command {
+    let mut command = Command::new("/usr/bin/open");
+    if url
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("steam"))
+    {
+        command.args(["-b", "com.valvesoftware.steam"]);
+    }
+    command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Windows: explorer resolves the registered scheme with no shell in between,
+/// exactly like a store hand-off. Its exit status means nothing for a verb.
+#[cfg(target_os = "windows")]
+fn dispatch_shortcut_url(url: &str) -> Result<(), LaunchError> {
+    explorer_open(std::ffi::OsStr::new(url))
+}
+
+#[cfg(target_os = "linux")]
+fn dispatch_shortcut_url(url: &str) -> Result<(), LaunchError> {
+    let status = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(LaunchError::Process)?
+        .wait()
+        .map_err(LaunchError::Process)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(LaunchError::ShortcutDispatchFailed(status))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn dispatch_shortcut_url(_url: &str) -> Result<(), LaunchError> {
+    Err(LaunchError::ShortcutUnsupported(PathBuf::new()))
+}
+
+/// A `.lnk` is opened the way a double-click opens it, so everything the
+/// shortcut carries — elevation, compatibility settings, a Store app — is
+/// honoured by Windows itself.
+#[cfg(target_os = "windows")]
+fn open_shell_link(path: &Path) -> Result<(), LaunchError> {
+    explorer_open(path.as_os_str())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_shell_link(path: &Path) -> Result<(), LaunchError> {
+    Err(LaunchError::ShortcutUnsupported(path.to_path_buf()))
+}
+
+#[cfg(target_os = "windows")]
+fn explorer_open(target: &std::ffi::OsStr) -> Result<(), LaunchError> {
+    Command::new("explorer.exe")
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(LaunchError::Process)?
+        .wait()
+        .map_err(LaunchError::Process)?;
+    Ok(())
+}
+
 /// Steam is handed a URL assembled from a validated catalog app id. We wait
 /// for the OS opener to accept the URI, not for the game process itself, so a
 /// missing or unregistered handler surfaces as a dispatch failure instead of a
@@ -527,6 +668,73 @@ mod tests {
     use super::*;
     use crate::catalog::GameSource;
     use std::{collections::BTreeMap, path::PathBuf};
+
+    /// The program behind a `.lnk` is started with the shortcut's arguments and
+    /// from its folder, which is what makes the card start the game the
+    /// shortcut did.
+    #[cfg(windows)]
+    #[test]
+    fn a_resolved_shortcut_starts_its_program_with_its_arguments_and_folder() {
+        let root = std::env::temp_dir().join(format!(
+            "orivo-launch-shortcut-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        let directory = root.join("Game Folder");
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("game.bat");
+        let marker = root.join("marker.txt");
+        std::fs::write(
+            &script,
+            format!("@echo off\r\necho %~1^|%~2^|%CD%> \"{}\"\r\n", marker.display()),
+        )
+        .unwrap();
+        let link = root.join("Game.lnk");
+        std::fs::write(
+            &link,
+            crate::shortcut::tests::shell_link_bytes(
+                script.to_str().unwrap(),
+                Some(directory.to_str().unwrap()),
+                Some(r#"-windowed "--name=Player One""#),
+                false,
+            ),
+        )
+        .unwrap();
+
+        let game = crate::game_folder::game_for_path(&link).unwrap();
+        let mut child = launch_owned(&game).unwrap().expect("a process of Orivo's own");
+        assert!(child.wait().unwrap().success());
+        let written = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(
+            written.trim(),
+            format!("-windowed|--name=Player One|{}", directory.display())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_web_shortcut_is_never_opened_even_if_it_was_edited_after_import() {
+        let root = std::env::temp_dir().join(format!(
+            "orivo-launch-url-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let shortcut = root.join("Game.url");
+        std::fs::write(&shortcut, "[InternetShortcut]\nURL=steam://rungameid/570\n").unwrap();
+        let game = crate::game_folder::game_for_path(&shortcut).unwrap();
+        assert!(is_shortcut_file(game.executable_path.as_deref().unwrap()));
+        std::fs::write(&shortcut, "[InternetShortcut]\nURL=https://example.com\n").unwrap();
+        assert!(matches!(
+            launch_owned(&game),
+            Err(LaunchError::ShortcutUnsupported(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reports_missing_executable_before_spawning() {
