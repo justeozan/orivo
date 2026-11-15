@@ -171,14 +171,12 @@ pub struct GameFolders {
     pub folders: Vec<GameFolder>,
 }
 
+/// One games folder. The folder is the reference: whatever it holds that the
+/// library does not is added on the next scan. (A `seen` list an earlier
+/// build wrote is ignored.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GameFolder {
     pub path: PathBuf,
-    /// Names of the items in this folder already turned into a card, or found
-    /// to be one the library already had. An item listed here is never added
-    /// again, so a game the player removed from the library stays removed.
-    #[serde(default)]
-    pub seen: BTreeSet<String>,
 }
 
 /// The record as the first version wrote it: one folder, nothing else.
@@ -210,10 +208,7 @@ impl GameFolders {
         }
         match serde_json::from_str::<LegacyGameFolder>(&text) {
             Ok(legacy) => Self {
-                folders: vec![GameFolder {
-                    path: legacy.path,
-                    seen: BTreeSet::new(),
-                }],
+                folders: vec![GameFolder { path: legacy.path }],
             },
             Err(_) => Self::default(),
         }
@@ -242,7 +237,6 @@ impl GameFolders {
         }
         self.folders.push(GameFolder {
             path: path.to_path_buf(),
-            seen: BTreeSet::new(),
         });
         true
     }
@@ -266,11 +260,6 @@ impl GameFolders {
             .collect()
     }
 
-    pub fn folder_mut(&mut self, path: &Path) -> Option<&mut GameFolder> {
-        self.folders
-            .iter_mut()
-            .find(|folder| same_path(&folder.path, path))
-    }
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -311,8 +300,7 @@ pub fn folder_label(path: &Path) -> String {
 /// One game found in a games folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FoundGame {
-    /// The item directly inside the games folder this game came from. Its
-    /// name is the game's key in the folder's `seen` list.
+    /// The item directly inside the games folder this game came from.
     pub entry: PathBuf,
     /// What is imported: an executable, an app bundle or a shortcut file.
     pub path: PathBuf,
@@ -321,6 +309,7 @@ pub struct FoundGame {
     pub title: Option<String>,
 }
 
+#[cfg(test)]
 impl FoundGame {
     pub fn key(&self) -> String {
         entry_key(&self.entry)
@@ -346,8 +335,6 @@ pub struct FolderScan {
     pub unrecognized: BTreeSet<String>,
     /// The folder could not be listed.
     pub unreadable: bool,
-    /// Every name in the folder, games or not, for pruning the `seen` list.
-    pub names: BTreeSet<String>,
 }
 
 /// The games directly inside `root`, one per item, sorted by item name.
@@ -368,7 +355,6 @@ pub fn scan_folder(root: &Path, budget: &mut usize) -> FolderScan {
         if is_system_file(&name) {
             continue;
         }
-        scan.names.insert(name.clone());
         scan.entries += 1;
         let Ok(file_type) = entry.file_type() else {
             continue;
@@ -1632,8 +1618,16 @@ mod tests {
 
         assert!(folders.add(&second));
         assert!(!folders.add(&first), "the same folder is not added twice");
-        folders.folders[0].seen.insert("Hades".into());
         folders.save(&record).unwrap();
+        // A record an earlier build of this one wrote, with a `seen` list.
+        fs::write(
+            &record,
+            serde_json::to_string(&serde_json::json!({
+                "folders": [{ "path": first, "seen": ["Hades"] }, { "path": second }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
 
         let reloaded = GameFolders::load(&record);
         assert_eq!(reloaded, folders);

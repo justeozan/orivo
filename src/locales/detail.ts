@@ -77,6 +77,8 @@ export const en = {
   "detail.reset.none": "No covers were found for this game.",
   "detail.thisGame": "this game",
   "detail.remove.done": "{title} removed from your library.",
+  "detail.remove.returns":
+    "{title} removed. It is still in a games folder, so it comes back at the next scan: hide it to keep it out.",
   "detail.remove.failed": "This game could not be removed.",
   "detail.uninstall.done": "{title} has been uninstalled.",
   "detail.uninstall.failed": "This game could not be uninstalled.",
@@ -233,6 +235,8 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "detail.reset.none": "Aucune jaquette trouvée pour ce jeu.",
   "detail.thisGame": "ce jeu",
   "detail.remove.done": "{title} retiré de ta bibliothèque.",
+  "detail.remove.returns":
+    "{title} retiré. Il est toujours dans un dossier de jeux, il reviendra au prochain scan : masque-le pour l’écarter.",
   "detail.remove.failed": "Impossible de retirer ce jeu.",
   "detail.uninstall.done": "{title} a été désinstallé.",
   "detail.uninstall.failed": "Impossible de désinstaller ce jeu.",

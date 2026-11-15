@@ -53,6 +53,7 @@ import {
   gameFolderScanMessage,
   readGameFolderScan,
   readGameFolders,
+  renderGameFoldersPanel,
   type GameFolderView,
 } from "./game-folders";
 import {
@@ -742,7 +743,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryMenu: get<HTMLElement>("#library-source-menu"),
     libraryMenuButton: get<HTMLButtonElement>("#library-menu-button"),
     librarySourceList: get<HTMLElement>("#library-source-list"),
-    libraryGameFolders: get<HTMLElement>("#library-game-folders"),
+    gameFoldersPanel: get<HTMLElement>("#game-folders-panel"),
     primaryNav: get<HTMLElement>(".primary-nav"),
     navIndicator: get<HTMLElement>(".nav-indicator"),
     toast: get<HTMLElement>("#toast"),
@@ -2261,7 +2262,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.topbar.classList.toggle("is-library-menu-open", open);
     if (open) {
       renderLibrarySources();
-      void loadGameFolders();
     }
 
     if (open && focus) {
@@ -2527,49 +2527,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderGameFolders();
   };
 
-  /**
-   * One row per watched folder, under "Games folders": pressing it looks in
-   * the folder again, and the small button beside it stops watching it. The
-   * names come from the disk, so they go in through `textContent`.
-   */
   const renderGameFolders = (): void => {
-    const list = refs.libraryGameFolders;
-    list.replaceChildren();
-    list.hidden = gameFolders.length === 0 || !platformFeatures.localRunners;
-    for (const folder of gameFolders) {
-      const row = document.createElement("div");
-      row.className = "library-game-folder";
-
-      const rescan = document.createElement("button");
-      rescan.type = "button";
-      rescan.className = "library-source-action library-game-folder__scan";
-      rescan.setAttribute("role", "menuitem");
-      rescan.dataset.libraryAction = "game-folder-rescan";
-      rescan.dataset.folderId = folder.id;
-      rescan.setAttribute("aria-label", t("app.folder.rescan", { folder: folder.label }));
-      rescan.title = t("app.folder.rescan", { folder: folder.label });
-      const copy = document.createElement("span");
-      copy.className = "library-source-action__copy";
-      const name = document.createElement("strong");
-      name.textContent = folder.label;
-      const hint = document.createElement("small");
-      hint.textContent = folder.available ? t("app.folder.watching") : t("app.folder.unavailable");
-      copy.append(name, hint);
-      rescan.append(copy);
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "library-game-folder__remove";
-      remove.setAttribute("role", "menuitem");
-      remove.dataset.libraryAction = "game-folder-remove";
-      remove.dataset.folderId = folder.id;
-      remove.setAttribute("aria-label", t("app.folder.remove", { folder: folder.label }));
-      remove.title = t("app.folder.remove", { folder: folder.label });
-      remove.innerHTML = icon("close");
-
-      row.append(rescan, remove);
-      list.append(row);
-    }
+    renderGameFoldersPanel(
+      refs.gameFoldersPanel,
+      gameFolders,
+      isTauriRuntime() && platformFeatures.localRunners,
+    );
   };
 
   const rescanGameFolder = (folderId: string): void => {
@@ -2588,7 +2551,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       gameFolders = readGameFolders(await invoke<unknown>("remove_game_folder", { folderId }));
       renderGameFolders();
       if (folder) showToast(t("app.folder.removed", { folder: folder.label }));
-      requestAnimationFrame(() => focusLibraryMenuItem("first"));
     } catch (error) {
       showToast(messageFromError(error, t("app.folder.removeFailed")));
     }
@@ -6081,10 +6043,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void importGame();
     } else if (action === "game-folder") {
       void chooseGameFolder();
-    } else if (action === "game-folder-rescan" && trigger.dataset.folderId) {
-      rescanGameFolder(trigger.dataset.folderId);
-    } else if (action === "game-folder-remove" && trigger.dataset.folderId) {
-      void removeGameFolder(trigger.dataset.folderId);
     } else if (action === "winlator-folder") {
       void connectWinlatorExportFolder();
     } else if (action === "winlator-import") {
@@ -6193,6 +6151,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!storeFoldersPanel || !isTauriRuntime()) return;
     renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
   };
+  refs.gameFoldersPanel.addEventListener("click", (event) => {
+    const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]");
+    const action = button?.dataset.gameFolderAction;
+    if (!button || !action) return;
+    if (action === "add") void chooseGameFolder();
+    else if (action === "rescan" && button.dataset.folderId) rescanGameFolder(button.dataset.folderId);
+    else if (action === "remove" && button.dataset.folderId) void removeGameFolder(button.dataset.folderId);
+  });
+
   storeFoldersPanel?.addEventListener("click", (event) => {
     const store = (event.target as Element | null)?.closest<HTMLButtonElement>(
       "[data-store-folder-grant]",
@@ -7630,7 +7597,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderGameStartPreference();
     const gameFolderRow = document.querySelector<HTMLElement>('[data-library-action="game-folder"]');
     if (gameFolderRow) gameFolderRow.hidden = !features.localRunners;
-    renderGameFolders();
+    void loadGameFolders();
     renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
@@ -8245,8 +8212,6 @@ function shell(): string {
                 <span class="library-source-action__icon" aria-hidden="true">${icon("folder")}</span>
                 <span class="library-source-action__copy"><strong>${t("app.menu.gamesFolder")}</strong><small>${t("app.menu.gamesFolderHint")}</small></span>
               </button>
-              <!-- The folders already watched, filled in when the menu opens. -->
-              <div id="library-game-folders" class="library-game-folders" role="group" aria-label="${t("app.menu.gamesFolder")}" hidden></div>
               <!-- Android only, and deliberately not a desktop no-op: Winlator is
                    an Android application, and the folder chooser this opens does
                    not exist anywhere else. -->
@@ -8616,6 +8581,10 @@ function shell(): string {
               <!-- Mac App Store edition only (store-folders.ts): the sandbox
                    reads Steam's and Epic's folders once the player allows it. -->
               <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
+              <!-- Desktop: the watched games folders (game-folders.ts). The
+                   library's menu keeps one "Games folders" entry; the list,
+                   rescans and removals live here. -->
+              <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside

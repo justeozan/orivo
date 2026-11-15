@@ -179,3 +179,64 @@ function scanMessage(event: GameFolderScanEvent): string | null {
     event.folders[0];
   return folderMessage(telling);
 }
+
+/**
+ * Settings › Libraries: the watched folders, one row each (look again, stop
+ * watching), and a way to add one. Folder names come from the disk, so they
+ * go in through `textContent`. The library's menu keeps a single entry.
+ */
+export function renderGameFoldersPanel(panel: HTMLElement, folders: GameFolderView[], offered: boolean): void {
+  panel.hidden = !offered;
+  if (!offered) {
+    panel.replaceChildren();
+    return;
+  }
+  const heading = document.createElement("div");
+  heading.className = "settings-row";
+  const headingCopy = document.createElement("div");
+  headingCopy.className = "settings-row__copy";
+  const title = document.createElement("strong");
+  title.textContent = t("app.menu.gamesFolder");
+  const intro = document.createElement("small");
+  intro.textContent = t("app.folder.settingsIntro");
+  headingCopy.append(title, intro);
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "settings-button";
+  add.dataset.gameFolderAction = "add";
+  add.textContent = t("app.folder.add");
+  heading.append(headingCopy, add);
+
+  const rows = folders.map((folder) => {
+    const row = document.createElement("div");
+    row.className = "settings-row";
+    const copy = document.createElement("div");
+    copy.className = "settings-row__copy";
+    const name = document.createElement("strong");
+    name.textContent = folder.label;
+    const state = document.createElement("small");
+    state.textContent = folder.available ? t("app.folder.watching") : t("app.folder.unavailable");
+    copy.append(name, state);
+    const actions = document.createElement("div");
+    actions.className = "game-folder-actions";
+    const rescan = document.createElement("button");
+    rescan.type = "button";
+    rescan.className = "settings-button";
+    rescan.dataset.gameFolderAction = "rescan";
+    rescan.dataset.folderId = folder.id;
+    rescan.disabled = !folder.available;
+    rescan.textContent = t("app.folder.rescanShort");
+    rescan.setAttribute("aria-label", t("app.folder.rescan", { folder: folder.label }));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "settings-button";
+    remove.dataset.gameFolderAction = "remove";
+    remove.dataset.folderId = folder.id;
+    remove.textContent = t("app.folder.removeShort");
+    remove.setAttribute("aria-label", t("app.folder.remove", { folder: folder.label }));
+    actions.append(rescan, remove);
+    row.append(copy, actions);
+    return row;
+  });
+  panel.replaceChildren(heading, ...rows);
+}

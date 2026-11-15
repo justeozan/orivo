@@ -1,5 +1,6 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { gameFolderScanMessage, readGameFolderScan, readGameFolders } from "./game-folders";
+import { gameFolderScanMessage, readGameFolderScan, readGameFolders, renderGameFoldersPanel } from "./game-folders";
 
 const folder = (overrides: Record<string, unknown> = {}) => ({
   label: "Shortcuts",
@@ -90,5 +91,35 @@ describe("games folders", () => {
     expect(gameFolderScanMessage(scan({ folders: [] }))).toBe(
       "No games folder yet. Add one and every game in it joins your library.",
     );
+  });
+
+  it("lists the folders in Settings, each with its own actions, and stays out where it cannot work", () => {
+    const panel = document.createElement("section");
+    renderGameFoldersPanel(
+      panel,
+      [
+        { id: "folder:a", label: "<b>Shortcuts</b>", available: true },
+        { id: "folder:b", label: "USB", available: false },
+      ],
+      true,
+    );
+    expect(panel.hidden).toBe(false);
+    const actions = [...panel.querySelectorAll<HTMLButtonElement>("[data-game-folder-action]")].map(
+      (button) => `${button.dataset.gameFolderAction}:${button.dataset.folderId ?? ""}:${button.disabled}`,
+    );
+    expect(actions).toEqual([
+      "add::false",
+      "rescan:folder:a:false",
+      "remove:folder:a:false",
+      "rescan:folder:b:true",
+      "remove:folder:b:false",
+    ]);
+    // A folder's name is text, never markup.
+    expect(panel.querySelector("b")).toBeNull();
+    expect(panel.textContent).toContain("<b>Shortcuts</b>");
+
+    renderGameFoldersPanel(panel, [], false);
+    expect(panel.hidden).toBe(true);
+    expect(panel.children).toHaveLength(0);
   });
 });

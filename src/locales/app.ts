@@ -274,6 +274,11 @@ export const en = {
     "1 card that opened a tool instead of its game (checksum checker, plugin, crack copy) was fixed.",
   "app.folder.repairedMany":
     "{count} cards that opened a tool instead of their game (checksum checker, plugin, crack copy) were fixed.",
+  "app.folder.settingsIntro":
+    "Every game, app and shortcut in these folders joins your library, at launch and every few minutes.",
+  "app.folder.add": "Add a folder",
+  "app.folder.rescanShort": "Look again",
+  "app.folder.removeShort": "Remove",
   "app.folder.addedOneFrom": "1 game added from {folder}.",
   "app.folder.addedManyFrom": "{count} games added from {folder}.",
   "app.folder.skippedOne": "1 shortcut could not be used.",
@@ -762,6 +767,11 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
     "1 carte qui ouvrait un outil au lieu de son jeu (vérificateur, plugin, copie de crack) a été corrigée.",
   "app.folder.repairedMany":
     "{count} cartes qui ouvraient un outil au lieu de leur jeu (vérificateur, plugin, copie de crack) ont été corrigées.",
+  "app.folder.settingsIntro":
+    "Chaque jeu, app et raccourci de ces dossiers rejoint ta bibliothèque, au lancement et toutes les quelques minutes.",
+  "app.folder.add": "Ajouter un dossier",
+  "app.folder.rescanShort": "Rechercher",
+  "app.folder.removeShort": "Retirer",
   "app.folder.addedOneFrom": "1 jeu ajouté depuis {folder}.",
   "app.folder.addedManyFrom": "{count} jeux ajoutés depuis {folder}.",
   "app.folder.skippedOne": "1 raccourci n’a pas pu être utilisé.",

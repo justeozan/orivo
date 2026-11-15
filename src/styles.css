@@ -387,27 +387,6 @@ button { border: 0; cursor: pointer; }
 .library-source-action__copy strong { color: inherit; font-size: 13px; font-weight: 590; letter-spacing: -.008em; }
 .library-source-action__copy small { color: #aba5b2; font-size: 11px; font-weight: 450; }
 .library-source-action__chevron { width: 16px; height: 16px; color: #bdb6c8; }
-/* Watched games folders, indented under "Games folders": the name looks in the
-   folder again, the small cross beside it stops watching it. */
-.library-game-folders[hidden] { display: none; }
-.library-game-folders { display: grid; padding: 0 0 4px 43px; }
-.library-game-folder { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; }
-.library-game-folder + .library-game-folder { border-top: 1px solid rgba(255,255,255,.06); }
-.library-game-folder .library-source-action { min-height: 40px; grid-template-columns: minmax(0, 1fr); padding: 6px 8px; border-radius: 9px; }
-.library-game-folder__remove {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  color: #aba5b2;
-  background: transparent;
-  cursor: pointer;
-  transition: background 160ms ease, color 160ms ease;
-}
-.library-game-folder__remove .icon { width: 14px; height: 14px; }
-.library-game-folder__remove:hover, .library-game-folder__remove:focus-visible, .library-game-folder__remove[data-nav-focus] { color: #fff; background: rgba(255,255,255,.085); }
 /* A connected source listed for information only: same anatomy as an action
    row, but it never lights up as a pressable item. */
 
@@ -2392,6 +2371,7 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .settings-row__copy { display: grid; min-width: 0; gap: 5px; }
 .settings-row__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
 .settings-row__copy small { color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.game-folder-actions { display: flex; flex-shrink: 0; gap: 18px; }
 .settings-card__intro { margin: 0 0 8px; color: #d0cadf; font-size: 13px; line-height: 1.55; }
 
 /* `appearance: none` is what stops macOS from drawing its own double caret on

@@ -5079,6 +5079,9 @@ fn run_game_folder_scan(app: &AppHandle, request: ScanRequest) {
 struct KnownGames {
     ids: BTreeSet<String>,
     local_paths: Vec<PathBuf>,
+    /// Programs of the cards the library shows: a hidden card keeps its own
+    /// file out, never a different program of the same install.
+    visible_local_paths: Vec<PathBuf>,
     steam_app_ids: BTreeSet<u32>,
     epic_app_names: BTreeSet<String>,
 }
@@ -5088,6 +5091,7 @@ impl KnownGames {
         let mut known = Self {
             ids: BTreeSet::new(),
             local_paths: Vec::new(),
+            visible_local_paths: Vec::new(),
             steam_app_ids: BTreeSet::new(),
             epic_app_names: BTreeSet::new(),
         };
@@ -5097,6 +5101,9 @@ impl KnownGames {
                 && let Some(path) = &game.executable_path
             {
                 known.local_paths.push(path.clone());
+                if !game.hidden {
+                    known.visible_local_paths.push(path.clone());
+                }
             }
             if let LaunchTarget::Steam { app_id } = game.launch_target {
                 known.steam_app_ids.insert(app_id);
@@ -5155,7 +5162,7 @@ impl KnownGames {
         let points_outside = !executable.starts_with(&found.entry);
         points_outside
             && executable.parent().is_some_and(|install| {
-                self.local_paths
+                self.visible_local_paths
                     .iter()
                     .any(|path| path.parent() == Some(install))
             })
@@ -5191,11 +5198,7 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
     // Copying artwork is the slow part, so it happens before the catalog
     // lease is taken: an import or a launch never waits behind a scan.
     let mut budget = game_folder::MAX_ENTRIES;
-    let mut pending = Vec::<PendingFolderGame>::new();
-    // Per folder: the items now known, and every name present when the whole
-    // folder was listed (which is when the record can drop the names of items
-    // that are gone).
-    let mut seen_updates = Vec::<(PathBuf, BTreeSet<String>, Option<BTreeSet<String>>)>::new();
+    let mut pending = Vec::<(usize, Game)>::new();
     for folder in &folders.folders {
         if let ScanRequest::Folder(id) = request
             && game_folder::folder_id(&folder.path) != *id
@@ -5222,16 +5225,12 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
         summary.entries = scan.entries;
         summary.games = scan.games.len();
         summary.unrecognized = scan.unrecognized.iter().cloned().collect();
-        let mut now_seen = BTreeSet::new();
+        // The folder is the reference: whatever it holds and the library does
+        // not becomes a card, including a game removed from the library by
+        // hand. Hiding a card is how a game is kept out.
         for found in scan.games {
-            let key = found.key();
-            if folder.seen.contains(&key) {
-                summary.known += 1;
-                continue;
-            }
             if known.has_item(&found) {
                 summary.known += 1;
-                now_seen.insert(key);
                 continue;
             }
             let Ok(mut game) = game_folder::game_for_path(&found.path) else {
@@ -5243,33 +5242,15 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
             }
             if known.has_game(&game, &found) {
                 summary.known += 1;
-                now_seen.insert(key);
                 continue;
             }
             let _ = cache_game_media(app, &mut game);
-            pending.push(PendingFolderGame {
-                summary_index,
-                folder: folder.path.clone(),
-                key,
-                game,
-            });
+            pending.push((summary_index, game));
         }
-        let complete = budget > 0;
-        seen_updates.push((
-            folder.path.clone(),
-            now_seen,
-            complete.then_some(scan.names),
-        ));
         event.folders.push(summary);
     }
 
-    for (folder, key) in add_folder_games(&state, pending, &mut event) {
-        if let Some((_, now_seen, _)) = seen_updates.iter_mut().find(|(path, _, _)| *path == folder)
-        {
-            now_seen.insert(key);
-        }
-    }
-    update_seen_items(&record, seen_updates);
+    add_folder_games(&state, pending, &mut event);
     event
 }
 /// Points the cards an older scan aimed at a checksum checker, a plugin or a
@@ -5295,107 +5276,81 @@ fn repair_tool_cards(state: &AppState) -> game_folder::Repair {
     repair
 }
 
-struct PendingFolderGame {
-    summary_index: usize,
-    folder: PathBuf,
-    key: String,
-    game: Game,
-}
-
-/// Adds the games a scan found in one catalog transaction. Returns the
-/// folder and item of each game now in the library, added or already there.
-fn add_folder_games(
-    state: &AppState,
-    pending: Vec<PendingFolderGame>,
-    event: &mut GameFolderScanEvent,
-) -> Vec<(PathBuf, String)> {
-    let mut settled = Vec::new();
+/// Adds the games a scan found in one catalog transaction.
+fn add_folder_games(state: &AppState, pending: Vec<(usize, Game)>, event: &mut GameFolderScanEvent) {
     if pending.is_empty() {
-        return settled;
+        return;
     }
     let Ok(_mutation) = state.catalog_mutation.lock() else {
-        return settled;
+        return;
     };
     let mut next = match state.catalog.read() {
         Ok(catalog) => catalog.clone(),
-        Err(_) => return settled,
+        Err(_) => return,
     };
     let mut added = Vec::new();
-    for PendingFolderGame {
-        summary_index,
-        folder,
-        key,
-        game,
-    } in pending
-    {
+    for (summary_index, game) in pending {
         let id = game.id.clone();
         let duplicate = next.games.iter().any(|existing| existing.id == id);
         match next.add(game) {
-            Ok(()) => added.push((summary_index, folder, key, id)),
-            // Added since the scan began, by an import or another folder.
-            Err(_) if duplicate => {
-                if let Some(summary) = event.folders.get_mut(summary_index) {
-                    summary.known += 1;
-                }
-                settled.push((folder, key));
-            }
+            Ok(()) => added.push((summary_index, id)),
             Err(_) => {
                 if let Some(summary) = event.folders.get_mut(summary_index) {
-                    summary.unusable += 1;
+                    // Added since the scan began, by an import or another folder.
+                    if duplicate {
+                        summary.known += 1;
+                    } else {
+                        summary.unusable += 1;
+                    }
                 }
             }
         }
     }
     if added.is_empty() {
-        return settled;
+        return;
     }
     // Same as a manual import: a Windows .exe becomes launchable through
     // Wine-Staging in the same transaction, where Wine-Staging is installed.
     auto_apply_wine_to_direct_games(&mut next, &state.wine_prefix_root);
     if persist_catalog(&next, &state.catalog_path).is_err() {
-        return settled;
+        return;
     }
-    for (summary_index, folder, key, id) in added {
+    for (summary_index, id) in added {
         if let Some(summary) = event.folders.get_mut(summary_index) {
             summary.added += 1;
         }
         event.added += 1;
         event.added_ids.push(visible_game_id(&next, &id));
-        settled.push((folder, key));
     }
     if let Ok(mut catalog) = state.catalog.write() {
         *catalog = next;
     }
-    settled
 }
 
-/// Records what a scan settled, so those items are never added twice, and
-/// forgets the names of items no longer in a folder that was listed whole —
-/// a game copied back in later is then a new game again.
-fn update_seen_items(
-    record: &Path,
-    updates: Vec<(PathBuf, BTreeSet<String>, Option<BTreeSet<String>>)>,
-) {
-    let Ok(_record) = GAME_FOLDER_RECORD_LOCK.lock() else {
-        return;
+/// Whether a card comes from an item of a games folder, so removing it only
+/// lasts until the next scan brings it back.
+fn is_games_folder_card(app: &AppHandle, game: &Game) -> bool {
+    if game.source != GameSource::Local {
+        return false;
+    }
+    let Some(record) = game_folder_record(app) else {
+        return false;
     };
-    let mut folders = game_folder::GameFolders::load(record);
-    let mut changed = false;
-    for (path, now_seen, present) in updates {
-        // The folder may have been removed while the scan ran.
-        let Some(folder) = folders.folder_mut(&path) else {
-            continue;
-        };
-        let before = folder.seen.clone();
-        folder.seen.extend(now_seen);
-        if let Some(present) = present {
-            folder.seen.retain(|name| present.contains(name));
-        }
-        changed |= folder.seen != before;
-    }
-    if changed {
-        let _ = folders.save(record);
-    }
+    let folders = match GAME_FOLDER_RECORD_LOCK.lock() {
+        Ok(_record) => game_folder::GameFolders::load(&record),
+        Err(_) => return false,
+    };
+    folders.folders.iter().any(|folder| {
+        game.executable_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(&folder.path))
+            // A shortcut's card is named after the shortcut, not its program.
+            || fs::read_dir(&folder.path).is_ok_and(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| catalog::local_game_id(&entry.path()) == game.id)
+            })
+    })
 }
 
 /// Download best-effort cover/hero art for a game via the keyless Steam Store
@@ -5934,12 +5889,33 @@ fn remove_cached_artwork(cache_dir: &Path, prefix: &str) {
 
 /// Remove a game from the library. The game's own files are never deleted; this
 /// only drops the catalog record so its card and detail page disappear.
+/// What removing a game did: the library, and whether the game will come
+/// back because a games folder still holds it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveGameResponse {
+    #[serde(flatten)]
+    library: LibraryState,
+    returns_from_games_folder: bool,
+}
+
 #[tauri::command]
 fn remove_game(
     app: AppHandle,
     state: State<'_, AppState>,
     game_id: String,
-) -> Result<LibraryState, String> {
+) -> Result<RemoveGameResponse, String> {
+    let removed = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .games
+        .iter()
+        .find(|game| game.id == game_id)
+        .cloned();
+    let returns_from_games_folder = removed
+        .as_ref()
+        .is_some_and(|game| is_games_folder_card(&app, game));
     {
         let _mutation = state
             .catalog_mutation
@@ -5967,7 +5943,10 @@ fn remove_game(
         .catalog
         .read()
         .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
-    Ok(library_state(&app, &catalog))
+    Ok(RemoveGameResponse {
+        library: library_state(&app, &catalog),
+        returns_from_games_folder,
+    })
 }
 
 /// Hide a game from the library without forgetting it.
@@ -11617,6 +11596,7 @@ pub(crate) mod tests {
         let known = KnownGames {
             ids: BTreeSet::new(),
             local_paths: vec![PathBuf::from("/Games/Control/Control_DX12.exe")],
+            visible_local_paths: vec![PathBuf::from("/Games/Control/Control_DX12.exe")],
             steam_app_ids: BTreeSet::new(),
             epic_app_names: BTreeSet::new(),
         };
@@ -11630,6 +11610,17 @@ pub(crate) mod tests {
 
         game.executable_path = Some(PathBuf::from("/Games/Hades/Hades.exe"));
         assert!(!known.has_game(&game, &shortcut));
+
+        // A hidden Control_DX12 keeps itself out, not Control.exe.
+        let hidden = KnownGames {
+            ids: BTreeSet::new(),
+            local_paths: known.local_paths.clone(),
+            visible_local_paths: Vec::new(),
+            steam_app_ids: BTreeSet::new(),
+            epic_app_names: BTreeSet::new(),
+        };
+        game.executable_path = Some(PathBuf::from("/Games/Control/Control.exe"));
+        assert!(!hidden.has_game(&game, &shortcut));
 
         // Inside the games folder, a game's own folder is its identity: two
         // loose executables side by side are two games.
