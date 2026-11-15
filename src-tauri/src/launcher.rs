@@ -47,7 +47,9 @@ pub enum LaunchError {
     /// A shortcut that does not open a game launcher, or one only another
     /// operating system can open (a Windows `.lnk` on a Mac).
     ShortcutUnsupported(PathBuf),
-    /// The operating system's opener refused the shortcut's address.
+    /// The operating system's opener refused the shortcut's address. Windows
+    /// hands addresses to explorer, whose status means nothing, so never there.
+    #[cfg_attr(windows, allow(dead_code))]
     ShortcutDispatchFailed(ExitStatus),
     Process(io::Error),
 }

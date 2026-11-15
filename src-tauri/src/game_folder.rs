@@ -1559,7 +1559,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn shortcuts_windows_itself_wrote_are_imported_with_their_arguments() {
-        let root = scratch("windows-shortcuts");
+        // `%TEMP%` can be an 8.3 short path (`C:\Users\RUNNER~1\…` on CI),
+        // while Windows saves a shortcut's target in its long form: compare
+        // against the long one.
+        let root = canonical(&scratch("windows-shortcuts")).unwrap();
         let game_directory = root.join("Jeux").join("Héros Ünïcode");
         let program = game_directory.join("Héros.exe");
         touch(&program, 10);
