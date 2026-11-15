@@ -1,4 +1,4 @@
-package io.orivo.desktop
+package run.evey.orivo
 
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge

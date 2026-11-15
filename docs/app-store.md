@@ -18,9 +18,10 @@ together.
 ## Building for the record
 
 iOS builds are `run.evey.orivo`: `src-tauri/tauri.ios.conf.json` overrides the
-identifier for iOS only. Desktop and Android stay `io.orivo.desktop`, which
-names the data directory and the Android package existing installs live
-under.
+identifier for iOS, as `tauri.android.conf.json` does for Android, whose Google
+Play record has the same package ([`google-play.md`](google-play.md)). The
+desktop stays `io.orivo.desktop`, which names the data directory existing
+installs live under.
 
 `src-tauri/gen/apple` is generated and gitignored, and `tauri ios init` gives
 it Tauri's logo as the app icon. After an init, before any iOS build:
@@ -159,6 +160,11 @@ An iOS build runs no PC game and may download no code, and two things follow
 Streaming from a computer and emulation are not offered on iOS. The Moonlight
 app for iOS registers no URL scheme, so no other app can start a stream in it,
 and Orivo has no source of ROMs there.
+
+Nor does Orivo update itself there: the App Store installs new versions, so the
+host answers `self_updates: false`, nothing looks for a release on GitHub, and
+Settings › About has no Updates row. Android builds do the same, for Google
+Play ([`google-play.md`](google-play.md)).
 
 ## Age rating: 12+
 
