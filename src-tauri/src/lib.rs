@@ -8665,6 +8665,8 @@ async fn get_store_choices(
         &title,
         &launch_target,
         &region,
+        // The App Store is worth asking only on a device that installs from it.
+        cfg!(target_os = "ios"),
         playport_game.as_ref(),
         &playport::COMPATIBILITY,
     )

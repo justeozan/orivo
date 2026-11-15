@@ -19,7 +19,8 @@ pub struct PlatformFeatures {
     /// the apps they hand a game to has a URL Orivo could open there.
     pub local_runners: bool,
     /// "Install" asks the host where the game can be got on this device, rather
-    /// than asking a store's client to download it (see `store_choices`).
+    /// than asking a store's client to download it (see `store_choices`). iOS
+    /// and Android, where no Steam client is there to take `steam://install`.
     pub store_choices: bool,
     /// Orivo can get out of a started game's way: hide on macOS, minimise on
     /// Windows and Linux (`step_aside_for_game`). A phone switches to the
@@ -51,7 +52,7 @@ pub const fn for_target(ios: bool, mobile: bool, app_store: bool) -> PlatformFea
     PlatformFeatures {
         downloadable_plugins: !store_reviewed,
         local_runners: !store_reviewed,
-        store_choices: ios,
+        store_choices: mobile,
         steps_aside: !mobile,
         self_updates: !mobile && !app_store,
     }
@@ -87,7 +88,7 @@ mod tests {
             PlatformFeatures {
                 downloadable_plugins: true,
                 local_runners: true,
-                store_choices: false,
+                store_choices: true,
                 steps_aside: false,
                 self_updates: false,
             }

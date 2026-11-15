@@ -1,9 +1,10 @@
 /* ---------------------------------------------------------------------------
    Where a game can be got on a device that cannot run it.
 
-   On an iPhone or an iPad "Install" cannot hand a download to Steam, so it
-   asks the host what this device can do instead: open the game's own iOS
-   version on the App Store when there is one, and its Steam page otherwise
+   On an iPhone, an iPad or an Android device "Install" cannot hand a download
+   to Steam, so it asks the host what this device can do instead: open the
+   game's own iOS version on the App Store when there is one and the device is
+   an iPhone or an iPad, and its Steam page otherwise
    (`src-tauri/src/store_choices.rs`). The WebView only ever sends back a game
    id and the id of the row it was offered; the destination stays in Rust.
    --------------------------------------------------------------------------- */
