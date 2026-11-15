@@ -46,6 +46,14 @@ describe("iOS App Store build", () => {
     expect(readJson("src-tauri/tauri.conf.json").identifier).toBe("io.orivo.desktop");
   });
 
+  it("builds the sideload edition as another app, never the App Store record's", () => {
+    // Sharing the record's identifier would make a sideloaded copy and the App
+    // Store one fight over a single slot on the device, and a library over it.
+    const sideload = readJson("src-tauri/tauri.ios-sideload.conf.json").identifier;
+    expect(sideload).toBe("run.evey.orivo.sideload");
+    expect(sideload).not.toBe(readJson("src-tauri/tauri.ios.conf.json").identifier);
+  });
+
   it("fills every slot of the asset catalog `tauri ios init` writes", () => {
     // A slot missing here keeps Tauri's logo in the build.
     expect(readdirSync(repoFile(ICONS)).sort()).toEqual([

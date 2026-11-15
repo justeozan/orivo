@@ -151,6 +151,7 @@ retarget the run at `v<version>`.
 | Windows | NSIS `.exe`, `.msi` | NSIS `.exe` + `.sig` |
 | Linux | `.AppImage`, `.deb`, `.rpm` | `.AppImage.tar.gz` + `.sig` |
 | Android (arm64) | `Orivo_<version>_android.apk`, `.aab` | — |
+| iPhone & iPad, sideload edition | `Orivo_<version>_ios-sideload.ipa` (unsigned) + `.json` | — |
 
 Plus one `latest.json` shared by the four desktop builds.
 
@@ -167,6 +168,11 @@ secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
 `ANDROID_KEY_ALIAS`) and nowhere else; losing it means every user has to
 uninstall before they can install again. The `.aab` is uploaded for a possible
 Play Store listing and is not installable directly.
+
+The `_ios-sideload.ipa` is the App Store app under another identifier, for
+AltStore, SideStore or Sideloadly to sign with the player's own Apple ID; the
+`.json` beside it is what orivo.evey.run's AltStore source is built from. Its
+job is not a release gate yet. See [`ios-sideload.md`](ios-sideload.md).
 
 `src-tauri/gen/android` is committed, unlike `gen/apple`, because the release
 build needs it and because the signing configuration lives in its
