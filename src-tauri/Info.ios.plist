@@ -53,5 +53,15 @@
 	-->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!--
+	  The schemes Orivo may ask `canOpenURL:` about. iOS answers `false` for any
+	  scheme not listed here, installed or not. `playport` is how Orivo learns
+	  that Playport is on the device before offering a game's PC version in it
+	  (src-tauri/src/playport.rs). Opening a URL needs no entry; asking does.
+	-->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>playport</string>
+	</array>
 </dict>
 </plist>

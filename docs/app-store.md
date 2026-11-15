@@ -148,6 +148,13 @@ An iOS build runs no PC game and may download no code, and two things follow
   (`src-tauri/src/store_choices.rs`): its own iOS version when the App Store
   sells one by a studio Steam names, then its Steam page, which is always
   there. One answer opens directly; two are offered beside the button.
+- **Playport.** On a device where Playport is installed, the PC version comes
+  first in that menu, and a GOG or Epic Games game, which has no other answer
+  there, gets an Install of its own ([`playport.md`](playport.md)). Playport
+  runs Windows games on the device itself; Orivo only asks whether it is there
+  (`canOpenURL`, with `playport` in `LSApplicationQueriesSchemes`) and brings
+  it to the front. Playport is sideloaded, so Orivo never names, links or
+  recommends it where it is not installed: without it, the menu is what it was.
 
 Streaming from a computer and emulation are not offered on iOS. The Moonlight
 app for iOS registers no URL scheme, so no other app can start a stream in it,
@@ -193,6 +200,8 @@ Not "collected" in Apple's sense:
 - The library, preferences, wishlist and the IGDB / SteamGridDB / Google keys:
   stored on the device only.
 - Requests to the stores' public catalogs and CDNs: no personal data is sent.
+- The request for Playport's public compatibility list (playport.dev), made
+  only on a device where Playport is installed: nothing is sent with it.
 
 No advertising or analytics SDK, no advertising identifier.
 

@@ -1989,10 +1989,28 @@ describe("the application shell on iOS", () => {
       | Record<string, boolean>
       | undefined,
     choices: [] as Record<string, unknown>[],
+    library: [] as Record<string, unknown>[],
+    playport: false,
   };
   const stardew = { id: "steam:413150", title: "Stardew Valley", source: "steam", launchable: false };
+  const bioshock = {
+    id: "gog:2022341186",
+    title: "BioShock",
+    source: "gog",
+    launchable: false,
+    supportedPlatforms: ["windows"],
+  };
+  const superMeatBoy = {
+    id: "epic:SuperMeatBoy",
+    title: "Super Meat Boy",
+    source: "epic",
+    launchable: false,
+    supportedPlatforms: ["windows"],
+    installState: "not-installed",
+  };
   const appStore = { id: "app-store", label: "iPhone & iPad version", detail: "App Store · ConcernedApe LLC" };
   const steamPage = { id: "steam-page", label: "View on Steam", detail: "Its page on the Steam store" };
+  const playport = { id: "playport", label: "PC version", detail: "Playport · Runs" };
 
   const mount = (): void => {
     root = document.createElement("div");
@@ -2009,6 +2027,8 @@ describe("the application shell on iOS", () => {
     window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
     backend.features = { downloadablePlugins: false, localRunners: false, storeChoices: true };
     backend.choices = [appStore, steamPage];
+    backend.library = [stardew];
+    backend.playport = false;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockReset();
     tauri.invoke.mockImplementation(async (command) => {
@@ -2016,9 +2036,11 @@ describe("the application shell on iOS", () => {
         case "get_platform_features":
           return backend.features;
         case "get_library":
-          return [stardew];
+          return backend.library;
         case "get_store_choices":
           return backend.choices;
+        case "is_playport_installed":
+          return backend.playport;
         case "get_preferences":
           return {};
         case "get_steam_account_status":
@@ -2097,6 +2119,76 @@ describe("the application shell on iOS", () => {
 
     expect(commandArgs("install_steam_game")).toEqual([{ gameId: "steam:413150" }]);
     expect(commandArgs("get_store_choices")).toEqual([]);
+  });
+
+  const playButton = (): HTMLButtonElement => root.querySelector<HTMLButtonElement>("#play-button")!;
+  /** Orivo coming back to the front, the moment an app can have come or gone. */
+  const returnToForeground = async (): Promise<void> => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+  };
+
+  it("sends a GOG game to Playport, and only while Playport is installed", async () => {
+    backend.library = [bioshock];
+    backend.choices = [playport];
+    mount();
+    await settle();
+
+    // Nothing on an iPhone takes a GOG game without Playport.
+    expect(playButton().textContent).toContain("Unavailable");
+    expect(playButton().getAttribute("aria-disabled")).toBe("true");
+
+    // Playport installed while Orivo was in the background.
+    backend.playport = true;
+    await returnToForeground();
+    expect(playButton().textContent).toContain("Install");
+    expect(playButton().hasAttribute("aria-disabled")).toBe(false);
+
+    playButton().click();
+    await settle();
+    // Its only answer opens straight away.
+    expect(menu().hidden).toBe(true);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "gog:2022341186", choiceId: "playport" }]);
+
+    // And deleted again.
+    backend.playport = false;
+    await returnToForeground();
+    expect(playButton().getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("never asks an iPhone for an Epic launcher it cannot have", async () => {
+    backend.library = [superMeatBoy];
+    mount();
+    await settle();
+
+    // Install used to ask the Epic Games Launcher, which no iPhone has.
+    expect(playButton().textContent).toContain("Unavailable");
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+
+    backend.playport = true;
+    backend.choices = [playport];
+    await returnToForeground();
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "epic:SuperMeatBoy", choiceId: "playport" }]);
+  });
+
+  it("asks nothing about Playport on a computer", async () => {
+    backend.features = undefined;
+    backend.library = [superMeatBoy];
+    mount();
+    await settle();
+    await returnToForeground();
+
+    expect(commandArgs("is_playport_installed")).toEqual([]);
+    // A computer's Epic launcher is still the one asked to install.
+    expect(playButton().textContent).toContain("Install");
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([{ gameId: "epic:SuperMeatBoy" }]);
   });
 });
 

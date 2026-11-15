@@ -60,7 +60,10 @@ tauri = { version = "2.11.5", features = ["protocol-asset"] }
 tauri-plugin-process = "2"
 tauri-plugin-updater = "2"
 tar = "0.4"
-tokio = { version = "1", features = ["time"] }
+# `sync` is for one oneshot channel: the answer `playport.rs` brings back from
+# the main thread, where UIKit has to be asked. Tauri already builds tokio with
+# it, so this compiles nothing new.
+tokio = { version = "1", features = ["sync", "time"] }
 url = "2"
 wasmtime = { version = "=44.0.0", default-features = false, features = ["component-model", "cranelift", "runtime"] }
 tauri-plugin-opener = "2"
@@ -108,9 +111,19 @@ quiky_host = { package = "orivo-plugin-quiky-host", path = "../quiky-host/rust" 
 # own bootstrap (`v1.rs::set_credential_store`) installs a default store only on
 # macOS, Windows and Linux, so on iOS Orivo has to install one itself or every
 # `Entry::new` fails with "No default store has been set".
+#
+# `objc2`, `objc2-foundation` and `objc2-ui-kit` carry the one UIKit call Orivo
+# makes itself: `canOpenURL:`, which says whether Playport is installed
+# (`playport.rs`). Every iOS build already compiles all three, with these
+# features — tauri, wry and tao reach UIKit through them, at these versions — so
+# naming them compiles nothing new. MIT (`objc2`, `objc2-foundation`) and
+# Zlib OR Apache-2.0 OR MIT (`objc2-ui-kit`).
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1.0", features = ["protected"] }
 keyring-core = "1.0"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIApplication", "UIResponder"] }
 
 [target.'cfg(windows)'.dependencies]
 # `Win32_Foundation` is `HANDLE`, `FILETIME` and the other shared scalars that

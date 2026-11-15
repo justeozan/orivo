@@ -3349,6 +3349,7 @@ dependencies = [
  "ndk-context",
  "objc2",
  "objc2-foundation",
+ "objc2-ui-kit",
  "object 0.39.1",
  "orivo-plugin-quiky-host",
  "plist",

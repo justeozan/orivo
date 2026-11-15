@@ -37,6 +37,7 @@ pub mod plugin_manifest;
 mod plugin_registry;
 pub mod plugin_runtime;
 mod platform;
+mod playport;
 mod plugin_scheduler;
 mod plugin_update;
 mod preferences;
@@ -1231,6 +1232,7 @@ pub fn run() {
             platform::get_platform_features,
             folder_access::get_store_folder_access,
             folder_access::grant_store_folder_access,
+            playport::is_playport_installed,
             install_epic_game,
             uninstall_epic_game,
             sync_android_games,
@@ -8618,18 +8620,20 @@ async fn install_steam_game(
     })
 }
 
-/// Where an iPhone or an iPad can get a game it cannot run: its iOS version
-/// when the App Store has one, its Steam page always. See `store_choices`.
+/// Where an iPhone or an iPad can get a game it cannot run: the PC version in
+/// Playport where Playport is installed, its iOS version when the App Store
+/// has one, its Steam page always. See `store_choices`.
 ///
-/// Only Steam games have choices for now: they are the ones whose store page
-/// the catalog can name, and the ones whose button said Install and failed.
+/// A Steam game always has an answer. A GOG or Epic Games game has one only
+/// where Playport is installed: neither store publishes a page the catalog can
+/// name, so outside Playport there is nowhere to send it.
 #[tauri::command]
 async fn get_store_choices(
     game_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<store_choices::StoreChoiceView>, String> {
-    let (title, launch_target) = {
+    let (title, launch_target, playport_game) = {
         let catalog = state
             .catalog
             .read()
@@ -8639,14 +8643,32 @@ async fn get_store_choices(
             .iter()
             .find(|game| game.id == game_id)
             .ok_or_else(|| "This game is no longer in your library.".to_string())?;
-        (game.title.clone(), game.launch_target.clone())
+        (
+            game.title.clone(),
+            game.launch_target.clone(),
+            playport::game_for(game, &supported_platforms(game)),
+        )
     };
-    let LaunchTarget::Steam { app_id } = launch_target else {
+    // Asked only about a game Playport could take, and asked each time: the
+    // app can have been installed or deleted since the last menu.
+    let playport_game = match playport_game {
+        Some(game) if playport::installed(&app).await => Some(game),
+        _ => None,
+    };
+    if playport_game.is_none() && !matches!(launch_target, LaunchTarget::Steam { .. }) {
         return Ok(Vec::new());
-    };
+    }
     let region = store::store_region(&app)?;
     let http = store::ReqwestStoreHttp::new()?;
-    let choices = store_choices::choices_for_steam_game(&http, &title, app_id, &region).await;
+    let choices = store_choices::choices_for_game(
+        &http,
+        &title,
+        &launch_target,
+        &region,
+        playport_game.as_ref(),
+        &playport::COMPATIBILITY,
+    )
+    .await;
     store_choices::remember(&game_id, &choices);
     Ok(choices.iter().map(store_choices::StoreChoice::view).collect())
 }
@@ -8654,10 +8676,21 @@ async fn get_store_choices(
 /// Open the choice the menu offered. The WebView names a game and a row; the
 /// destination is the one the host built when it offered that row.
 #[tauri::command]
-fn open_store_choice(game_id: String, choice_id: String) -> Result<(), String> {
+async fn open_store_choice(
+    game_id: String,
+    choice_id: String,
+    app: AppHandle,
+) -> Result<(), String> {
     let choice = store_choices::recall(&game_id, &choice_id)
         .ok_or_else(|| "That choice is no longer available. Press Install again.".to_string())?;
-    store::open_store_url(&choice.url(), &store::SystemUrlOpener)
+    match choice.destination() {
+        store_choices::Destination::Page(url) => {
+            store::open_store_url(&url, &store::SystemUrlOpener)
+        }
+        store_choices::Destination::Playport => {
+            playport::open(playport::installed(&app).await, &store::SystemUrlOpener)
+        }
+    }
 }
 
 /// The PC a phone streams from through Moonlight, as the player named it.
