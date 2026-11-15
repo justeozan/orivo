@@ -17,6 +17,7 @@
 
 ### Changed
 
+- On Android, Orivo is now `run.evey.orivo`, the package of its Google Play record and the identifier the iPhone build already has. To Android, the APKs of 0.3.7 to 0.3.11, which were `io.orivo.desktop`, are a different app: an install of one keeps working with the library it has, and this version installs beside it rather than over it, with a library of its own. Every Android release now goes to Google Play, and the APK on GitHub is the one Google Play signs, so an install from GitHub and an install from Google Play take each other's updates.
 - The Play button is frosted glass with drifting light, takes the colour of the game's artwork, and says what it will do: Play, Stream it, Emulate it, Install, Downloading or Unavailable.
 - Games without artwork are panes of glass over one gradient instead of the Orivo ring, with their title, and say "Finding artwork" while it is looked for.
 - Titles read as titles: `the-perfect-pencil` shows as "The Perfect Pencil" and "Kena - Bridge of Spirits" as "Kena: Bridge of Spirits".
