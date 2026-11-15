@@ -809,7 +809,7 @@ describe("the setup view", () => {
 
     expect(root.querySelector(".gs-pin")!.textContent).toBe("1234");
     expect(text()).toContain("On your PC, open Sunshine (or Apollo) › PIN, type 1234 and a name.");
-    expect(text()).toContain("Your browser may warn about the certificate");
+    expect(text()).toContain("A certificate warning is expected");
     expect(text()).toContain("Waiting for your PC…");
 
     button("open-pin-page").click();

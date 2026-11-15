@@ -631,7 +631,14 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     expect(setup.hidden).toBe(false);
-    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(true);
+    // The setup opens beside the list, under the plugin's own detail, and the
+    // plugin's card says it is the one open.
+    const page = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
+    expect(page.hasAttribute("data-detail-open")).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(false);
+    expect(
+      root.querySelector("[data-plugin-card='com.orivo.gamestream']")?.classList.contains("is-selected"),
+    ).toBe(true);
     // Nothing found on this machine, so the first step is the active one.
     expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
     expect(setup.textContent).toContain("Install Moonlight");
@@ -640,7 +647,47 @@ describe("application shell against the desktop backend", () => {
     setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
     await settleAll();
     expect(setup.hidden).toBe(true);
+    expect(page.hasAttribute("data-detail-open")).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(true);
+  });
+
+  it("opens an installed plugin's detail beside the list, with Update and Uninstall", async () => {
+    backend.plugins = [
+      {
+        id: "dev.example.saves",
+        name: "Save Keeper",
+        version: "1.0.0",
+        extensions: [],
+        state: "ready",
+        message: "",
+        trusted: false,
+        rollbackTo: null,
+        rollbackTrusted: null,
+        updateTo: "1.1.0",
+      },
+    ];
+    mount();
+    await goto("#/settings/plugins");
+    await settleAll();
+
+    const card = root.querySelector<HTMLElement>("[data-plugin-card='dev.example.saves']")!;
+    // Its shelf, who made it, and the mark that says there is an update.
+    expect(card.querySelector(".plugin-pill")?.textContent).toBe("Saves");
+    expect(card.textContent).toContain("Community");
+    expect(card.querySelector(".plugin-card__flag--info")).not.toBeNull();
+
+    card.querySelector<HTMLButtonElement>(".plugin-card__open")!.click();
+    await settleAll();
+
+    const detail = root.querySelector<HTMLElement>("#plugin-managed-panel")!;
+    expect(detail.hidden).toBe(false);
+    expect(detail.querySelector("[data-plugin-update='dev.example.saves']")).not.toBeNull();
+    expect(detail.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
+    expect(detail.textContent).toContain("v1.0.0 → v1.1.0");
+    // The list and the catalogue stay where they are.
     expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
+    expect(root.querySelector("[data-plugin-card='dev.example.saves']")?.classList.contains("is-selected")).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugins-detail-empty")!.hidden).toBe(true);
   });
 
   it("shows how a finished game streaming setup stands instead of the wizard", async () => {
@@ -1997,15 +2044,13 @@ describe("the application shell on iOS", () => {
     await settle();
 
     const catalog = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
-    const row = (plugin: string) =>
-      catalog.querySelector<HTMLElement>(`[data-plugin-open='${plugin}']`)!.closest<HTMLElement>(".plugin-row")!;
     // Nothing to download, so no catalogue, no updates and no file picker.
     expect(catalog.querySelector<HTMLElement>(".plugins-group--catalog")!.hidden).toBe(true);
     // Wine starts nothing on an iPhone, and neither does any other runner.
-    expect(row("wine").hidden).toBe(true);
+    expect(catalog.querySelector("[data-plugin-card='wine']")).toBeNull();
     expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
     expect(root.querySelector<HTMLElement>("#gamestream-setup-panel")!.hidden).toBe(true);
-    expect(row("wallpaper-searcher").hidden).toBe(false);
+    expect(catalog.querySelector("[data-plugin-card='wallpaper-searcher']")).not.toBeNull();
   });
 
   it("offers the iPhone version and the Steam page beside Install", async () => {

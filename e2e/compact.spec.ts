@@ -338,13 +338,10 @@ test.describe("every route", () => {
     });
   }
 
-  test("the Third-party runners panel stays inside the screen", async ({ page }) => {
+  test("a plugin's detail stays inside the screen", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
-    // Reached with no click at all: the panel is inline with the browser.
-    await expect(page.locator("#runners-panel")).toBeVisible();
-    await expect(page.locator("#runners-panel-body")).toContainText(
-      "Install a runner plugin to add an emulator",
-    );
+    await page.locator("[data-plugin-open='wallpaper-searcher']").click();
+    await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
     const overflow = await documentOverflow(page);
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
   });
