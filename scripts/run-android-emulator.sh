@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
 AVD="${ORIVO_AVD:-Orivo_Test}"
-PKG="io.orivo.desktop"
+PKG="run.evey.orivo"
 ACTIVITY="${PKG}/.MainActivity"
 BOOT_TIMEOUT="${ORIVO_BOOT_TIMEOUT:-180}"
 APK=""

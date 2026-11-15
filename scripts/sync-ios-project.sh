@@ -10,10 +10,11 @@
 #   The bundle identifier. iOS builds are `run.evey.orivo`, the identifier of
 #   the App Store Connect record (src-tauri/tauri.ios.conf.json). A project
 #   generated before that override still says `io.orivo.desktop`, and a build
-#   carrying it uploads to no record at all. Desktop and Android keep
-#   `io.orivo.desktop`: it names the data directory and the Android package
-#   that existing installs live under, so renaming it there would hand every
-#   one of them an empty library. The sideload edition passes its own config
+#   carrying it uploads to no record at all. Android is `run.evey.orivo` too,
+#   the package of the Google Play record (src-tauri/tauri.android.conf.json).
+#   The desktop keeps `io.orivo.desktop`: it names the data directory existing
+#   installs live under, so renaming it there would hand every one of them an
+#   empty library. The sideload edition passes its own config
 #   (src-tauri/tauri.ios-sideload.conf.json, see build-ios-sideload.sh), whose
 #   identifier then wins: it is a different app, and must not be mistaken for
 #   the App Store one on a device that has both.

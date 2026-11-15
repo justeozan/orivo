@@ -31,7 +31,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
-PKG="io.orivo.desktop"
+PKG="run.evey.orivo"
 ACTIVITY="${PKG}/.MainActivity"
 SERIAL=""
 PAIR_CODE=""

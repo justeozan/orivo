@@ -42,7 +42,7 @@ describe("iOS App Store build", () => {
     expect(readJson("src-tauri/tauri.ios.conf.json").identifier).toBe("run.evey.orivo");
   });
 
-  it("keeps the identifier existing desktop and Android installs keep their data under", () => {
+  it("keeps the identifier existing desktop installs keep their data under", () => {
     expect(readJson("src-tauri/tauri.conf.json").identifier).toBe("io.orivo.desktop");
   });
 

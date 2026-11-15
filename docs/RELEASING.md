@@ -27,6 +27,9 @@ updater silently stops working. The third is optional.
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | An **empty string**. The key was generated without a password, so the secret exists but has no value. |
 | `VITE_SENTRY_DSN` | Optional. The Sentry DSN from Sentry › Settings › Projects › _project_ › Client Keys (DSN). Vite inlines it at build time, so it has to exist before the build, not after. The Rust side reads the same variable at compile time to report panics. |
 | `SENTRY_AUTH_TOKEN` | Optional. A Sentry auth token with `project:releases` and `org:read` (Settings › Auth Tokens). With it the desktop release uploads source maps for `orivo@<version>`; without it nothing changes and stack traces stay minified. |
+| `ANDROID_UPLOAD_KEYSTORE_BASE64`, `ANDROID_UPLOAD_KEYSTORE_PASSWORD`, `ANDROID_UPLOAD_KEY_ALIAS` | The Google Play upload key, base64 of the keystore, its password and its alias. Required by the Android job: Play refuses a bundle it did not sign. See [`google-play.md`](google-play.md). |
+
+The Android job also reads two repository **variables** (not secrets): `GOOGLE_PLAY_WORKLOAD_IDENTITY_PROVIDER` and `GOOGLE_PLAY_SERVICE_ACCOUNT`, which let it reach Google Play without any stored key ([`google-play.md`](google-play.md) › "The release job").
 
 With the GitHub CLI:
 
@@ -150,7 +153,7 @@ retarget the run at `v<version>`.
 | macOS (Apple Silicon + Intel, built separately) | `.dmg` | `.app.tar.gz` + `.sig` |
 | Windows | NSIS `.exe`, `.msi` | NSIS `.exe` + `.sig` |
 | Linux | `.AppImage`, `.deb`, `.rpm` | `.AppImage.tar.gz` + `.sig` |
-| Android (arm64) | `Orivo_<version>_android.apk`, `.aab` | — |
+| Android (arm64) | `Orivo_<version>_android.apk` (signed by Google Play), `.aab` | — |
 | iPhone & iPad, sideload edition | `Orivo_<version>_ios-sideload.ipa` (unsigned) + `.json` | — |
 
 Plus one `latest.json` shared by the four desktop builds.
@@ -160,14 +163,16 @@ file. The `.dmg` is the user-facing macOS installer; the `.app.tar.gz` is the
 signed updater archive, not a manual download.
 
 The Android `.apk` is a sideload download and is deliberately absent from
-`latest.json`: Tauri's updater has no Android target, and Android installs
+`latest.json`: Orivo does not update itself on Android, and Android installs
 updates by comparing signatures, not by asking a manifest. That makes the
 signing key the app's identity — the same key must sign every version or a
-device refuses the update as a different app. It lives in three repository
-secrets (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-`ANDROID_KEY_ALIAS`) and nowhere else; losing it means every user has to
-uninstall before they can install again. The `.aab` is uploaded for a possible
-Play Store listing and is not installable directly.
+device refuses the update as a different app — and since Orivo is on Google
+Play, that key is Play's. The job sends the bundle to Google Play and attaches
+the universal APK Play generates and signs from it, so an install from GitHub
+and an install from Play update each other
+([`google-play.md`](google-play.md)). The bundle itself is signed with the
+upload key; losing that one means asking Play support for a new one, not
+losing the app. The `.aab` is not installable directly.
 
 The `_ios-sideload.ipa` is the App Store app under another identifier, for
 AltStore, SideStore or Sideloadly to sign with the player's own Apple ID; the

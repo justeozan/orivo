@@ -936,7 +936,8 @@ export function resolvePrimaryAction(
   options: {
     /**
      * Whether this device asks where a game can be got instead of installing
-     * it (`platform-features.ts`): iOS, which can run no PC game.
+     * it (`platform-features.ts`): iOS and Android, where no Steam client
+     * takes a download request.
      */
     storeChoices?: boolean;
     /** Whether Playport is installed on this device (`playport.ts`). */
@@ -976,7 +977,7 @@ export function resolvePrimaryAction(
         hint: t("detail.action.playHint", { title: detail.title }),
       };
     case "install-steam": {
-      // Steam cannot install anything on an iPhone. The same word the Library
+      // Steam cannot install anything on a phone. The same word the Library
       // hero uses opens where this device can get the game instead.
       if (options.storeChoices) {
         return {
