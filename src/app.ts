@@ -20,6 +20,7 @@ import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
 import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } from "./profile";
 import { brandIcon, icon, type IconName } from "./icons";
+import { pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
 import {
   type BrowseMode,
   type BrowseSegment,
@@ -264,8 +265,13 @@ interface WineSettingsState {
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
 type PluginId = "wine" | "wallpaper-searcher" | "game-streaming";
-/** `list` shows the plugin browser; a PluginId shows one plugin's detail view. */
-type PluginView = "list" | PluginId;
+/**
+ * `list` is the browser with nothing open beside it; a PluginId opens a
+ * built-in's detail, and `plugin:<id>` the detail of one the registry
+ * installed (its version, health, update and removal).
+ */
+type PluginView = "list" | PluginId | `plugin:${string}`;
+const MANAGED_PLUGIN_VIEW = "plugin:";
 
 interface LaunchFeedback {
   gameId: string;
@@ -477,75 +483,6 @@ const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 // A launch, or the end of a session Orivo timed, changed a game's last-played
 // date or play time, which is what the Activity shelves are built from.
 const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
-
-/**
- * The Libraries tab's account button, for a plugin: one outlined slot of one
- * width whose label says the state at rest and, when `hover` is given, the
- * action under the pointer (red, because the only such action is a removal).
- */
-function pluginStateButton(options: { idle: string; hover?: string }): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "source-account-row__account plugin-state-button";
-  const name = document.createElement("span");
-  name.className = "source-account-row__account-name";
-  name.textContent = options.idle;
-  button.append(name);
-  if (options.hover) {
-    const hover = document.createElement("span");
-    hover.className = "source-account-row__account-hover";
-    hover.setAttribute("aria-hidden", "true");
-    hover.textContent = options.hover;
-    button.append(hover);
-  }
-  return button;
-}
-
-/**
- * What a plugin is for, in two words, for its row's subtitle. Plugins ship a
- * name and a sentence-long summary but nothing this short, so it is read from
- * what the plugin is, falling back on the kind of extension it provides.
- */
-function pluginPurpose(id: string, name: string, extensions: readonly string[]): string {
-  const key = `${id} ${name}`.toLocaleLowerCase();
-  if (key.includes("stream") || key.includes("moonlight")) return t("app.purpose.streaming");
-  if (key.includes("ryujinx") || key.includes("switch")) return t("app.purpose.switch");
-  if (key.includes("ppsspp") || key.includes("psp")) return t("app.purpose.psp");
-  if (key.includes("retroarch")) return t("app.purpose.retro");
-  if (key.includes("winlator") || key.includes("wine")) return t("app.purpose.windows");
-  if (key.includes("quiky")) return t("app.purpose.installs");
-  if (key.includes("wallpaper") || key.includes("artwork")) return t("app.purpose.artwork");
-  const kinds = extensions.join(" ").toLocaleLowerCase();
-  if (kinds.includes("runner")) return t("app.purpose.launcher");
-  if (kinds.includes("source") || kinds.includes("library")) return t("app.purpose.library");
-  return "";
-}
-
-/**
- * The tile a plugin row opens with. Plugins ship no icon of their own, so the
- * glyph is chosen from what the plugin is (its id, else its name).
- */
-function pluginTile(id: string, name: string): HTMLElement {
-  const key = `${id} ${name}`.toLocaleLowerCase();
-  const glyph: IconName = key.includes("wine")
-    ? "wine"
-    : key.includes("stream") || key.includes("moonlight")
-      ? "cast"
-      : key.includes("winlator") || key.includes("android")
-        ? "android"
-        : key.includes("ryujinx") || key.includes("retroarch") || key.includes("ppsspp") || key.includes("emul")
-          ? "gamepad"
-          : key.includes("wallpaper")
-            ? "landscape"
-            : key.includes("quiky") || key.includes("install")
-              ? "download"
-              : "puzzle";
-  const tile = document.createElement("span");
-  tile.className = "plugin-tile";
-  tile.setAttribute("aria-hidden", "true");
-  tile.innerHTML = icon(glyph);
-  return tile;
-}
 
 /** Glyphs for the Source row's segments that have no brand wordmark. */
 const SOURCE_GLYPHS: Readonly<Record<string, IconName>> = {
@@ -767,6 +704,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
     pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
+    pluginsCatalogGroup: get<HTMLElement>("#plugins-catalog-group"),
+    pluginsDetail: get<HTMLElement>("#plugins-detail"),
+    pluginsDetailEmpty: get<HTMLElement>("#plugins-detail-empty"),
+    pluginManagedPanel: get<HTMLElement>("#plugin-managed-panel"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
     wallpaperIgdbClientId: get<HTMLInputElement>("#wallpaper-igdb-client-id"),
@@ -2817,141 +2758,189 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
   let gamestreamSetupOpen = false;
 
-  const renderPluginCatalogRow = (entry: AvailablePluginView): HTMLElement => {
-    const row = document.createElement("div");
-    row.className = "settings-row plugin-catalog-row";
-    row.dataset.pluginRow = entry.id;
+  /** The view a registry plugin's card opens: streaming opens its own setup. */
+  const managedPluginView = (pluginId: string): PluginView =>
+    pluginId === GAMESTREAM_PLUGIN_ID && platformFeatures.localRunners
+      ? "game-streaming"
+      : `plugin:${pluginId}`;
+
+  /** The registry plugin whose detail is open beside the list, if any. */
+  const openManagedPluginId = (): string | null => {
+    if (state.pluginView === "game-streaming") return GAMESTREAM_PLUGIN_ID;
+    return state.pluginView.startsWith(MANAGED_PLUGIN_VIEW)
+      ? state.pluginView.slice(MANAGED_PLUGIN_VIEW.length)
+      : null;
+  };
+
+  /**
+   * What is wrong with an installed plugin, in a few words, or "" when
+   * nothing is. A plugin the host refused to load, one that keeps failing,
+   * and an update that did not finish all wear the same corner mark.
+   */
+  const pluginTrouble = (plugin: InstalledPluginView): string => {
+    if (plugin.state === "incompatible" || plugin.state === "invalid") return formatPluginStatus(plugin);
+    const health = pluginHealthById.get(plugin.id) ?? null;
+    if (health?.degraded) return pluginHealthSummary(health) || t("app.plugins.needsAttention");
+    const update = pluginManager.progressFor(plugin.id);
+    if (update?.phase === "failed") return update.message || t("app.plugin.updateFailed");
+    return "";
+  };
+
+  const renderPluginCatalogCard = (entry: AvailablePluginView): HTMLElement => {
     const progress = pluginManager.progressFor(entry.id);
     const busy = isPluginInstallBusy(progress);
     const installed = entry.installed || progress?.phase === "installed";
-
-    const copy = document.createElement("div");
-    copy.className = "settings-row__copy";
-    const name = document.createElement("strong");
-    name.textContent = entry.name;
-    const summary = document.createElement("small");
-    summary.textContent = [
-      entry.summary,
-      entry.version ? `v${entry.version}` : "",
-      formatPluginSize(entry.sizeBytes),
-    ]
+    const failed = progress?.phase === "failed";
+    let action: HTMLElement | null = null;
+    if (!installed) {
+      const install = document.createElement("button");
+      install.type = "button";
+      install.className = "plugin-install-button";
+      install.dataset.pluginInstall = entry.id;
+      install.disabled = busy;
+      const label = formatInstallLabel(progress, entry);
+      install.setAttribute("aria-label", `${label} ${entry.name}`);
+      install.title = label;
+      install.textContent = busy ? `${pluginPercent(progress)}%` : t("app.plugin.install");
+      action = install;
+    }
+    const view = managedPluginView(entry.id);
+    const card = pluginCard({
+      id: entry.id,
+      name: entry.name,
+      category: pluginCategory(entry.id, entry.name),
+      // While it comes in, the card's own line says how far along it is: an
+      // install that takes a minute stays legible next to what it installs.
+      lines: [
+        busy && progress ? progress.message || formatInstallLabel(progress, entry) : entry.summary,
+        t("app.plugins.official"),
+      ],
+      open: installed ? { view, label: t("app.plugins.openNamed", { name: entry.name }) } : null,
+      flag: failed
+        ? { tone: "warn", label: progress?.message || formatInstallLabel(progress, entry) }
+        : null,
+      action,
+      selected: installed && state.pluginView === view,
+      progress: busy ? pluginPercent(progress) : null,
+    });
+    card.classList.add("plugin-card--catalog");
+    card.dataset.pluginRow = entry.id;
+    card.title = [entry.summary, entry.version ? `v${entry.version}` : "", formatPluginSize(entry.sizeBytes)]
       .filter(Boolean)
       .join(" · ");
-    copy.append(name, summary);
-    if (progress) {
-      // The row's own status line, not a toast: an install that takes a minute
-      // has to stay legible next to the thing it is installing.
-      const status = document.createElement("small");
-      status.className = "plugin-catalog-row__status";
-      if (progress.phase === "failed") status.classList.add("plugin-catalog-row__status--error");
-      status.textContent = progress.message || formatInstallLabel(progress, entry);
-      copy.append(status);
-    }
+    return card;
+  };
 
-    const install = document.createElement("button");
-    install.type = "button";
-    install.className = "settings-button";
-    install.dataset.pluginInstall = entry.id;
-    install.disabled = busy || installed;
-    const label = formatInstallLabel(progress, { ...entry, installed });
-    install.setAttribute("aria-label", `${label} ${entry.name}`);
-    // The Libraries tab's button: "Install" to add it, its progress while it
-    // comes in, then the blue "Installed" a connected store wears.
-    install.className = "source-account-row__account plugin-state-button";
-    if (installed) install.classList.add("is-on");
-    const word = document.createElement("span");
-    word.className = "source-account-row__account-name";
-    word.textContent = installed
-      ? t("app.plugin.installed")
-      : busy
-        ? `${pluginPercent(progress)}%`
-        : t("app.plugin.install");
-    install.replaceChildren(word);
-    install.title = label;
-    row.append(pluginTile(entry.id, entry.name), copy, install);
+  const renderManagedPluginCard = (plugin: InstalledPluginView): HTMLElement => {
+    const trouble = pluginTrouble(plugin);
+    const update = pluginManager.progressFor(plugin.id);
+    const view = managedPluginView(plugin.id);
+    const card = pluginCard({
+      id: plugin.id,
+      name: plugin.name,
+      category: pluginCategory(plugin.id, plugin.name, plugin.extensions),
+      lines: [
+        plugin.updateTo
+          ? t("app.plugin.versionAvailable", { version: plugin.updateTo })
+          : t("app.plugin.installed"),
+        plugin.trusted ? t("app.plugins.official") : t("app.plugins.community"),
+      ],
+      open: { view, label: t("app.plugins.openNamed", { name: plugin.name }) },
+      flag: trouble
+        ? { tone: "warn", label: trouble }
+        : plugin.updateTo
+          ? { tone: "info", label: t("app.plugin.updateTo", { version: plugin.updateTo }) }
+          : null,
+      selected: state.pluginView === view,
+      progress: update?.phase === "downloading" ? pluginPercent(update) : null,
+    });
+    card.dataset.pluginManaged = plugin.id;
+    return card;
+  };
 
-    if (busy) {
-      const track = document.createElement("div");
-      track.className = "plugin-progress";
-      const bar = document.createElement("div");
-      bar.className = "plugin-progress__bar";
-      bar.style.width = `${pluginPercent(progress)}%`;
-      track.append(bar);
-      row.append(track);
-    }
+  /** A built-in's card: its detail is always one of the panels in the page. */
+  const renderBuiltInCard = (id: PluginId | "winlator", name: string, label: string): HTMLElement =>
+    pluginCard({
+      id,
+      name,
+      category: pluginCategory(id, name),
+      lines: [t("app.plugins.builtIn")],
+      open: { view: id, label },
+      selected: state.pluginView === id,
+    });
+
+  /** The header every detail panel opens with: back (narrow only), name, pill. */
+  const pluginDetailHeader = (
+    id: string,
+    name: string,
+    category: PluginCategory,
+    actions: HTMLElement[] = [],
+  ): HTMLElement => {
+    const header = document.createElement("header");
+    header.className = "plugin-detail__header";
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "plugin-back-button";
+    back.dataset.pluginBack = "";
+    back.setAttribute("aria-label", t("app.plugins.backAria"));
+    back.innerHTML = icon("chevron-left");
+    const title = document.createElement("div");
+    title.className = "plugin-detail__title";
+    const strong = document.createElement("strong");
+    strong.textContent = name;
+    title.append(strong, pluginPill(category));
+    const tools = document.createElement("div");
+    tools.className = "plugin-detail__actions";
+    tools.append(...actions);
+    header.append(back, pluginIcon(id, name, category), title, tools);
+    return header;
+  };
+
+  /** One label/value line of a detail panel. */
+  const pluginFact = (label: string, value: string | HTMLElement, tone = ""): HTMLElement => {
+    const row = document.createElement("div");
+    row.className = "plugin-fact";
+    if (tone) row.dataset.tone = tone;
+    const term = document.createElement("span");
+    term.className = "plugin-fact__label";
+    term.textContent = label;
+    const data = document.createElement("span");
+    data.className = "plugin-fact__value";
+    data.append(value);
+    row.append(term, data);
     return row;
   };
 
-  const renderInstalledPluginRow = (plugin: InstalledPluginView): HTMLElement => {
-    const row = document.createElement("div");
-    row.className = "settings-row plugin-row";
-    row.dataset.pluginManaged = plugin.id;
-
-    const copy = document.createElement("div");
-    copy.className = "settings-row__copy";
-    const name = document.createElement("strong");
-    name.textContent = plugin.name;
-    // Debug detail (version, extension points, health counts, the log and the
-    // rollback) only shows with Beta features on; the row otherwise says what
-    // the plugin is and offers what to do with it.
+  /**
+   * The detail of a plugin the registry installed: its version and where it
+   * came from, what is wrong if anything is, Update in the header the moment
+   * there is one, and removal at the bottom. Debug tools (rollback, the log)
+   * only with Beta features on.
+   */
+  const renderManagedPluginDetail = (): void => {
+    const panel = refs.pluginManagedPanel;
+    const id = openManagedPluginId();
+    const plugin = id ? pluginManager.catalog().installed.find((entry) => entry.id === id) : undefined;
+    panel.hidden = !plugin;
+    if (!plugin) {
+      panel.replaceChildren();
+      return;
+    }
     const debug = state.preferences.betaFeatures;
-    const details = document.createElement("small");
-    // The subtitle is the version, and the newer one when there is one; the
-    // Update button beside it is how to get it.
-    details.textContent =
-      [
-        pluginPurpose(plugin.id, plugin.name, plugin.extensions),
-        plugin.version ? `v${plugin.version}` : "",
-        plugin.updateTo ? t("app.plugin.versionAvailable", { version: plugin.updateTo }) : "",
-        debug ? plugin.extensions.join(", ") : "",
-        debug ? plugin.message : "",
-      ]
-        .filter(Boolean)
-        .join(" · ") || t("app.plugin.thirdParty");
-    copy.append(name, details);
-
     const health = pluginHealthById.get(plugin.id) ?? null;
-    const healthSummary = pluginHealthSummary(health);
-    if (healthSummary && (debug || health?.degraded)) {
-      const healthLine = document.createElement("small");
-      healthLine.className = "plugin-row__health";
-      if (health?.degraded) healthLine.classList.add("plugin-row__health--degraded");
-      healthLine.textContent = healthSummary;
-      copy.append(healthLine);
-    }
-
-    const status = document.createElement("span");
-    status.className = "plugin-row__state";
-    // A plugin the host refused to load must not read in the same green as one
-    // that works; the copy says so, the colour says it faster. A working one
-    // says nothing here: its button already reads "Installed".
-    if (plugin.state === "incompatible") status.classList.add("plugin-row__state--warn");
-    if (plugin.state === "invalid") status.classList.add("plugin-row__state--error");
-    const troubled = plugin.state === "incompatible" || plugin.state === "invalid";
-    status.textContent = troubled ? formatPluginStatus(plugin) : "";
-    status.hidden = !troubled;
-
-    const actions = document.createElement("div");
-    actions.className = "plugin-row__actions";
-
-    if (health?.degraded) {
-      const resume = document.createElement("button");
-      resume.type = "button";
-      resume.className = "settings-button settings-button--quiet";
-      resume.dataset.pluginResume = plugin.id;
-      resume.textContent = t("app.plugin.resume");
-      actions.append(resume);
-    }
     const updateProgress = pluginManager.progressFor(plugin.id);
     const updateBusy = isPluginInstallBusy(updateProgress);
+
+    const headerActions: HTMLElement[] = [];
     if (plugin.updateTo || updateBusy) {
-      const update = pluginStateButton({ idle: "" });
+      const update = document.createElement("button");
+      update.type = "button";
+      update.className = "plugin-install-button";
       update.dataset.pluginUpdate = plugin.id;
       // A second click while one is already running must not restart it — the
-      // controller itself ignores it too, but the button should already look
-      // like there is nothing left to click.
+      // controller ignores it too, but the button should already look done.
       update.disabled = updateBusy;
-      update.firstElementChild!.textContent = updateBusy
+      update.textContent = updateBusy
         ? updateProgress?.phase === "downloading"
           ? `${pluginPercent(updateProgress)}%`
           : t("app.plugin.updatingEllipsis")
@@ -2959,65 +2948,81 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       update.title = plugin.updateTo
         ? t("app.plugin.updateTo", { version: plugin.updateTo })
         : t("app.plugin.updating");
-      actions.append(update);
-      if (updateProgress?.phase === "failed") {
-        const failed = document.createElement("small");
-        failed.className = "plugin-row__update-error";
-        failed.textContent = updateProgress.message || t("app.plugin.updateFailed");
-        copy.append(failed);
-      }
+      headerActions.push(update);
     }
+    const category = pluginCategory(plugin.id, plugin.name, plugin.extensions);
+    const header = pluginDetailHeader(plugin.id, plugin.name, category, headerActions);
+
+    const facts = document.createElement("div");
+    facts.className = "plugin-facts";
+    facts.append(
+      pluginFact(
+        t("app.plugins.version"),
+        [plugin.version ? `v${plugin.version}` : "—", plugin.updateTo ? `→ v${plugin.updateTo}` : ""]
+          .filter(Boolean)
+          .join(" "),
+      ),
+      pluginFact(
+        t("app.plugins.source"),
+        plugin.trusted ? t("app.plugins.official") : t("app.plugins.community"),
+      ),
+    );
+    const trouble = pluginTrouble(plugin);
+    if (trouble) {
+      const value = document.createElement("span");
+      value.textContent = trouble;
+      if (health?.degraded) {
+        const resume = document.createElement("button");
+        resume.type = "button";
+        resume.className = "plugin-text-button";
+        resume.dataset.pluginResume = plugin.id;
+        resume.textContent = t("app.plugin.resume");
+        value.append(resume);
+      }
+      facts.append(pluginFact(t("app.plugins.status"), value, "warn"));
+    } else {
+      facts.append(pluginFact(t("app.plugins.status"), t("app.plugins.working"), "ok"));
+    }
+    if (debug) {
+      const summary = pluginHealthSummary(health);
+      if (summary) facts.append(pluginFact(t("app.plugins.health"), summary));
+      if (plugin.extensions.length) facts.append(pluginFact(t("app.plugins.provides"), plugin.extensions.join(", ")));
+    }
+
+    const footer = document.createElement("div");
+    footer.className = "plugin-detail__footer";
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "plugin-text-button plugin-text-button--danger";
+    remove.dataset.pluginUninstall = plugin.id;
+    remove.setAttribute("aria-label", t("app.plugin.uninstallNamed", { name: plugin.name }));
+    remove.textContent = t("app.plugin.uninstall");
+    footer.append(remove);
     if (debug && plugin.rollbackTo) {
       const rollback = document.createElement("button");
       rollback.type = "button";
-      rollback.className = "settings-button settings-button--quiet";
+      rollback.className = "plugin-text-button";
       rollback.dataset.pluginRollback = plugin.id;
       // Said in the button itself, before the click that would act on it: a
-      // rollback is allowed to put a development build back in place of a
-      // signed one, and that is not the same kind of "previous version".
+      // rollback may put a development build back in place of a signed one.
       rollback.textContent =
         plugin.rollbackTrusted === false
           ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
           : t("app.plugin.rollback", { version: plugin.rollbackTo });
-      actions.append(rollback);
+      footer.append(rollback);
     }
-
     if (debug) {
       const log = document.createElement("button");
       log.type = "button";
-      log.className = "settings-button settings-button--quiet";
+      log.className = "plugin-text-button";
       log.dataset.pluginLog = plugin.id;
       log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
       log.textContent = openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog");
-      actions.append(log);
+      footer.append(log);
     }
 
-    // The Libraries tab's button: it states the plugin is in at rest, and
-    // under the pointer offers the one thing that state is for.
-    const remove = pluginStateButton({ idle: t("app.plugin.installed"), hover: t("app.plugin.uninstall") });
-    remove.dataset.pluginUninstall = plugin.id;
-    remove.setAttribute("aria-label", t("app.plugin.uninstallNamed", { name: plugin.name }));
-    actions.append(remove);
-
-    row.append(pluginTile(plugin.id, plugin.name), copy, status, actions);
-
-    // Game streaming is set up, not just installed: the same chevron the
-    // built-in rows wear opens its guided setup.
-    if (plugin.id === GAMESTREAM_PLUGIN_ID && platformFeatures.localRunners) {
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "plugin-open-button";
-      open.dataset.pluginOpen = "game-streaming";
-      open.setAttribute("aria-label", t("app.plugin.setupStreamingAria"));
-      open.title = t("app.plugin.setup");
-      open.innerHTML = icon("chevron-right");
-      row.append(open);
-    }
-
-    if (debug && openPluginLogId === plugin.id) {
-      row.append(renderPluginLogPanel(plugin.id));
-    }
-    return row;
+    panel.replaceChildren(header, facts, footer);
+    if (debug && openPluginLogId === plugin.id) panel.append(renderPluginLogPanel(plugin.id));
   };
 
   const renderPluginLogPanel = (pluginId: string): HTMLElement => {
@@ -3160,23 +3165,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (progress.phase === "installed") void refreshLibrary();
   });
 
-  /**
-   * The Quiky row predates the registry and is discovered through its own
-   * command. Once the registry reports the same plugin, the registry wins: it
-   * is the row that can be uninstalled, and two rows for one plugin is worse
-   * than either of them alone.
-   */
-  // Third-party plugins are discovered on disk, so the Installed group is the
-  // two built-ins (Wine, Wallpaper Searcher) plus whatever the registry found.
-  // Nothing extra renders when the registry is empty: the panel then looks
-  // exactly as it did before.
+  // The list beside the detail: the built-ins first, then whatever the
+  // registry installed. Re-rendered whole: a card is cheap, and its selected
+  // state follows the open view.
   const renderDiscoveredPlugins = (): void => {
-    for (const stale of refs.pluginsInstalledList.querySelectorAll("[data-plugin-managed]")) {
-      stale.remove();
+    const winlator = isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
+    const cards: HTMLElement[] = [];
+    // Wine is the desktop's built-in runner; a phone has Winlator instead.
+    if (platformFeatures.localRunners && !winlator) {
+      cards.push(renderBuiltInCard("wine", "Wine", t("app.plugins.openWine")));
     }
+    cards.push(renderBuiltInCard("wallpaper-searcher", "Wallpaper Searcher", t("app.plugins.openWallpaper")));
+    // On Android, Winlator is the runner Orivo ships with: it is set up where
+    // its games come from, under Libraries.
+    if (winlator) cards.push(renderBuiltInCard("winlator", "Winlator", t("app.plugins.setupWinlator")));
     const installed = pluginManager.catalog().installed;
-    const rows = installed.map(renderInstalledPluginRow);
-    refs.pluginsInstalledList.append(...rows);
+    cards.push(...installed.map(renderManagedPluginCard));
+    refs.pluginsInstalledList.replaceChildren(...cards);
+    renderManagedPluginDetail();
 
     const ids = installed.map((plugin) => plugin.id);
     if (ids.join(",") !== pluginHealthIdsKey) {
@@ -3186,11 +3192,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   /**
    * What Orivo is being built towards, named rather than promised in a
-   * changelog. A row marked "Soon" is an honest roadmap entry — honest right
+   * changelog. A card marked "Soon" is an honest roadmap entry — honest right
    * up until the registry can offer the real thing: the day a version is
-   * downloadable, its own catalogue row takes the rail with a working Install
-   * button, and this entry steps aside rather than showing the same plugin
-   * twice (`ids` names the ones whose registry id is already decided).
+   * downloadable, its own catalogue card takes the place with a working
+   * Install button, and this entry steps aside rather than showing the same
+   * plugin twice (`ids` names the ones whose registry id is already decided).
    */
   const COMING_SOON_PLUGINS: ReadonlyArray<{
     name: string;
@@ -3210,7 +3216,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const renderComingSoonPlugins = (term: string): HTMLElement[] => {
     // The registry is the present tense of these promises: whatever it
     // already offers — by id, or simply by carrying the same name — renders
-    // as a real catalogue row elsewhere in this list, so the teaser goes.
+    // as a real catalogue card, so the teaser goes.
     const offered = pluginManager.catalog();
     const knownIds = new Set(
       [...offered.available, ...offered.installed].map((plugin) => plugin.id.toLocaleLowerCase()),
@@ -3229,37 +3235,76 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
       )
       .map((entry) => {
-        const row = document.createElement("div");
+        const soon = document.createElement("span");
+        soon.className = "plugin-soon";
+        soon.textContent = t("app.soon.badge");
+        const card = pluginCard({
+          id: entry.name,
+          name: entry.name,
+          category: pluginCategory(entry.ids?.[0] ?? "", entry.name),
+          lines: [entry.summary],
+          action: soon,
+        });
         // A plugin that does not exist yet is a promise, not a control: it
         // only shows with Beta features on.
-        row.className = "settings-row plugin-row plugin-row--soon plugins-debug-only";
-        const copy = document.createElement("div");
-        copy.className = "settings-row__copy";
-        const name = document.createElement("strong");
-        name.textContent = entry.name;
-        const summary = document.createElement("small");
-        summary.textContent = entry.summary;
-        copy.append(name, summary);
-        const state = document.createElement("span");
-        state.className = "plugin-row__state plugin-row__state--soon";
-        state.textContent = t("app.soon.badge");
-        row.append(pluginTile(entry.name, entry.name), copy, state);
-        return row;
+        card.classList.add("plugin-card--catalog", "plugin-card--soon", "plugins-debug-only");
+        return card;
       });
   };
 
+  /**
+   * The detail column changes content, never place: whichever panel comes in
+   * rises a few pixels into place, once per change of plugin, and not at all
+   * under reduced motion (the stylesheet drops the animation there).
+   */
+  let shownPluginView: PluginView = "list";
+  const playPluginDetailEntrance = (): void => {
+    const panels = [...refs.pluginsDetail.children].filter(
+      (child): child is HTMLElement => child instanceof HTMLElement && !child.hidden,
+    );
+    panels.forEach((panel, index) => {
+      panel.classList.remove("is-entering");
+      // Read layout once so the class removed above restarts the animation.
+      void panel.offsetWidth;
+      panel.style.setProperty("--enter-delay", `${index * 50}ms`);
+      panel.classList.add("is-entering");
+      panel.addEventListener("animationend", () => panel.classList.remove("is-entering"), {
+        once: true,
+      });
+    });
+  };
+
+  // The runner profiles live inside the detail of the plugin that provides
+  // them; the panel renders every runner, so the other groups are hidden.
+  const filterRunnerGroups = (): void => {
+    const only = refs.runnersPanel.dataset.plugin ?? "";
+    for (const group of refs.runnersPanelBody.querySelectorAll<HTMLElement>("[data-runner-plugin]")) {
+      group.hidden = Boolean(only) && group.dataset.runnerPlugin !== only;
+    }
+  };
+  new MutationObserver(filterRunnerGroups).observe(refs.runnersPanelBody, { childList: true });
+
   const renderPluginList = (): void => {
-    const showList = state.pluginView === "list";
+    const installed = pluginManager.catalog().installed;
+    // A plugin removed while its detail was open leaves nothing to show.
+    const managedId = openManagedPluginId();
+    if (
+      state.pluginView.startsWith(MANAGED_PLUGIN_VIEW) &&
+      !installed.some((plugin) => plugin.id === managedId)
+    ) {
+      state.pluginView = "list";
+    }
+    const view = state.pluginView;
     renderDiscoveredPlugins();
-    refs.pluginsCatalogPanel.hidden = !showList;
-    refs.wallpaperPluginPanel.hidden = state.pluginView !== "wallpaper-searcher";
-    refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
-    refs.gamestreamSetupPanel.hidden =
-      state.pluginView !== "game-streaming" || !platformFeatures.localRunners;
+    refs.pluginsCatalogPanel.toggleAttribute("data-detail-open", view !== "list");
+    refs.pluginsDetailEmpty.hidden = view !== "list";
+    refs.wallpaperPluginPanel.hidden = view !== "wallpaper-searcher";
+    refs.wineSettingsPanel.hidden = view !== "wine";
+    refs.gamestreamSetupPanel.hidden = view !== "game-streaming" || !platformFeatures.localRunners;
     // The setup reads the PC and the plugin when it is opened and stops its
     // pairing watch when it is left, whichever way that happens: the back
-    // button, another section, or leaving Settings.
-    const settingUp = state.pluginView === "game-streaming" && platformFeatures.localRunners;
+    // button, another plugin, another section, or leaving Settings.
+    const settingUp = view === "game-streaming" && platformFeatures.localRunners;
     if (settingUp && !gamestreamSetupOpen) {
       gamestreamSetupOpen = true;
       void gamestreamSetup.open();
@@ -3267,24 +3312,20 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       gamestreamSetupOpen = false;
       gamestreamSetup.close();
     }
+    const managed = installed.find((plugin) => plugin.id === openManagedPluginId());
+    const runs = Boolean(managed?.extensions.some((kind) => kind.toLocaleLowerCase().includes("runner")));
+    // Streaming is a runner too, but it is set up by its own guided steps.
+    refs.runnersPanel.hidden = !platformFeatures.localRunners || !runs || view === "game-streaming";
+    refs.runnersPanel.dataset.plugin = managed?.id ?? "";
+    filterRunnerGroups();
+    if (view !== shownPluginView) {
+      shownPluginView = view;
+      playPluginDetailEntrance();
+    }
+
     // An iOS build downloads no code and starts no game itself, so what is left
     // of the section there is what is built in and works: the wallpaper search.
-    const catalogGroup = refs.pluginsCatalogPanel.querySelector<HTMLElement>(".plugins-group--catalog");
-    if (catalogGroup) catalogGroup.hidden = !platformFeatures.downloadablePlugins;
-    const wineRow = refs.pluginsCatalogPanel
-      .querySelector<HTMLElement>("[data-plugin-open='wine']")
-      ?.closest<HTMLElement>(".plugin-row");
-    // Wine is the desktop's built-in runner; a phone has Winlator instead.
-    if (wineRow) {
-      wineRow.hidden =
-        !platformFeatures.localRunners ||
-        isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
-    }
-    // The runners panel is not a plugin's detail view: it belongs to the
-    // section by name, so it sits inline with the browser and is replaced by
-    // whichever detail view opens, exactly like the browser itself.
-    refs.runnersPanel.hidden = !showList || !platformFeatures.localRunners;
-    if (!showList) return;
+    refs.pluginsCatalogGroup.hidden = !platformFeatures.downloadablePlugins;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
     refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
@@ -3293,7 +3334,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
     );
     const soon = renderComingSoonPlugins(term);
-    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogRow), ...soon);
+    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogCard), ...soon);
     refs.pluginsCatalogEmpty.hidden = matches.length + soon.length > 0;
     // An empty registry and a search that matched nothing are different
     // problems, and telling the user to refine a search they never typed is
@@ -3338,7 +3379,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
   };
 
-  const openPluginDetail = (id: PluginId): void => {
+  const openPluginDetail = (id: PluginView): void => {
     state.pluginView = id;
     renderPluginList();
     renderWineSettingsPanel();
@@ -3439,12 +3480,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         warning.className = "wine-profile-card__warning";
         warning.textContent = t("app.wine.experimental");
         card.append(warning);
-      } else {
-        const dxvkHint = document.createElement("p");
-        dxvkHint.className = "wine-profile-card__hint";
-        dxvkHint.textContent =
-          t("app.wine.autoCompat");
-        card.append(dxvkHint);
       }
 
       const lastImport = document.createElement("p");
@@ -5587,7 +5622,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           // arrives with its controls already sitting on screen. The
           // stylesheet animates the same list; blocks that land after this
           // runs still take the path because its selectors are classes too.
-          ".settings-row, .provider-status-row, .settings-group__label, .settings-hint, .settings-card__header, .settings-choices, .plugins-group__label, .plugins-group__action, .plugins-search, .credentials-form, .settings-attributions",
+          ".settings-row, .provider-status-row, .settings-group__label, .settings-hint, .settings-card__header, .settings-choices, .plugins-group__title, .plugin-card, .plugins-detail, .plugins-group__action, .plugins-search, .credentials-form, .settings-attributions",
         ),
       );
       const first = enteringPage ? 120 : 80;
@@ -6901,8 +6936,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const target = event.target as Element | null;
 
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
-    if (pluginId === "wine" || pluginId === "wallpaper-searcher" || pluginId === "game-streaming") {
-      openPluginDetail(pluginId);
+    if (
+      pluginId === "wine" ||
+      pluginId === "wallpaper-searcher" ||
+      pluginId === "game-streaming" ||
+      pluginId?.startsWith(MANAGED_PLUGIN_VIEW)
+    ) {
+      openPluginDetail(pluginId as PluginView);
       return;
     }
     if (pluginId === "winlator") {
@@ -8610,171 +8650,131 @@ function shell(): string {
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
               <!-- No card header: the page title already says "Plugins &
-                   Runners", and the two groups below name themselves. -->
-              <section id="plugins-catalog-panel" class="settings-card" data-settings-searchable>
-                <div class="plugins-group">
-                  <p class="plugins-group__label">${t("app.plugin.installed")}</p>
-                  <div id="plugins-installed-list" class="plugins-group__list">
-                    <div class="settings-row plugin-row">
-                      <span class="plugin-tile" aria-hidden="true">${icon("wine")}</span>
-                      <div class="settings-row__copy">
-                        <strong>Wine</strong>
-                        <small>${t("app.plugins.wineSummary")}</small>
-                      </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wine" aria-label="${t("app.plugins.openWine")}">${icon("chevron-right")}</button>
+                   Runners". The plugins Orivo has sit on the left and open
+                   their detail on the right; the catalogue runs underneath. -->
+              <section id="plugins-catalog-panel" class="plugins-page" data-settings-searchable>
+                <div class="plugins-split">
+                  <div id="plugins-installed-list" class="plugins-mine" aria-label="${t("app.plugin.installed")}"></div>
+                  <div id="plugins-detail" class="plugins-detail">
+                    <div id="plugins-detail-empty" class="plugins-detail__empty">
+                      <span class="plugins-detail__empty-mark" aria-hidden="true">${icon("puzzle")}</span>
+                      <span>${t("app.plugins.pickOne")}</span>
                     </div>
-                    <div class="settings-row plugin-row">
-                      <span class="plugin-tile" aria-hidden="true">${icon("landscape")}</span>
-                      <div class="settings-row__copy">
-                        <strong>Wallpaper Searcher</strong>
-                        <small>${t("app.plugins.wallpaperSummary")}</small>
+
+                    <section id="wallpaper-plugin-panel" class="plugin-detail" aria-labelledby="wallpaper-plugin-title" hidden>
+                      <header class="plugin-detail__header">
+                        <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
+                        <span class="plugin-icon" data-category="visuals" aria-hidden="true">${icon("landscape")}</span>
+                        <div class="plugin-detail__title">
+                          <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
+                          <span class="plugin-pill" data-category="visuals">${t("app.pluginCategory.visuals")}</span>
+                        </div>
+                        <div class="plugin-detail__actions">
+                          <button id="wallpaper-credentials-save" type="button" class="plugin-install-button">${t("app.common.save")}</button>
+                        </div>
+                      </header>
+                      <!-- One line per source: its name, whether it is ready,
+                           and the key it needs. What each one brings is in
+                           the tooltip, not in a paragraph. -->
+                      <div class="plugin-fields ws-sources">
+                        <div class="plugin-field ws-source" title="${t("app.wallpaper.freeSources")}">
+                          <span class="plugin-field__label">Steam · Wikimedia · Openverse</span>
+                          <span class="ws-pill ws-pill--on">${t("app.wallpaper.ready")}</span>
+                        </div>
+                        <div class="plugin-field ws-source ws-source--recommended" title="${t("app.wallpaper.sgdbBody")}">
+                          <span class="plugin-field__label">SteamGridDB</span>
+                          <span class="ws-pill" data-ws-status="steamgriddb"></span>
+                          <div class="plugin-field__inputs">
+                            <input id="wallpaper-steamgriddb-api-key" class="plugin-input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.sgdbKeyAria")}" />
+                          </div>
+                        </div>
+                        <div class="plugin-field ws-source" title="${t("app.wallpaper.igdbBody")}">
+                          <span class="plugin-field__label">IGDB</span>
+                          <span class="ws-pill" data-ws-status="igdb"></span>
+                          <div class="plugin-field__inputs">
+                            <input id="wallpaper-igdb-client-id" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientId")}" aria-label="${t("app.wallpaper.igdbIdAria")}" />
+                            <input id="wallpaper-igdb-client-secret" class="plugin-input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientSecret")}" aria-label="${t("app.wallpaper.igdbSecretAria")}" />
+                          </div>
+                        </div>
+                        <div class="plugin-field ws-source" title="${t("app.wallpaper.googleBody")}">
+                          <span class="plugin-field__label">Google Images</span>
+                          <span class="ws-pill" data-ws-status="google"></span>
+                          <div class="plugin-field__inputs">
+                            <input id="wallpaper-google-api-key" class="plugin-input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.googleKeyAria")}" />
+                            <input id="wallpaper-google-cse-id" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.engineId")}" aria-label="${t("app.wallpaper.googleEngineAria")}" />
+                          </div>
+                        </div>
                       </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="wallpaper-searcher" aria-label="${t("app.plugins.openWallpaper")}">${icon("chevron-right")}</button>
-                    </div>
-                    ${
-                      isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent)
-                        ? `<!-- On Android, Winlator is the runner Orivo ships with: it
-                             is set up where its games come from, under Libraries. -->
-                    <div class="settings-row plugin-row">
-                      <span class="plugin-tile" aria-hidden="true">${icon("android")}</span>
-                      <div class="settings-row__copy">
-                        <strong>Winlator</strong>
-                        <small>${t("app.plugins.winlatorSummary")}</small>
-                      </div>
-                      <span class="source-account-row__account plugin-state-button is-on is-static">${t("app.plugins.builtIn")}</span>
-                      <button type="button" class="plugin-open-button" data-plugin-open="winlator" aria-label="${t("app.plugins.setupWinlator")}">${icon("chevron-right")}</button>
-                    </div>`
-                        : ""
-                    }
-                    <!-- Third-party runners has no row here on purpose: it is
-                         not a plugin but part of Orivo itself, and the section
-                         it belongs to is already named after it — the panel
-                         below renders inline with the browser. -->
+                      <details class="plugin-more ws-advanced">
+                        <summary>${t("app.wallpaper.advancedShort")}</summary>
+                        <div class="plugin-more__grid ws-advanced__grid">
+                          <label>${t("app.wallpaper.termCover")}<input id="wallpaper-search-term-cover" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' /></label>
+                          <label>${t("app.wallpaper.termKeyArt")}<input id="wallpaper-search-term-landscape" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' /></label>
+                          <label>${t("app.wallpaper.termBackground")}<input id="wallpaper-search-term-background" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' /></label>
+                          <label>${t("app.wallpaper.termLogo")}<input id="wallpaper-search-term-logo" class="plugin-input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' /></label>
+                        </div>
+                      </details>
+                    </section>
+
+                    <section id="wine-settings-panel" class="plugin-detail" aria-labelledby="wine-settings-title" hidden>
+                      <header class="plugin-detail__header">
+                        <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
+                        <span class="plugin-icon plugin-icon--logo" data-category="compatibility" aria-hidden="true"><img src="/media/plugins/wine.png" alt="" decoding="async" draggable="false" /></span>
+                        <div class="plugin-detail__title">
+                          <strong id="wine-settings-title">Wine</strong>
+                          <span class="plugin-pill" data-category="compatibility">${t("app.pluginCategory.compatibility")}</span>
+                        </div>
+                        <div class="plugin-detail__actions"></div>
+                      </header>
+                      <div id="wine-settings-body" class="wine-settings-body"></div>
+                    </section>
+
+                    <!-- A registry plugin's detail (plugin-managed): version,
+                         source, status, Update and Uninstall. Game streaming
+                         adds its guided setup right under it. -->
+                    <section id="plugin-managed-panel" class="plugin-detail" hidden></section>
+
+                    <section id="gamestream-setup-panel" class="plugin-detail plugin-detail--setup" aria-labelledby="gamestream-setup-title" hidden>
+                      <header class="plugin-detail__header">
+                        <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
+                        <span class="plugin-icon plugin-icon--logo" data-category="streaming" aria-hidden="true"><img src="/media/plugins/moonlight.png" alt="" decoding="async" draggable="false" /></span>
+                        <div class="plugin-detail__title">
+                          <strong id="gamestream-setup-title">${t("app.purpose.streaming")}</strong>
+                          <span class="plugin-pill" data-category="streaming">${t("app.pluginCategory.streaming")}</span>
+                        </div>
+                        <div class="plugin-detail__actions"></div>
+                      </header>
+                      <div id="gamestream-setup-body"></div>
+                    </section>
+
+                    <!-- Runner profiles ("Add an emulator") open inside the
+                         detail of the plugin that provides the runner. -->
+                    <section id="runners-panel" class="plugin-detail plugin-detail--runners" aria-labelledby="runners-panel-title" hidden>
+                      <p id="runners-panel-title" class="plugin-detail__section">${t("app.plugins.profiles")}</p>
+                      <div id="runners-panel-body"></div>
+                    </section>
                   </div>
                 </div>
 
-                <div class="plugins-group plugins-group--catalog">
+                <div id="plugins-catalog-group" class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
-                    <p class="plugins-group__label">${t("app.plugins.available")}</p>
+                    <h2 class="plugins-group__title">${t("app.plugins.catalogue")}</h2>
                     <div class="plugins-group__header-actions">
                       <label class="plugins-automatic-updates">
                         <input id="plugins-automatic-updates" type="checkbox" />
                         <span>${t("app.plugins.autoUpdates")}</span>
                       </label>
-                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry>${icon("refresh")}<span>${t("app.update.check")}</span></button>
-                      <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file>${icon("folder")}<span>${t("app.plugins.installFile")}</span></button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry title="${t("app.plugins.refresh")}" aria-label="${t("app.plugins.refresh")}">${icon("refresh")}</button>
+                      <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file title="${t("app.plugins.installFile")}" aria-label="${t("app.plugins.installFile")}">${icon("folder")}</button>
                     </div>
                   </div>
                   <label class="plugins-search">
                     ${icon("search")}
                     <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
                   </label>
-                  <div id="plugins-catalog-list" class="plugins-group__list"></div>
+                  <div id="plugins-catalog-list" class="plugins-catalog"></div>
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>
-              </section>
-
-              <section id="wallpaper-plugin-panel" class="settings-card" aria-labelledby="wallpaper-plugin-title" hidden>
-                <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
-                  <div class="settings-card__copy">
-                    <strong id="wallpaper-plugin-title">Wallpaper Searcher</strong>
-                    <small>${t("app.wallpaper.intro")}</small>
-                  </div>
-                </header>
-                <!-- One block per source: what it brings, what it needs, and
-                     whether it is ready. Keyword tuning is tucked away. -->
-                <div class="ws-sources">
-                  <div class="ws-source">
-                    <div class="ws-source__head">
-                      <strong>Steam, Wikimedia Commons, Openverse</strong>
-                      <span class="ws-pill ws-pill--on">${t("app.wallpaper.ready")}</span>
-                    </div>
-                    <small>${t("app.wallpaper.freeSources")}</small>
-                  </div>
-                  <div class="ws-source ws-source--recommended">
-                    <div class="ws-source__head">
-                      <strong>SteamGridDB</strong>
-                      <span class="ws-pill" data-ws-status="steamgriddb"></span>
-                    </div>
-                    <small>${t("app.wallpaper.sgdbBody")}</small>
-                    <input id="wallpaper-steamgriddb-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.sgdbKeyAria")}" />
-                  </div>
-                  <div class="ws-source">
-                    <div class="ws-source__head">
-                      <strong>IGDB</strong>
-                      <span class="ws-pill" data-ws-status="igdb"></span>
-                    </div>
-                    <small>${t("app.wallpaper.igdbBody")}</small>
-                    <div class="ws-source__pair">
-                      <input id="wallpaper-igdb-client-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientId")}" aria-label="${t("app.wallpaper.igdbIdAria")}" />
-                      <input id="wallpaper-igdb-client-secret" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.clientSecret")}" aria-label="${t("app.wallpaper.igdbSecretAria")}" />
-                    </div>
-                  </div>
-                  <div class="ws-source">
-                    <div class="ws-source__head">
-                      <strong>Google Images</strong>
-                      <span class="ws-pill" data-ws-status="google"></span>
-                    </div>
-                    <small>${t("app.wallpaper.googleBody")}</small>
-                    <div class="ws-source__pair">
-                      <input id="wallpaper-google-api-key" class="credentials-form__input" type="password" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.apiKey")}" aria-label="${t("app.wallpaper.googleKeyAria")}" />
-                      <input id="wallpaper-google-cse-id" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder="${t("app.wallpaper.engineId")}" aria-label="${t("app.wallpaper.googleEngineAria")}" />
-                    </div>
-                  </div>
-                </div>
-                <details class="ws-advanced">
-                  <summary>${t("app.wallpaper.advanced")}</summary>
-                  <small>${t("app.wallpaper.advancedBody")}</small>
-                  <div class="ws-advanced__grid">
-                    <label>${t("app.wallpaper.termCover")}<input id="wallpaper-search-term-cover" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" box art cover' /></label>
-                    <label>${t("app.wallpaper.termKeyArt")}<input id="wallpaper-search-term-landscape" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" key art' /></label>
-                    <label>${t("app.wallpaper.termBackground")}<input id="wallpaper-search-term-background" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" wallpaper' /></label>
-                    <label>${t("app.wallpaper.termLogo")}<input id="wallpaper-search-term-logo" class="credentials-form__input" type="text" autocomplete="off" spellcheck="false" placeholder='"{name}" logo transparent' /></label>
-                  </div>
-                </details>
-                <div class="ws-actions">
-                  <button id="wallpaper-credentials-save" type="button" class="settings-button">${t("app.wallpaper.save")}</button>
-                  <small>${t("app.wallpaper.applied")}</small>
-                </div>
-              </section>
-
-              <section id="runners-panel" class="settings-card" aria-labelledby="runners-panel-title" data-settings-searchable hidden>
-                <header class="settings-card__header">
-                  <span class="settings-card__mark" aria-hidden="true">${icon("gamepad")}</span>
-                  <div class="settings-card__copy">
-                    <strong id="runners-panel-title">${t("app.runners.title")}</strong>
-                    <small>${t("app.runners.hint")}</small>
-                  </div>
-                </header>
-                <div id="runners-panel-body"></div>
-              </section>
-
-              <!-- Game streaming has one place: the guided setup behind its
-                   plugin's row. It is a detail view like Wine's, so it is
-                   hidden until that row's chevron opens it. -->
-              <section id="gamestream-setup-panel" class="settings-card" aria-labelledby="gamestream-setup-title" hidden>
-                <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
-                  <div class="settings-card__copy">
-                    <strong id="gamestream-setup-title">${t("app.purpose.streaming")}</strong>
-                    <small>${t("app.gamestream.hint")}</small>
-                  </div>
-                </header>
-                <div id="gamestream-setup-body"></div>
-              </section>
-
-              <section id="wine-settings-panel" class="settings-card" aria-labelledby="wine-settings-title" hidden>
-                <header class="settings-card__header">
-                  <button type="button" class="settings-button settings-button--quiet plugin-back-button" data-plugin-back>${t("app.plugins.back")}</button>
-                  <div class="settings-card__copy">
-                    <strong id="wine-settings-title">Wine-Staging</strong>
-                    <small>${t("app.wine.hint")}</small>
-                  </div>
-                </header>
-                <div id="wine-settings-body" class="wine-settings-body"></div>
               </section>
             </section>
 
