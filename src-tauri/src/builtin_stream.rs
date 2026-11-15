@@ -478,13 +478,69 @@ fn pair_with(
                 "Your gaming PC did not say who it is. Update Sunshine and try again.".into(),
             )
         })?;
-    let (_, saved) =
-        session::pair_and_save(host, device_name, pin, PAIRING_WAIT).map_err(|error| {
-            // The detail is for the log; the person gets a sentence.
-            eprintln!("orivo: built-in streaming pairing with {host} failed: {error}");
-            BuiltinStreamError::Refused(pairing_failure(&error.to_string()))
-        })?;
+    let saved = pair_and_save(host, device_name, pin, PAIRING_WAIT).map_err(|error| {
+        // The detail is for the log; the person gets a sentence.
+        eprintln!("orivo: built-in streaming pairing with {host} failed: {error}");
+        BuiltinStreamError::Refused(pairing_failure(&error.to_string()))
+    })?;
     Ok((host_id, saved))
+}
+
+/// Starfire's `session::pair_and_save`, with one tolerance: Apollo registers
+/// the client and then drops the connection on the fourth step
+/// (`clientpairingsecret`), so the answer never arrives. That reset is not a
+/// verdict. The fifth step, over the certificate the host now trusts, is: it
+/// only succeeds if the host really took the client.
+fn pair_and_save(
+    host: &str,
+    device_name: &str,
+    pin: &str,
+    pin_wait: Duration,
+) -> starfire_core::Result<SavedPairing> {
+    use starfire_core::{
+        https::{cert_pem_to_der, HttpsClient},
+        pairing::{
+            crypto::{aes_ecb_decrypt, pin_key, random_bytes},
+            PairingClient,
+        },
+        Error,
+    };
+
+    let identity = ClientIdentity::generate(device_name)?;
+    let (cert, key) = (identity.cert_pem.clone(), identity.key_pem.clone());
+    let mut client = PairingClient::new(host, discovery::DEFAULT_HTTP_PORT, identity);
+    client.timeout = pin_wait;
+
+    let salt = random_bytes::<16>()?;
+    // Step 1 blocks until the PIN is typed on the host.
+    let host_cert = client.get_server_cert(&salt)?;
+    let key_from_pin = pin_key(&salt, pin);
+    let answer = client.client_challenge(&key_from_pin, &random_bytes::<16>()?)?;
+    let decrypted = aes_ecb_decrypt(&key_from_pin, &answer);
+    if decrypted.len() < 48 {
+        return Err(Error::Protocol(format!(
+            "challengeresponse too short: {} bytes (want 48)",
+            decrypted.len()
+        )));
+    }
+    let mut server_challenge = [0u8; 16];
+    server_challenge.copy_from_slice(&decrypted[32..48]);
+    let secret = random_bytes::<16>()?;
+    client.server_challenge_resp(&key_from_pin, &server_challenge, &secret)?;
+    match client.client_pairing_secret(&secret) {
+        Ok(()) => {}
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+            eprintln!("orivo: the host dropped the connection after the pairing secret; checking with the trusted certificate");
+        }
+        Err(error) => return Err(error),
+    }
+
+    let https = HttpsClient::new(&cert, &key, Some(cert_pem_to_der(&host_cert)?))?;
+    client.pair_challenge(&https, 47984)?;
+    Ok(SavedPairing {
+        identity: client.identity,
+        host_cert_pem: host_cert,
+    })
 }
 
 /// Starfire's errors are for logs. Say what happened in the person's terms.
