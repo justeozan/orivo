@@ -17,6 +17,7 @@ import { WALLPAPER_CATEGORIES } from "./contracts";
 import { displayTitle } from "./game-title";
 import { backgroundMedia } from "./media-role";
 import type { IconName } from "./icons";
+import { playportTakes } from "./playport";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
@@ -230,7 +231,11 @@ export interface GameDetailFact {
 }
 
 export interface PrimaryActionDescriptor {
-  kind: GameDetailPrimaryAction;
+  /**
+   * The host's action, or `store-choices` where the page makes one the host
+   * left unavailable: a GOG or Epic game on iOS, while Playport is installed.
+   */
+  kind: GameDetailPrimaryAction | "store-choices";
   label: string;
   /**
    * 0-100 while a download runs. The button fills to this, which is why the
@@ -934,6 +939,8 @@ export function resolvePrimaryAction(
      * it (`platform-features.ts`): iOS, which can run no PC game.
      */
     storeChoices?: boolean;
+    /** Whether Playport is installed on this device (`playport.ts`). */
+    playport?: boolean;
   } = {},
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
@@ -1058,6 +1065,19 @@ export function resolvePrimaryAction(
       };
     }
     case "unavailable":
+      // A GOG or Epic game has nowhere to go on an iPhone — unless Playport is
+      // there to take it, and then the host's menu has that one answer.
+      if (options.storeChoices && options.playport && playportTakes(detail)) {
+        return {
+          ...base,
+          kind: "store-choices",
+          label: t("detail.action.install"),
+          icon: "download",
+          intent: "store-choices",
+          disabled: false,
+          hint: t("detail.action.storeChoicesHint", { title: detail.title }),
+        };
+      }
       return base;
   }
 }

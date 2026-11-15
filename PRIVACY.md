@@ -1,6 +1,6 @@
 # Orivo Privacy Policy
 
-_Last updated: October 12, 2026_
+_Last updated: November 15, 2026_
 
 Orivo is a game library made by Ozan Sahin. It brings the games you own on
 other stores together in one place. This page explains what Orivo does with
@@ -37,6 +37,11 @@ added your own keys, from IGDB, SteamGridDB and Google image search: titles,
 descriptions, artwork and prices. Like any web request, these services see
 your device's IP address. Orivo sends them game names or store identifiers,
 not your personal information.
+
+On an iPhone or an iPad where [Playport](https://playport.dev) is installed,
+Orivo also downloads Playport's public compatibility list from playport.dev, to
+say whether a game runs in it. That request carries nothing about you or your
+library, and opening Playport passes it nothing either.
 
 ## Crash reports and feedback
 

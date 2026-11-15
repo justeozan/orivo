@@ -262,6 +262,11 @@ export interface GameDetailPageOptions {
    * follows the shell as soon as it has learned what the platform is.
    */
   storeChoices?(): StoreChoicesClient | null;
+  /**
+   * Whether Playport is installed (`playport.ts`), which is what gives a GOG
+   * or Epic game somewhere to go where Install asks. Asked each time too.
+   */
+  playportInstalled?(): boolean;
   client?: GameDetailPageClient;
 }
 
@@ -703,6 +708,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   const storeChoicesClient = (): StoreChoicesClient | null => options.storeChoices?.() ?? null;
+  /** What the device lets Install do, read afresh for every resolution. */
+  const actionOptions = () => ({
+    storeChoices: storeChoicesClient() !== null,
+    playport: options.playportInstalled?.() ?? false,
+  });
 
   /**
    * Install on a device that installs nothing: open the one place the host
@@ -749,9 +759,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId) return;
-    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent, {
-      storeChoices: storeChoicesClient() !== null,
-    });
+    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent, actionOptions());
     if (action.disabled) return;
     if (action.intent === "store-choices") {
       const choicesClient = storeChoicesClient();
@@ -1253,7 +1261,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       detail,
       state.gameId,
       epicProgressPercent,
-      { storeChoices: storeChoicesClient() !== null },
+      actionOptions(),
     );
     const button = element(
       "button",

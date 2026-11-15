@@ -180,6 +180,7 @@ import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
 import { createStoreChoicesClient, fillStoreChoiceMenu, type StoreChoice } from "./store-choices";
+import { loadPlayportInstalled, playportTakes } from "./playport";
 import {
   NAV_STEP_EVENT,
   composedTarget,
@@ -584,6 +585,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // The games folders the host watches, by name and opaque id only.
   let gameFolders: GameFolderView[] = [];
   const storeChoices = createStoreChoicesClient();
+  /**
+   * Whether Playport is installed (`playport.ts`). Only iOS asks, and it asks
+   * again each time Orivo comes back to the front.
+   */
+  let playportInstalled = false;
   const state: State = {
     // Deliberately empty until the first load answers. Seeding the showcase
     // games here meant a real library flashed ten games it does not own, and
@@ -1812,6 +1818,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   /**
+   * Whether Install asks the host where this game can be got rather than
+   * asking a store's client to download it: on iOS, a Steam game always — its
+   * Steam page is there — and a GOG or Epic game while Playport is installed
+   * to take it.
+   */
+  const hasStoreChoices = (game: LibraryGame): boolean =>
+    platformFeatures.storeChoices &&
+    !game.launchable &&
+    (game.source === "steam" || (playportInstalled && playportTakes(game)));
+
+  /**
    * "Install" on a device that installs nothing: the host says where the game
    * can be got instead (`store-choices.ts`). One answer opens straight away;
    * several are offered in the menu beside the button that asked, the way Play
@@ -1877,10 +1894,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     const isSteamInstallable = game.source === "steam" && !game.launchable;
     // Epic is the one connected store that will accept an install request from
-    // Orivo, so it is the one that gets a live Install button here.
+    // Orivo, so it is the one that gets a live Install button here — where its
+    // launcher can be asked, which an iPhone never can.
     const isEpicInstallable =
-      game.source === "epic" && game.installState === "not-installed";
+      game.source === "epic" &&
+      game.installState === "not-installed" &&
+      !platformFeatures.storeChoices;
     const isEpicInstalling = game.installState === "installing";
+    const offersStoreChoices = hasStoreChoices(game);
     // Which store a game came from is no longer written on the artwork: the
     // rail, the game's page and the Sources menu all say it, and repeating it
     // here cost the hero a whole line to name something the player chose.
@@ -1908,7 +1929,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (!game.launchable &&
         !isSteamInstallable &&
         !isEpicInstallable &&
-        !isEpicInstalling);
+        !isEpicInstalling &&
+        !offersStoreChoices);
     if (quiet) refs.playButton.setAttribute("aria-disabled", "true");
     else refs.playButton.removeAttribute("aria-disabled");
     // The button doubles as the progress bar, so it keeps its size and place
@@ -1935,13 +1957,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           })
         : game.launchable
           ? t("app.play.aria.play", { title: game.title })
-          : isSteamInstallable
-            ? t("app.play.aria.installSteam", { title: game.title })
-            : isEpicInstallable
-              ? t("app.play.aria.installEpic", { title: game.title })
-              : isEpicInstalling
-                ? t("app.play.aria.downloading", { title: game.title })
-                : t("app.play.aria.unavailable", { title: game.title }),
+          : offersStoreChoices
+            ? t("app.play.aria.install", { title: game.title })
+            : isSteamInstallable
+              ? t("app.play.aria.installSteam", { title: game.title })
+              : isEpicInstallable
+                ? t("app.play.aria.installEpic", { title: game.title })
+                : isEpicInstalling
+                  ? t("app.play.aria.downloading", { title: game.title })
+                  : t("app.play.aria.unavailable", { title: game.title }),
     );
     // What pressing it does decides how it looks (styles.css, `data-kind`):
     // the scene's one call to action is vivid only when it will start something.
@@ -1949,7 +1973,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       ? "blocked"
       : game.launchable
         ? playKindFor(game)
-        : isSteamInstallable || isEpicInstallable
+        : isSteamInstallable || isEpicInstallable || offersStoreChoices
           ? "install"
           : isEpicInstalling
             ? "downloading"
@@ -5281,7 +5305,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         return;
       }
       if (!game.launchable) {
-        if (game.source === "steam" && platformFeatures.storeChoices) {
+        if (hasStoreChoices(game)) {
           await offerStoreChoices(game.id, refs.playLaunchMenu, closeLaunchMenu);
         } else if (game.source === "steam") {
           showToast(t("app.launch.openingSteam", { title: game.title }));
@@ -6866,6 +6890,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // On iOS, Install asks where the game can be got rather than starting a
         // download; the page offers the answer beside its own button.
         storeChoices: () => (platformFeatures.storeChoices ? storeChoices : null),
+        // A GOG or Epic game's Install has an answer there only while Playport
+        // is installed to take it.
+        playportInstalled: () => playportInstalled,
       });
     });
 
@@ -7631,6 +7658,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     },
     { signal: attached.signal },
   );
+  /**
+   * Ask the host whether Playport is installed, and repaint the Library's
+   * button if the answer changed. Asked at start and whenever Orivo comes back
+   * to the front, which is when an app can have come or gone.
+   */
+  const refreshPlayport = async (): Promise<void> => {
+    const installed = await loadPlayportInstalled();
+    if (installed === playportInstalled) return;
+    playportInstalled = installed;
+    renderSelection();
+  };
   const platformFeaturesLoaded = loadPlatformFeatures().then((features) => {
     platformFeatures = features;
     renderPluginList();
@@ -7641,6 +7679,18 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
+    if (!features.storeChoices) return;
+    // On iOS the Library's button reads both: an Epic game has no launcher to
+    // ask there, and a GOG or Epic game goes to Playport if anywhere.
+    renderSelection();
+    void refreshPlayport();
+    document.addEventListener(
+      "visibilitychange",
+      () => {
+        if (document.visibilityState === "visible") void refreshPlayport();
+      },
+      { signal: attached.signal },
+    );
   });
   // Read once at startup, only so the notice about artwork keys can tell
   // whether there is already one. Settings re-reads it whenever it opens.
