@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "orivo"
-version = "0.3.11"
+version = "0.4.0"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
