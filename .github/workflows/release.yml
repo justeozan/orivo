@@ -187,11 +187,25 @@ jobs:
             echo "::error::macOS signing secrets are missing (${missing[*]}). Without them the DMG would ship unsigned and Gatekeeper would call it damaged, so this build stops here instead. See docs/RELEASING.md, section 4."
             exit 1
           fi
+          # GITHUB_ENV takes one line per NAME=value. A .p12 encoded with
+          # `openssl base64` (or pasted from a wrapped terminal) arrives on
+          # several lines, which would cut the certificate at the first one;
+          # base64 decodes the same without the whitespace.
+          certificate="$(printf '%s' "$APPLE_CERTIFICATE" | tr -d '[:space:]')"
+          # The others are single values: a trailing newline from pasting is
+          # dropped, one in the middle is a broken secret.
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_ISSUER; do
+            value="$(printf '%s' "${!name}")"
+            case "$value" in
+              *$'\n'*) echo "::error::$name spans several lines; set it again as a single line."; exit 1 ;;
+            esac
+            printf -v "$name" '%s' "$value"
+          done
           key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
           printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key_path"
           chmod 600 "$key_path"
           {
-            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE=$certificate"
             echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
             echo "APPLE_SIGNING_IDENTITY=Developer ID Application: Ozan SAHIN (P27N8S83TV)"
             echo "APPLE_API_KEY=$APPLE_API_KEY"
@@ -256,6 +270,16 @@ jobs:
             exit 1
           fi
           codesign --verify --deep --strict --verbose=2 "$app"
+          # Notarization passes without the JIT entitlement, then the hardened
+          # runtime kills the app (SIGKILL) the first time wasmtime compiles a
+          # plugin. Only the signed entitlements catch that before users do.
+          entitlements="$(codesign -d --entitlements - "$app" 2>/dev/null)"
+          for key in com.apple.security.cs.allow-jit com.apple.security.cs.allow-unsigned-executable-memory; do
+            if ! grep -q "$key" <<<"$entitlements"; then
+              echo "::error::$app is signed without $key: plugins would be killed by the hardened runtime. Check bundle.macOS.entitlements in src-tauri/tauri.conf.json."
+              exit 1
+            fi
+          done
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"
 
