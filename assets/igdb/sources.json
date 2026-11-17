@@ -11,11 +11,16 @@
       },
       "hero": {
         "file": "heroes/elden-ring-wallpaper.jpg",
-        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/scagdp.jpg"
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/ss_943bf6fe62352757d9070c1d33e50b92fe8539f1.jpg"
       },
       "alternate_hero": {
         "file": "heroes/elden-ring-gameplay.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_original/scagdm.jpg"
+      },
+      "logo": {
+        "file": "logos/elden-ring.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -26,7 +31,13 @@
       },
       "hero": {
         "file": "heroes/cyberpunk-2077.webp",
-        "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ubbe5gewccx5ig3xy30t.webp"
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1091500/f678ed77c2fe7060ac9c64e32e1472e3ec3ab7dc/ss_f678ed77c2fe7060ac9c64e32e1472e3ec3ab7dc.jpg",
+        "edit": "resized 4000x2250 -> 3840x2160"
+      },
+      "logo": {
+        "file": "logos/cyberpunk-2077.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1091500/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -38,6 +49,11 @@
       "hero": {
         "file": "heroes/baldurs-gate-3.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_1080p/sc81fj.jpg"
+      },
+      "logo": {
+        "file": "logos/baldurs-gate-3.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1086940/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -49,6 +65,10 @@
       "hero": {
         "file": "heroes/hades-2.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_original/scka7e.jpg"
+      },
+      "logo": {
+        "file": "logos/hades-2.png",
+        "source": "https://commons.wikimedia.org/wiki/File:Hades_II_logo_black.svg (public domain; recoloured, the Steam logo still reads Early Access)"
       }
     },
     {
@@ -60,6 +80,11 @@
       "hero": {
         "file": "heroes/red-dead-redemption-2.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ar4ct.jpg"
+      },
+      "logo": {
+        "file": "logos/red-dead-redemption-2.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1174180/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -71,6 +96,11 @@
       "hero": {
         "file": "heroes/the-witcher-3-wild-hunt.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_1080p/mnljdjtrh44x4snmierh.jpg"
+      },
+      "logo": {
+        "file": "logos/the-witcher-3.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/292030/logo_2x.png",
+        "edit": "baked-in shadow halo removed; grey lettering lifted to silver to read on dark art"
       }
     },
     {
@@ -82,6 +112,11 @@
       "hero": {
         "file": "heroes/horizon-forbidden-west.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ar1cwx.jpg"
+      },
+      "logo": {
+        "file": "logos/horizon-forbidden-west.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2420110/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -93,6 +128,11 @@
       "hero": {
         "file": "heroes/god-of-war.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_1080p/ye6iswk51xxnhkzt9xt7.jpg"
+      },
+      "logo": {
+        "file": "logos/god-of-war.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1593500/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -104,6 +144,11 @@
       "hero": {
         "file": "heroes/unrailed.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_original/arcu7.jpg"
+      },
+      "logo": {
+        "file": "logos/unrailed.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1016920/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     },
     {
@@ -115,6 +160,11 @@
       "hero": {
         "file": "heroes/astro-duel-2.jpg",
         "source": "https://images.igdb.com/igdb/image/upload/t_original/sciudk.jpg"
+      },
+      "logo": {
+        "file": "logos/astro-duel-2.png",
+        "source": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/655350/logo_2x.png",
+        "edit": "baked-in shadow halo removed"
       }
     }
   ]

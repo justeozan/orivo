@@ -243,6 +243,8 @@ export interface GameSummary {
   coverUrl: string;
   heroUrl: string;
   landscapeUrl: string;
+  /** Transparent wordmark; when empty or broken the title text stands. */
+  logoUrl?: string;
   genres: string[];
   tags: string[];
   supportedPlatforms: Array<"windows" | "macos" | "linux" | "ios" | "android">;

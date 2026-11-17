@@ -31,6 +31,7 @@ controller.
 
 ![The Orivo library](docs/screenshots/library.png)
 ![The Orivo store](docs/screenshots/store.png)
+![A game page in Orivo](docs/screenshots/game-detail.png)
 
 
 ## Install

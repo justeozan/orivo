@@ -579,6 +579,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
     coverUrl: text(value.coverUrl),
     heroUrl: text(value.heroUrl),
     landscapeUrl: text(value.landscapeUrl),
+    logoUrl: text(value.logoUrl),
     genres: visibleLabels(stringList(value.genres)),
     tags: visibleLabels(stringList(value.tags)),
     supportedPlatforms: platforms,
@@ -2042,11 +2043,13 @@ export function createFallbackWallpaperSearch(
       ["The Witcher 3", "/media/igdb/heroes/the-witcher-3-wild-hunt.jpg"],
       ["Hades II", "/media/igdb/heroes/hades-2.jpg"],
     ],
-    // No wordmarks ship with the app: a logo is a transparent PNG per game and
-    // there is nothing generic to stand in for one. The row renders empty in
-    // the browser, which is what a game with no published logo looks like in
-    // the real app too.
-    logo: [],
+    logo: [
+      ["Elden Ring", "/media/igdb/logos/elden-ring.webp"],
+      ["Cyberpunk 2077", "/media/igdb/logos/cyberpunk-2077.webp"],
+      ["Horizon Forbidden West", "/media/igdb/logos/horizon-forbidden-west.webp"],
+      ["The Witcher 3", "/media/igdb/logos/the-witcher-3.webp"],
+      ["Hades II", "/media/igdb/logos/hades-2.webp"],
+    ],
   };
   return {
     phase: "ready",
@@ -2088,6 +2091,7 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     coverUrl: "/media/igdb/covers/elden-ring.jpg",
     heroUrl: "/media/igdb/heroes/elden-ring-wallpaper.jpg",
     landscapeUrl: "/media/igdb/landscapes/elden-ring.jpg",
+    logoUrl: "/media/igdb/logos/elden-ring.webp",
     genres: ["Action RPG"],
     tags: ["Open world", "Souls-like"],
     supportedPlatforms: ["windows"],

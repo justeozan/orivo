@@ -233,7 +233,8 @@ test.describe("the startup animation", () => {
     // It may already be leaving, but it was the first thing on the page.
     await expect(splash).toHaveCSS("pointer-events", "none");
     await expect(splash).toHaveCount(0, { timeout: 10_000 });
-    await expect(page.locator("#app-page-library #hero-title")).toBeVisible();
+    // The hero names the game with its wordmark or, until that decodes, its title.
+    await expect(page.locator("#app-page-library :is(#hero-title, #hero-logo):not([hidden])")).toBeVisible();
   });
 
   test("has nothing to hold under reduced motion: it goes as soon as the library is in", async ({ page }) => {
