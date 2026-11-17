@@ -247,29 +247,68 @@ gap.
 
 ---
 
-## 4. Code signing: not yet
+## 4. Code signing
 
-Orivo is **not** code-signed on macOS or Windows. The builds are usable, but the
-operating systems warn about them. This is independent of the updater
-signature above: minisign proves the update came from us, the OS wants a
+The macOS download is signed with a *Developer ID Application* certificate and
+notarized by Apple; Windows is not signed yet. This is independent of the
+updater signature above: minisign proves the update came from us, the OS wants a
 certificate from a paid program.
 
 ### macOS
 
-Users see *"Orivo can't be opened because Apple cannot check it for malicious
-software"* (or, from a browser download, *"Orivo is damaged and can't be
-opened"*). The workaround, worth repeating in the release notes:
+Outside the Mac App Store, Developer ID is what lets Orivo stay unsandboxed: it
+starts Moonlight with a host and a game on its command line
+(`moonlight stream`), which a sandboxed app cannot do — the system drops the
+arguments of any app a sandboxed process launches. The Mac App Store edition
+(`--features app-store`, see `docs/app-store.md`) is the sandboxed one, and it
+streams with the built-in player instead.
 
-1. Drag Orivo to **Applications**.
-2. **Right-click** (or Control-click) the app → **Open** → **Open** in the
-   dialog. macOS remembers the choice; later launches are normal.
+`release.yml` signs and notarizes in the `Prepare macOS signing and
+notarization` step, from five repository secrets, and stops the macOS build if
+any is missing:
 
-If the "damaged" message shows up instead, the quarantine attribute has to be
-cleared:
+| Secret | What it holds |
+| --- | --- |
+| `APPLE_CERTIFICATE` | base64 of a `.p12` holding the Developer ID Application certificate and its private key |
+| `APPLE_CERTIFICATE_PASSWORD` | the password the `.p12` was exported with |
+| `APPLE_API_KEY` | the App Store Connect API key ID used to notarize |
+| `APPLE_API_ISSUER` | that key's issuer ID |
+| `APPLE_API_PRIVATE_KEY` | the key's `.p8` file, as text |
+
+Only the Account Holder can create a Developer ID certificate: App Store
+Connect API keys are refused with *"This operation can only be performed by the
+Account Holder"*. Create it at developer.apple.com › Certificates › + ›
+*Developer ID Application* (G2 Sub-CA), from a CSR whose private key you keep,
+then bundle both:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Orivo.app
+openssl x509 -inform der -in developerID_application.cer -out devid.pem
+openssl pkcs12 -export -inkey devid.key -in devid.pem -out devid.p12
+base64 -i devid.p12 | gh secret set APPLE_CERTIFICATE
 ```
+
+That is macOS's own `openssl` (LibreSSL). With OpenSSL 3, add `-legacy` to the
+`pkcs12` line: `security import` cannot read OpenSSL 3's default encryption.
+
+The app is signed with the hardened runtime and `src-tauri/Entitlements.plist`,
+which grants `allow-jit` and `allow-unsigned-executable-memory` and nothing else:
+wasmtime compiles every plugin to machine code, and without them the hardened
+runtime kills Orivo (SIGKILL) the first time a plugin runs. Notarization does
+not catch that, so the job checks the signed entitlements itself, then what a
+downloaded copy will go through — `codesign --verify`, `spctl --assess` and
+`xcrun stapler validate` on the bundled app. There is no dry run: a manual
+*Release* dispatch is a real release and publishes like a tag.
+To check a release by hand:
+
+```sh
+spctl --assess --type execute --verbose=2 /Applications/Orivo.app
+# /Applications/Orivo.app: accepted
+# source=Notarized Developer ID
+```
+
+Copies installed before the first signed release keep working and update
+themselves as before; the updater checks its own minisign signature, not
+Apple's.
 
 ### Windows
 
@@ -322,20 +361,7 @@ artifacts.
 Nothing in the workflow has to be restructured; signing is turned on with
 secrets and a few config keys.
 
-**macOS** — requires an Apple Developer Program membership (99 USD/year) and a
-*Developer ID Application* certificate. Export it as a `.p12`, base64 it, and
-add these to the `env:` block of the `Build and publish` step in
-`release.yml`:
-
-- `APPLE_CERTIFICATE` (base64 of the `.p12`)
-- `APPLE_CERTIFICATE_PASSWORD`
-- `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: Name (TEAMID)`)
-- `APPLE_ID`, `APPLE_PASSWORD` (an app-specific password), `APPLE_TEAM_ID` —
-  these three enable notarization, which is what actually removes the Gatekeeper
-  prompt.
-
-`tauri-action` picks them up automatically and notarizes as part of the bundle
-step.
+**macOS** — done, see above.
 
 **Windows** — either Azure Trusted Signing (cheapest credible option, no
 hardware token) or an OV/EV code-signing certificate from a CA. Configure it
@@ -343,8 +369,8 @@ under `bundle.windows` in `src-tauri/tauri.conf.json` (`signCommand`, or the
 `trustedSigning` block) and add the corresponding secrets to the same `env:`
 block.
 
-Until then, keep the Gatekeeper / SmartScreen instructions in the release notes
-— the release body published by the workflow already contains them.
+Until then, keep the SmartScreen instructions in the release notes — the
+release body published by the workflow already contains them.
 
 ---
 
