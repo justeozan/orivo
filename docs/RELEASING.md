@@ -290,8 +290,14 @@ base64 -i devid.p12 | gh secret set APPLE_CERTIFICATE
 That is macOS's own `openssl` (LibreSSL). With OpenSSL 3, add `-legacy` to the
 `pkcs12` line: `security import` cannot read OpenSSL 3's default encryption.
 
-The job then checks what a downloaded copy will go through — `codesign
---verify`, `spctl --assess` and `xcrun stapler validate` on the bundled app.
+The app is signed with the hardened runtime and `src-tauri/Entitlements.plist`,
+which grants `allow-jit` and `allow-unsigned-executable-memory` and nothing else:
+wasmtime compiles every plugin to machine code, and without them the hardened
+runtime kills Orivo (SIGKILL) the first time a plugin runs. Notarization does
+not catch that, so the job checks the signed entitlements itself, then what a
+downloaded copy will go through — `codesign --verify`, `spctl --assess` and
+`xcrun stapler validate` on the bundled app. There is no dry run: a manual
+*Release* dispatch is a real release and publishes like a tag.
 To check a release by hand:
 
 ```sh
