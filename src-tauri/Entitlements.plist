@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The direct-download (Developer ID) build. Notarization requires the
+	     hardened runtime, which kills a process that makes memory executable
+	     after writing it. Plugins run in wasmtime, whose Cranelift compiler
+	     does exactly that for every plugin it loads, so without this the app
+	     is killed (SIGKILL) the first time a plugin runs. Nothing else is
+	     granted: no sandbox here, so Moonlight can still be started with
+	     arguments (docs/RELEASING.md). The Mac App Store build uses
+	     Entitlements.appstore.plist and has no JIT. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+</dict>
+</plist>

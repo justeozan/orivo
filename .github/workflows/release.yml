@@ -158,6 +158,47 @@ jobs:
             libxdo-dev \
             libssl-dev
 
+      # Signed with the Developer ID certificate and notarized with an App Store
+      # Connect API key, so Gatekeeper opens the downloaded app like any other.
+      # tauri-action reads these from the environment: it imports the .p12 into
+      # a throwaway keychain, signs with the hardened runtime, notarizes and
+      # staples. They go through GITHUB_ENV, set only on macOS and only once
+      # every secret is there, because an empty APPLE_CERTIFICATE is not "no
+      # signing" to Tauri, it is a certificate that fails to decode. A missing
+      # secret stops the build: an unsigned DMG is what this step exists to end,
+      # and publishing one by accident would put the "damaged app" prompt back
+      # in front of every new user.
+      - name: Prepare macOS signing and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::macOS signing secrets are missing (${missing[*]}). Without them the DMG would ship unsigned and Gatekeeper would call it damaged, so this build stops here instead. See docs/RELEASING.md, section 4."
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          {
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=Developer ID Application: Ozan SAHIN (P27N8S83TV)"
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$key_path"
+          } >> "$GITHUB_ENV"
+
       # Every matrix worker uploads to the same *draft* release. Keeping it
       # private until the final job verifies every installer and updater entry
       # prevents users from ever seeing a half-finished multi-platform release.
@@ -194,12 +235,29 @@ jobs:
 
             Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
 
-            Orivo is not code-signed yet. On macOS, right-click the app and choose **Open** the first time (Gatekeeper blocks a double-click). On Windows, click **More info** then **Run anyway** on the SmartScreen prompt.
+            The macOS app is signed and notarized by Apple: it opens with a double-click. Windows is not code-signed yet: click **More info** then **Run anyway** on the SmartScreen prompt.
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') || contains(inputs.version, '-') }}
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
+
+      # The build only proves a signature was attempted. This is what a
+      # downloaded copy goes through: Gatekeeper's verdict on the app, and the
+      # notarization ticket stapled to it so the first launch works offline.
+      - name: Verify the macOS app is signed and notarized
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find target -path '*/release/bundle/macos/*.app' -maxdepth 6 -type d | head -1)"
+          if [ -z "$app" ]; then
+            echo "::error::No .app bundle found under target/*/release/bundle/macos."
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+          xcrun stapler validate "$app"
 
   android:
     name: Build Android (AAB, and the APK Google Play signs)
