@@ -874,6 +874,31 @@ mod tests {
         assert!(!apply(&mut catalog, games_from(&[app("41", "Celeste")])));
     }
 
+    /// A build without the "stream" source sets these entries aside (the
+    /// tolerant catalog); this build must read them as games, not set them
+    /// aside, and write them back as it found them.
+    #[test]
+    fn stream_games_are_read_not_set_aside() {
+        let dir = std::env::temp_dir().join(format!(
+            "orivo-builtin-stream-catalog-{}",
+            std::process::id()
+        ));
+        let path = dir.join("catalog.json");
+        let mut catalog = Catalog::default();
+        apply(
+            &mut catalog,
+            games_from(&[app("1", "Celeste"), app("2", "Hades")]),
+        );
+        catalog.save_atomically(&path).unwrap();
+
+        let loaded = Catalog::load(&path).unwrap();
+        assert!(loaded.unreadable_games.is_empty());
+        assert_eq!(loaded.games.len(), 2);
+        assert!(loaded.games.iter().all(|g| g.source == GameSource::Stream));
+        assert_eq!(loaded, catalog);
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn applying_leaves_other_sources_alone() {
         let mut catalog = Catalog::default();
