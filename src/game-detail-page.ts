@@ -1,4 +1,5 @@
 import "./game-detail-page.css";
+import { applyLogoFit, prepareLogo } from "./logo-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {
@@ -2254,6 +2255,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = element("h1", "gd-hero__title", detail.title);
     title.id = "gd-hero-title";
     copy.append(title);
+    // The wordmark replaces the text only once it has decoded: the h1 keeps
+    // the accessible name and stands whenever there is no logo or it fails.
+    if (detail.logoUrl) {
+      const source = detail.logoUrl;
+      void prepareLogo(source).then((logo) => {
+        if (!logo || !title.isConnected) return;
+        const image = document.createElement("img");
+        image.className = "gd-hero__logo";
+        image.alt = "";
+        image.decoding = "async";
+        image.src = logo.src;
+        applyLogoFit(image, logo);
+        title.replaceChildren(image);
+        title.classList.add("has-logo");
+        title.setAttribute("aria-label", detail.title);
+      });
+    }
     // The approved design's meta row starts straight at the developer name —
     // no source logo in front of it.
     const subline = element("div", "gd-hero__subline");

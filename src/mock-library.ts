@@ -64,6 +64,7 @@ export interface LibraryGame {
 const hero = (name: string) => `/media/igdb/heroes/${name}`;
 const cover = (name: string) => `/media/igdb/covers/${name}`;
 const landscape = (name: string) => `/media/igdb/landscapes/${name}`;
+const logo = (name: string) => `/media/igdb/logos/${name}.webp`;
 
 export const fallbackLibrary: LibraryGame[] = [
   {
@@ -72,6 +73,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "A vast world full of mystery and peril. What will you discover?",
     metadata: "Achievements 67/82",
     genre: "RPG",
+    logoUrl: logo("elden-ring"),
     heroUrl: hero("elden-ring-wallpaper.jpg"),
     coverUrl: cover("elden-ring.jpg"),
     landscapeUrl: landscape("elden-ring.jpg"),
@@ -85,6 +87,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Night City is yours for the taking. Choose your legend.",
     metadata: "Achievements 41/57",
     genre: "Action RPG",
+    logoUrl: logo("cyberpunk-2077"),
     heroUrl: hero("cyberpunk-2077.webp"),
     coverUrl: cover("cyberpunk-2077.jpg"),
     landscapeUrl: landscape("cyberpunk-2077.webp"),
@@ -98,6 +101,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Gather your party and return to the Forgotten Realms.",
     metadata: "Achievements 39/54",
     genre: "RPG",
+    logoUrl: logo("baldurs-gate-3"),
     heroUrl: hero("baldurs-gate-3.jpg"),
     coverUrl: cover("baldurs-gate-3.jpg"),
     landscapeUrl: landscape("baldurs-gate-3.jpg"),
@@ -111,6 +115,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Defy the Titan of Time beneath a moonlit underworld.",
     metadata: "Achievements 26/50",
     genre: "Roguelike",
+    logoUrl: logo("hades-2"),
     heroUrl: hero("hades-2.jpg"),
     coverUrl: cover("hades-2.jpg"),
     landscapeUrl: landscape("hades-2.jpg"),
@@ -124,6 +129,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Outlaws for life in a fading American frontier.",
     metadata: "Achievements 35/51",
     genre: "Adventure",
+    logoUrl: logo("red-dead-redemption-2"),
     heroUrl: hero("red-dead-redemption-2.jpg"),
     coverUrl: cover("red-dead-redemption-2.jpg"),
     landscapeUrl: landscape("red-dead-redemption-2.jpg"),
@@ -137,6 +143,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Track monsters and chase the Wild Hunt across the Continent.",
     metadata: "Achievements 56/78",
     genre: "RPG",
+    logoUrl: logo("the-witcher-3"),
     heroUrl: hero("the-witcher-3-wild-hunt.jpg"),
     coverUrl: cover("the-witcher-3-wild-hunt.jpg"),
     landscapeUrl: landscape("the-witcher-3-wild-hunt.jpg"),
@@ -150,6 +157,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Explore a vibrant frontier ruled by colossal machines.",
     metadata: "Achievements 33/59",
     genre: "Adventure",
+    logoUrl: logo("horizon-forbidden-west"),
     heroUrl: hero("horizon-forbidden-west.jpg"),
     coverUrl: cover("horizon-forbidden-west.jpg"),
     landscapeUrl: landscape("horizon-forbidden-west.jpg"),
@@ -163,6 +171,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "A deeply personal journey through the Norse realms.",
     metadata: "Achievements 28/37",
     genre: "Action",
+    logoUrl: logo("god-of-war"),
     heroUrl: hero("god-of-war.jpg"),
     coverUrl: cover("god-of-war.jpg"),
     landscapeUrl: landscape("god-of-war.jpg"),
@@ -176,6 +185,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "Build a railway together before the runaway train reaches the end.",
     metadata: "Local co-op • Railway 18",
     genre: "Co-op",
+    logoUrl: logo("unrailed"),
     heroUrl: hero("unrailed.jpg"),
     coverUrl: cover("unrailed.jpg"),
     landscapeUrl: landscape("unrailed.jpg"),
@@ -189,6 +199,7 @@ export const fallbackLibrary: LibraryGame[] = [
     description: "A high-speed space battle between ship and body.",
     metadata: "Versus • Campaign",
     genre: "Action",
+    logoUrl: logo("astro-duel-2"),
     heroUrl: hero("astro-duel-2.jpg"),
     coverUrl: cover("astro-duel-2.jpg"),
     landscapeUrl: landscape("astro-duel-2.jpg"),

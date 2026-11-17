@@ -441,6 +441,24 @@
   letter-spacing: -0.02em;
 }
 
+/* Once decoded, the wordmark takes the title's place; wide marks are drawn
+   shorter (`--logo-scale` from logo-fit.ts) so banners and crests weigh the same. */
+.gd-hero__title.has-logo { display: block; overflow: visible; }
+
+.gd-hero__logo {
+  --gd-logo-box: clamp(110px, 17svh, 210px);
+  display: block;
+  box-sizing: border-box;
+  max-width: min(560px, 100%);
+  height: var(--gd-logo-box);
+  padding-top: calc(var(--gd-logo-box) * (1 - var(--logo-scale, 1)));
+  object-fit: contain;
+  object-position: left bottom;
+  filter: drop-shadow(0 6px 24px rgb(0 0 0 / 0.55));
+}
+
+html[data-form-factor="compact"] .gd-hero__logo { --gd-logo-box: clamp(56px, 12svh, 96px); }
+
 
 .gd-hero__actions {
   display: flex;

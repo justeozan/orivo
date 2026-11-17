@@ -833,12 +833,9 @@ describe("wallpaper search state", () => {
       cover: "/media/igdb/covers/",
       landscape: "/media/igdb/landscapes/",
       background: "/media/igdb/heroes/",
-      // No wordmarks ship with the app, so this row is empty in the browser.
-      logo: "",
+      logo: "/media/igdb/logos/",
     };
-    for (const category of WALLPAPER_CATEGORIES.filter(
-      (category) => category !== "logo",
-    )) {
+    for (const category of WALLPAPER_CATEGORIES) {
       const view = createFallbackWallpaperSearch(category, "elden ring");
       expect(view).toMatchObject({
         phase: "ready",
