@@ -3,6 +3,10 @@
 #![cfg_attr(feature = "app-store", allow(dead_code))]
 mod android_games;
 mod builtin_stream;
+#[cfg(target_os = "macos")]
+mod stream_input;
+#[cfg(target_os = "macos")]
+mod stream_player;
 mod artwork_backfill;
 mod catalog;
 mod console_runner;
@@ -532,6 +536,9 @@ enum LaunchHandoff {
     Process,
     /// The store's client was asked to start it.
     Client,
+    /// The game plays in a window of Orivo's own (the stream player). Orivo
+    /// does not step aside for it: hiding the app would hide that window too.
+    Window,
 }
 
 /// The launch service hands Steam and the connected stores a URI, and starts
@@ -8515,14 +8522,35 @@ async fn launch_game_inner(
     }
 
     // A game on the person's gaming PC is streamed by Orivo itself. The player
-    // is the next piece of this work; until it lands, say so rather than fail
-    // somewhere less clear.
-    if let LaunchTarget::Provider { provider, .. } = &game.launch_target
+    // exists on the Mac so far; elsewhere, say so rather than fail somewhere
+    // less clear.
+    if let LaunchTarget::Provider { provider, app_ref } = &game.launch_target
         && provider == builtin_stream::PROVIDER
     {
-        return Err(format!(
-            "Playing {title} from your gaming PC inside Orivo is coming next. Your PC's games are already in your library."
-        ));
+        #[cfg(target_os = "macos")]
+        {
+            let service = app
+                .state::<Arc<builtin_stream::BuiltinStreamService>>()
+                .inner()
+                .clone();
+            let app_ref = app_ref.clone();
+            let target = tauri::async_runtime::spawn_blocking(move || service.stream_target(&app_ref))
+                .await
+                .map_err(|_| "Your gaming PC did not answer. Try again.".to_string())?
+                .map_err(|error| error.to_string())?;
+            stream_player::play(&app, target)?;
+            return Ok(LaunchResult {
+                status: format!("Streaming {title} from your gaming PC"),
+                handoff: Some(LaunchHandoff::Window),
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = app_ref;
+            return Err(format!(
+                "Playing {title} from your gaming PC inside Orivo is coming next. Your PC's games are already in your library."
+            ));
+        }
     }
 
     // A game that is an app on this phone starts the way its home-screen icon

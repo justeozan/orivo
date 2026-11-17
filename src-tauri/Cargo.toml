@@ -100,6 +100,16 @@ core-graphics = "0.25"
 # Both already in the lockfile through tao and rfd.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"] }
+# The in-app stream player: pair kept -> launch -> receive -> VideoToolbox decode.
+# Mac first; iOS follows once the decoder is built for it.
+starfire-client = { git = "https://github.com/justeozan/starfire", tag = "orivo-2026.11.13" }
+starfire-decode = { git = "https://github.com/justeozan/starfire", tag = "orivo-2026.11.13" }
+starfire-render = { git = "https://github.com/justeozan/starfire", tag = "orivo-2026.11.13" }
+# A window with no webview, so Metal can own the whole surface of the stream.
+tauri = { version = "2.11.5", features = ["protocol-asset", "unstable"] }
+# The stream window's keyboard and mouse, read from AppKit (stream_input.rs).
+block2 = "0.6"
+objc2-app-kit = "0.3"
 # The privileged half of the Quiky plugin. The `.orivo-plugin` archive is
 # deliberately data-only, so the FitGirl search/scrape/aria2/Wine pipeline lives
 # in a host crate that is linked into Orivo at build time. It is vendored from

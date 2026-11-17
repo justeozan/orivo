@@ -359,6 +359,37 @@ impl BuiltinStreamService {
         self.update(|state| *state = StoredState::default())
     }
 
+    /// Everything the player needs to stream one game: where the PC is, the
+    /// pairing kept for it, and the title the host knows the game by (the host
+    /// starts a game by that title, not by the card's name, which the person
+    /// may have edited).
+    pub fn stream_target(&self, app_ref: &str) -> Result<StreamTarget, BuiltinStreamError> {
+        let host = self.saved_host()?;
+        let state = self.snapshot();
+        let info = discovery::probe(&HostAddress {
+            host: host.clone(),
+            http_port: discovery::DEFAULT_HTTP_PORT,
+        })
+        .map_err(|_| BuiltinStreamError::Unreachable)?;
+        let pairing = info
+            .unique_id
+            .as_ref()
+            .and_then(|id| state.pairings.get(id))
+            .ok_or(BuiltinStreamError::NotPaired)?
+            .to_saved();
+        let apps = session::resume(&host, &pairing)
+            .and_then(|client| client.applist())
+            .map_err(|_| BuiltinStreamError::NotPaired)?;
+        let app = apps.into_iter().find(|app| app.id == app_ref).ok_or_else(|| {
+            BuiltinStreamError::Refused("That game is no longer on your gaming PC.".into())
+        })?;
+        Ok(StreamTarget {
+            host,
+            pairing,
+            title: app.title,
+        })
+    }
+
     /// The saved machine's games, asked with this client's pairing.
     pub fn list_games(&self) -> Result<Vec<App>, BuiltinStreamError> {
         let host = self.saved_host()?;
@@ -629,6 +660,13 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 // ---------------------------------------------------------------------------
 // The library
 // ---------------------------------------------------------------------------
+
+/// What the player is handed to start one stream.
+pub struct StreamTarget {
+    pub host: String,
+    pub pairing: SavedPairing,
+    pub title: String,
+}
 
 /// A card's id, from the game's title so that it survives the host renumbering
 /// its apps. A title with nothing to keep falls back to the host's own id.

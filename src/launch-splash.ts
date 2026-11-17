@@ -27,7 +27,9 @@ import { t } from "./i18n";
 import { prefersReducedMotion } from "./motion";
 
 /** Who puts the game on screen, as the host reports it with the launch. */
-export type LaunchHandoff = "process" | "client";
+/** `window`: the game plays in a window of Orivo's own (the stream player), so
+ * Orivo never steps aside for it — hiding the app would hide that window too. */
+export type LaunchHandoff = "process" | "client" | "window";
 
 export interface LaunchSplashGame {
   id: string;
@@ -114,7 +116,8 @@ export function windowForegroundSignals(target: Window = window, page: Document 
 
 /** Reads the handoff the host sent with a launch. Anything else is a game Orivo started. */
 export function readLaunchHandoff(result: unknown): LaunchHandoff {
-  return (result as { handoff?: unknown } | null | undefined)?.handoff === "client" ? "client" : "process";
+  const handoff = (result as { handoff?: unknown } | null | undefined)?.handoff;
+  return handoff === "client" || handoff === "window" ? handoff : "process";
 }
 
 type Phase = "closed" | "starting" | "waiting" | "leaving";
@@ -349,7 +352,7 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       if (phase !== "starting" || id !== gameId) return;
       phase = "waiting";
       handoff = kind;
-      stepsAside = options.shouldStepAside() && !returned;
+      stepsAside = kind !== "window" && options.shouldStepAside() && !returned;
       if (stepsAside) schedule(stepAside, timing.deadlineMs);
       evaluate();
     },

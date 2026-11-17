@@ -202,6 +202,17 @@ describe("starting a game", () => {
     expect(stepAside).not.toHaveBeenCalled();
   });
 
+  it("never steps aside for a game that plays in a window of Orivo's own", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "window");
+    window_.send("blur");
+
+    await vi.advanceTimersByTimeAsync(deadlineMs + holdMs);
+    // Hiding Orivo would hide the stream window with it.
+    expect(stepAside).not.toHaveBeenCalled();
+    expect(splash.isOpen()).toBe(false);
+  });
+
   it("stays when the player comes back to Orivo while the game starts", async () => {
     mount().open(hades);
     splash.launched(hades.id, "client");
@@ -329,6 +340,7 @@ describe("the host's launch answer", () => {
   it("reads who puts the game on screen, and assumes Orivo did when it does not say", () => {
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "client" })).toBe("client");
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "process" })).toBe("process");
+    expect(readLaunchHandoff({ status: "Streaming Spacewar", handoff: "window" })).toBe("window");
     expect(readLaunchHandoff({ status: "Launching Spacewar" })).toBe("process");
     expect(readLaunchHandoff(undefined)).toBe("process");
     expect(readLaunchHandoff({ handoff: "steam" })).toBe("process");
