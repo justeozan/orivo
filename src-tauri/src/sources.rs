@@ -39,7 +39,13 @@ use std::{
 
 /// Versioned so a future change to the stored credential shape cannot make an
 /// older entry deserialize into something it never meant.
-const KEYRING_SERVICE: &str = "io.orivo.desktop.sources.v1";
+/// Development builds keep their own credentials, like their own data
+/// folders (see `DEV_IDENTIFIER_SUFFIX` in `lib.rs`).
+const KEYRING_SERVICE: &str = if cfg!(all(debug_assertions, desktop)) {
+    "io.orivo.desktop.dev.sources.v1"
+} else {
+    "io.orivo.desktop.sources.v1"
+};
 
 /// Windows Credential Manager refuses a credential blob larger than 2560
 /// bytes, and the keyring crate encodes a password as UTF-16 — two bytes per

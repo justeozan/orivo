@@ -20,8 +20,18 @@ use std::{
 // The original entry was created by unsigned development binaries whose
 // ad-hoc identifier changes after every Rust rebuild, making macOS reject the
 // next binary even though the item itself still exists.
-const KEYRING_SERVICE: &str = "io.orivo.desktop.steam.v2";
-const LEGACY_KEYRING_SERVICE: &str = "io.orivo.desktop.steam";
+/// Development builds keep their own credentials, like their own data
+/// folders (see `DEV_IDENTIFIER_SUFFIX` in `lib.rs`).
+const KEYRING_SERVICE: &str = if cfg!(all(debug_assertions, desktop)) {
+    "io.orivo.desktop.dev.steam.v2"
+} else {
+    "io.orivo.desktop.steam.v2"
+};
+const LEGACY_KEYRING_SERVICE: &str = if cfg!(all(debug_assertions, desktop)) {
+    "io.orivo.desktop.dev.steam"
+} else {
+    "io.orivo.desktop.steam"
+};
 const KEYRING_ACCOUNT: &str = "primary-library";
 /// Steam's entry in the shared, secret-free connection directory. Rendering
 /// Settings reads this instead of the keychain, so opening the page no longer

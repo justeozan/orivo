@@ -1302,8 +1302,30 @@ pub fn run() {
             plugin_health::resume_plugin,
             plugin_health::get_plugin_journal
         ])
-        .run(tauri::generate_context!())
+        .run(app_context())
         .expect("error while running Orivo");
+}
+
+/// The identifier a desktop development build runs under.
+///
+/// Every place Orivo keeps data (catalog, game state, artwork, caches, logs)
+/// is derived from the app identifier, so a `tauri dev` build that shared it
+/// with the installed Orivo would read and rewrite the real library. A library
+/// written by an unreleased build can then stop opening in the released one.
+/// Development builds get their own identifier, and with it their own folders.
+#[cfg(all(debug_assertions, desktop))]
+pub(crate) const DEV_IDENTIFIER_SUFFIX: &str = ".dev";
+
+fn app_context() -> tauri::Context<tauri::Wry> {
+    #[allow(unused_mut)]
+    let mut context = tauri::generate_context!();
+    #[cfg(all(debug_assertions, desktop))]
+    {
+        let config = context.config_mut();
+        config.identifier.push_str(DEV_IDENTIFIER_SUFFIX);
+        config.product_name = Some("Orivo Dev".into());
+    }
+    context
 }
 
 /// `GameDetailError` carries IO and parse detail that must never reach a
@@ -10212,6 +10234,7 @@ fn showcase_catalog() -> Catalog {
         runner_profiles: Vec::new(),
         runner_inventory: Vec::new(),
         plugin_grants: Vec::new(),
+        unreadable_games: Vec::new(),
         extra: BTreeMap::new(),
     }
 }
