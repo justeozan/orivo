@@ -56,15 +56,17 @@
 //!   build has no stable code identity for a keychain ACL to name, so the ACL is
 //!   not a boundary either.
 //!
-//! This is stated rather than papered over because the same attacker can already
-//! replace Orivo itself: macOS builds ship without a Developer ID signature or
-//! the hardened runtime, and the Windows installation is per-user. A program that
-//! can write to this directory *and* read that keychain item can already edit the
-//! binary that reads both. The cache is therefore not the weakest link today, and
-//! it must not become one: when macOS builds are Developer ID signed with the
-//! hardened runtime, this key has to move to the data-protection keychain behind
-//! an access group, or it will be. That is recorded as a follow-up on the pull
-//! request that introduced this module, not as a comment nobody will find.
+//! This is stated rather than papered over because the same attacker can still
+//! replace Orivo itself: the Windows installation is per-user, and a Mac app
+//! dragged to /Applications is writable by its user. A program that can write to
+//! this directory *and* read that keychain item can already edit the binary that
+//! reads both. That changed in one respect: the macOS download is now Developer
+//! ID signed with the hardened runtime (`release.yml`), so Orivo has a stable code
+//! identity a keychain could hold the key to, and the planted-item and
+//! default-keychain tricks above are what is left. This key has to move to the
+//! data-protection keychain behind an access group to close them. That is
+//! recorded as a follow-up on the pull request that introduced this module, not
+//! as a comment nobody will find.
 //!
 //! One thing in that shape *was* a defect of this module rather than of the
 //! platform, and is fixed: replacing a damaged entry deletes it and creates a new
