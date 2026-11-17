@@ -44,6 +44,11 @@ const GOLDENS: GoldenCase[] = [
 
 async function prepare(page: Page, golden: GoldenCase): Promise<void> {
   await openRoute(page, golden.hash, golden.name);
+  // The game page swaps its title for the wordmark once the logo decodes;
+  // the golden is taken after that swap, never on either side of a race.
+  if (golden.name === "game") {
+    await page.locator("#app-page-game:not([hidden]) .gd-hero__title.has-logo .gd-hero__logo").waitFor();
+  }
   await waitForImages(page);
   // Nothing may be focused: a focus ring would leak into the golden.
   await page.evaluate(() => {
