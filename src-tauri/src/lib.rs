@@ -7972,7 +7972,11 @@ fn record_session(app: &AppHandle, game_id: &str, started: Instant) {
 
 /// Wait for a game process Orivo started and record how long it ran. This also
 /// reaps it, so a direct launch no longer leaves a zombie behind.
-fn watch_game_session(app: AppHandle, game_id: String, mut child: std::process::Child) {
+fn watch_game_session(
+    app: AppHandle,
+    game_id: String,
+    mut child: launcher::GameProcess,
+) {
     let started = Instant::now();
     thread::spawn(move || {
         let _ = child.wait();
@@ -8265,7 +8269,11 @@ async fn launch_game_inner(
         .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
         .map_err(|error| error.to_string())?;
         // The emulator is Orivo's own child here, so its session is timed.
-        watch_game_session(app.clone(), game.id.clone(), child);
+        watch_game_session(
+            app.clone(),
+            game.id.clone(),
+            launcher::GameProcess::Child(child),
+        );
         return Ok(LaunchResult {
             status: format!("Launching {resolved_title}"),
             handoff: Some(LaunchHandoff::Process),
