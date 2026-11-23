@@ -981,7 +981,10 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* Install is the dark pill from the reference: glass first, its light held
    back until the pointer or the pad reaches it. */
 .play-button[data-kind="install"],
+.play-button[data-kind="locate"],
 .play-button[data-kind="downloading"] { --play-field: .3; }
+.play-button[data-kind="locate"]:hover,
+.play-button[data-kind="locate"][data-nav-focus],
 .play-button[data-kind="install"]:hover,
 .play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
 /* Nothing to start: no field, no sheen, a still grey rim. */
@@ -1709,6 +1712,15 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
+/* A game whose files moved where no search found them reads the way a game
+   that is not installed reads in any launcher: its art stays, so it is still
+   recognisable, but drained and in shadow. Selected, it comes up a little,
+   enough to be looked at, never enough to pass for a playable one. */
+.game-card.is-missing .card-art { filter: grayscale(.92) brightness(.38); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1), filter 300ms ease; }
+.game-card.is-missing.is-selected .card-art { filter: grayscale(.8) brightness(.58); }
+.game-card.is-missing { border-color: rgba(255,255,255,.1); }
+.hero-media.is-missing .hero-image { filter: grayscale(.75) brightness(.6); }
+.genre-chip--missing { border-color: rgba(255,255,255,.24); color: #fff; background: rgba(12,11,15,.72); font-weight: 600; }
 /* With no picture of the game at all, the card turns to glass: the scene
    behind it shows through, frosted and bent, and its name stands on it — no
    real cover is there to carry the title. The rim and the two inner lights

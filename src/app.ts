@@ -499,13 +499,22 @@ const SHELF_FADE_PX = 72;
 const CARD_TILT_DEGREES = 14;
 
 /** What the hero's main button will do, and so how it is dressed. */
-type PlayButtonKind = "play" | "stream" | "emulate" | "install" | "downloading" | "unavailable" | "blocked";
+type PlayButtonKind =
+  | "play"
+  | "stream"
+  | "emulate"
+  | "install"
+  | "downloading"
+  | "locate"
+  | "unavailable"
+  | "blocked";
 const PLAY_BUTTON_LABELS: Record<PlayButtonKind, string> = {
   play: t("app.playButton.play"),
   stream: t("app.playButton.stream"),
   emulate: t("app.playButton.emulate"),
   install: t("app.playButton.install"),
   downloading: t("app.playButton.downloading"),
+  locate: t("app.playButton.locate"),
   unavailable: t("app.playButton.unavailable"),
   blocked: "",
 };
@@ -515,9 +524,13 @@ const PLAY_BUTTON_ICONS: Record<PlayButtonKind, IconName | null> = {
   emulate: "gamepad",
   install: "download",
   downloading: "download",
+  locate: "folder",
   unavailable: null,
   blocked: null,
 };
+/** A local game whose files moved where no search found them: Play asks where it is now. */
+const isLocatableGame = (game: LibraryGame): boolean => game.missing === true && game.source === "local";
+
 /** Runners that start a console game through an emulator. */
 const EMULATOR_RUNNERS = new Set(["com.orivo.ryujinx", "com.orivo.retroarch", "com.orivo.ppsspp"]);
 
@@ -668,8 +681,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     feedbackButton: get<HTMLButtonElement>("#feedback-button"),
     heroLayers: [get<HTMLImageElement>("#hero-a"), get<HTMLImageElement>("#hero-b")],
     heroGround: get<HTMLElement>("#hero-ground"),
+    heroMedia: get<HTMLElement>(".hero-media"),
     artworkProgress: get<HTMLElement>("#artwork-progress"),
     genre: get<HTMLElement>("#hero-genre"),
+    missing: get<HTMLElement>("#hero-missing"),
     title: get<HTMLElement>("#hero-title"),
     logo: get<HTMLImageElement>("#hero-logo"),
     studio: get<HTMLElement>("#hero-studio"),
@@ -1696,6 +1711,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const fallbackName = card.querySelector<HTMLElement>(".card-fallback__title");
     if (fallbackName && fallbackName.textContent !== game.title) fallbackName.textContent = game.title;
     card.classList.toggle("is-art-pending", artworkPending.has(game.id));
+    // Its files moved where no search found them: the card dims, the way a
+    // game that is not installed reads.
+    card.classList.toggle("is-missing", game.missing === true);
 
     card.dataset.gameId = game.id;
     // Spatial navigation verbs: A opens the game's page, Enter starts it.
@@ -1704,7 +1722,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     card.classList.toggle("is-selected", selected);
     card.toggleAttribute("data-nav-selected", selected);
     card.setAttribute("aria-pressed", String(selected));
-    card.setAttribute("aria-label", t("app.card.openDetails", { title: game.title }));
+    card.setAttribute(
+      "aria-label",
+      game.missing
+        ? `${t("app.card.openDetails", { title: game.title })} · ${t("app.card.notInstalled")}`
+        : t("app.card.openDetails", { title: game.title }),
+    );
 
     // The cards in view load first, the selected one before all of them.
     const priority = selected ? "high" : distance <= 6 ? "auto" : "low";
@@ -1885,6 +1908,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // printing it put a word on the artwork that told the player nothing.
     refs.genre.textContent = knownGenre(game.genre);
     refs.genre.hidden = refs.genre.textContent === "";
+    // A game that is not installed any more says so in the meta line, where
+    // the eye already reads what kind of game it is.
+    refs.missing.hidden = game.missing !== true;
+    refs.heroMedia.classList.toggle("is-missing", game.missing === true);
     refs.title.textContent = game.title;
     updateHeroLogo(game);
     if (titleChanged && !immediateHero && !prefersReducedMotion()) {
@@ -1902,6 +1929,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       !platformFeatures.storeChoices;
     const isEpicInstalling = game.installState === "installing";
     const offersStoreChoices = hasStoreChoices(game);
+    const isLocatable = isLocatableGame(game);
     // Which store a game came from is no longer written on the artwork: the
     // rail, the game's page and the Sources menu all say it, and repeating it
     // here cost the hero a whole line to name something the player chose.
@@ -1930,6 +1958,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         !isSteamInstallable &&
         !isEpicInstallable &&
         !isEpicInstalling &&
+        !isLocatable &&
         !offersStoreChoices);
     if (quiet) refs.playButton.setAttribute("aria-disabled", "true");
     else refs.playButton.removeAttribute("aria-disabled");
@@ -1957,6 +1986,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           })
         : game.launchable
           ? t("app.play.aria.play", { title: game.title })
+          : isLocatable
+            ? t("app.play.aria.locate", { title: game.title })
           : offersStoreChoices
             ? t("app.play.aria.install", { title: game.title })
             : isSteamInstallable
@@ -1973,6 +2004,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       ? "blocked"
       : game.launchable
         ? playKindFor(game)
+        : isLocatable
+          ? "locate"
         : isSteamInstallable || isEpicInstallable || offersStoreChoices
           ? "install"
           : isEpicInstalling
@@ -5305,7 +5338,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         return;
       }
       if (!game.launchable) {
-        if (hasStoreChoices(game)) {
+        if (isLocatableGame(game)) {
+          await locateGame(game);
+        } else if (hasStoreChoices(game)) {
           await offerStoreChoices(game.id, refs.playLaunchMenu, closeLaunchMenu);
         } else if (game.source === "steam") {
           showToast(t("app.launch.openingSteam", { title: game.title }));
@@ -5352,6 +5387,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } catch (error) {
       launchSplash.failed(game.id);
       const message = messageFromError(error, t("app.launch.failed", { title: game.title }));
+      // A local game that would not start may have moved: the host has just
+      // looked for it and marked it, and the card should say so now.
+      if (game.source === "local") void refreshLibrary();
       if (game.source === "wine") {
         state.launchFeedback = {
           gameId: game.id,
@@ -5361,6 +5399,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         renderLaunchFeedback();
       }
       showToast(message);
+    }
+  };
+
+  /**
+   * Ask where a game that moved is now. The host opens the file dialog and
+   * points the card at what was picked; the card keeps its play time.
+   */
+  const locateGame = async (game: LibraryGame): Promise<boolean> => {
+    if (!isTauriRuntime()) return false;
+    try {
+      const title = await invoke<string | null>("locate_game", { gameId: game.id });
+      if (!title) return false;
+      await refreshLibrary();
+      showToast(t("app.locate.found", { title }));
+      return true;
+    } catch (error) {
+      showToast(messageFromError(error, t("app.locate.failed", { title: game.title })));
+      return false;
     }
   };
 
@@ -6423,7 +6479,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // choosing a folder never ends in silence.
     void listen<unknown>(GAME_FOLDER_SCANNED_EVENT, (event) => {
       const scan = readGameFolderScan(event.payload);
-      if (scan.added > 0 || scan.repointed + scan.hidden > 0) void refreshLibrary();
+      if (
+        scan.added > 0 ||
+        scan.repointed + scan.hidden > 0 ||
+        scan.relocated.length > 0 ||
+        scan.missingChanged
+      ) {
+        void refreshLibrary();
+      }
       if (scan.added > 0) fetchArtworkFor(scan.addedIds);
       const message = gameFolderScanMessage(scan);
       if (message) showToast(message);
@@ -6876,6 +6939,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         back: () => router.back({ page: "library" }),
         play: (gameId) => {
           void launchGame(gameId);
+        },
+        locate: async (gameId) => {
+          const game = state.games.find((candidate) => candidate.id === gameId);
+          return game ? locateGame(game) : false;
         },
         // Home art, a refetched cover or a removed game changed the catalog; pull
         // the library again so its cards and hero reflect it on the way back.
@@ -7899,6 +7966,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
       installState: readInstallState(record),
       installPercent: readNumber(record, "installPercent", "install_percent") ?? null,
       macCompatibility: readMacCompatibility(record),
+      missing: readBoolean(record, "missing") ?? fixture?.missing ?? false,
     },
     mediaTokens: {
       heroUrl: heroToken,
@@ -8444,6 +8512,7 @@ function shell(): string {
                wordmark turned the one screen built around artwork into a
                form. -->
           <div class="hero-meta" aria-label="${t("app.hero.metadata")}">
+            <span id="hero-missing" class="genre-chip genre-chip--missing" hidden>${t("app.card.notInstalled")}</span>
             <span id="hero-genre" class="genre-chip"></span>
             <span id="hero-studio" class="hero-studio"></span>
           </div>
