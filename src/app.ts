@@ -22,15 +22,17 @@ import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } fro
 import { brandIcon, icon, type IconName } from "./icons";
 import { pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
 import {
-  type BrowseMode,
+  ALL_GAMES_SEGMENT,
   type BrowseSegment,
+  type LibrarySort,
   browseGames,
-  browseModeLabel,
   browseSegments,
   knownGenre,
-  nextBrowseMode,
+  librarySort,
+  nextLibrarySort,
   resolveSegment,
 } from "./library-browse";
+import { sourceMark } from "./source-marks";
 import {
   INITIAL_ONBOARDING_VIEW,
   ONBOARDING_SOURCES,
@@ -48,7 +50,6 @@ import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSy
 import { prefersReducedMotion, rememberMotionPreference } from "./motion";
 import { LANGUAGE_NAMES, LANGUAGES, rememberLanguagePreference, t, type LanguagePreference } from "./i18n";
 import type { BootSplash } from "./boot-splash";
-import { brandLogoFor } from "./brand-logos";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
   gameFolderScanMessage,
@@ -333,9 +334,10 @@ interface SourceAccountsState {
 }
 
 interface BrowseState {
-  mode: BrowseMode;
-  /** The segment last chosen in each mode, so cycling back restores the view. */
-  segments: Partial<Record<BrowseMode, string>>;
+  /** The source last chosen in the row; All Games when it is gone. */
+  source: string | undefined;
+  /** The order the rail is in. */
+  sort: LibrarySort;
   /** Rage: the same library, wearing the spiral. */
   rage: boolean;
 }
@@ -485,13 +487,6 @@ const GAME_FOLDER_SCANNED_EVENT = "game-folder-scanned";
 // date or play time, which is what the Activity shelves are built from.
 const GAME_PLAY_RECORDED_EVENT = "game-play-recorded";
 
-/** Glyphs for the Source row's segments that have no brand wordmark. */
-const SOURCE_GLYPHS: Readonly<Record<string, IconName>> = {
-  local: "monitor",
-  moonlight: "cast",
-  wine: "wine",
-};
-
 /** How wide the fade is where cards leave the shelf on the left. */
 const SHELF_FADE_PX = 72;
 
@@ -598,7 +593,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryMediaTokens: new Map(),
     selectedId: "",
     query: "",
-    browse: { mode: "activity", segments: {}, rage: false },
+    browse: { source: undefined, sort: "recent", rage: false },
     onboarding: { view: INITIAL_ONBOARDING_VIEW, rendered: null, signature: "" },
     notifications: {
       open: false,
@@ -678,6 +673,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     browseSegments: get<HTMLElement>("#browse-segments"),
     browseMode: get<HTMLButtonElement>("#browse-mode"),
     browseModeLabel: get<HTMLElement>("#browse-mode-label"),
+    browseModeIcon: get<HTMLElement>("#browse-mode-icon"),
     rageToggle: get<HTMLButtonElement>("#rage-toggle"),
     rageLabel: get<HTMLElement>("#rage-label"),
     brandMarkRing: get<HTMLElement>("#brand-mark-ring"),
@@ -845,12 +841,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     navigate({ page: "game", gameId, from: "library" });
   };
 
-  /** The segments the browse bar can offer for the library as it stands now. */
-  const currentSegments = (): BrowseSegment[] => browseSegments(state.games, state.browse.mode);
+  /** The sources the browse bar can offer for the library as it stands now. */
+  const currentSegments = (): BrowseSegment[] => browseSegments(state.games);
 
   /** The segment on screen: the remembered one while it still exists. */
-  const currentSegmentId = (): string =>
-    resolveSegment(currentSegments(), state.browse.segments[state.browse.mode]);
+  const currentSegmentId = (): string => resolveSegment(currentSegments(), state.browse.source);
 
   /**
    * Whether the catalogue holds nothing at all — which is a different question
@@ -872,12 +867,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       : state.games;
 
     // Searching is the stronger intent: a query looks through the whole
-    // library rather than through the segment that happens to be selected.
-    if (term) {
-      return searched;
-    }
-
-    return browseGames(searched, state.browse.mode, currentSegmentId());
+    // library rather than through the source that happens to be selected. It
+    // keeps the order the player picked.
+    return browseGames(searched, term ? ALL_GAMES_SEGMENT.id : currentSegmentId(), state.browse.sort);
   };
 
   /**
@@ -1287,7 +1279,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   /**
    * The browse bar and the rail heading. Both are derived from the same two
-   * pieces of state — the mode and its segment — so the row of segments, the
+   * pieces of state — the source and the sort — so the row of sources, the
    * heading above the cards and the cards themselves can never drift apart.
    */
   const renderBrowseBar = (): void => {
@@ -1295,19 +1287,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const activeId = currentSegmentId();
     const active = segments.find((segment) => segment.id === activeId) ?? segments[0];
 
-    // The accessible name keeps the visible word intact, so "click Activity"
+    // The accessible name keeps the visible word intact, so "click Recent"
     // still hits this button under speech control.
-    refs.browseModeLabel.textContent = browseModeLabel(state.browse.mode);
-    refs.browseMode.setAttribute(
-      "aria-label",
-      t("app.browse.modeAria", { mode: browseModeLabel(state.browse.mode) }),
-    );
+    const sort = librarySort(state.browse.sort);
+    refs.browseModeLabel.textContent = sort.label;
+    if (refs.browseModeIcon.dataset.icon !== sort.icon) {
+      refs.browseModeIcon.innerHTML = icon(sort.icon);
+      refs.browseModeIcon.dataset.icon = sort.icon;
+    }
+    refs.browseMode.setAttribute("aria-label", t("app.browse.sortAria", { sort: sort.label }));
 
     const existing = Array.from(
       refs.browseSegments.querySelectorAll<HTMLButtonElement>(".browse-bar__segment"),
     );
     // Every selection redraws this bar, so the row is only rebuilt when the
-    // segments themselves changed. Re-appending a button detaches it first,
+    // sources themselves changed. Re-appending a button detaches it first,
     // which would drop the focus a controller or the keyboard is holding.
     const matchesCurrentOrder =
       existing.length === segments.length &&
@@ -1329,44 +1323,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
 
     // The heading names the shelf on screen; a search overrides it, because
-    // what is on the rail then is the search, not the segment.
+    // what is on the rail then is the search, not the source.
     const heading = state.query.trim() ? t("app.browse.searchResults") : (active?.label ?? t("app.browse.library"));
     refs.railTitle.textContent = heading;
     refs.cards.setAttribute("aria-label", heading);
   };
-
-  /** Logos that did not load this run; their segments keep their words. */
-  const failedBrandLogos = new Set<string>();
 
   const createSegmentButton = (): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "browse-bar__segment";
 
-    const glyph = document.createElement("span");
-    glyph.className = "browse-bar__segment-icon";
-    glyph.setAttribute("aria-hidden", "true");
-    glyph.hidden = true;
-
-    const logo = document.createElement("img");
-    logo.className = "browse-bar__segment-logo";
-    logo.alt = "";
-    logo.decoding = "async";
-    logo.hidden = true;
-    // A logo that does not load gives the word back rather than a hole, and
-    // keeps giving it back: buttons are rebuilt whenever the mode changes, so
-    // the failure is remembered by the shell rather than by this button.
-    logo.addEventListener("error", () => {
-      const src = logo.getAttribute("src");
-      if (src) failedBrandLogos.add(src);
-      logo.hidden = true;
-      button.classList.remove("has-logo");
-    });
+    const mark = document.createElement("span");
+    mark.className = "browse-bar__segment-mark";
+    mark.setAttribute("aria-hidden", "true");
 
     const label = document.createElement("span");
     label.className = "browse-bar__segment-label";
 
-    button.append(glyph, logo, label);
+    button.append(mark, label);
     button.addEventListener("click", () => {
       const id = button.dataset.segmentId;
       if (id) selectSegment(id);
@@ -1374,46 +1349,25 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return button;
   };
 
+  /** Every segment is the same two things: its source's mark, then its name. */
   const syncSegmentButton = (
     button: HTMLButtonElement,
     segment: BrowseSegment,
     selected: boolean,
   ): void => {
     button.dataset.segmentId = segment.id;
+    button.dataset.kind = segment.kind;
     button.classList.toggle("is-active", selected);
     button.setAttribute("aria-pressed", String(selected));
-    // A genre or a store name comes from the backend, so it is set as text and
-    // never interpolated into markup.
+    // A store or a plugin name comes from the backend, so it is set as text
+    // and never interpolated into markup.
     const label = button.querySelector<HTMLElement>(".browse-bar__segment-label");
-    if (label) label.textContent = segment.label;
-    // Source and Platform read best as the brands' own logos. The word stays in
-    // the button — out of sight, but it is still the button's name.
-    const found = brandLogoFor(state.browse.mode, segment.id);
-    const brand = found && !failedBrandLogos.has(found.src) ? found : null;
-    const logo = button.querySelector<HTMLImageElement>(".browse-bar__segment-logo");
-    if (logo) {
-      if (brand) {
-        if (logo.getAttribute("src") !== brand.src) {
-          logo.width = brand.width;
-          logo.height = brand.height;
-          logo.src = brand.src;
-        }
-        logo.hidden = false;
-      } else {
-        logo.hidden = true;
-        logo.removeAttribute("src");
-      }
-    }
-    button.classList.toggle("has-logo", Boolean(brand));
-    // A source with no wordmark reads as an ordinary segment with a glyph.
-    const glyph = button.querySelector<HTMLElement>(".browse-bar__segment-icon");
-    const glyphName = !brand && state.browse.mode === "source" ? SOURCE_GLYPHS[segment.id] : undefined;
-    if (glyph) {
-      if (glyphName && glyph.dataset.icon !== glyphName) {
-        glyph.innerHTML = icon(glyphName);
-        glyph.dataset.icon = glyphName;
-      }
-      glyph.hidden = !glyphName;
+    if (label && label.textContent !== segment.label) label.textContent = segment.label;
+    // The mark is Orivo's own markup (`source-marks.ts`), keyed by the id.
+    const mark = button.querySelector<HTMLElement>(".browse-bar__segment-mark");
+    if (mark && mark.dataset.mark !== segment.id) {
+      mark.innerHTML = sourceMark(segment);
+      mark.dataset.mark = segment.id;
     }
   };
 
@@ -1423,9 +1377,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    * game takes over rather than leaving the hero showing something the rail no
    * longer offers.
    */
-  const applyBrowseChange = (): void => {
+  const applyBrowseChange = (options: { fromStart?: boolean } = {}): void => {
     const games = visibleGames();
-    const kept = games.some((game) => game.id === state.selectedId);
+    // A new order is read from its start: the game it puts first takes the
+    // hero, rather than the old selection staying wherever it was reshuffled to.
+    const kept = !options.fromStart && games.some((game) => game.id === state.selectedId);
     if (!kept) {
       state.selectedId = games[0]?.id ?? state.selectedId;
     }
@@ -1451,13 +1407,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const selectSegment = (id: string): void => {
     if (currentSegmentId() === id) return;
-    state.browse.segments[state.browse.mode] = id;
+    state.browse.source = id;
     applyBrowseChange();
   };
 
-  const cycleBrowseMode = (): void => {
-    state.browse.mode = nextBrowseMode(state.browse.mode);
-    applyBrowseChange();
+  const cycleSort = (): void => {
+    state.browse.sort = nextLibrarySort(state.browse.sort);
+    applyBrowseChange({ fromStart: true });
   };
 
   /**
@@ -6949,7 +6905,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     });
   }
 
-  refs.browseMode.addEventListener("click", () => cycleBrowseMode());
+  refs.browseMode.addEventListener("click", () => cycleSort());
   refs.rageToggle.addEventListener("click", () => setRageMode(!state.browse.rage));
 
   refs.notFoundPage.addEventListener("click", (event) => {
@@ -8475,14 +8431,15 @@ function shell(): string {
         <div class="rail-header">
           <!-- The heading is the active segment: the rail and its title can
                never disagree about what is on screen. -->
-          <h2 id="recently-played-title">${t("app.rail.recent")}</h2>
+          <h2 id="recently-played-title">${t("store.browse.allGames")}</h2>
         </div>
-        <div id="game-cards" class="game-cards" role="list" aria-label="${t("app.rail.recent")}" data-nav-rail></div>
+        <div id="game-cards" class="game-cards" role="list" aria-label="${t("store.browse.allGames")}" data-nav-rail></div>
       </section>
 
-      <!-- The browse bar. One button cycles the mode, the row beside it holds
-           that mode's segments, and the mark on the left is the app's own
-           mood. -->
+      <!-- The browse bar. The row holds All Games and every source the
+           library holds, each a mark and a name; the button on the right
+           cycles the order the rail is in. The mark on the left is the app's
+           own mood. -->
       <footer class="browse-bar" aria-label="${t("app.browse.barAria")}" data-nav-row>
         <!-- A switch, not a button that happens to remember a state: the role
              says so, and the track says so. -->
@@ -8492,7 +8449,8 @@ function shell(): string {
         </button>
         <div id="browse-segments" class="browse-bar__segments" role="group" aria-label="${t("app.browse.segmentsAria")}"></div>
         <button id="browse-mode" class="browse-bar__mode" type="button">
-          <span id="browse-mode-label">${t("app.browse.activity")}</span>
+          <span id="browse-mode-icon" class="browse-bar__mode-icon" aria-hidden="true"></span>
+          <span id="browse-mode-label">${t("store.browse.sort.recent")}</span>
         </button>
       </footer>
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Library's bottom bar is sorted by source, always. It starts with *All Games*, then every library you have (Steam, Epic Games, GOG…), then what plugins bring under their console (*Switch* for Ryujinx, *PSP*, *SNES*…), then *Local* for every games folder (Wine and Winlator entries included) and *Stream* for every game a client streams from another machine. A store game stays under its store whatever starts it. Each source is its mark and its name, drawn as vectors in one size and one type, instead of logos of different shapes and heights. The button on the right now sorts the rail — *Recent*, *New* (never played first, newest arrival first), *Most played* — instead of switching between Activity, Genre, Source and Platform.
+
 ## [0.4.0] - 2026-11-16
 
 ### Added

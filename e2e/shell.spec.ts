@@ -172,11 +172,17 @@ test.describe("no circular spinners", () => {
 });
 
 test.describe("the library browse bar", () => {
-  test("keeps its segments and Activity, and carries no mood switch", async ({ page }) => {
+  test("leads its sources with All Games, sorts with one button, and carries no mood switch", async ({ page }) => {
     await openRoute(page, "#/library", "library");
 
-    await expect(page.locator("#browse-segments .browse-bar__segment")).toHaveCount(2);
-    await expect(page.locator("#browse-mode")).toBeVisible();
+    // The showcase names no store, so its games are the player's own: Local.
+    const segments = page.locator("#browse-segments .browse-bar__segment");
+    await expect(segments).toHaveText(["All Games", "Local"]);
+    await expect(segments.first().locator("svg.source-mark")).toBeVisible();
+    await expect(page.locator("#browse-mode")).toHaveText("Recent");
+    await page.locator("#browse-mode").click();
+    await expect(page.locator("#browse-mode")).toHaveText("New");
+    await expect(segments).toHaveCount(2);
 
     // The switch is out of the product rather than merely out of the way: the
     // state it drives stays in the document, the stylesheet takes the control

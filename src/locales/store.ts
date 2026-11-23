@@ -1,4 +1,4 @@
-/** Store page, its filters and price lines; Library browse modes; Library onboarding. */
+/** Store page, its filters and price lines; Library source row and sort; Library onboarding. */
 export const en = {
   // Store model
   "store.category.forYou": "For you",
@@ -82,17 +82,12 @@ export const en = {
   "store.why.p3": "Less noise, more meaning: a short shelf you can read in full.",
 
   // Library browse
-  "store.browse.activity": "Activity",
-  "store.browse.genre": "Genre",
-  "store.browse.source": "Source",
-  "store.browse.platform": "Platform",
   "store.browse.allGames": "All Games",
   "store.browse.other": "Other",
-  "store.browse.recent": "Recently Played",
-  "store.browse.mostPlayed": "Most Played",
-  "store.browse.playNext": "Play Next",
-  "store.browse.resume": "Resume",
-  "store.browse.never": "Never Played",
+  "store.browse.stream": "Stream",
+  "store.browse.sort.recent": "Recent",
+  "store.browse.sort.new": "New",
+  "store.browse.sort.mostPlayed": "Most played",
 
   // Library onboarding
   "store.onboarding.step.connect.title": "Connect your libraries",
@@ -197,17 +192,12 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
     "Les durées annoncées sont celles de l'histoire principale, les prix viennent des boutiques elles-mêmes, et les jeux déjà dans ta bibliothèque n'apparaissent jamais ici.",
   "store.why.p3": "Moins de bruit, plus de sens : une étagère courte que tu peux lire en entier.",
 
-  "store.browse.activity": "Activité",
-  "store.browse.genre": "Genre",
-  "store.browse.source": "Source",
-  "store.browse.platform": "Plateforme",
   "store.browse.allGames": "Tous les jeux",
   "store.browse.other": "Autre",
-  "store.browse.recent": "Joués récemment",
-  "store.browse.mostPlayed": "Les plus joués",
-  "store.browse.playNext": "À jouer ensuite",
-  "store.browse.resume": "À reprendre",
-  "store.browse.never": "Jamais joués",
+  "store.browse.stream": "Stream",
+  "store.browse.sort.recent": "Récents",
+  "store.browse.sort.new": "Nouveaux",
+  "store.browse.sort.mostPlayed": "Les plus joués",
 
   "store.onboarding.step.connect.title": "Connecte tes bibliothèques",
   "store.onboarding.step.connect.detail": "Steam, Epic, GOG…",
