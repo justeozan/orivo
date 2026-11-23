@@ -29,9 +29,18 @@ controller.
 
 ---
 
-![The Orivo library](docs/screenshots/library.png)
-![The Orivo store](docs/screenshots/store.png)
+<p align="center">
+  <img src="assets/readme/app-card.png" alt="Orivo: a console for every game you own, on Mac, TV and iPhone" />
+</p>
 
+<p align="center">
+  <img src="assets/readme/library-motorfest.jpg" alt="The Orivo library, with The Crew Motorfest in the hero and the Recently Played rail below" />
+</p>
+
+<p align="center">
+  <img src="assets/readme/library-silksong.jpg" width="49%" alt="The Orivo library, with Hollow Knight: Silksong in the hero and the Moonlight rail below" />
+  <img src="assets/readme/library-cyberpunk.jpg" width="49%" alt="The Orivo library, with Cyberpunk 2077 in the hero and the Moonlight rail below" />
+</p>
 
 ## Install
 
