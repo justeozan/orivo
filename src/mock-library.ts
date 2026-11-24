@@ -59,6 +59,11 @@ export interface LibraryGame {
   /** 0-100, present only while a download is running. */
   installPercent?: number | null;
   macCompatibility?: "native" | "not-native" | "unknown";
+  /**
+   * The game's files are no longer where the card says, and no search found
+   * where they went: shown as not installed, and Play becomes Locate.
+   */
+  missing?: boolean;
 }
 
 const hero = (name: string) => `/media/igdb/heroes/${name}`;

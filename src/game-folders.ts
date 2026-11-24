@@ -37,6 +37,10 @@ export interface GameFolderScanEvent {
   repointed: number;
   /** Such cards hidden: no game beside the tool, or already in the library. */
   hidden: number;
+  /** Titles of the games that moved and were found where they went. */
+  relocated: string[];
+  /** Some card started, or stopped, being shown as not installed. */
+  missingChanged: boolean;
   folders: GameFolderScanSummary[];
 }
 
@@ -69,7 +73,16 @@ export function readGameFolders(value: unknown): GameFolderView[] {
  */
 export function readGameFolderScan(value: unknown): GameFolderScanEvent {
   if (typeof value === "number") {
-    return { requested: false, added: count(value), addedIds: [], repointed: 0, hidden: 0, folders: [] };
+    return {
+      requested: false,
+      added: count(value),
+      addedIds: [],
+      repointed: 0,
+      hidden: 0,
+      relocated: [],
+      missingChanged: false,
+      folders: [],
+    };
   }
   const event = record(value);
   const folders = Array.isArray(event.folders)
@@ -94,6 +107,8 @@ export function readGameFolderScan(value: unknown): GameFolderScanEvent {
     addedIds: strings(event.addedIds),
     repointed: count(event.repointed),
     hidden: count(event.hidden),
+    relocated: strings(event.relocated),
+    missingChanged: event.missingChanged === true,
     folders,
   };
 }
@@ -137,10 +152,19 @@ function folderMessage(folder: GameFolderScanSummary): string {
  * background scan that added nothing.
  */
 export function gameFolderScanMessage(event: GameFolderScanEvent): string | null {
-  const fixed = repairMessage(event);
-  const found = scanMessage(event);
-  if (fixed && found) return `${found} ${fixed}`;
-  return found ?? fixed;
+  const parts = [scanMessage(event), relocatedMessage(event), repairMessage(event)].filter(
+    (part): part is string => part !== null,
+  );
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/** Games that moved, found where they went. Said even after a quiet scan:
+ *  the player moved them, and their cards changed under them. */
+function relocatedMessage(event: GameFolderScanEvent): string | null {
+  if (event.relocated.length === 0) return null;
+  return event.relocated.length === 1
+    ? t("app.folder.relocatedOne", { title: event.relocated[0] })
+    : t("app.folder.relocatedMany", { count: event.relocated.length });
 }
 
 /** Cards that pointed at a checksum tool, a plugin or a crack copy. */

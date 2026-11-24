@@ -298,6 +298,7 @@ export interface GameDetailView extends GameSummary {
     | "install-steam"
     | "install-epic"
     | "configure-wine"
+    | "locate"
     | "view-offer"
     | "unavailable";
 }

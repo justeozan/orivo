@@ -7,7 +7,7 @@ use std::{
 
 #[derive(Debug)]
 pub enum LaunchError {
-    MissingExecutable(std::path::PathBuf),
+    MissingExecutable,
     PermissionDenied(std::path::PathBuf),
     SteamNotInstalled,
     #[cfg(not(target_os = "macos"))]
@@ -58,12 +58,15 @@ pub enum LaunchError {
     Process(io::Error),
 }
 
+/// What Play says when a game is no longer where Orivo left it, and could
+/// not be found where it went.
+pub const MOVED_GAME_MESSAGE: &str = "This game is no longer where Orivo left it. Press Locate to show Orivo where it is now.";
+
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingExecutable(path) => {
-                write!(f, "executable does not exist: {}", path.display())
-            }
+            // The path stays on this side: the WebView is told what to do.
+            Self::MissingExecutable => write!(f, "{}", MOVED_GAME_MESSAGE),
             Self::PermissionDenied(path) => {
                 write!(f, "executable is not readable: {}", path.display())
             }
@@ -449,9 +452,9 @@ fn launch_direct(game: &Game) -> Result<Option<GameProcess>, LaunchError> {
     let executable = game
         .executable_path
         .as_ref()
-        .ok_or_else(|| LaunchError::MissingExecutable(std::path::PathBuf::new()))?;
+        .ok_or_else(|| LaunchError::MissingExecutable)?;
     if !executable.is_file() {
-        return Err(LaunchError::MissingExecutable(executable.clone()));
+        return Err(LaunchError::MissingExecutable);
     }
     if !is_executable(executable) {
         return Err(LaunchError::PermissionDenied(executable.clone()));
@@ -624,7 +627,7 @@ pub fn is_shortcut_file(path: &Path) -> bool {
 
 fn open_shortcut(path: &Path) -> Result<(), LaunchError> {
     if !path.is_file() {
-        return Err(LaunchError::MissingExecutable(path.to_path_buf()));
+        return Err(LaunchError::MissingExecutable);
     }
     let is_url = path
         .extension()
@@ -942,7 +945,7 @@ mod tests {
 
         assert!(matches!(
             launch(&game),
-            Err(LaunchError::MissingExecutable(_))
+            Err(LaunchError::MissingExecutable)
         ));
     }
 

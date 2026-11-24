@@ -18,6 +18,7 @@ mod game_media;
 mod gamestream;
 mod launcher;
 mod moonlight_android;
+mod moved_games;
 // Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
 // numbers docs/performance.md records. It never runs in the default `cargo test`
 // gate, so a busy CI runner can't turn a timing into a false failure.
@@ -477,6 +478,9 @@ struct GameView {
     /// 0-100, set only while a download is running.
     install_percent: Option<u8>,
     mac_compatibility: game_detail::MacCompatibilityView,
+    /// The game's files are no longer where the card says, and no search
+    /// found where they went: the card is shown as not installed.
+    missing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1168,6 +1172,7 @@ pub fn run() {
             get_library,
             import_game,
             choose_game_folder,
+            locate_game,
             list_game_folders,
             remove_game_folder,
             scan_game_folders,
@@ -5004,6 +5009,109 @@ fn remove_game_folder(
     Ok(folders.views())
 }
 
+/// The games folders, as paths, for a search that runs on this side.
+fn game_folder_paths(app: &AppHandle) -> Vec<PathBuf> {
+    let Some(record) = game_folder_record(app) else {
+        return Vec::new();
+    };
+    match GAME_FOLDER_RECORD_LOCK.lock() {
+        Ok(_record) => game_folder::GameFolders::load(&record)
+            .folders
+            .into_iter()
+            .map(|folder| folder.path)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Whether pressing Play on this card would start a program that is gone:
+/// its own way of starting, or the one chosen, is the local program.
+fn starts_a_missing_program(state: &AppState, game_id: &str, option: Option<&str>) -> bool {
+    let Ok(catalog) = state.catalog.read() else {
+        return false;
+    };
+    let Some(game) = catalog.games.iter().find(|game| game.id == game_id) else {
+        return false;
+    };
+    let target = option
+        .and_then(|option| launch_target_for_option(game, option))
+        .unwrap_or_else(|| game.launch_target.clone());
+    matches!(target, LaunchTarget::Direct) && moved_games::is_missing(game)
+}
+
+/// Show Orivo where a game is now, when it moved somewhere no search reached.
+/// The card keeps its id, play time and artwork; only what it starts changes.
+/// Returns the game's title, or `None` when the dialog was cancelled.
+#[tauri::command]
+fn locate_game(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    game_id: String,
+) -> Result<Option<String>, String> {
+    #[cfg(mobile)]
+    {
+        let _ = (app, state, game_id);
+        return Ok(None);
+    }
+    #[cfg(desktop)]
+    {
+        let _ = &app;
+        let title = {
+            let catalog = state
+                .catalog
+                .read()
+                .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+            let game = catalog
+                .games
+                .iter()
+                .find(|game| game.id == game_id)
+                .ok_or_else(|| "This game is no longer in your library.".to_string())?;
+            if game.source != GameSource::Local || !matches!(game.launch_target, LaunchTarget::Direct) {
+                return Err("Its store or runner keeps track of this game.".into());
+            }
+            game.title.clone()
+        };
+        let Some(picked) = rfd::FileDialog::new()
+            .set_title(format!("Where is {title} now?"))
+            .pick_file()
+        else {
+            return Ok(None);
+        };
+        let found = game_folder::game_for_path(&picked)?;
+        let _mutation = state
+            .catalog_mutation
+            .lock()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+        let mut next = state
+            .catalog
+            .read()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+            .clone();
+        if next.games.iter().any(|game| {
+            game.id != game_id
+                && game.source == GameSource::Local
+                && !game.hidden
+                && game.executable_path.is_some()
+                && game.executable_path == found.executable_path
+        }) {
+            return Err("Another game in your library already starts this program.".into());
+        }
+        let card = next
+            .games
+            .iter_mut()
+            .find(|game| game.id == game_id)
+            .ok_or_else(|| "This game is no longer in your library.".to_string())?;
+        moved_games::point_at(card, &found);
+        next.validate().map_err(|error| error.to_string())?;
+        persist_catalog(&next, &state.catalog_path).map_err(|error| error.to_string())?;
+        *state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())? = next;
+        Ok(Some(title))
+    }
+}
+
 /// Look in the games folders now — one of them, or all — and report what was
 /// found through the `game-folder-scanned` event, even when nothing was.
 #[tauri::command]
@@ -5057,6 +5165,11 @@ struct GameFolderScanEvent {
     repointed: usize,
     /// Such cards hidden: no game beside the tool, or one already in the library.
     hidden: usize,
+    /// Titles of the cards whose game moved and was found where it went.
+    relocated: Vec<String>,
+    /// Cards that started or stopped being shown as not installed, so the
+    /// library is pulled again.
+    missing_changed: bool,
     folders: Vec<GameFolderScanSummary>,
 }
 
@@ -5094,7 +5207,12 @@ fn run_game_folder_scan(app: &AppHandle, request: ScanRequest) {
         }
     };
     let event = scan_game_folder_record(app, &request);
-    if event.requested || event.added > 0 || event.repointed + event.hidden > 0 {
+    if event.requested
+        || event.added > 0
+        || event.repointed + event.hidden > 0
+        || !event.relocated.is_empty()
+        || event.missing_changed
+    {
         let _ = app.emit_to(MAIN_WINDOW_LABEL, GAME_FOLDER_SCANNED_EVENT, event);
     }
 }
@@ -5108,11 +5226,15 @@ struct KnownGames {
     visible_local_paths: Vec<PathBuf>,
     steam_app_ids: BTreeSet<u32>,
     epic_app_names: BTreeSet<String>,
+    /// Cards whose game is nowhere to be found: a shortcut in a folder that
+    /// now names a program that is there points its card at it.
+    missing_ids: BTreeSet<String>,
 }
 
 impl KnownGames {
     fn of(catalog: &Catalog) -> Self {
         let mut known = Self {
+            missing_ids: BTreeSet::new(),
             ids: BTreeSet::new(),
             local_paths: Vec::new(),
             visible_local_paths: Vec::new(),
@@ -5121,6 +5243,9 @@ impl KnownGames {
         };
         for game in &catalog.games {
             known.ids.insert(game.id.clone());
+            if moved_games::marked_missing(game) {
+                known.missing_ids.insert(game.id.clone());
+            }
             if game.source == GameSource::Local
                 && let Some(path) = &game.executable_path
             {
@@ -5214,6 +5339,20 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
     let repair = repair_tool_cards(&state);
     event.repointed = repair.repointed;
     event.hidden = repair.hidden;
+    // A game moved into a games folder is found there before the folder is
+    // read for new games, so it comes back as its own card, not as a second one.
+    let places = folders
+        .folders
+        .iter()
+        .map(|folder| folder.path.clone())
+        .collect::<Vec<_>>();
+    let (relocation, missing_changed) = relocate_moved_cards(&state, &places, None);
+    event.relocated = relocation
+        .relocated
+        .into_iter()
+        .map(|(_, title)| title)
+        .collect();
+    event.missing_changed = missing_changed;
     let known = match state.catalog.read() {
         Ok(catalog) => KnownGames::of(&catalog),
         Err(_) => return event,
@@ -5223,6 +5362,7 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
     // lease is taken: an import or a launch never waits behind a scan.
     let mut budget = game_folder::MAX_ENTRIES;
     let mut pending = Vec::<(usize, Game)>::new();
+    let mut retargeted = Vec::<Game>::new();
     for folder in &folders.folders {
         if let ScanRequest::Folder(id) = request
             && game_folder::folder_id(&folder.path) != *id
@@ -5264,6 +5404,13 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
             if let Some(title) = found.title.as_deref().filter(|title| !title.trim().is_empty()) {
                 game.title = title.to_string();
             }
+            // A shortcut whose program moved, and that names where it went
+            // now (Windows follows a moved target, or the player fixed it).
+            if known.missing_ids.contains(&game.id) && !moved_games::is_missing(&game) {
+                summary.known += 1;
+                retargeted.push(game);
+                continue;
+            }
             if known.has_game(&game, &found) {
                 summary.known += 1;
                 continue;
@@ -5274,8 +5421,79 @@ fn scan_game_folder_record(app: &AppHandle, request: &ScanRequest) -> GameFolder
         event.folders.push(summary);
     }
 
+    for title in retarget_cards(&state, retargeted) {
+        event.relocated.push(title);
+    }
     add_folder_games(&state, pending, &mut event);
     event
+}
+
+/// Points the cards whose game moved at where it went, and marks those that
+/// cannot be found (`moved_games::relocate`). The search reads the disk, so it
+/// runs on a snapshot and only its outcome is applied under the catalog lease:
+/// an import or a launch never waits behind it. Returns what was found, and
+/// whether any card changed.
+fn relocate_moved_cards(
+    state: &AppState,
+    places: &[PathBuf],
+    only: Option<&str>,
+) -> (moved_games::Relocation, bool) {
+    let Ok(before) = state.catalog.read().map(|catalog| catalog.clone()) else {
+        return Default::default();
+    };
+    let mut after = before.clone();
+    let relocation = moved_games::relocate(&mut after, places, only, &moved_games::spotlight);
+    if after == before {
+        return (relocation, false);
+    }
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return Default::default();
+    };
+    let mut next = match state.catalog.read() {
+        Ok(catalog) => catalog.clone(),
+        Err(_) => return Default::default(),
+    };
+    if !moved_games::carry_over(&mut next, &before, &after)
+        || next.validate().is_err()
+        || persist_catalog(&next, &state.catalog_path).is_err()
+    {
+        return (moved_games::Relocation::default(), false);
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+    (relocation, true)
+}
+
+/// Points cards at the program their shortcut names now. Returns their titles.
+fn retarget_cards(state: &AppState, found: Vec<Game>) -> Vec<String> {
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let Ok(_mutation) = state.catalog_mutation.lock() else {
+        return Vec::new();
+    };
+    let mut next = match state.catalog.read() {
+        Ok(catalog) => catalog.clone(),
+        Err(_) => return Vec::new(),
+    };
+    let mut titles = Vec::new();
+    for game in &found {
+        if let Some(card) = next.games.iter_mut().find(|card| card.id == game.id) {
+            moved_games::point_at(card, game);
+            titles.push(card.title.clone());
+        }
+    }
+    if titles.is_empty()
+        || next.validate().is_err()
+        || persist_catalog(&next, &state.catalog_path).is_err()
+    {
+        return Vec::new();
+    }
+    if let Ok(mut catalog) = state.catalog.write() {
+        *catalog = next;
+    }
+    titles
 }
 /// Points the cards an older scan aimed at a checksum checker, a plugin or a
 /// crack copy at the game beside it, or hides them (`game_folder::repair_tool_cards`).
@@ -8088,6 +8306,25 @@ async fn launch_game_inner(
     state: State<'_, AppState>,
     runners: State<'_, Arc<runner_commands::ThirdPartyRunnerService>>,
 ) -> Result<LaunchResult, String> {
+    // A game moved since the last look is looked for now, before Play would
+    // end on a path that is not there. The search reads the disk, so it runs
+    // off the command executor.
+    if starts_a_missing_program(&state, &game_id, launch_option.as_deref()) {
+        let finder = app.clone();
+        let id = game_id.clone();
+        let (relocation, _) = tauri::async_runtime::spawn_blocking(move || {
+            let places = game_folder_paths(&finder);
+            match finder.try_state::<AppState>() {
+                Some(state) => relocate_moved_cards(&state, &places, Some(&id)),
+                None => Default::default(),
+            }
+        })
+        .await
+        .unwrap_or_default();
+        if relocation.relocated.is_empty() {
+            return Err(launcher::MOVED_GAME_MESSAGE.into());
+        }
+    }
     let mut stream_or_download: Option<String> = None;
     let (game, mut wine_launch, winlator_launch, console_launch, runner_launch) = {
         let catalog = state
@@ -9529,13 +9766,18 @@ fn target_launchable(target: &LaunchTarget, game: &Game, catalog: &Catalog) -> b
         // the cheap, authoritative state boundary; no filesystem stat per
         // rendered card is needed here.
         LaunchTarget::Steam { .. } => game.installation_path.is_some(),
-        LaunchTarget::Direct => !game.id.starts_with("showcase-"),
+        // The background pass marks a card whose program is gone; the mark is
+        // read here instead of the disk.
+        LaunchTarget::Direct => {
+            !game.id.starts_with("showcase-") && !moved_games::marked_missing(game)
+        }
         LaunchTarget::Runner {
             runner_id,
             profile_id,
             game_ref,
         } if runner_id == WINE_STAGING_RUNNER_ID => {
-            catalog
+            !moved_games::marked_missing(game)
+                && catalog
                 .wine_profile(profile_id)
                 .is_some_and(|profile| profile.enabled)
                 && catalog.wine_inventory_entry(profile_id, game_ref).is_some()
@@ -9877,6 +10119,7 @@ fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameVi
         install_state: game_detail::install_state_of(game),
         install_percent: game_detail::install_percent_of(game),
         mac_compatibility: game_detail::mac_compatibility_of(game),
+        missing: moved_games::marked_missing(game),
     }
 }
 
@@ -11665,6 +11908,7 @@ pub(crate) mod tests {
             visible_local_paths: vec![PathBuf::from("/Games/Control/Control_DX12.exe")],
             steam_app_ids: BTreeSet::new(),
             epic_app_names: BTreeSet::new(),
+            missing_ids: BTreeSet::new(),
         };
         let shortcut = game_folder::FoundGame {
             entry: PathBuf::from("/Shortcuts/Control.exe.lnk"),
@@ -11684,6 +11928,7 @@ pub(crate) mod tests {
             visible_local_paths: Vec::new(),
             steam_app_ids: BTreeSet::new(),
             epic_app_names: BTreeSet::new(),
+            missing_ids: BTreeSet::new(),
         };
         game.executable_path = Some(PathBuf::from("/Games/Control/Control.exe"));
         assert!(!hidden.has_game(&game, &shortcut));

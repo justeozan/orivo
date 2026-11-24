@@ -1161,6 +1161,30 @@ describe("application shell against the desktop backend", () => {
     expect(Array.from(hero?.children ?? [])).toEqual([identity, feedback, actions]);
   });
 
+  it("dims a game whose files moved, and turns Play into Locate", async () => {
+    backend.library = [{ ...alpha, launchable: false, installState: "not-installed", missing: true }, beta];
+    mount();
+    await settle();
+
+    const cards = Array.from(root.querySelectorAll<HTMLElement>("#game-cards .game-card"));
+    expect(cards.map((card) => card.classList.contains("is-missing"))).toEqual([true, false]);
+    expect(cards[0].getAttribute("aria-label")).toContain("Not installed");
+    expect(root.querySelector<HTMLElement>("#hero-missing")?.hidden).toBe(false);
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.dataset.kind).toBe("locate");
+    expect(play.textContent).toContain("Locate");
+    expect(play.hasAttribute("aria-disabled")).toBe(false);
+
+    // Pressing it asks where the game is now, and never tries to start it.
+    tauri.invoke.mockClear();
+    play.click();
+    await settle();
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === "locate_game")).toEqual([
+      ["locate_game", { gameId: alpha.id }],
+    ]);
+    expect(launchedGameIds()).toEqual([]);
+  });
+
   it("gives the hero one line: the genre, then the studio", async () => {
     backend.library = [
       {
