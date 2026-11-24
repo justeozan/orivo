@@ -4,12 +4,13 @@ Orivo ships as a self-updating desktop app. A release is one GitHub Release that
 carries the installers for every platform **plus** an updater manifest
 (`latest.json`) that installed copies poll on startup.
 
-Everything is automated by three workflows:
+Every PR merged into `main` cuts a release. Four workflows do it:
 
 | Workflow | File | Trigger | What it does |
 | --- | --- | --- | --- |
 | CI | `.github/workflows/ci.yml` | push to `main`, every PR | `pnpm typecheck`, `pnpm test`, and `cargo check` on Linux / macOS / Windows |
-| Tag release | `.github/workflows/tag.yml` | manual (`workflow_dispatch`) | bumps the version everywhere, commits to `main`, pushes `v<version>`, starts the release |
+| Auto tag | `.github/workflows/auto-tag.yml` | a PR merged into `main` | starts Tag release with a patch bump (`release:minor` / `release:major` label: bigger; `release:skip`: none). Docs- or Markdown-only PRs do not start it |
+| Tag release | `.github/workflows/tag.yml` | Auto tag, or manual (`workflow_dispatch`) | works out the next version (or takes the one given), bumps it everywhere, commits to `main`, pushes `v<version>`, starts the release |
 | Release | `.github/workflows/release.yml` | push of a `v*` tag, or manual | stages, verifies, then publishes the bundles, signatures and `latest.json` |
 
 ---
@@ -101,14 +102,22 @@ both secrets.
 ### Before you start
 
 - Everything you want to ship is merged into `main` and CI is green.
-- `CHANGELOG.md` has an entry for the new version (move the `[Unreleased]`
-  items under a `## [x.y.z]` heading).
+- Nothing else: the release notes are written by `scripts/release-notes.sh`,
+  one line per PR merged since the previous stable tag (`- #N : <PR title>`),
+  then the download notes. PR titles are the changelog, so make them read well.
 
 ### The normal path (recommended)
 
+Merge the PR. That is all: **Auto tag** starts **Tag release** with the bump
+its labels ask for (patch when none). Two PRs merged in a row get two
+consecutive versions: Tag release runs one at a time and picks the number
+itself.
+
+To release without a merge (or with an exact version):
+
 1. Go to **Actions → Tag release → Run workflow**.
-2. Enter the new version **without** the leading `v` (for example `0.4.0`).
-   Pre-releases like `0.4.0-rc.1` are accepted.
+2. Pick a bump, or enter the exact version **without** the leading `v` (for
+   example `0.4.0`). Pre-releases like `0.4.0-rc.1` are accepted.
 3. Run it. The workflow:
    - refuses to continue if `v0.4.0` already exists locally or on `origin`;
    - rewrites the single version literal in `package.json`,
@@ -369,8 +378,8 @@ under `bundle.windows` in `src-tauri/tauri.conf.json` (`signCommand`, or the
 `trustedSigning` block) and add the corresponding secrets to the same `env:`
 block.
 
-Until then, keep the SmartScreen instructions in the release notes — the
-release body published by the workflow already contains them.
+Until then, SmartScreen will warn on every new Windows release; the
+workaround (**More info → Run anyway**) is in the Windows section above.
 
 ---
 

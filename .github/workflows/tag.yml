@@ -3,9 +3,15 @@ name: Tag release
 on:
   workflow_dispatch:
     inputs:
+      bump:
+        description: 'Which part of the version to raise, when no version is given'
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
       version:
-        description: 'New version, without the leading v (e.g. 0.4.0)'
-        required: true
+        description: 'Exact new version, without the leading v (e.g. 0.4.0). Overrides the bump.'
+        required: false
         type: string
 
 permissions:
@@ -32,9 +38,38 @@ jobs:
         with:
           node-version: 22
 
+      - name: Work out the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            version="$INPUT_VERSION"
+          else
+            # Computed here rather than by the caller: runs of this workflow are
+            # serialised, so two merges in a row never pick the same number.
+            # The highest of package.json and the latest tag, so a version
+            # bumped by hand or a tag pushed alone is never reused.
+            current=$(node -p "require('./package.json').version" | sed 's/-.*//')
+            latest=$(git tag --list 'v[0-9]*' | sed 's/^v//; s/-.*//' | sort -V | tail -n1)
+            base=$(printf '%s\n%s\n' "$current" "${latest:-0.0.0}" | sort -V | tail -n1)
+            IFS=. read -r major minor patch <<< "$base"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              *) patch=$((patch + 1)) ;;
+            esac
+            version="$major.$minor.$patch"
+            echo "$BUMP bump from $base."
+          fi
+          echo "Releasing v$version."
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Validate the version and make sure the tag is free
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
@@ -52,7 +87,7 @@ jobs:
 
       - name: Bump the version in package.json, Cargo.toml, Cargo.lock and tauri.conf.json
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           cat > "$RUNNER_TEMP/bump-version.mjs" <<'NODE'
@@ -105,7 +140,7 @@ jobs:
 
       - name: Commit, tag and push
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
@@ -123,7 +158,7 @@ jobs:
       - name: Start the release workflow
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           # A tag pushed with GITHUB_TOKEN does not start a workflow run, so
