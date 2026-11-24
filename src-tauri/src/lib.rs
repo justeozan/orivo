@@ -8986,16 +8986,16 @@ async fn install_steam_game(
 /// Playport where Playport is installed, its iOS version when the App Store
 /// has one, its Steam page always. See `store_choices`.
 ///
-/// A Steam game always has an answer. A GOG or Epic Games game has one only
-/// where Playport is installed: neither store publishes a page the catalog can
-/// name, so outside Playport there is nowhere to send it.
+/// A Steam game always has an answer. A GOG or Epic Games game has one where
+/// the App Store sells its iOS version (Fortnite) or Playport is installed:
+/// neither store publishes a page the catalog can name.
 #[tauri::command]
 async fn get_store_choices(
     game_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<store_choices::StoreChoiceView>, String> {
-    let (title, launch_target, playport_game) = {
+    let (title, launch_target, developer, playport_game) = {
         let catalog = state
             .catalog
             .read()
@@ -9008,6 +9008,7 @@ async fn get_store_choices(
         (
             game.title.clone(),
             game.launch_target.clone(),
+            developer_of(game),
             playport::game_for(game, &supported_platforms(game)),
         )
     };
@@ -9017,7 +9018,12 @@ async fn get_store_choices(
         Some(game) if playport::installed(&app).await => Some(game),
         _ => None,
     };
-    if playport_game.is_none() && !matches!(launch_target, LaunchTarget::Steam { .. }) {
+    let app_store_may_have_it = cfg!(target_os = "ios")
+        && matches!(&launch_target, LaunchTarget::Provider { provider, .. } if provider == "epic" || provider == "gog");
+    if playport_game.is_none()
+        && !app_store_may_have_it
+        && !matches!(launch_target, LaunchTarget::Steam { .. })
+    {
         return Ok(Vec::new());
     }
     let region = store::store_region(&app)?;
@@ -9026,6 +9032,7 @@ async fn get_store_choices(
         &http,
         &title,
         &launch_target,
+        &developer,
         &region,
         // The App Store is worth asking only on a device that installs from it.
         cfg!(target_os = "ios"),

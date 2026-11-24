@@ -19,6 +19,10 @@
 //! the game's developer or publisher. A port published by a porting house
 //! (Netflix's Hades, Playdigious's Dead Cells) is missed by that last rule, and
 //! that is the trade.
+//!
+//! A GOG or Epic Games game is looked for the same way, with the studio its
+//! store recorded at sync: Fortnite on an iPhone is Epic's own App Store app,
+//! and "Install" used to hand it to an Epic launcher no iPhone has.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -160,12 +164,15 @@ impl StoreChoice {
 /// the App Store), then its Steam page.
 ///
 /// `playport` is the game as Playport would name it, and only where Playport
-/// is installed. A GOG or Epic Games game has no other answer here: neither
-/// store publishes a page the catalog can name.
+/// is installed. A GOG or Epic Games game gets no store page: neither store
+/// publishes one the catalog can name, and a page is not an install anyway.
+/// Its iOS version is looked for with `developer`, the studio its store named.
+#[allow(clippy::too_many_arguments)]
 pub async fn choices_for_game(
     http: &dyn StoreHttp,
     title: &str,
     launch_target: &LaunchTarget,
+    developer: &str,
     region: &str,
     app_store: bool,
     playport: Option<&PlayportGame>,
@@ -181,16 +188,24 @@ pub async fn choices_for_game(
             None => None,
         }
     };
-    let from_steam = async {
+    let from_stores = async {
         match launch_target {
             LaunchTarget::Steam { app_id } => {
                 choices_for_steam_game(http, title, *app_id, region, app_store).await
             }
+            LaunchTarget::Provider { provider, .. }
+                if app_store && matches!(provider.as_str(), "epic" | "gog") =>
+            {
+                find_ios_version_by(http, title, &[developer.to_string()], region)
+                    .await
+                    .into_iter()
+                    .collect()
+            }
             _ => Vec::new(),
         }
     };
-    let (in_playport, from_steam) = futures_util::future::join(in_playport, from_steam).await;
-    in_playport.into_iter().chain(from_steam).collect()
+    let (in_playport, from_stores) = futures_util::future::join(in_playport, from_stores).await;
+    in_playport.into_iter().chain(from_stores).collect()
 }
 
 /// Everything "Install" can offer for a Steam game here: its iOS version when
@@ -232,6 +247,21 @@ async fn find_ios_version(
             .filter(|name| normalise(name) != normalise(title))
             .and_then(|name| app_store_match(&search, &name, &studios))
     })
+}
+
+/// The iOS version of a game whose studio the library already knows.
+async fn find_ios_version_by(
+    http: &dyn StoreHttp,
+    title: &str,
+    studios: &[String],
+    region: &str,
+) -> Option<StoreChoice> {
+    // Without a studio nothing could match, so the App Store is not asked.
+    if studio_words(studios).is_empty() {
+        return None;
+    }
+    let search = http.get_json(&app_store_search_url(title, region)).await.ok()?;
+    app_store_match(&search, title, studios)
 }
 
 /// The public iTunes Search API, the same one the Store's App Store shelf
@@ -611,7 +641,7 @@ mod tests {
         let stardew_valley = PlayportGame::Steam { app_id: 413_150 };
         let target = LaunchTarget::Steam { app_id: 413_150 };
         let list = CompatibilityList::new();
-        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "US", true, Some(&stardew_valley), &list));
+        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "", "US", true, Some(&stardew_valley), &list));
         assert_eq!(
             choices,
             vec![
@@ -626,7 +656,7 @@ mod tests {
     fn without_playport_a_steam_game_keeps_the_answers_it_had() {
         let target = LaunchTarget::Steam { app_id: 413_150 };
         let list = CompatibilityList::new();
-        let choices = block_on(choices_for_game(&stardew(), "Stardew Valley", &target, "US", true, None, &list));
+        let choices = block_on(choices_for_game(&stardew(), "Stardew Valley", &target, "", "US", true, None, &list));
         assert_eq!(
             choices,
             vec![
@@ -646,15 +676,59 @@ mod tests {
         let gog = provider_target("gog", "2022341186");
         let bioshock = PlayportGame::Gog { product_id: "2022341186".into() };
         assert_eq!(
-            block_on(choices_for_game(&http, "BioShock", &gog, "US", true, Some(&bioshock), &list)),
+            block_on(choices_for_game(&http, "BioShock", &gog, "", "US", true, Some(&bioshock), &list)),
             vec![StoreChoice::Playport { verdict: Some(Compatibility::Broken) }]
         );
-        assert_eq!(block_on(choices_for_game(&http, "BioShock", &gog, "US", true, None, &list)), Vec::new());
+        assert_eq!(block_on(choices_for_game(&http, "BioShock", &gog, "", "US", true, None, &list)), Vec::new());
         let epic = provider_target("epic", "ns:item:SuperMeatBoy");
         let super_meat_boy = PlayportGame::Epic { title: "Super Meat Boy".into() };
         assert_eq!(
-            block_on(choices_for_game(&http, "Super Meat Boy", &epic, "US", true, Some(&super_meat_boy), &list)),
+            block_on(choices_for_game(&http, "Super Meat Boy", &epic, "", "US", true, Some(&super_meat_boy), &list)),
             vec![StoreChoice::Playport { verdict: Some(Compatibility::Unlisted) }]
+        );
+    }
+
+    fn fortnite() -> FakeHttp {
+        FakeHttp::new(
+            Err("not asked".into()),
+            Ok(search(vec![
+                result("Fortnite", "Epic Games Inc.", "Epic Games Sweden AB", GAMES_GENRE_ID, 6_483_539_426),
+                result("Epic Games", "Epic Games Inc.", "Epic Games Sweden AB", "6002", 6_480_077_263),
+            ])),
+        )
+    }
+
+    #[test]
+    fn an_epic_game_on_an_iphone_is_sent_to_its_own_app_store_app() {
+        let epic = provider_target("epic", "fn:4fe75bbc5a674f4f9b356b5c90567da5:Fortnite");
+        let list = CompatibilityList::new();
+        let choices = block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "Epic Games", "FR", true, None, &list));
+        assert_eq!(
+            choices,
+            vec![StoreChoice::AppStore { track_id: 6_483_539_426, seller: "Epic Games Sweden AB".into() }]
+        );
+        let gog = provider_target("gog", "1207658924");
+        assert_eq!(
+            block_on(choices_for_game(&fortnite(), "Fortnite", &gog, "Epic Games", "FR", true, None, &list)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn an_epic_game_is_not_looked_for_without_a_studio_or_off_ios() {
+        let epic = provider_target("epic", "fn:item:Fortnite");
+        let list = CompatibilityList::new();
+        // No studio: a namesake by anybody would do, so nothing is offered.
+        assert_eq!(block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "", "FR", true, None, &list)), Vec::new());
+        // Android installs nothing from the App Store.
+        assert_eq!(
+            block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "Epic Games", "FR", false, None, &list)),
+            Vec::new()
+        );
+        // Another studio's game of the same name is somebody else's app.
+        assert_eq!(
+            block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "Imitation Studio", "FR", true, None, &list)),
+            Vec::new()
         );
     }
 
@@ -664,7 +738,7 @@ mod tests {
         let stardew_valley = PlayportGame::Steam { app_id: 413_150 };
         let target = LaunchTarget::Steam { app_id: 413_150 };
         let list = CompatibilityList::new();
-        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "US", true, Some(&stardew_valley), &list));
+        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "", "US", true, Some(&stardew_valley), &list));
         assert_eq!(
             choices,
             vec![StoreChoice::Playport { verdict: None }, StoreChoice::SteamPage { app_id: 413_150 }]

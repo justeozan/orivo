@@ -273,6 +273,8 @@ export interface GameDetailPageOptions {
    * or Epic game somewhere to go where Install asks. Asked each time too.
    */
   playportInstalled?(): boolean;
+  /** Whether the App Store may sell a GOG or Epic game's iOS version (iOS). */
+  appStoreVersions?(): boolean;
   client?: GameDetailPageClient;
 }
 
@@ -718,6 +720,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   const actionOptions = () => ({
     storeChoices: storeChoicesClient() !== null,
     playport: options.playportInstalled?.() ?? false,
+    appStoreVersions: options.appStoreVersions?.() ?? false,
   });
 
   /**
