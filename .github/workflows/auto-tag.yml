@@ -1,14 +1,19 @@
 name: Auto tag on merge
 
-# Merging a PR labelled release:patch, release:minor or release:major cuts a
-# release: this workflow works out the next version and starts `tag.yml`, which
-# bumps the version files, pushes the tag and dispatches `release.yml`.
-# A PR without one of those labels releases nothing.
+# Every PR merged into main cuts a release: this workflow starts `tag.yml`, which
+# works out the next version, bumps the version files, pushes the tag and
+# dispatches `release.yml`. A patch release by default; the labels
+# release:minor and release:major raise more, release:skip releases nothing.
+# A PR that only touches docs or Markdown never starts this workflow; its
+# changes ship, and are listed, with the next release.
 
 on:
   pull_request:
     types: [closed]
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
 
 permissions:
   contents: read
@@ -31,46 +36,32 @@ jobs:
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
         run: |
           set -euo pipefail
-          bump=""
+          bump="patch"
           # The biggest label wins when a PR carries several.
-          for level in patch minor major; do
+          for level in minor major; do
             case ",$LABELS," in *",release:$level,"*) bump="$level" ;; esac
           done
-          if [ -z "$bump" ]; then
-            echo "No release:* label on the PR: nothing to release."
-          fi
+          case ",$LABELS," in
+            *",release:skip,"*)
+              echo "release:skip on the PR: nothing to release."
+              bump=""
+              ;;
+          esac
           echo "bump=$bump" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout main
-        if: steps.bump.outputs.bump != ''
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Work out the next version and start tag.yml
+      - name: Start tag.yml
         if: steps.bump.outputs.bump != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           BUMP: ${{ steps.bump.outputs.bump }}
         run: |
           set -euo pipefail
-          # The highest of package.json and the latest tag, so a version bumped
-          # by hand or a tag pushed alone is never reused.
-          current=$(node -p "require('./package.json').version" | sed 's/-.*//')
-          latest=$(git tag --list 'v[0-9]*' | sed 's/^v//; s/-.*//' | sort -V | tail -n1)
-          base=$(printf '%s\n%s\n' "$current" "${latest:-0.0.0}" | sort -V | tail -n1)
-          IFS=. read -r major minor patch <<< "$base"
-          case "$BUMP" in
-            major) major=$((major + 1)); minor=0; patch=0 ;;
-            minor) minor=$((minor + 1)); patch=0 ;;
-            patch) patch=$((patch + 1)) ;;
-          esac
-          version="$major.$minor.$patch"
-          echo "Releasing v$version ($BUMP bump from $base)."
-          gh workflow run tag.yml --ref main -f version="$version"
+          # tag.yml picks the version itself: its runs are serialised, so two
+          # PRs merged a minute apart get two consecutive versions.
+          gh workflow run tag.yml --ref main -f bump="$BUMP"
           {
-            echo "### Release requested: v$version"
+            echo "### Release requested ($BUMP)"
             echo ""
-            echo "PR #${{ github.event.pull_request.number }} carried \`release:$BUMP\`. Follow it in [Actions → Tag release](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tag.yml)."
+            echo "PR #${{ github.event.pull_request.number }} was merged. Follow it in [Actions → Tag release](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tag.yml)."
           } >> "$GITHUB_STEP_SUMMARY"

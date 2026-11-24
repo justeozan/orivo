@@ -34,6 +34,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The tags, to list the PRs since the previous release.
+          fetch-depth: 0
 
       - name: Create the draft if it does not exist
         env:
@@ -53,21 +56,10 @@ jobs:
             echo "A release for $tag already exists; the builds add their assets to it."
             exit 0
           fi
-          gh release create "$tag" --draft --title "Orivo ${tag#v}" --notes "$(cat <<'NOTES'
-          ## Downloads
-
-          - **macOS:** download the `.dmg` matching your Mac (Apple Silicon or Intel).
-          - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
-          - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
-          - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
-          - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
-
-          The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
-          The `.apk` is the build Google Play signs, so it updates an install from Google Play and the other way round. The `.aab` (Android App Bundle) is what Google Play received; it is not an installer.
-
-          Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
-          NOTES
-          )"
+          # The PR list is written again just before publishing, so a title
+          # edited meanwhile still reads right.
+          scripts/release-notes.sh "$tag" > "$RUNNER_TEMP/notes.md"
+          gh release create "$tag" --draft --title "Orivo ${tag#v}" --notes-file "$RUNNER_TEMP/notes.md"
 
   release:
     name: Build ${{ matrix.label }}
@@ -235,21 +227,6 @@ jobs:
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.version && format('v{0}', inputs.version) || 'v__VERSION__') }}
           releaseName: 'Orivo __VERSION__'
-          releaseBody: |
-            ## Downloads
-
-            - **macOS:** download the `.dmg` matching your Mac (Apple Silicon or Intel).
-            - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
-            - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
-            - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
-            - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
-
-            The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
-            The `.apk` is the build Google Play signs, so it updates an install from Google Play and the other way round. The `.aab` (Android App Bundle) is what Google Play received; it is not an installer.
-
-            Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
-
-            The macOS app is signed and notarized by Apple: it opens with a double-click. Windows is not code-signed yet: click **More info** then **Run anyway** on the SmartScreen prompt.
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') || contains(inputs.version, '-') }}
           includeUpdaterJson: true
@@ -751,6 +728,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The tags, to list the PRs since the previous release.
+          fetch-depth: 0
 
       - name: Publish only after verification
         env:
@@ -771,6 +751,9 @@ jobs:
             echo "::error::Release $tag is no longer a draft; refusing to change a public release."
             exit 1
           fi
+
+          scripts/release-notes.sh "$tag" > "$RUNNER_TEMP/notes.md"
+          gh release edit "$tag" --notes-file "$RUNNER_TEMP/notes.md"
 
           if [ "$(gh release view "$tag" --json isPrerelease --jq '.isPrerelease')" = "true" ]; then
             gh release edit "$tag" --draft=false
