@@ -1,41 +1,56 @@
 /**
- * How the Library is browsed: one mode at a time, each offering its own row of
- * segments.
+ * How the Library is browsed: by where each game comes from, in an order the
+ * player picks.
  *
- * The rail used to carry two decorative dropdowns ("All Games", "Recent") that
- * did nothing. This replaces them with a single control that cycles through the
- * four ways a library is actually read — what you played, what kind of game it
- * is, where it came from, what it runs on — and a row of segments whose content
- * follows the mode.
+ * The bar used to cycle four modes (Activity, Genre, Source, Platform), each
+ * with its own row of segments. Four ways to slice the same shelf meant the
+ * row under the rail changed shape every time the button was pressed. It is
+ * one row now, always the same: All Games, then every source the library
+ * actually holds. The button beside it no longer changes what the row is; it
+ * changes the order the rail is in — Recent, New, Most played.
  *
  * Everything here is pure: the page owns the DOM, this owns the answers.
  */
 
 import { t } from "./i18n";
+import type { IconName } from "./icons";
 import type { LibraryGame } from "./mock-library";
 import { sourceBadge } from "./source-model";
 
-export type BrowseMode = "activity" | "genre" | "source" | "platform";
+/** What kind of source a segment is. It decides where the segment sits in the row. */
+export type SourceKind = "all" | "store" | "console" | "plugin" | "local" | "stream";
 
 export interface BrowseSegment {
-  /** Unique inside its mode; the mode itself is the rest of the key. */
+  /** Unique in the row, and the key of the segment's mark (`source-marks.ts`). */
   id: string;
   label: string;
+  kind: SourceKind;
 }
 
-/** The cycle order of the single mode button, and its wording. */
-export const BROWSE_MODES: ReadonlyArray<{ mode: BrowseMode; label: string }> = [
-  { mode: "activity", label: t("store.browse.activity") },
-  { mode: "genre", label: t("store.browse.genre") },
-  { mode: "source", label: t("store.browse.source") },
-  { mode: "platform", label: t("store.browse.platform") },
+/** Always the first segment: the whole library, sorted. */
+export const ALL_GAMES_SEGMENT: BrowseSegment = {
+  id: "all",
+  label: t("store.browse.allGames"),
+  kind: "all",
+};
+
+export type LibrarySort = "recent" | "new" | "most-played";
+
+/** The cycle order of the sort button, its word and its glyph. */
+export const LIBRARY_SORTS: ReadonlyArray<{ sort: LibrarySort; label: string; icon: IconName }> = [
+  { sort: "recent", label: t("store.browse.sort.recent"), icon: "clock" },
+  { sort: "new", label: t("store.browse.sort.new"), icon: "sparkle" },
+  { sort: "most-played", label: t("store.browse.sort.mostPlayed"), icon: "chart" },
 ];
 
-/**
- * A mode that has nothing to divide the library by still needs one segment, or
- * the bar would read as broken. A library with no genres simply shows the lot.
- */
-export const ALL_GAMES_SEGMENT: BrowseSegment = { id: "all", label: t("store.browse.allGames") };
+export function librarySort(sort: LibrarySort): { sort: LibrarySort; label: string; icon: IconName } {
+  return LIBRARY_SORTS.find((entry) => entry.sort === sort) ?? LIBRARY_SORTS[0];
+}
+
+export function nextLibrarySort(sort: LibrarySort): LibrarySort {
+  const index = LIBRARY_SORTS.findIndex((entry) => entry.sort === sort);
+  return LIBRARY_SORTS[(index + 1) % LIBRARY_SORTS.length].sort;
+}
 
 /**
  * What the backend returns as a game's genre when no store published one.
@@ -43,8 +58,7 @@ export const ALL_GAMES_SEGMENT: BrowseSegment = { id: "all", label: t("store.bro
  * Epic and GOG both hand back entitlements with no genre at all
  * (`source_epic.rs`, `source_gog.rs`), so this is a common value, not a rare
  * one — and it is an absence wearing a label. Treating it as a real genre put
- * a "Library" pill on the hero and a "Library" shelf in the genre row, neither
- * of which told anyone anything.
+ * a "Library" pill on the hero, which told nobody anything.
  */
 export const UNKNOWN_GENRE = "Library";
 
@@ -54,33 +68,12 @@ export function knownGenre(genre: string | undefined): string {
   return text === UNKNOWN_GENRE ? "" : text;
 }
 
-export function browseModeLabel(mode: BrowseMode): string {
-  return BROWSE_MODES.find((entry) => entry.mode === mode)?.label ?? t("store.browse.activity");
-}
-
-export function nextBrowseMode(mode: BrowseMode): BrowseMode {
-  const index = BROWSE_MODES.findIndex((entry) => entry.mode === mode);
-  return BROWSE_MODES[(index + 1) % BROWSE_MODES.length].mode;
-}
-
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const WEEK = 7 * DAY;
 const MONTH = 30 * DAY;
 const YEAR = 365 * DAY;
-
-/** Under an hour on the clock is a game you have looked at, not one you play. */
-const STARTED_THRESHOLD_SECONDS = 3_600;
-
-/**
- * The bar is one line across the foot of the scene, so a derived mode shows the
- * busiest segments and stops. A Steam library carries thirty genres; laying all
- * thirty out turns every label into two ellipsised letters and the row stops
- * being readable at a glance. What falls off the end is still reachable through
- * search.
- */
-export const MAX_BROWSE_SEGMENTS = 8;
 
 const RELATIVE_LABEL = /^(\d+)\s+(minute|min|hour|day|week|month|year)s?\s+ago$/;
 
@@ -119,292 +112,188 @@ export function lastPlayedTime(value: string | undefined, now = Date.now()): num
 }
 
 /**
- * Native support first — a Mac library is read by what runs on the Mac — then
- * the consoles, newest family first. Each key is also the id of its logo in
- * `brand-logos.ts`.
+ * The libraries, in the order the Settings list connects them. A store game
+ * stays its store's whatever starts it: an Epic game Winlator runs on a phone
+ * is still an Epic game, and a Steam game that can also be streamed is still
+ * a Steam game.
  */
-const PLATFORM_ORDER = [
-  "macos",
-  "windows",
-  "linux",
-  "android",
-  "switch",
+const STORE_ORDER = [
+  "steam",
+  "epic",
+  "gog",
+  "ubisoft",
   "xbox",
-  "ps5",
-  "psp",
-  "nes",
-  "snes",
-  "gb",
-  "gba",
-  "megadrive",
-  "other",
+  "microsoft-store",
+  "instant-gaming",
+  "android",
 ] as const;
 
-type PlatformKey = (typeof PLATFORM_ORDER)[number];
+const isStore = (value: string): boolean => (STORE_ORDER as readonly string[]).includes(value);
 
-const PLATFORM_LABELS: Record<PlatformKey, string> = {
-  macos: "Mac",
-  windows: "Windows",
-  linux: "Linux",
-  android: "Android",
-  switch: "Nintendo Switch",
-  xbox: "Xbox",
-  ps5: "PlayStation 5",
+/**
+ * The consoles a plugin can bring, newest family first. A game an emulator
+ * plugin opens is filed under its console — Ryujinx adds `Switch`, PPSSPP adds
+ * `PSP` — because that is the name a player has for those games, not the
+ * emulator's.
+ */
+const CONSOLE_ORDER = ["switch", "psp", "gba", "gb", "snes", "nes", "megadrive"] as const;
+
+type ConsoleKey = (typeof CONSOLE_ORDER)[number];
+
+const CONSOLE_LABELS: Record<ConsoleKey, string> = {
+  switch: "Switch",
   psp: "PSP",
-  nes: "NES",
-  snes: "SNES",
+  gba: "GBA",
   gb: "Game Boy",
-  gba: "Game Boy Advance",
+  snes: "SNES",
+  nes: "NES",
   megadrive: "Mega Drive",
-  other: t("store.browse.other"),
 };
 
-const isPlatformKey = (value: string): value is PlatformKey =>
-  (PLATFORM_ORDER as readonly string[]).includes(value);
+const isConsole = (value: string): value is ConsoleKey =>
+  (CONSOLE_ORDER as readonly string[]).includes(value);
 
-/**
- * Where a game comes from, as Source mode reads it: the runner its card starts
- * through, when there is one, before the store token. Forty games streamed
- * through Moonlight are not "local" in any way a player would recognise, and a
- * Wine entry is Wine before it is a folder. Each id is its logo's id.
- */
-const RUNNER_SOURCES: ReadonlyMap<string, BrowseSegment> = new Map([
-  ["com.orivo.gamestream", { id: "moonlight", label: "Moonlight" }],
-  ["com.orivo.wine-staging", { id: "wine", label: "Wine" }],
-  ["com.orivo.ryujinx", { id: "ryujinx", label: "Ryujinx" }],
-  ["com.orivo.winlator", { id: "winlator", label: "Winlator" }],
-  ["com.orivo.retroarch", { id: "retroarch", label: "RetroArch" }],
-  ["com.orivo.ppsspp", { id: "ppsspp", label: "PPSSPP" }],
+/** A host from before `systems` still names the emulator; its console follows from it. */
+const RUNNER_CONSOLES: ReadonlyMap<string, ConsoleKey> = new Map([
+  ["com.orivo.ryujinx", "switch"],
+  ["com.orivo.ppsspp", "psp"],
 ]);
 
-function sourceOf(game: LibraryGame): BrowseSegment | null {
-  const runner = game.runner ? RUNNER_SOURCES.get(game.runner) : undefined;
-  if (runner) return runner;
-  // A host from before the runner field still says "wine" for a Wine entry.
-  if (game.source === "wine") return RUNNER_SOURCES.get("com.orivo.wine-staging") ?? null;
-  if (game.runner) {
-    // A third-party runner: its own name, as the profile the player set up
-    // calls it, rather than lumping it in with what is local.
-    return { id: `runner:${game.runner}`, label: game.launchOptions?.[0]?.label || t("store.browse.other") };
+/** Runners that stream the game from another machine. */
+const STREAM_RUNNERS: ReadonlySet<string> = new Set(["com.orivo.gamestream"]);
+
+/**
+ * Runners that start a file from a folder on this machine. Their games are
+ * the player's own folders, whatever compatibility layer opens them.
+ */
+const LOCAL_RUNNERS: ReadonlySet<string> = new Set(["com.orivo.wine-staging", "com.orivo.winlator"]);
+
+/** The names Orivo gives a third-party runner it knows nothing about. */
+const KNOWN_RUNNER_LABELS: ReadonlyMap<string, string> = new Map([["com.orivo.retroarch", "RetroArch"]]);
+
+const LOCAL_SEGMENT = (): BrowseSegment => ({ id: "local", label: t("misc.source.local"), kind: "local" });
+const STREAM_SEGMENT = (): BrowseSegment => ({ id: "stream", label: t("store.browse.stream"), kind: "stream" });
+
+/**
+ * Where a game comes from, as the bar files it. Every game lands somewhere:
+ *
+ * 1. A store library is its store — Steam, Epic, GOG… and the phone's own apps.
+ * 2. A game a client streams from another machine (Moonlight, or a plugin
+ *    profile set to stream) is `Stream`, however many hosts it comes from.
+ * 3. A game a plugin opens is the plugin's console when it has one, and the
+ *    plugin's own name when it does not.
+ * 4. Everything else — a folder the player added, a Wine or Winlator entry —
+ *    is `Local`.
+ */
+export function sourceOf(game: LibraryGame): BrowseSegment {
+  const source = game.source ?? "";
+  if (isStore(source)) {
+    const badge = sourceBadge(game.source);
+    if (badge) return { id: source, label: badge.label, kind: "store" };
   }
-  const badge = sourceBadge(game.source);
-  return badge && game.source ? { id: game.source, label: badge.label } : null;
+
+  const runner = game.runner ?? "";
+  // The card's own way of starting is what the game is; a stream offered as a
+  // second way does not make a local game a streamed one.
+  if (STREAM_RUNNERS.has(runner) || (runner && game.launchOptions?.[0]?.remote === true)) {
+    return STREAM_SEGMENT();
+  }
+
+  const system = (game.systems ?? []).find(isConsole) ?? RUNNER_CONSOLES.get(runner);
+  if (system) return { id: system, label: CONSOLE_LABELS[system], kind: "console" };
+
+  if (runner && !LOCAL_RUNNERS.has(runner)) {
+    // A plugin's runner: its own name, as the profile the player set up calls
+    // it, rather than lumping it in with what is local.
+    const label = KNOWN_RUNNER_LABELS.get(runner) || game.launchOptions?.[0]?.label || t("store.browse.other");
+    return { id: `runner:${runner}`, label, kind: "plugin" };
+  }
+
+  return LOCAL_SEGMENT();
+}
+
+const KIND_ORDER: readonly SourceKind[] = ["all", "store", "console", "plugin", "local", "stream"];
+
+/** Where a segment sits in the row: by kind, then in its kind's own order. */
+function rowPosition(segment: BrowseSegment): [number, number] {
+  const kind = KIND_ORDER.indexOf(segment.kind);
+  if (segment.kind === "store") return [kind, (STORE_ORDER as readonly string[]).indexOf(segment.id)];
+  if (segment.kind === "console") return [kind, CONSOLE_ORDER.indexOf(segment.id as ConsoleKey)];
+  return [kind, 0];
 }
 
 /**
- * A game belongs to every platform it actually declares.
- *
- * `hostPlatform` is deliberately not consulted: the backend fills it with the
- * OS of the machine running Orivo, so it is the same value for every game in
- * the library. Reading it here would put the whole library under one segment
- * and label a Windows-only title "Mac" on a Mac.
- *
- * Three sources of truth, in the order they can be trusted:
- *
- * 1. `supportedPlatforms` — the full matrix, when a store published one. Steam
- *    reports it through store metadata, GOG through `content_system_
- *    compatibility`, Epic through its per-platform entitlement lists.
- * 2. `macCompatibility`, but only as a *fallback* for a game that declared no
- *    matrix at all. It answers one question about one platform, so it can say
- *    "there is a macOS build" or "there is not" and nothing else. Reading it
- *    beside a real matrix is how a Linux-only GOG title — which honestly has
- *    no macOS build — ended up filed under Windows.
- * 3. A Wine entry is a Windows build, that being the entire reason it needs
- *    Wine.
- * 4. The consoles the host names in `systems`: an emulator profile's system,
- *    Ryujinx's Switch, an Xbox entitlement's Xbox.
- *
- * `unknown` stays out, and a game with nothing to declare stays out of this
- * mode rather than being guessed into a segment.
+ * The row: All Games, then every source this library actually holds — a
+ * `PlayStation` tab with nothing behind it would be a promise the library
+ * cannot keep. The order is fixed rather than by size, so a source keeps its
+ * place in the row as the library grows: libraries, then what plugins bring,
+ * then `Local`, then `Stream`.
  */
-function platformsOf(game: LibraryGame): PlatformKey[] {
-  const declared = game.supportedPlatforms ?? [];
-  const keys = new Set<PlatformKey>(declared);
-  if (game.source === "wine") keys.add("windows");
-  // An app on the phone is an Android game, whatever else it may also be.
-  if (game.source === "android") keys.add("android");
-  if (declared.length === 0) {
-    // A catalog synced before stores recorded their matrix still carries the
-    // macOS answer, and for those entries it is all there is. Epic's are
-    // Windows entitlements, which is what makes the second line safe here and
-    // unsafe above.
-    if (game.macCompatibility === "native") keys.add("macos");
-    if (game.macCompatibility === "not-native") keys.add("windows");
-  }
-  for (const system of game.systems ?? []) {
-    if (isPlatformKey(system)) keys.add(system);
-  }
-  return [...keys];
-}
-
-interface ActivityShelf extends BrowseSegment {
-  /** Absent means the shelf keeps the whole library and only reorders it. */
-  keep?: (game: LibraryGame, now: number) => boolean;
-  rank: (game: LibraryGame, now: number) => number;
-}
-
-/**
- * The five ways a session starts. The first two only reorder — the Library must
- * never open on an empty rail — while the last three are real shelves and are
- * offered only when they hold something.
- */
-const ACTIVITY_SHELVES: readonly ActivityShelf[] = [
-  {
-    id: "recent",
-    label: t("store.browse.recent"),
-    rank: (game, now) => -(lastPlayedTime(game.lastPlayedAt, now) ?? Number.NEGATIVE_INFINITY),
-  },
-  {
-    id: "most-played",
-    label: t("store.browse.mostPlayed"),
-    rank: (game) => -game.playTimeSeconds,
-  },
-  {
-    id: "play-next",
-    label: t("store.browse.playNext"),
-    keep: (game) => game.launchable && game.playTimeSeconds < STARTED_THRESHOLD_SECONDS,
-    // The least-touched first: this shelf exists to surface what is waiting.
-    rank: (game) => game.playTimeSeconds,
-  },
-  {
-    id: "resume",
-    label: t("store.browse.resume"),
-    keep: (game) => game.launchable && game.playTimeSeconds >= STARTED_THRESHOLD_SECONDS,
-    rank: (game, now) => -(lastPlayedTime(game.lastPlayedAt, now) ?? Number.NEGATIVE_INFINITY),
-  },
-  {
-    id: "never",
-    label: t("store.browse.never"),
-    keep: (game, now) => game.playTimeSeconds <= 0 && lastPlayedTime(game.lastPlayedAt, now) === null,
-    rank: () => 0,
-  },
-];
-
-/**
- * Sorting is stable, so games that tie keep the order the catalog gave them —
- * that is what lets the default shelf reorder nothing at all when a library
- * already arrives newest-first.
- */
-function sorted(
-  games: readonly LibraryGame[],
-  rank: (game: LibraryGame, now: number) => number,
-  now: number,
-): LibraryGame[] {
-  return [...games].sort((left, right) => rank(left, now) - rank(right, now));
-}
-
-/** Recency first, then A→Z, for every mode that filters rather than sorts. */
-function byRecency(games: readonly LibraryGame[], now: number): LibraryGame[] {
-  return [...games].sort((left, right) => {
-    const leftAt = lastPlayedTime(left.lastPlayedAt, now);
-    const rightAt = lastPlayedTime(right.lastPlayedAt, now);
-    if (leftAt !== rightAt) {
-      if (leftAt === null) return 1;
-      if (rightAt === null) return -1;
-      return rightAt - leftAt;
-    }
-    return left.title.localeCompare(right.title);
-  });
-}
-
-/** Busiest first, so the segment you are most likely to want leads the row. */
-function byCount(entries: Map<string, { label: string; count: number }>): BrowseSegment[] {
-  return [...entries]
-    .sort(([, left], [, right]) => right.count - left.count || left.label.localeCompare(right.label))
-    .slice(0, MAX_BROWSE_SEGMENTS)
-    .map(([id, entry]) => ({ id, label: entry.label }));
-}
-
-function tally(
-  games: readonly LibraryGame[],
-  keysOf: (game: LibraryGame) => Array<{ id: string; label: string }>,
-): BrowseSegment[] {
-  const entries = new Map<string, { label: string; count: number }>();
+export function browseSegments(games: readonly LibraryGame[]): BrowseSegment[] {
+  const found = new Map<string, BrowseSegment>();
   for (const game of games) {
-    for (const key of keysOf(game)) {
-      const existing = entries.get(key.id);
-      if (existing) existing.count += 1;
-      else entries.set(key.id, { label: key.label, count: 1 });
-    }
+    const source = sourceOf(game);
+    if (!found.has(source.id)) found.set(source.id, source);
   }
-  return byCount(entries);
+  const sources = [...found.values()].sort((left, right) => {
+    const [leftKind, leftIndex] = rowPosition(left);
+    const [rightKind, rightIndex] = rowPosition(right);
+    return leftKind - rightKind || leftIndex - rightIndex || left.label.localeCompare(right.label);
+  });
+  return [ALL_GAMES_SEGMENT, ...sources];
 }
+
+type Ranked = { game: LibraryGame; index: number; playedAt: number | null };
+
+/** Most recent session first; a game never started goes after every one that was. */
+function byRecency(left: Ranked, right: Ranked): number {
+  if (left.playedAt === right.playedAt) return 0;
+  if (left.playedAt === null) return 1;
+  if (right.playedAt === null) return -1;
+  return right.playedAt - left.playedAt;
+}
+
+const SORTS: Record<LibrarySort, (left: Ranked, right: Ranked) => number> = {
+  recent: byRecency,
+  // What has never been started, newest arrival first — the catalogue appends
+  // what it imports, so a later place in it is a later arrival. Then what has
+  // been touched least.
+  new: (left, right) => {
+    const leftNew = left.game.playTimeSeconds <= 0 && left.playedAt === null;
+    const rightNew = right.game.playTimeSeconds <= 0 && right.playedAt === null;
+    if (leftNew !== rightNew) return leftNew ? -1 : 1;
+    if (leftNew) return right.index - left.index;
+    return left.game.playTimeSeconds - right.game.playTimeSeconds || byRecency(left, right);
+  },
+  "most-played": (left, right) => right.game.playTimeSeconds - left.game.playTimeSeconds || byRecency(left, right),
+};
 
 /**
- * The segments a mode offers for this library. A derived mode lists only what
- * the library actually holds — an empty "PlayStation" tab would be a promise
- * the library cannot keep.
+ * Put games in the order the player picked. Sorting is stable, so games that
+ * tie keep the order the catalogue gave them.
  */
-export function browseSegments(
-  games: readonly LibraryGame[],
-  mode: BrowseMode,
-  now = Date.now(),
-): BrowseSegment[] {
-  let segments: BrowseSegment[];
-
-  switch (mode) {
-    case "activity":
-      segments = ACTIVITY_SHELVES.filter(
-        (shelf) => !shelf.keep || games.some((game) => shelf.keep?.(game, now)),
-      ).map((shelf) => ({ id: shelf.id, label: shelf.label }));
-      break;
-    case "genre":
-      segments = tally(games, (game) => {
-        const genre = knownGenre(game.genre);
-        return genre ? [{ id: genre, label: genre }] : [];
-      });
-      break;
-    case "source":
-      segments = tally(games, (game) => {
-        const source = sourceOf(game);
-        return source ? [source] : [];
-      });
-      break;
-    case "platform":
-      // Platforms are a fixed, tiny set, so they read best in their own order
-      // rather than by how many games happen to carry each one.
-      segments = tally(games, (game) =>
-        platformsOf(game).map((key) => ({ id: key, label: PLATFORM_LABELS[key] })),
-      ).sort(
-        (left, right) =>
-          PLATFORM_ORDER.indexOf(left.id as PlatformKey) -
-          PLATFORM_ORDER.indexOf(right.id as PlatformKey),
-      );
-      break;
-  }
-
-  return segments.length > 0 ? segments : [ALL_GAMES_SEGMENT];
+export function sortGames(games: readonly LibraryGame[], sort: LibrarySort, now = Date.now()): LibraryGame[] {
+  const compare = SORTS[sort] ?? SORTS.recent;
+  return games
+    .map((game, index): Ranked => ({ game, index, playedAt: lastPlayedTime(game.lastPlayedAt, now) }))
+    .sort(compare)
+    .map((entry) => entry.game);
 }
 
-/** The library as this segment shows it: filtered where it filters, always sorted. */
+/** The rail for this segment: its source's games, in the order the player picked. */
 export function browseGames(
   games: readonly LibraryGame[],
-  mode: BrowseMode,
   segmentId: string,
+  sort: LibrarySort,
   now = Date.now(),
 ): LibraryGame[] {
-  if (segmentId === ALL_GAMES_SEGMENT.id) return [...games];
-
-  if (mode === "activity") {
-    const shelf = ACTIVITY_SHELVES.find((entry) => entry.id === segmentId);
-    if (!shelf) return [...games];
-    const kept = shelf.keep ? games.filter((game) => shelf.keep?.(game, now)) : games;
-    return sorted(kept, shelf.rank, now);
-  }
-
-  const matches = (game: LibraryGame): boolean => {
-    if (mode === "genre") return knownGenre(game.genre) === segmentId;
-    if (mode === "source") return sourceOf(game)?.id === segmentId;
-    return platformsOf(game).includes(segmentId as PlatformKey);
-  };
-
-  return byRecency(games.filter(matches), now);
+  const kept = segmentId === ALL_GAMES_SEGMENT.id ? games : games.filter((game) => sourceOf(game).id === segmentId);
+  return sortGames(kept, sort, now);
 }
 
 /**
- * Which segment a mode should land on: the one last used when it still exists,
- * otherwise the first. Keeping the choice per mode is what makes the button
- * feel like four views rather than one that forgets.
+ * Which segment to show: the one last chosen while the library still holds it,
+ * otherwise All Games.
  */
 export function resolveSegment(segments: readonly BrowseSegment[], preferred: string | undefined): string {
   if (preferred && segments.some((segment) => segment.id === preferred)) return preferred;
