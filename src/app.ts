@@ -1,5 +1,5 @@
 import { getTauriVersion, getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AppRoute,
@@ -191,7 +191,7 @@ import {
   type NavStepDetail,
 } from "./spatial-nav";
 import { createGamepadBridge } from "./gamepad";
-import { attachFeedbackTo, initErrorReporting } from "./sentry";
+import { attachFeedbackTo, initErrorReporting, reportFailure } from "./sentry";
 import "./library-onboarding.css";
 
 type BackendRecord = Record<string, unknown>;
@@ -6011,6 +6011,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       pendingUpdate = update;
       state.update = applyCheckResult(state.update, update);
     } catch (error) {
+      // The updater is not an `invoke` of ours, and a player whose check fails
+      // stays on the build they have: the one failure that keeps every fix
+      // from reaching them.
+      reportFailure("updater:check", error);
       state.update = applyError(state.update, error);
     }
     renderUpdatePanel();
@@ -6044,6 +6048,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       renderUpdatePanel();
       showToast(t("app.update.installed"));
     } catch (error) {
+      reportFailure("updater:install", error);
       state.update = applyError(state.update, error);
       renderUpdatePanel();
       showToast(messageFromError(error, t("app.update.installFailed")));

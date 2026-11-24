@@ -148,6 +148,9 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 wit-parser = "=0.246.2"
+# `sentry::test::with_captured_events`, so a test can read what a report would
+# have sent. Same crate, same licence; it only exists in test builds.
+sentry = { version = "0.49", default-features = false, features = ["test"] }
 
 [features]
 # The Mac App Store edition: sandboxed, updated by the App Store, no downloaded

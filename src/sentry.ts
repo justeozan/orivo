@@ -10,12 +10,19 @@
  * app that never opens a socket to Sentry, and the feedback button hides itself
  * rather than dangling as a control that does nothing.
  *
+ * Two kinds of error reach it. The ones nobody caught, which the SDK's own
+ * handlers see. And the ones the app caught and showed as a toast — a launch
+ * that was refused, a sync that failed, an update that would not install —
+ * which are the failures a player actually meets and which never throw at the
+ * window: `host.ts` and the updater hand those to `reportFailure`.
+ *
  * The SDK itself is fetched on demand. It was 141 kB of the shell's 377 kB
  * entry chunk — more than any page — and not one byte of it is needed to paint
  * a library. What the first screen loses by waiting is closed below: this
  * module watches for errors from the moment it is initialised and hands
  * whatever it caught to the SDK as soon as the SDK exists.
  */
+import type { ErrorEvent as SentryEvent } from "@sentry/browser";
 import { t } from "./i18n";
 
 type SentrySdk = typeof import("./sentry-sdk");
@@ -39,9 +46,24 @@ const MAX_HELD_ERRORS = 8;
  */
 const RELEASE = typeof __APP_VERSION__ === "string" ? `orivo@${__APP_VERSION__}` : "orivo@dev";
 
+/**
+ * How many failures one session reports, and how often each. A command that
+ * fails because the player is offline fails again on every screen that asks;
+ * that is one lead, and a free quota is not there to count it a hundred times.
+ * Sentry already counts how many sessions hit it.
+ */
+const MAX_FAILURE_KINDS = 20;
+
+/** What `captureException` takes as its second argument, in the part Orivo uses. */
+interface CaptureScope {
+  extra?: Record<string, unknown>;
+  tags?: Record<string, string>;
+  fingerprint?: string[];
+}
+
 interface HeldError {
   error: unknown;
-  context?: Record<string, unknown>;
+  scope?: CaptureScope;
 }
 
 /** Non-null once `initErrorReporting` has decided Sentry is configured. */
@@ -49,6 +71,8 @@ let starting: Promise<SentrySdk | null> | null = null;
 /** Non-null once the SDK has arrived and been initialised. */
 let sdk: SentrySdk | null = null;
 let held: HeldError[] = [];
+/** Failures already sent this session, by fingerprint. */
+const reportedFailures = new Set<string>();
 
 export interface ErrorReportingOptions {
   /**
@@ -60,9 +84,76 @@ export interface ErrorReportingOptions {
   load?: () => Promise<SentrySdk>;
 }
 
-function hold(error: unknown, context?: Record<string, unknown>): void {
+function hold(error: unknown, scope?: CaptureScope): void {
   if (held.length >= MAX_HELD_ERRORS) return;
-  held.push({ error, context });
+  held.push({ error, scope });
+}
+
+/**
+ * Takes the player's account name out of a path.
+ *
+ * A failure's text is the host's own message, and the host quotes the file it
+ * could not open. `sendDefaultPii: false` does not touch that, so the folders
+ * under the home directory are shortened here, before anything leaves.
+ */
+export function scrubHomePaths(text: string): string {
+  return text
+    .replace(/\/Users\/[^/\s"'`]+/g, "/Users/~")
+    .replace(/\/home\/[^/\s"'`]+/g, "/home/~")
+    .replace(/([A-Za-z]:[\\/]+Users[\\/]+)[^\\/\s"'`]+/gi, "$1~");
+}
+
+function scrubExtra(extra: Record<string, unknown>): Record<string, unknown> {
+  const scrubbed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(extra)) {
+    scrubbed[key] = typeof value === "string" ? scrubHomePaths(value) : value;
+  }
+  return scrubbed;
+}
+
+/** The last stop before an event leaves: no account names in any text it carries. */
+export function scrubEvent(event: SentryEvent): SentryEvent {
+  if (event.message) event.message = scrubHomePaths(event.message);
+  for (const exception of event.exception?.values ?? []) {
+    if (exception.value) exception.value = scrubHomePaths(exception.value);
+  }
+  for (const crumb of event.breadcrumbs ?? []) {
+    if (crumb.message) crumb.message = scrubHomePaths(crumb.message);
+  }
+  if (event.extra) event.extra = scrubExtra(event.extra);
+  return event;
+}
+
+function describe(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
+}
+
+/**
+ * The message with everything that varies per player taken out, so the same
+ * failure on two machines is one issue. Paths go first: they are what differs
+ * most, and a game's folder name is not part of what went wrong.
+ */
+function fingerprintOf(message: string): string {
+  return message
+    .replace(/\S*[\\/]\S*/g, "<path>")
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<id>")
+    .replace(/\d+/g, "#")
+    .slice(0, 160);
+}
+
+function send(error: unknown, scope?: CaptureScope): void {
+  if (!starting) return;
+  if (!sdk) {
+    hold(error, scope);
+    return;
+  }
+  sdk.captureException(error, scope);
 }
 
 /**
@@ -97,6 +188,7 @@ export function initErrorReporting(
         // A library is not a checkout flow: there is no sensitive payload to leak,
         // but there is no reason to send names and IP addresses either.
         sendDefaultPii: false,
+        beforeSend: scrubEvent,
         // Traces are on at a low rate — enough to see a slow library load, not
         // enough to make a hobby project's quota a problem.
         tracesSampleRate: 0.1,
@@ -170,7 +262,7 @@ export function initErrorReporting(
       const backlog = held;
       held = [];
       for (const entry of backlog) {
-        loaded.captureException(entry.error, entry.context ? { extra: entry.context } : undefined);
+        loaded.captureException(entry.error, entry.scope);
       }
       return loaded;
     })
@@ -220,10 +312,32 @@ export async function attachFeedbackTo(
 
 /** Report a caught error that the app handled but should not have hit. */
 export function reportError(error: unknown, context?: Record<string, unknown>): void {
+  send(error, context ? { extra: context } : undefined);
+}
+
+/**
+ * Report something that failed and was handled — shown as a toast, retried,
+ * swallowed — so that a failure only the player saw is one Sentry sees too.
+ *
+ * `source` is what failed: a host command's name, or a step such as
+ * `updater:check`. It becomes a tag to filter by and, with the message, the
+ * fingerprint, so a thousand players hitting one refusal make one issue. Each
+ * fingerprint is sent once per session.
+ */
+export function reportFailure(source: string, error: unknown): void {
   if (!starting) return;
-  if (!sdk) {
-    hold(error, context);
-    return;
-  }
-  sdk.captureException(error, context ? { extra: context } : undefined);
+
+  const message = describe(error);
+  const fingerprint = [source, fingerprintOf(message)];
+  const key = fingerprint.join("\n");
+  if (reportedFailures.has(key) || reportedFailures.size >= MAX_FAILURE_KINDS) return;
+  reportedFailures.add(key);
+
+  // A fresh error rather than the caller's: a host rejection is a bare string,
+  // and the stack of a wrapper that only re-throws would point at the wrong
+  // place. The source and the message are the whole story.
+  const failure = new Error(`${source}: ${message}`);
+  failure.name = "HandledFailure";
+  failure.stack = undefined;
+  send(failure, { tags: { failure: source }, fingerprint });
 }

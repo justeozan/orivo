@@ -187,3 +187,147 @@ describe("attachFeedbackTo", () => {
     expect(sdk.setTag).not.toHaveBeenCalledWith("game", "");
   });
 });
+
+describe("reportFailure", () => {
+  const dsn = "https://k@o.test/1";
+
+  async function started() {
+    const mod = await freshModule();
+    const sdk = fakeSdk();
+    mod.initErrorReporting("desktop", { dsn, load: load(sdk) });
+    await vi.waitFor(() => expect(sdk.init).toHaveBeenCalledTimes(1));
+    return { ...mod, sdk };
+  }
+
+  it("does nothing when Sentry is not configured", async () => {
+    const { reportFailure } = await freshModule();
+    // No init, so there is no SDK to hold anything for either: the call must
+    // not throw and must not queue what nothing will ever send.
+    expect(() => reportFailure("get_library", "it failed")).not.toThrow();
+  });
+
+  it("names the command, and groups by it and by what the host said", async () => {
+    const { reportFailure, sdk } = await started();
+
+    reportFailure("launch_game", "The game folder is gone");
+
+    expect(sdk.captureException).toHaveBeenCalledTimes(1);
+    const [failure, scope] = sdk.captureException.mock.calls[0] as [Error, Record<string, unknown>];
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toBe("launch_game: The game folder is gone");
+    expect(scope).toEqual({
+      tags: { failure: "launch_game" },
+      fingerprint: ["launch_game", "The game folder is gone"],
+    });
+  });
+
+  it("sends a failure once per session, however often it repeats", async () => {
+    const { reportFailure, sdk } = await started();
+
+    reportFailure("sync_store", "offline");
+    reportFailure("sync_store", "offline");
+    reportFailure("sync_store", "offline");
+
+    expect(sdk.captureException).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats the same failure on two games or two machines as one", async () => {
+    const { reportFailure, sdk } = await started();
+
+    reportFailure("launch_game", "Could not start /Users/ana/Games/Alpha/alpha.exe (code 3)");
+    reportFailure("launch_game", "Could not start C:\\Users\\bo\\Games\\Beta\\beta.exe (code 7)");
+
+    // Paths and numbers are what differ per player; neither is what went wrong.
+    expect(sdk.captureException).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps different failures of one command apart", async () => {
+    const { reportFailure, sdk } = await started();
+
+    reportFailure("launch_game", "The game folder is gone");
+    reportFailure("launch_game", "Wine is not installed");
+
+    expect(sdk.captureException).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after twenty kinds, so a runaway cannot spend the quota", async () => {
+    const { reportFailure, sdk } = await started();
+
+    for (let kind = 0; kind < 40; kind += 1) reportFailure(`command_${kind}`, "failed");
+
+    expect(sdk.captureException).toHaveBeenCalledTimes(20);
+  });
+
+  it("describes what the host rejects with, whatever its shape", async () => {
+    const { reportFailure, sdk } = await started();
+
+    reportFailure("a", new Error("an Error"));
+    reportFailure("b", { code: 12, reason: "no" });
+
+    const messages = sdk.captureException.mock.calls.map(([failure]) => (failure as Error).message);
+    expect(messages).toEqual(["a: an Error", 'b: {"code":12,"reason":"no"}']);
+  });
+
+  it("holds a failure that happens before the SDK arrives, with its tags", async () => {
+    const { initErrorReporting, reportFailure } = await freshModule();
+    const sdk = fakeSdk();
+    let arrive!: (value: FakeSdk) => void;
+    initErrorReporting("desktop", {
+      dsn,
+      load: () => new Promise<FakeSdk>((resolve) => (arrive = resolve)) as never,
+    });
+
+    reportFailure("get_library", "the catalogue is unreadable");
+    expect(sdk.captureException).not.toHaveBeenCalled();
+
+    arrive(sdk);
+    await vi.waitFor(() => expect(sdk.captureException).toHaveBeenCalledTimes(1));
+    expect(sdk.captureException.mock.calls[0][1]).toEqual({
+      tags: { failure: "get_library" },
+      fingerprint: ["get_library", "the catalogue is unreadable"],
+    });
+  });
+});
+
+describe("scrubbing", () => {
+  it("shortens the folders under a home directory on every platform", async () => {
+    const { scrubHomePaths } = await freshModule();
+
+    expect(scrubHomePaths("open /Users/ana/Games/a.exe")).toBe("open /Users/~/Games/a.exe");
+    expect(scrubHomePaths("open /home/bo/.steam/x")).toBe("open /home/~/.steam/x");
+    expect(scrubHomePaths("open C:\\Users\\Cy\\Games\\c.exe")).toBe("open C:\\Users\\~\\Games\\c.exe");
+    // The same path after JSON.stringify doubled its backslashes.
+    expect(scrubHomePaths("open C:\\\\Users\\\\Cy\\\\Games")).toBe("open C:\\\\Users\\\\~\\\\Games");
+    expect(scrubHomePaths("open D:/Users/Di/Games")).toBe("open D:/Users/~/Games");
+  });
+
+  it("leaves text without a home path alone", async () => {
+    const { scrubHomePaths } = await freshModule();
+
+    expect(scrubHomePaths("os error 2 reading /opt/games/a")).toBe("os error 2 reading /opt/games/a");
+  });
+
+  it("scrubs the event as the SDK hands it over, before it leaves", async () => {
+    const { initErrorReporting } = await freshModule();
+    const sdk = fakeSdk();
+    initErrorReporting("desktop", { dsn: "https://k@o.test/1", load: load(sdk) });
+    await vi.waitFor(() => expect(sdk.init).toHaveBeenCalledTimes(1));
+
+    const { beforeSend } = sdk.init.mock.calls[0][0] as {
+      beforeSend: (event: Record<string, unknown>) => Record<string, unknown>;
+    };
+    const scrubbed = beforeSend({
+      message: "read /Users/ana/lib.json",
+      exception: { values: [{ type: "Error", value: "open /home/bo/x" }] },
+      breadcrumbs: [{ message: "scan C:\\Users\\Cy\\Games" }],
+      extra: { path: "/Users/di/Games", count: 3 },
+    });
+
+    expect(scrubbed).toEqual({
+      message: "read /Users/~/lib.json",
+      exception: { values: [{ type: "Error", value: "open /home/~/x" }] },
+      breadcrumbs: [{ message: "scan C:\\Users\\~\\Games" }],
+      extra: { path: "/Users/~/Games", count: 3 },
+    });
+  });
+});

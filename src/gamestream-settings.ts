@@ -18,7 +18,7 @@
    and a test hands in a recorder.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { t } from "./i18n";
 
 export interface GameStreamSettingsView {

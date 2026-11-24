@@ -48,7 +48,11 @@ library, and opening Playport passes it nothing either.
 Some builds of Orivo send crash reports to [Sentry](https://sentry.io), a
 service that helps us find and fix bugs. A report contains technical details
 only: the app version, the operating system and what went wrong in the code.
-Orivo asks Sentry not to attach names or IP addresses to these reports. A small
+That includes an action that failed without crashing the app, such as a game
+that would not launch or an update that would not install, reported once per
+session. Orivo asks Sentry not to attach names or IP addresses to these reports,
+and shortens the folders under your home directory in an error message before
+it is sent, so your account name stays on your machine. A small
 share of sessions also sends performance measurements, such as how long a
 screen took to load.
 

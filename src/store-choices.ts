@@ -9,7 +9,7 @@
    id and the id of the row it was offered; the destination stays in Rust.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 export interface StoreChoice {
   id: string;

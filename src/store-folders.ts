@@ -9,7 +9,7 @@
    Every other build reads the folders directly and shows none of this.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { t } from "./i18n";
 
 export type StoreFolder = "steam" | "epic";

@@ -1,6 +1,6 @@
 import "./game-detail-page.css";
 import { applyLogoFit, prepareLogo } from "./logo-fit";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {
   AppRoute,
