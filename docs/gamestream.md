@@ -328,3 +328,29 @@ PC saved says "Add your gaming PC first." instead of reporting zero games.
   the host would be a v2 contract revision — a WIT import, an allowlist, a
   raised SDK baseline — and is deliberately not done here. It is also no longer
   needed: the host does not reach the network either, it runs the client.
+
+## On a phone, with Orivo Streaming paired
+
+Orivo Streaming (`builtin_stream.rs`) pairs Orivo itself with the gaming PC, PIN
+typed into Sunshine or Apollo once, like any client. From then on Orivo asks the
+PC for its `/applist` over mutual TLS: at the end of the setup, at every start
+and whenever Orivo comes back to the foreground (at most every five minutes).
+The list is kept with the pairing.
+
+A phone does not stream inside Orivo yet. It hands the game to Artemis or
+Moonlight, already paired with the same PC, through `ShortcutTrampoline`, with:
+
+| Extra | Value | Why |
+|---|---|---|
+| `UUID` | the PC's `uniqueid` from `/serverinfo` | the id both clients file the PC under |
+| `AppId` | the host's id for the game, from `/applist` | skips the client's own cached list, where a game it has not shown yet is missing ("app not found in cache") |
+| `AppName`, `Name`, `HDR` | title, PC name, HDR flag | shown on the client's screens |
+
+The same list decides which cards offer "Stream from <PC>": a store's card only
+when the PC lists a game of that title (compared without case, spacing,
+punctuation or trademark signs), and a PC game the library already has from a
+store gets no second card. Without the pairing, a phone falls back to the PC
+name typed in Settings › Libraries and offers the stream on every PC game.
+
+Next: when Orivo also runs on the gaming PC, the two pair with each other
+directly, with no PIN to type.

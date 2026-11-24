@@ -1012,9 +1012,11 @@ pub fn run() {
             // Streaming built into Orivo keeps its own address and pairings:
             // a client certificate the gaming PC trusts is a secret of this
             // install, not a setting the Moonlight setup shares.
-            app.manage(Arc::new(builtin_stream::BuiltinStreamService::load(
+            let builtin_stream = Arc::new(builtin_stream::BuiltinStreamService::load(
                 app_data.join(builtin_stream::STATE_FILE),
-            )));
+            ));
+            builtin_stream::share(Arc::clone(&builtin_stream));
+            app.manage(builtin_stream);
             // Two live services would let one instance answer the WebView while
             // catalog writes refresh the other, so a second setup is a hard
             // startup failure rather than a silently divergent projection.
@@ -8248,13 +8250,28 @@ async fn launch_game_inner(
     let title = game.title.clone();
 
     match stream_or_download.as_deref() {
+        // A PC paired with Orivo itself says which games it has: the stream
+        // goes by its ids, never by a guessed name.
+        Some(moonlight_android::STREAM_OPTION)
+            if builtin_stream::shared().is_some_and(|service| service.knows_games()) =>
+        {
+            let service = builtin_stream::shared()
+                .cloned()
+                .ok_or_else(|| "Pair your gaming PC in Settings › Plugins to stream from it.".to_string())?;
+            let handoff = fresh_stream_handoff(&service, None, &title).await?;
+            return hand_stream_to_moonlight(&app, &handoff).await;
+        }
         Some(moonlight_android::STREAM_OPTION) => {
             let pc = moonlight_android::pc_name()
                 .filter(|_| moonlight_android::streams(&game))
                 .ok_or_else(|| "Name your PC in Settings › Libraries & Sources to stream from it.".to_string())?;
             use tauri_plugin_orivo_saf::OrivoSafExt;
             app.orivo_saf()
-                .start_stream(&pc, Some(&title))
+                .start_stream(tauri_plugin_orivo_saf::StreamRequest {
+                    pc_name: &pc,
+                    app_name: Some(&title),
+                    ..Default::default()
+                })
                 .await
                 .map_err(|error| {
                     if error.to_string().contains("moonlight-missing") {
@@ -8544,7 +8561,18 @@ async fn launch_game_inner(
                 handoff: Some(LaunchHandoff::Window),
             });
         }
-        #[cfg(not(target_os = "macos"))]
+        // A phone hands the game to Moonlight or Artemis, paired with the same
+        // PC, by the PC's id and the game's id from Orivo's own list of it.
+        #[cfg(target_os = "android")]
+        {
+            let service = app
+                .state::<Arc<builtin_stream::BuiltinStreamService>>()
+                .inner()
+                .clone();
+            let handoff = fresh_stream_handoff(&service, Some(app_ref), &game.title).await?;
+            return hand_stream_to_moonlight(&app, &handoff).await;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "android")))]
         {
             let _ = app_ref;
             return Err(format!(
@@ -8837,6 +8865,63 @@ async fn sync_android_games(
     })
 }
 
+/// The hand-off for one game on the gaming PC, from the freshest list Orivo
+/// can get: the PC is asked first, briefly, so a game renumbered or added
+/// since the last look still starts; if it does not answer, the list kept from
+/// the last look decides, and Moonlight wakes or reaches the PC its own way.
+/// `app_ref` is the host's id for a card imported from it; any other card is
+/// matched by title.
+async fn fresh_stream_handoff(
+    service: &Arc<builtin_stream::BuiltinStreamService>,
+    app_ref: Option<&str>,
+    title: &str,
+) -> Result<builtin_stream::Handoff, String> {
+    let refresh = {
+        let service = Arc::clone(service);
+        tauri::async_runtime::spawn_blocking(move || service.list_games())
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(4), refresh).await;
+    app_ref
+        .and_then(|app_ref| service.handoff(app_ref))
+        .or_else(|| service.handoff_for_title(title))
+        .ok_or_else(|| {
+            format!("{title} is not on your gaming PC's list. Add it in Sunshine or Apollo, then try again.")
+        })
+}
+
+/// Start one game on the gaming PC through Moonlight or Artemis on this phone.
+async fn hand_stream_to_moonlight(
+    app: &AppHandle,
+    handoff: &builtin_stream::Handoff,
+) -> Result<LaunchResult, String> {
+    use tauri_plugin_orivo_saf::OrivoSafExt;
+    app.orivo_saf()
+        .start_stream(tauri_plugin_orivo_saf::StreamRequest {
+            pc_name: &handoff.host_name,
+            host_uuid: Some(&handoff.host_id),
+            app_name: Some(&handoff.title),
+            app_id: Some(&handoff.app_id),
+            hdr: handoff.hdr,
+        })
+        .await
+        .map_err(|error| {
+            if error.to_string().contains("moonlight-missing") {
+                "Install Artemis or Moonlight and pair it with your PC to stream this game.".to_string()
+            } else {
+                format!("Moonlight could not be opened: {error}")
+            }
+        })?;
+    let pc = if handoff.host_name.is_empty() {
+        "your gaming PC"
+    } else {
+        handoff.host_name.as_str()
+    };
+    Ok(LaunchResult {
+        status: format!("Streaming {} from {pc}", handoff.title),
+        handoff: Some(LaunchHandoff::Client),
+    })
+}
+
 /// Bring the library's streamed games in line with what the gaming PC lists.
 /// Asked by the built-in streaming setup once the PC accepts this client.
 #[tauri::command]
@@ -8849,7 +8934,7 @@ async fn sync_stream_games(
         .await
         .map_err(|_| "Orivo could not ask your gaming PC for its games.".to_string())?
         .map_err(|error| error.to_string())?;
-    let games = builtin_stream::games_from(&apps);
+    let mut games = builtin_stream::games_from(&apps);
     let count = games.len();
 
     let _mutation = state
@@ -8861,6 +8946,11 @@ async fn sync_stream_games(
         .read()
         .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
         .clone();
+    // On a phone, a game the library already has from a store gets "Stream
+    // from <PC>" on that card rather than a second card of its own.
+    if cfg!(target_os = "android") {
+        builtin_stream::drop_games_already_carded(&next, &mut games);
+    }
     let changed = builtin_stream::apply(&mut next, games);
     if changed {
         persist_catalog(&next, &state.catalog_path).map_err(|error| error.to_string())?;
@@ -9827,7 +9917,7 @@ fn launch_options_of(game: &Game, catalog: &Catalog) -> Vec<LaunchOptionView> {
             remote: launch_target_is_remote(target, catalog),
         })
         .collect();
-    if let Some(label) = moonlight_android::stream_label(game) {
+    if let Some(label) = stream_option_label(game) {
         let downloadable = matches!(
             &game.launch_target,
             LaunchTarget::Provider { provider, .. } if launcher::orivo_installs_on_this_device(provider)
@@ -9848,6 +9938,30 @@ fn launch_options_of(game: &Game, catalog: &Catalog) -> Vec<LaunchOptionView> {
         });
     }
     options
+}
+
+/// The stream a phone offers for a card that is not itself one of the PC's
+/// games. Once Orivo is paired with the PC and knows its list, only a game on
+/// that list is offered, under the PC's own name; until then, every PC game is,
+/// under the name typed in Settings.
+fn stream_option_label(game: &Game) -> Option<String> {
+    if !cfg!(target_os = "android") || game.source == catalog::GameSource::Stream {
+        return None;
+    }
+    match builtin_stream::shared().filter(|service| service.knows_games()) {
+        Some(service) => {
+            if !moonlight_android::streams(game) {
+                return None;
+            }
+            let handoff = service.handoff_for_title(&game.title)?;
+            Some(if handoff.host_name.is_empty() {
+                "Stream from your gaming PC".to_owned()
+            } else {
+                format!("Stream from {}", handoff.host_name)
+            })
+        }
+        None => moonlight_android::stream_label(game),
+    }
 }
 
 fn game_view(game: &Game, catalog: &Catalog, cache_dir: Option<&Path>) -> GameView {

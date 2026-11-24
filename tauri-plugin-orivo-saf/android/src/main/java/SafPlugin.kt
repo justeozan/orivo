@@ -38,7 +38,10 @@ class LaunchPackageArgs {
 @InvokeArg
 class StartStreamArgs {
     var pcName: String = ""
+    var hostUuid: String? = null
     var appName: String? = null
+    var appId: String? = null
+    var hdr: Boolean = false
 }
 
 /**
@@ -202,9 +205,19 @@ class SafPlugin(private val activity: Activity) : Plugin(activity) {
             for (pkg in listOf("com.limelight", "com.limelight.noir", "com.limelight.root")) {
                 val intent = Intent()
                 intent.component = ComponentName(pkg, "com.limelight.ShortcutTrampoline")
-                intent.putExtra("Name", args.pcName)
+                if (args.pcName.isNotBlank()) intent.putExtra("Name", args.pcName)
+                // With the PC's id and the game's id, Moonlight and Artemis
+                // start the game directly. A name alone is looked up in their
+                // cached list of the PC's games, which may not have it.
+                val hostUuid = args.hostUuid
+                if (!hostUuid.isNullOrBlank()) intent.putExtra("UUID", hostUuid)
                 val appName = args.appName
                 if (!appName.isNullOrBlank()) intent.putExtra("AppName", appName)
+                val appId = args.appId
+                if (!appId.isNullOrBlank()) {
+                    intent.putExtra("AppId", appId)
+                    intent.putExtra("HDR", args.hdr)
+                }
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
                     activity.startActivity(intent)

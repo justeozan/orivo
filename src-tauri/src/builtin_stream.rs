@@ -20,8 +20,16 @@
 //! 3. **The games.** The host's `/applist`, asked over mutual TLS with that
 //!    pairing, becomes one card per game.
 //!
-//! Playing is the next step (a native player). Until it lands, a card says so
-//! instead of pretending.
+//! Playing depends on the device. The Mac plays in a window of Orivo's own
+//! (`stream_player.rs`). A phone hands the game to Moonlight or Artemis, which
+//! are paired with the same PC: Orivo passes the PC's id and the game's id from
+//! the list kept here ([`Handoff`]), so they start the exact game without
+//! looking up a name in a cache of their own. The same list tells a phone which
+//! of its other cards (a store's copy of a game the PC also has) can be
+//! streamed, instead of offering a stream for every PC game.
+//!
+//! Later, when Orivo also runs on the gaming PC, the two can pair with each
+//! other directly, with no PIN to type into Sunshine.
 
 use std::{
     collections::BTreeMap,
@@ -106,15 +114,91 @@ impl StoredPairing {
     }
 }
 
+/// One game as the host last listed it: the id it launches under, and its
+/// title exactly as the host spells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredApp {
+    id: String,
+    title: String,
+    #[serde(default)]
+    hdr: bool,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredState {
     /// The address the person gave, normalised. Empty until one answered.
     #[serde(default)]
     host: String,
+    /// The saved machine's `uniqueid` and name from `/serverinfo`, as of the
+    /// last time it answered. Moonlight and Artemis file the same machine
+    /// under the same id, which is how a phone hands them a stream.
+    #[serde(default)]
+    host_id: String,
+    #[serde(default)]
+    host_name: String,
     /// Pairings by the host's `uniqueid` from `/serverinfo`.
     #[serde(default)]
     pairings: BTreeMap<String, StoredPairing>,
+    /// The saved machine's games, as its last `/applist` gave them. Kept so a
+    /// phone knows which games its PC offers without asking at every look.
+    #[serde(default)]
+    apps: Vec<StoredApp>,
+}
+
+impl StoredState {
+    /// Note what a machine said about itself. Another machine at the saved
+    /// address means the games listed so far were someone else's.
+    fn remember_host(&mut self, host_id: Option<&str>, host_name: Option<&str>) {
+        if let Some(id) = host_id.map(str::trim).filter(|id| !id.is_empty()) {
+            if self.host_id != id {
+                self.apps.clear();
+            }
+            self.host_id = id.to_owned();
+        }
+        if let Some(name) = host_name.map(str::trim).filter(|name| !name.is_empty()) {
+            self.host_name = name.chars().take(MAX_TITLE_CHARS).collect();
+        }
+    }
+
+    fn remember_apps(&mut self, apps: &[App]) {
+        self.apps = apps
+            .iter()
+            .map(|app| StoredApp {
+                id: app.id.clone(),
+                title: app.title.clone(),
+                hdr: app.hdr_supported,
+            })
+            .collect();
+    }
+
+    /// The hand-off for one listed game, if this client is paired with the
+    /// machine that listed it.
+    fn handoff(&self, app: &StoredApp) -> Option<Handoff> {
+        if self.host_id.is_empty() || !self.pairings.contains_key(&self.host_id) {
+            return None;
+        }
+        Some(Handoff {
+            host_id: self.host_id.clone(),
+            host_name: self.host_name.clone(),
+            app_id: app.id.clone(),
+            title: app.title.clone(),
+            hdr: app.hdr,
+        })
+    }
+}
+
+/// What Moonlight or Artemis on a phone needs to start one game on the PC
+/// without guessing: the PC by the id it gave both of them, and the game by
+/// the id its host lists it under. The title rides along for their screens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handoff {
+    pub host_id: String,
+    pub host_name: String,
+    pub app_id: String,
+    pub title: String,
+    pub hdr: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +358,17 @@ impl BuiltinStreamService {
         } else {
             normalise_host(host)?
         };
-        let status = probe_host(&host, &self.snapshot().pairings);
-        if status.state != HostState::Unreachable {
-            self.update(|state| state.host = host.clone())?;
+        let probed = probe_host(&host, &self.snapshot().pairings);
+        if probed.view.state != HostState::Unreachable {
+            self.update(|state| {
+                state.host = host.clone();
+                state.remember_host(probed.host_id.as_deref(), probed.host_name.as_deref());
+                if let Some(apps) = &probed.apps {
+                    state.remember_apps(apps);
+                }
+            })?;
         }
-        Ok(status)
+        Ok(probed.view)
     }
 
     /// Draw a PIN and start the handshake in the background. The host holds
@@ -315,8 +405,9 @@ impl BuiltinStreamService {
             if current != generation {
                 return;
             }
-            let next = match outcome.and_then(|(host_id, saved)| {
+            let next = match outcome.and_then(|(host_id, host_name, saved)| {
                 service.update(|state| {
+                    state.remember_host(Some(&host_id), host_name.as_deref());
                     state
                         .pairings
                         .insert(host_id, StoredPairing::from_saved(&saved));
@@ -390,7 +481,9 @@ impl BuiltinStreamService {
         })
     }
 
-    /// The saved machine's games, asked with this client's pairing.
+    /// The saved machine's games, asked with this client's pairing. What it
+    /// answers is kept, so a phone can offer and hand off its games later
+    /// without asking again.
     pub fn list_games(&self) -> Result<Vec<App>, BuiltinStreamError> {
         let host = self.saved_host()?;
         let state = self.snapshot();
@@ -406,8 +499,66 @@ impl BuiltinStreamService {
             .ok_or(BuiltinStreamError::NotPaired)?;
         let client = session::resume(&host, &pairing.to_saved())
             .map_err(|_| BuiltinStreamError::NotPaired)?;
-        client.applist().map_err(|_| BuiltinStreamError::NotPaired)
+        let apps = client.applist().map_err(|_| BuiltinStreamError::NotPaired)?;
+        self.update(|state| {
+            state.remember_host(info.unique_id.as_deref(), info.hostname.as_deref());
+            state.remember_apps(&apps);
+        })?;
+        Ok(apps)
     }
+
+    /// The hand-off for the game a card was imported from, by the host's id
+    /// for it. No network: the list kept from the last look answers.
+    pub fn handoff(&self, app_ref: &str) -> Option<Handoff> {
+        let state = self.snapshot();
+        let app = state.apps.iter().find(|app| app.id == app_ref)?;
+        state.handoff(app)
+    }
+
+    /// The hand-off for a game known by its title, such as a store's card for
+    /// a game the PC also lists. Titles are compared without case, spacing,
+    /// punctuation or trademark signs, which is all two stores tend to differ
+    /// by. Nothing when the PC does not list it.
+    pub fn handoff_for_title(&self, title: &str) -> Option<Handoff> {
+        let key = title_key(title);
+        if key.is_empty() {
+            return None;
+        }
+        let state = self.snapshot();
+        let app = state.apps.iter().find(|app| title_key(&app.title) == key)?;
+        state.handoff(app)
+    }
+
+    /// Whether this client is paired with the saved machine and knows its
+    /// games: the point from which Orivo, not a typed PC name, decides which
+    /// games a phone can stream.
+    pub fn knows_games(&self) -> bool {
+        let state = self.snapshot();
+        !state.host_id.is_empty()
+            && state.pairings.contains_key(&state.host_id)
+            && !state.apps.is_empty()
+    }
+}
+
+/// A title reduced to what identifies it: lower case letters and digits.
+pub fn title_key(title: &str) -> String {
+    title
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+static SHARED: std::sync::OnceLock<Arc<BuiltinStreamService>> = std::sync::OnceLock::new();
+
+/// Make the service reachable from code that has no Tauri state at hand, such
+/// as the launch menu built for every card.
+pub fn share(service: Arc<BuiltinStreamService>) {
+    let _ = SHARED.set(service);
+}
+
+pub fn shared() -> Option<&'static Arc<BuiltinStreamService>> {
+    SHARED.get()
 }
 
 // ---------------------------------------------------------------------------
@@ -469,7 +620,14 @@ pub fn forget_builtin_stream(service: Service<'_>) -> Result<(), String> {
 /// `/serverinfo` over plain HTTP, which any client may ask. Being accepted is
 /// `/applist` over mutual TLS with the pairing kept for that machine, the one
 /// question only a paired client gets an answer to.
-fn probe_host(host: &str, pairings: &BTreeMap<String, StoredPairing>) -> HostStatusView {
+struct Probed {
+    view: HostStatusView,
+    host_id: Option<String>,
+    host_name: Option<String>,
+    apps: Option<Vec<App>>,
+}
+
+fn probe_host(host: &str, pairings: &BTreeMap<String, StoredPairing>) -> Probed {
     let view = |state, games| HostStatusView {
         state,
         host: host.to_owned(),
@@ -479,28 +637,41 @@ fn probe_host(host: &str, pairings: &BTreeMap<String, StoredPairing>) -> HostSta
         host: host.to_owned(),
         http_port: discovery::DEFAULT_HTTP_PORT,
     }) else {
-        return view(HostState::Unreachable, 0);
+        return Probed {
+            view: view(HostState::Unreachable, 0),
+            host_id: None,
+            host_name: None,
+            apps: None,
+        };
+    };
+    let mut probed = Probed {
+        view: view(HostState::NotPaired, 0),
+        host_id: info.unique_id.clone(),
+        host_name: info.hostname.clone(),
+        apps: None,
     };
     let Some(pairing) = info.unique_id.as_ref().and_then(|id| pairings.get(id)) else {
-        return view(HostState::NotPaired, 0);
+        return probed;
     };
-    match session::resume(host, &pairing.to_saved()).and_then(|client| client.applist()) {
-        Ok(apps) => view(HostState::Paired, apps.len()),
-        Err(_) => view(HostState::NotPaired, 0),
+    if let Ok(apps) = session::resume(host, &pairing.to_saved()).and_then(|client| client.applist()) {
+        probed.view = view(HostState::Paired, apps.len());
+        probed.apps = Some(apps);
     }
+    probed
 }
 
-/// Run the handshake and say which machine accepted it.
+/// Run the handshake and say which machine accepted it, and its name.
 fn pair_with(
     host: &str,
     device_name: &str,
     pin: &str,
-) -> Result<(String, SavedPairing), BuiltinStreamError> {
+) -> Result<(String, Option<String>, SavedPairing), BuiltinStreamError> {
     let address = HostAddress {
         host: host.to_owned(),
         http_port: discovery::DEFAULT_HTTP_PORT,
     };
     let info = discovery::probe(&address).map_err(|_| BuiltinStreamError::Unreachable)?;
+    let host_name = info.hostname.clone();
     let host_id = info
         .unique_id
         .filter(|id| !id.trim().is_empty())
@@ -514,7 +685,7 @@ fn pair_with(
         eprintln!("orivo: built-in streaming pairing with {host} failed: {error}");
         BuiltinStreamError::Refused(pairing_failure(&error.to_string()))
     })?;
-    Ok((host_id, saved))
+    Ok((host_id, host_name, saved))
 }
 
 /// Starfire's `session::pair_and_save`, with one tolerance: Apollo registers
@@ -739,6 +910,20 @@ pub fn games_from(apps: &[App]) -> Vec<Game> {
     games.into_values().collect()
 }
 
+/// Leave out the PC's games the library already has a card for from
+/// elsewhere (a store, a folder): that card offers the stream instead, so the
+/// game is not shown twice.
+pub fn drop_games_already_carded(catalog: &Catalog, games: &mut Vec<Game>) {
+    let carded: std::collections::BTreeSet<String> = catalog
+        .games
+        .iter()
+        .filter(|game| game.source != GameSource::Stream && crate::moonlight_android::streams(game))
+        .map(|game| title_key(&game.title))
+        .filter(|key| !key.is_empty())
+        .collect();
+    games.retain(|game| !carded.contains(&title_key(&game.title)));
+}
+
 fn is_not_a_game(title: &str) -> bool {
     matches!(
         title.to_ascii_lowercase().as_str(),
@@ -911,6 +1096,127 @@ mod tests {
         catalog.games.push(local);
         apply(&mut catalog, Vec::new());
         assert_eq!(catalog.games.len(), 1);
+    }
+
+    fn paired_service(name: &str) -> BuiltinStreamService {
+        let dir = std::env::temp_dir().join(format!(
+            "orivo-builtin-stream-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let service = BuiltinStreamService::load(dir.join(STATE_FILE));
+        service
+            .update(|state| {
+                state.host = "100.72.203.120".into();
+                state.remember_host(Some("HOST-ID"), Some("Astra"));
+                state.pairings.insert(
+                    "HOST-ID".into(),
+                    StoredPairing {
+                        client_unique_id: "ABCD".into(),
+                        device_name: "Orivo (Android)".into(),
+                        client_cert_pem: "cert".into(),
+                        client_key_pem: "key".into(),
+                        host_cert_pem: "host".into(),
+                    },
+                );
+                state.remember_apps(&[app("881", "Cult of the Lamb"), app("17", "Deliver Us Mars")]);
+            })
+            .unwrap();
+        service
+    }
+
+    #[test]
+    fn a_phone_hands_off_by_the_pc_s_id_and_the_game_s_id() {
+        let service = paired_service("handoff");
+        assert!(service.knows_games());
+        assert_eq!(
+            service.handoff("881"),
+            Some(Handoff {
+                host_id: "HOST-ID".into(),
+                host_name: "Astra".into(),
+                app_id: "881".into(),
+                title: "Cult of the Lamb".into(),
+                hdr: false,
+            })
+        );
+        // A store's card for the same game matches despite case and signs.
+        assert_eq!(
+            service.handoff_for_title("Cult Of The Lamb™").map(|h| h.app_id),
+            Some("881".into())
+        );
+        // A game the PC does not list is not offered, however close.
+        assert_eq!(service.handoff_for_title("Deliver At All Costs"), None);
+        assert_eq!(service.handoff("999"), None);
+        assert_eq!(service.handoff_for_title("  "), None);
+        // The list survives a restart.
+        let reloaded = BuiltinStreamService::load(service.path.clone());
+        assert_eq!(reloaded.handoff("17").map(|h| h.title), Some("Deliver Us Mars".into()));
+        let _ = fs::remove_dir_all(service.path.parent().unwrap());
+    }
+
+    #[test]
+    fn no_handoff_without_a_pairing_or_after_the_machine_changes() {
+        let service = paired_service("handoff-unpaired");
+        service.update(|state| state.pairings.clear()).unwrap();
+        assert!(!service.knows_games());
+        assert_eq!(service.handoff("881"), None);
+
+        let service = paired_service("handoff-moved");
+        service
+            .update(|state| state.remember_host(Some("OTHER-PC"), Some("Laptop")))
+            .unwrap();
+        assert!(service.snapshot().apps.is_empty());
+        assert_eq!(service.handoff_for_title("Cult of the Lamb"), None);
+        // The same machine answering again keeps its games.
+        let service = paired_service("handoff-same");
+        service
+            .update(|state| state.remember_host(Some("HOST-ID"), None))
+            .unwrap();
+        assert_eq!(service.snapshot().apps.len(), 2);
+        assert_eq!(service.snapshot().host_name, "Astra");
+        for name in ["handoff-unpaired", "handoff-moved", "handoff-same"] {
+            let _ = fs::remove_dir_all(std::env::temp_dir().join(format!(
+                "orivo-builtin-stream-{name}-{}",
+                std::process::id()
+            )));
+        }
+    }
+
+    #[test]
+    fn a_state_file_from_before_the_list_was_kept_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "orivo-builtin-stream-legacy-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(STATE_FILE);
+        fs::write(&path, br#"{"host":"astra.local","pairings":{}}"#).unwrap();
+        let service = BuiltinStreamService::load(path);
+        assert_eq!(service.settings().host, "astra.local");
+        assert!(!service.knows_games());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_game_already_carded_from_a_store_is_not_added_twice() {
+        let mut catalog = Catalog::default();
+        let mut steam = games_from(&[app("1", "Cult of the Lamb")]).remove(0);
+        steam.id = "steam:1313140".into();
+        steam.source = GameSource::Steam;
+        steam.source_id = Some("1313140".into());
+        steam.launch_target = LaunchTarget::Steam { app_id: 1_313_140 };
+        catalog.games.push(steam);
+        let mut games = games_from(&[app("881", "CULT OF THE LAMB"), app("17", "Deliver Us Mars")]);
+        drop_games_already_carded(&catalog, &mut games);
+        let titles: Vec<_> = games.iter().map(|game| game.title.as_str()).collect();
+        assert_eq!(titles, vec!["Deliver Us Mars"]);
+    }
+
+    #[test]
+    fn title_keys_keep_only_letters_and_digits() {
+        assert_eq!(title_key("Kena: Bridge of Spirits™"), "kenabridgeofspirits");
+        assert_eq!(title_key("東方 Project"), "東方project");
+        assert_eq!(title_key(" - "), "");
     }
 
     #[test]

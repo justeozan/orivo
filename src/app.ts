@@ -545,6 +545,8 @@ const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 const INSTALL_ON_PHONE_OPTION = "install-on-phone";
 /** At most one look at the phone's own games per this many milliseconds. */
 const PHONE_GAMES_INTERVAL_MS = 20_000;
+/** How often, at most, the gaming PC paired with Orivo is asked for its games. */
+const PC_GAMES_INTERVAL_MS = 5 * 60_000;
 /** How a download Orivo runs itself ends — an Epic game on a phone (`epic_android.rs`). */
 const EPIC_INSTALL_STATUS_EVENT = "epic-install-status";
 /**
@@ -2410,6 +2412,31 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // The library still has every other game; a phone that refuses the
         // list is worth one line in the log, not a toast on every return.
         console.warn("orivo: the phone's games could not be listed", error);
+      });
+  };
+
+  /**
+   * The games of the gaming PC paired with Orivo Streaming, asked again after
+   * the first library load and when Orivo returns to the foreground, at most
+   * every five minutes. A game added in Sunshine or Apollo appears, one
+   * removed leaves, and on a phone the store cards that can be streamed follow.
+   * A PC that is off is not an error worth showing.
+   */
+  let pcGamesAskedAt = 0;
+  const syncPcGames = (): void => {
+    if (!isTauriRuntime()) return;
+    const now = Date.now();
+    if (now - pcGamesAskedAt < PC_GAMES_INTERVAL_MS) return;
+    pcGamesAskedAt = now;
+    const client = createBuiltinStreamClient();
+    void client
+      .settings()
+      .then((settings) => (settings.paired ? client.syncGames() : null))
+      .then((result) => {
+        if (result) void refreshLibrary();
+      })
+      .catch((error: unknown) => {
+        console.warn("orivo: the gaming PC's games could not be listed", error);
       });
   };
 
@@ -7679,13 +7706,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   const idleWarmUp = window.requestIdleCallback;
   if (idleWarmUp) idleWarmUp(warmDeferredPages, { timeout: WARM_UP_DEADLINE_MS });
   else window.setTimeout(warmDeferredPages, WARM_UP_DEADLINE_MS);
-  void refreshLibrary().then(() => syncPhoneGames());
+  void refreshLibrary().then(() => {
+    syncPhoneGames();
+    syncPcGames();
+  });
   // A game installed while Orivo was in the background appears when Orivo is
   // back: Android has no broadcast an app may still listen for that says so.
   document.addEventListener(
     "visibilitychange",
     () => {
-      if (document.visibilityState === "visible") syncPhoneGames();
+      if (document.visibilityState === "visible") {
+        syncPhoneGames();
+        syncPcGames();
+      }
     },
     { signal: attached.signal },
   );

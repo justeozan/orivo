@@ -42,9 +42,9 @@ export default defineConfig(({ mode }) => {
       ? [
           sentryVitePlugin({
             authToken: env.SENTRY_AUTH_TOKEN,
-            org: "ozan-6n",
+            org: "evey-fb",
             project: "orivo",
-            // The project lives in Sentry's German region, not sentry.io.
+            // The org lives in Sentry's German region, not sentry.io.
             url: "https://de.sentry.io",
             // The same string `src/sentry.ts` stamps on every report, so a stack
             // trace finds the maps of the build that produced it.

@@ -70,11 +70,19 @@ struct LaunchPackageArgs<'a> {
     package_name: &'a str,
 }
 
-#[derive(serde::Serialize)]
+/// A stream to hand to Moonlight (or Artemis). The PC is named the way
+/// Moonlight shows it, and, when Orivo knows them from its own pairing, also
+/// by its id; the game likewise by the name its host lists and by the host's
+/// id for it. With the ids, Moonlight starts the game without looking its name
+/// up in a cache of its own, where a game it has not shown yet is missing.
+#[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StartStreamArgs<'a> {
-    pc_name: &'a str,
-    app_name: Option<&'a str>,
+pub struct StreamRequest<'a> {
+    pub pc_name: &'a str,
+    pub host_uuid: Option<&'a str>,
+    pub app_name: Option<&'a str>,
+    pub app_id: Option<&'a str>,
+    pub hdr: bool,
 }
 
 /// What the picker resolved to. `None` is the ordinary answer: the user backed
@@ -156,17 +164,16 @@ impl<R: Runtime> OrivoSaf<R> {
 }
 
 impl<R: Runtime> OrivoSaf<R> {
-    /// Hand a stream to Moonlight: the PC by the name Moonlight shows for it,
-    /// and the game by the name its streaming host lists — or, with no game,
-    /// that PC's list. `Err` carries `moonlight-missing` when Moonlight is not
-    /// installed.
-    pub async fn start_stream(&self, pc_name: &str, app_name: Option<&str>) -> Result<(), Error> {
+    /// Hand a stream to Moonlight: the PC and the game as [`StreamRequest`]
+    /// names them, or, with no game, that PC's list. `Err` carries
+    /// `moonlight-missing` when Moonlight is not installed.
+    pub async fn start_stream(&self, request: StreamRequest<'_>) -> Result<(), Error> {
         #[cfg(target_os = "android")]
         {
             self.handle
                 .run_mobile_plugin_async::<serde::de::IgnoredAny>(
                     "startStream",
-                    StartStreamArgs { pc_name, app_name },
+                    request,
                 )
                 .await
                 .map(|_| ())
@@ -174,7 +181,7 @@ impl<R: Runtime> OrivoSaf<R> {
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = StartStreamArgs { pc_name, app_name };
+            let _ = request;
             Err(Error::Unsupported)
         }
     }
