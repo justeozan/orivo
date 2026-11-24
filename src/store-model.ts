@@ -10,7 +10,7 @@ import type {
   StoreProvider,
 } from "./contracts";
 import { currentLanguage, t } from "./i18n";
-import { STORE_CATALOG } from "./store-catalog.generated";
+import { STORE_CATALOG } from "./generated/store-catalog";
 
 export type StoreLoadPhase =
   | "loading"

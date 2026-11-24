@@ -762,7 +762,7 @@ fn cache_error(error: impl std::fmt::Display) -> String {
 
 // ---------------------------------------------------------------------------
 // The catalogue. One curated list, generated once by
-// `scripts/build-store-catalog.mjs`, written to `src/store-catalog.generated.ts`
+// `scripts/build-store-catalog.mjs`, written to `src/generated/store-catalog.ts`
 // for the WebView and to the JSON sibling embedded here for the shell. Neither
 // side can drift onto a catalogue of its own: this is the same bytes.
 // ---------------------------------------------------------------------------

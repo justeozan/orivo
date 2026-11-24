@@ -27,7 +27,7 @@ export const FALLBACK_LIBRARY_IDS = [
 ] as const;
 
 /**
- * The Store's real, generated catalogue (`store-catalog.generated.ts`) is
+ * The Store's real, generated catalogue (`src/generated/store-catalog.ts`) is
  * refreshed by `pnpm store:refresh` against the live Steam store, so its size
  * and exact contents are a fixture, not a constant to hardcode a full id list
  * against. Specs instead assert counts and a handful of stable, real titles

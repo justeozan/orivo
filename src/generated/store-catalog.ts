@@ -1,9 +1,9 @@
-// GENERATED FILE — run `node scripts/fetch-store-catalog.mjs && node scripts/build-store-catalog.mjs`.
+// GENERATED FILE — DO NOT EDIT. Run `pnpm store:build` (after `node scripts/fetch-store-catalog.mjs`).
 // Facts (title, description, genres, platform support, prices) come from the
 // Steam store listing for the French region; the French editorial copy in
 // `curation` is Orivo's own. Nothing here is invented: a title with no quoted
 // price keeps `priceMinor: null`.
-import type { GameSummary } from "./contracts";
+import type { GameSummary } from "../contracts";
 
 export const STORE_CATALOG_FETCHED_AT = "2026-08-02T18:10:02.752Z";
 
