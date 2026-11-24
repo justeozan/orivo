@@ -12,7 +12,7 @@
    collapse to "nothing to report" rather than an error.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { t, type MessageKey } from "./i18n";
 
 export interface PluginHealthView {

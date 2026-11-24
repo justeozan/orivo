@@ -14,7 +14,7 @@
    runs it on a worker thread and answers a poll. This module is the poller.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 import { t } from "./i18n";
 import type { PluginState } from "./plugin-manager";
 

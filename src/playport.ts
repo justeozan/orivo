@@ -11,7 +11,7 @@
    have been installed or deleted.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 const DESKTOP_PLATFORMS: readonly string[] = ["windows", "macos", "linux"];
 

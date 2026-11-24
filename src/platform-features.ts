@@ -7,7 +7,7 @@
    the command, both get the desktop answer — which is what they always were.
    --------------------------------------------------------------------------- */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./host";
 
 export interface PlatformFeatures {
   /** Plugins fetched from the registry or picked from a file. Off on iOS. */

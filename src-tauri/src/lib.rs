@@ -722,7 +722,10 @@ impl AppState {
                 // setup callback, which on macOS is a Cocoa callback that
                 // cannot unwind: the process aborts with a SIGABRT and the
                 // user never learns why. Say it, leave the file alone, exit.
-                Err(error) => exit_with_startup_failure(&startup_catalog_failure_message(&*error)),
+                Err(error) => exit_with_startup_failure(
+                    "library",
+                    &startup_catalog_failure_message(&*error),
+                ),
             };
 
         // Imported artwork is copied once into the app cache. That keeps the
@@ -9392,8 +9395,12 @@ fn startup_catalog_failure_message(error: &(dyn std::error::Error + 'static)) ->
 /// Startup has no window yet, so there is nowhere else to say it. It exits
 /// instead of returning an error because an error out of `setup` becomes a
 /// panic in a callback that cannot unwind (see `AppState::load`).
-fn exit_with_startup_failure(message: &str) -> ! {
+///
+/// `kind` names what failed for Sentry, which never sees `message`: it can
+/// quote a path under the player's home folder.
+fn exit_with_startup_failure(kind: &'static str, message: &str) -> ! {
     eprintln!("{message}");
+    crash_reporting::report_fatal(kind);
     #[cfg(desktop)]
     rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)

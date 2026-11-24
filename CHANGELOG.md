@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Crash reports no longer miss the failures you actually meet. Orivo used to send only what crashed it outright; a launch that was refused, a sync that failed or an update that would not install showed you a message and was never heard of. Those are now reported too, once per session each, with the name of what failed. Folders under your home directory are shortened (`/Users/~/…`) before anything leaves your machine, and a library that cannot be opened at startup is reported before Orivo closes.
+
 ## [0.4.2] - 2026-11-24
 
 ### Added
