@@ -41,11 +41,19 @@ export function isPhone(compact: boolean, touch: boolean): boolean {
 }
 
 /**
- * Mirror the current form factor onto `<html>` and keep it there. The listener
- * is not optional: Android hands the app a new viewport on rotation and on
- * split-screen resize, and a stale attribute is worse than none. A mouse
- * plugged into a phone changes the pointer just as a rotation changes the
- * height, so both queries are listened to.
+ * Mirror the current form factor onto `<html>` and keep it there. The height is
+ * listened to: Android hands the app a new viewport on rotation and on
+ * split-screen resize, and a stale attribute is worse than none.
+ *
+ * The finger is read differently: once a finger has been the only pointer, the
+ * screen is a phone for the rest of the session. What a phone reports as its
+ * primary pointer moves under it — a controller whose touchpad counts as a
+ * mouse, a mouse paired for a minute, the engine re-reading its input devices
+ * (Chromium does, mid-page, on a CI runner) — but the hardware does not, and a
+ * phone that dropped its layout because of it would hand back the desktop
+ * scene that cannot fit on it. A desktop window never answered yes, so it
+ * never becomes a phone; a phone that starts with a mouse becomes one as soon
+ * as the mouse goes.
  */
 export function applyFormFactor(): void {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
@@ -53,10 +61,12 @@ export function applyFormFactor(): void {
   const compact = window.matchMedia(COMPACT_QUERY);
   const touch = window.matchMedia(TOUCH_QUERY);
   const root = document.documentElement;
+  let fingerOnly = false;
   const reflect = () => {
+    fingerOnly ||= touch.matches;
     if (compact.matches) root.dataset.formFactor = "compact";
     else delete root.dataset.formFactor;
-    if (isPhone(compact.matches, touch.matches)) root.dataset.device = "phone";
+    if (isPhone(compact.matches, fingerOnly)) root.dataset.device = "phone";
     else delete root.dataset.device;
   };
 

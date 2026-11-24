@@ -223,6 +223,23 @@ test.describe("the Library scene", () => {
       .toBeCloseTo(card!.height * 2.5, 0);
   });
 
+  test("stays a phone when the engine stops reporting a finger", async ({ page }) => {
+    // Chromium on a CI runner re-reads its input devices mid-page and drops
+    // the emulated touch screen, so `(hover: none) and (pointer: coarse)`
+    // turns false under a test that never touched it. A controller's touchpad
+    // does the same on a real phone. Here it is done on purpose, then the
+    // card is measured as above.
+    const session = await page.context().newCDPSession(page);
+    await session.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+    await expect
+      .poll(() => page.evaluate(() => window.matchMedia("(hover: none) and (pointer: coarse)").matches))
+      .toBe(false);
+
+    expect(await page.evaluate(() => document.documentElement.dataset.device)).toBe("phone");
+    const card = await rectOf(page, "#game-cards .game-card:not(.is-selected)");
+    expect(card!.height).toBeLessThanOrEqual(100);
+  });
+
   test("offers finger-sized targets", async ({ page }) => {
     // The navigation waits behind the Orivo mark on a phone, so it is measured
     // once the mark has brought it out. `me` is behind the beta flag and hidden

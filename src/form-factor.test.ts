@@ -93,6 +93,23 @@ describe("form factor", () => {
     expect(document.documentElement.dataset.device).toBe("phone");
   });
 
+  it("keeps a phone a phone when its pointer stops being only a finger", () => {
+    const { emit } = stubMatchMedia({ [COMPACT_QUERY]: true, [TOUCH_QUERY]: true });
+
+    applyFormFactor();
+    expect(document.documentElement.dataset.device).toBe("phone");
+
+    // A controller's touchpad, a mouse, or the engine changing its mind.
+    emit(TOUCH_QUERY, false);
+    expect(document.documentElement.dataset.device).toBe("phone");
+
+    // The height still decides: turned upright it is no longer compact.
+    emit(COMPACT_QUERY, false);
+    expect(document.documentElement.dataset.device).toBeUndefined();
+    emit(COMPACT_QUERY, true);
+    expect(document.documentElement.dataset.device).toBe("phone");
+  });
+
   it("leaves the document alone where matchMedia does not exist", () => {
     expect(() => applyFormFactor()).not.toThrow();
     expect(document.documentElement.dataset.formFactor).toBeUndefined();
