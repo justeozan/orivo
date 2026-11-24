@@ -39,13 +39,12 @@ Everything below must pass before you open a pull request:
 ```sh
 pnpm typecheck && pnpm test    # TypeScript + unit tests
 pnpm test:e2e                  # Playwright, needs the dev server
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --workspace         # every Rust crate's tests
 ```
 
-CI is narrower than that — it runs `pnpm typecheck`, `pnpm test`, and
-`cargo check` on Linux, macOS and Windows. The Rust tests and the Playwright
-suite are yours to run locally, and a pull request that skipped them tends to
-show it.
+CI runs the same: `pnpm typecheck` and `pnpm test`, the Playwright suite on
+macOS, and `cargo test --workspace` on Linux and macOS. Windows runs
+`cargo check` and the tests of the modules whose code differs there.
 
 Requires Node 22, pnpm 11 and a stable Rust toolchain. On Linux you also need
 `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`.
