@@ -11968,6 +11968,11 @@ pub(crate) mod tests {
     /// than on the synchronous startup path, still converts a pending `.exe`
     /// into a Wine-Staging card — and the original Direct record survives
     /// underneath it, so the association stays reversible.
+    ///
+    /// macOS only, like the runner: `wine_auto_apply_candidates` finds nothing
+    /// anywhere else, which
+    /// `background_wine_auto_apply_leaves_a_pending_exe_alone_off_macos` holds.
+    #[cfg(target_os = "macos")]
     #[test]
     fn background_wine_auto_apply_converts_a_pending_exe_and_keeps_it_reversible() {
         let home = temporary_directory("wine-auto-apply-convert");
@@ -12032,6 +12037,7 @@ pub(crate) mod tests {
     /// A backlog bigger than one page must not lose or starve candidates past
     /// the first page — the risk a fixed-offset, snapshot-once design exists
     /// to avoid (see `wine_auto_apply_candidates`'s doc comment).
+    #[cfg(target_os = "macos")]
     #[test]
     fn background_wine_auto_apply_pages_through_a_backlog_larger_than_one_page() {
         let home = temporary_directory("wine-auto-apply-paging");
@@ -12059,6 +12065,43 @@ pub(crate) mod tests {
 
         let catalog = state.catalog.read().unwrap();
         assert_eq!(catalog.wine_inventory.len(), total);
+    }
+
+    /// Off macOS there is no built-in Wine-Staging runner, so the pass must
+    /// leave a pending `.exe` exactly as import left it — even with a seeded
+    /// profile whose binary would validate — rather than hand it to a runner
+    /// the platform cannot start.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn background_wine_auto_apply_leaves_a_pending_exe_alone_off_macos() {
+        let home = temporary_directory("wine-auto-apply-off-macos");
+        let games = home.join("Games");
+        fs::create_dir_all(&games).unwrap();
+        let executable = games.join("Foo.exe");
+        fs::write(&executable, "pretend windows binary").unwrap();
+
+        let state = state_for(&home);
+        {
+            let mut catalog = state.catalog.write().unwrap();
+            catalog
+                .games
+                .push(direct_windows_game_fixture("direct-foo", executable));
+            catalog.wine_profiles.push(seeded_auto_wine_profile(
+                &home,
+                wine_runner::write_staging_binary(&home),
+            ));
+        }
+
+        run_wine_auto_apply(&state);
+
+        let catalog = state.catalog.read().unwrap();
+        assert_eq!(catalog.wine_inventory.len(), 0);
+        assert!(
+            catalog
+                .games
+                .iter()
+                .all(|game| game.launch_target == LaunchTarget::Direct)
+        );
     }
 
     /// Two overlapping passes must not both mutate the catalog: the `in_flight`
