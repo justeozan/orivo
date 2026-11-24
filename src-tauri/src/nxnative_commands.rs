@@ -1243,7 +1243,6 @@ fn add_built_app(app: &AppHandle, bundle: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn settings_saved_before_removal_existed_still_load_as_installed() {
@@ -1253,7 +1252,10 @@ mod tests {
         assert!(removed.removed && removed.checkout.is_none());
     }
 
+    // Fixes run in macOS's own `/bin/zsh`, which a Linux runner lacks.
+    #[cfg(target_os = "macos")]
     fn run(command: &str) -> (Result<(), String>, Vec<String>) {
+        use std::sync::Mutex as StdMutex;
         let lines = StdMutex::new(Vec::new());
         let mut process = Command::new("/bin/zsh");
         process
@@ -1264,6 +1266,7 @@ mod tests {
         (result, lines.into_inner().unwrap())
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_fix_streams_its_output_and_errors_and_answers_yes() {
         let (result, lines) = run(
@@ -1278,6 +1281,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_failed_fix_says_its_last_line_and_exit_code() {
         let (result, _) = run("echo 'Error: No such formula'; exit 1");
@@ -1301,6 +1305,7 @@ mod tests {
         assert_eq!(&library[4..8], &[0x0c, 0x00, 0x00, 0x01]);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn homebrew_and_pip_are_told_not_to_ask() {
         let (_, lines) = run("echo \"$NONINTERACTIVE $PIP_NO_INPUT\"");

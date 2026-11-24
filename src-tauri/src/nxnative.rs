@@ -1291,6 +1291,8 @@ mod tests {
         assert_eq!(splitter.finish().as_deref(), Some("tail"));
     }
 
+    // Fixes run in macOS's own `/bin/zsh`, which a Linux runner lacks.
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_unattended_fix_answers_yes_and_keeps_its_exit_code() {
         let run = |command: &str| {
