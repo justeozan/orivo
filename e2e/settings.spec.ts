@@ -160,50 +160,49 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
     await expect(page.locator("#wine-settings-panel")).toBeHidden();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
-    // Third-party runners is part of Orivo, not a plugin in the list: its
-    // panel sits inline with the browser instead of behind a row.
-    await expect(page.locator("#runners-panel")).toBeVisible();
+    // Nothing is open yet: the detail column asks for a pick.
+    await expect(page.locator("#plugins-detail-empty")).toBeVisible();
+    // Runner profiles live in the detail of the plugin that provides them.
+    await expect(page.locator("#runners-panel")).toBeHidden();
 
-    // Four "coming soon" rows (Spotify, Moonlight/Sunshine, Playnite,
-    // Ludusavi) now sit alongside the two installed plugins — real, working
-    // teasers, not installable from here — so only the installed ones count.
-    const installed = page.locator(".plugin-row:not(.plugin-row--soon)");
+    // The built-ins are cards, each with its category pill. Four "coming
+    // soon" cards (Spotify, Moonlight/Sunshine, Playnite, Ludusavi) sit in
+    // the catalogue, shown only with Beta features on.
+    const installed = page.locator("#plugins-installed-list .plugin-card");
     await expect(installed).toHaveCount(2);
     await expect(installed.nth(0)).toContainText("Wine");
+    await expect(installed.nth(0).locator(".plugin-pill")).toHaveText("Compatibility");
     await expect(installed.nth(1)).toContainText("Wallpaper Searcher");
-    await expect(page.locator(".plugin-row--soon")).toHaveCount(4);
-    await expect(page.locator("[data-plugin-open='wine']")).toBeVisible();
-    await expect(page.locator("[data-plugin-open='wallpaper-searcher']")).toBeVisible();
+    await expect(installed.nth(1).locator(".plugin-pill")).toHaveText("Visuals");
+    await expect(page.locator(".plugin-card--soon")).toHaveCount(4);
     await expect(page.locator("[data-plugin-open='runners']")).toHaveCount(0);
 
     // This suite runs in a plain browser with no Tauri, so the live registry
-    // answers nothing and no real catalogue row is ever rendered — but the
-    // "coming soon" teasers above fill the panel, so the empty-registry
-    // notice (`refs.pluginsCatalogEmpty`, gated on `matches.length +
-    // soon.length`) has nothing to say and stays hidden.
-    await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
+    // answers nothing and no real catalogue card is ever rendered — but the
+    // "coming soon" teasers fill the panel, so the empty-registry notice
+    // (`refs.pluginsCatalogEmpty`, gated on `matches.length + soon.length`)
+    // has nothing to say and stays hidden.
+    await expect(page.locator(".plugin-card--catalog:not(.plugin-card--soon)")).toHaveCount(0);
     await expect(page.locator("#plugins-catalog-empty")).toBeHidden();
     // Install from file is a debug control: it only shows with Beta features on.
     await expect(page.locator("[data-plugin-install-file]")).toBeHidden();
   });
 
-  test("the chevron opens a plugin's settings and back returns to the browser", async ({ page }) => {
+  test("a card opens its plugin's settings beside the list", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
     await page.locator("[data-plugin-open='wine']").click();
     await expect(page.locator("#wine-settings-panel")).toBeVisible();
-    await expect(page.locator("#plugins-catalog-panel")).toBeHidden();
-
-    await page.locator("#wine-settings-panel [data-plugin-back]").click();
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#wine-settings-panel")).toBeHidden();
+    // The list and the catalogue stay: only the detail column changes.
+    await expect(page.locator("#plugins-installed-list")).toBeVisible();
+    await expect(page.locator("#plugins-catalog-group")).toBeVisible();
+    await expect(page.locator("[data-plugin-card='wine']")).toHaveClass(/is-selected/);
 
     await page.locator("[data-plugin-open='wallpaper-searcher']").click();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
-    await expect(page.locator("#plugins-catalog-panel")).toBeHidden();
-    await expect(page.locator("#wallpaper-plugin-panel")).toContainText(
-      "Official store art and free-licence images. No key needed.",
-    );
+    await expect(page.locator("#wine-settings-panel")).toBeHidden();
+    await expect(page.locator("[data-plugin-card='wallpaper-searcher']")).toHaveClass(/is-selected/);
+    await expect(page.locator("[data-plugin-card='wine']")).not.toHaveClass(/is-selected/);
 
     await page.locator("#wallpaper-igdb-client-id").fill("twitch-client");
     await page.locator("#wallpaper-igdb-client-secret").fill("secret");
@@ -212,24 +211,21 @@ test.describe("Plugins & Runners browser", () => {
     await page.locator("#wallpaper-credentials-save").click();
     await expect(page.locator("#toast")).toHaveText(/Wallpaper keys are saved in the Orivo desktop app/);
     await expect(page.locator("#wallpaper-igdb-client-id")).toHaveValue("twitch-client");
+  });
+
+  test("in a narrow window a plugin's detail takes the list's place, with a way back", async ({ page }) => {
+    await page.setViewportSize({ width: 620, height: 820 });
+    await openRoute(page, "#/settings/plugins", "settings");
+    await expect(page.locator("#plugins-detail-empty")).toBeHidden();
+
+    await page.locator("[data-plugin-open='wallpaper-searcher']").click();
+    await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
+    await expect(page.locator("#plugins-installed-list")).toBeHidden();
+    await expect(page.locator("#plugins-catalog-group")).toBeHidden();
 
     await page.locator("#wallpaper-plugin-panel [data-plugin-back]").click();
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-
-    // No row to reach it by: the runners panel is inline with the browser,
-    // and a plugin's detail view replaces both.
-    await expect(page.locator("#runners-panel")).toBeVisible();
-    // No Tauri in this suite, so no runner plugin ever answers: the empty
-    // state is the one thing this panel can show here.
-    await expect(page.locator("#runners-panel-body")).toContainText(
-      "Install a runner plugin to add an emulator",
-    );
-
-    await page.locator("[data-plugin-open='wine']").click();
-    await expect(page.locator("#runners-panel")).toBeHidden();
-    await page.locator("#wine-settings-panel [data-plugin-back]").click();
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#runners-panel")).toBeVisible();
+    await expect(page.locator("#plugins-installed-list")).toBeVisible();
+    await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
   });
 
   test("Plugins & Runners offers automatic updates and a registry check, both no-ops without Tauri", async ({
@@ -246,7 +242,7 @@ test.describe("Plugins & Runners browser", () => {
 
     await page.locator("[data-plugin-refresh-registry]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
+    await expect(page.locator(".plugin-card--catalog:not(.plugin-card--soon)")).toHaveCount(0);
   });
 
   test("the catalogue search survives an empty registry", async ({ page }) => {
@@ -255,7 +251,7 @@ test.describe("Plugins & Runners browser", () => {
     // Searching an empty catalogue is a no-op, not a crash, and it must not
     // start blaming the query for a registry that answered nothing.
     await page.locator("#plugins-catalog-search").fill("dolphin");
-    await expect(page.locator(".plugin-catalog-row")).toHaveCount(0);
+    await expect(page.locator(".plugin-card--catalog")).toHaveCount(0);
     await expect(page.locator("#plugins-catalog-empty")).toBeVisible();
     await expect(page.locator("#plugins-catalog-empty")).toHaveText(
       "There are no plugins to install right now.",

@@ -575,6 +575,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 
 .feedback-button {
   display: grid;
+  flex: none;
   width: var(--tap-round);
   height: var(--tap-round);
   padding: 0;
@@ -980,7 +981,10 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* Install is the dark pill from the reference: glass first, its light held
    back until the pointer or the pad reaches it. */
 .play-button[data-kind="install"],
+.play-button[data-kind="locate"],
 .play-button[data-kind="downloading"] { --play-field: .3; }
+.play-button[data-kind="locate"]:hover,
+.play-button[data-kind="locate"][data-nav-focus],
 .play-button[data-kind="install"]:hover,
 .play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
 /* Nothing to start: no field, no sheen, a still grey rim. */
@@ -1062,11 +1066,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 }
 .steam-account-body::-webkit-scrollbar { width: 8px; }
 .steam-account-body::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgba(210,200,255,.28); background-clip: padding-box; }
-.steam-account-overview { display: flex; align-items: flex-start; gap: 12px; padding: 2px 1px 17px; }
-.steam-account-overview .steam-state__icon { width: 43px; height: 43px; flex: none; border-radius: 13px; }
-.steam-account-overview h2, .steam-account-intro h2 { margin: 2px 0 6px; color: #f4f1f8; font-size: 16px; font-weight: 640; letter-spacing: -.018em; line-height: 1.2; }
-.steam-account-overview p, .steam-account-intro p { margin: 0; color: #aaa5b0; font-size: 12px; line-height: 1.5; }
-.steam-account-sync-summary { margin: 0 0 16px; padding: 10px 11px; border: 1px solid rgba(198,184,255,.14); border-radius: 10px; color: #d0c8de; background: rgba(127,101,229,.1); font-size: 12px; line-height: 1.4; }
+.steam-account-intro h2 { margin: 2px 0 6px; color: #f4f1f8; font-size: 16px; font-weight: 640; letter-spacing: -.018em; line-height: 1.2; }
+.steam-account-intro p { margin: 0; color: #aaa5b0; font-size: 12px; line-height: 1.5; }
 .steam-account-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin-top: auto; padding-top: 4px; }
 .steam-account-actions .steam-import-button, .steam-account-actions .steam-secondary-button { min-height: 36px; }
 .steam-account-intro { padding: 2px 1px 16px; }
@@ -1711,6 +1712,15 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
+/* A game whose files moved where no search found them reads the way a game
+   that is not installed reads in any launcher: its art stays, so it is still
+   recognisable, but drained and in shadow. Selected, it comes up a little,
+   enough to be looked at, never enough to pass for a playable one. */
+.game-card.is-missing .card-art { filter: grayscale(.92) brightness(.38); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1), filter 300ms ease; }
+.game-card.is-missing.is-selected .card-art { filter: grayscale(.8) brightness(.58); }
+.game-card.is-missing { border-color: rgba(255,255,255,.1); }
+.hero-media.is-missing .hero-image { filter: grayscale(.75) brightness(.6); }
+.genre-chip--missing { border-color: rgba(255,255,255,.24); color: #fff; background: rgba(12,11,15,.72); font-weight: 600; }
 /* With no picture of the game at all, the card turns to glass: the scene
    behind it shows through, frosted and bent, and its name stands on it — no
    real cover is there to carry the title. The rim and the two inner lights
@@ -1829,34 +1839,47 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   transform: translateX(17px);
 }
 
-/* The segments are a group in the middle of the bar, not a scale stretched
-   across it: labels alone, gathered and centred, with weight for the one you
-   are on. A rule under each word was one graphic too many for a row of words. */
-.browse-bar__segments { min-width: 0; flex: 1; justify-content: center; gap: clamp(18px, 2.6vw, 40px); }
-.browse-bar__segment { min-width: 0; flex: none; padding: 0; color: #97929f; background: none; font-size: 12.5px; text-align: center; transition: color 180ms ease; }
-.browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* A wordmark-less source (Local, Moonlight, Wine): a standard glyph in the
-   segment's own colour, then its name in the interface's type. */
-.browse-bar__segment-icon { display: inline-flex; margin-right: 6px; }
-.browse-bar__segment-icon[hidden] { display: none; }
-.browse-bar__segment-icon .icon { width: 14px; height: 14px; }
+/* The source row: a group in the middle of the bar, not a scale stretched
+   across it. Every segment is the same two things — its source's mark and its
+   name, in the interface's own type — so Steam, Switch and Local read as one
+   row. The one you are on is lit, the others dimmed; the mark dims with its
+   word because it is drawn in the word's colour.
+   A library with many sources scrolls sideways rather than squeezing every
+   name into an ellipsis. The auto margins centre the row while it fits and
+   fall to nothing once it does not, so its start is never cut off the way
+   `justify-content: center` cuts it. */
+.browse-bar__segments {
+  min-width: 0;
+  flex: 1;
+  gap: clamp(18px, 2.4vw, 34px);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  /* Room for the focus pill, which overhangs the word by 7px, and for the
+     fade at each end: a row that runs past the bar dissolves into it instead
+     of stopping on half a word, which is what says it scrolls. A row that
+     fits never reaches the fade. */
+  margin-block: -8px;
+  padding: 8px 18px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+}
+.browse-bar__segments::-webkit-scrollbar { display: none; }
+.browse-bar__segment:first-child { margin-left: auto; }
+.browse-bar__segment:last-child { margin-right: auto; }
+.browse-bar__segment { flex: none; gap: 7px; padding: 0; color: #97929f; background: none; font-size: 13px; font-weight: 500; letter-spacing: .005em; white-space: nowrap; transition: color 180ms ease; }
+.browse-bar__segment-label { white-space: nowrap; }
+.browse-bar__segment-mark { display: inline-flex; flex: none; width: 16px; height: 16px; filter: drop-shadow(0 1px 2px rgba(6,6,10,.7)); }
+.browse-bar__segment-mark .icon { width: 100%; height: 100%; }
 .browse-bar__segment:hover { color: #ded9e4; }
 .browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
-/* Source and Platform wear the brands' own logos: white, every one the same
-   height, dimmed as a word is until it is the segment on the rail. The word
-   stays in the button for whoever cannot see the picture. The shadow is the
-   one the words carry, so a logo reads over a bright wallpaper as well. */
-.browse-bar__segment.has-logo { position: relative; }
-.browse-bar__segment-logo { display: block; width: auto; height: 18px; opacity: .52; filter: drop-shadow(0 1px 2px rgba(6,6,10,.7)); transition: opacity 180ms ease; }
-.browse-bar__segment-logo[hidden] { display: none; }
-.browse-bar__segment.has-logo .browse-bar__segment-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.browse-bar__segment.has-logo:hover .browse-bar__segment-logo { opacity: .82; }
-.browse-bar__segment.has-logo.is-active .browse-bar__segment-logo { opacity: 1; }
 
-/* Glass, like every other floating control, and no chevron: the word already
-   changes each time it is pressed, which is the whole affordance. */
+/* The sort: glass, like every other floating control, and no chevron. Its
+   glyph and its word change each time it is pressed, which is the whole
+   affordance. */
 .browse-bar__mode {
   flex: none;
+  gap: 7px;
   height: 32px;
   padding: 0 16px;
   border: 1px solid rgba(255,255,255,.14);
@@ -1873,6 +1896,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 }
 .browse-bar__mode:hover, .browse-bar__mode[data-nav-focus] { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(30,28,36,.55); }
 .browse-bar__mode:active { transform: translateY(1px); }
+.browse-bar__mode-icon { display: inline-flex; width: 14px; height: 14px; opacity: .85; }
+.browse-bar__mode-icon .icon { width: 100%; height: 100%; }
 
 /* Rage changes nothing about the library and everything about the accent. */
 body[data-mood="rage"] { --violet: #f2453c; }
@@ -2297,7 +2322,9 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-hint,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-card__header,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-choices,
-.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-group__label,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-group__title,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugin-card,
+.settings-layout.is-entering .settings-panel:not([hidden]) .plugins-detail,
 .settings-layout.is-entering .settings-panel:not([hidden]) .plugins-group__action,
 .settings-layout.is-entering .settings-panel:not([hidden]) .plugins-search,
 .settings-layout.is-entering .settings-panel:not([hidden]) .credentials-form,
@@ -2373,6 +2400,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .settings-row__copy { display: grid; min-width: 0; gap: 5px; }
 .settings-row__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 600; letter-spacing: -.01em; }
 .settings-row__copy small { color: #d0cadf; font-size: 13px; line-height: 1.55; }
+.game-folder-actions { display: flex; flex-shrink: 0; gap: 18px; }
+.settings-card__intro { margin: 0 0 8px; color: #d0cadf; font-size: 13px; line-height: 1.55; }
 
 /* `appearance: none` is what stops macOS from drawing its own double caret on
    top of the chevron below. The control is the word plus its caret: one hairline
@@ -2472,140 +2501,308 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { background-position: 40px 0; }
 }
 
-/* Plugin browser: installed runners up top, a searchable catalogue below. */
-.plugins-group { padding: 16px 0 6px; }
-.plugins-group:first-child { padding-top: 4px; }
-.plugins-group + .plugins-group--catalog { border-top: 1px solid rgba(255,255,255,.08); }
-.plugins-group__label {
-  margin: 0 0 8px;
-  color: #b3abc6;
+/* Plugins page. The plugins Orivo has are cards on the left; the one that is
+   open shows its detail on the right, so changing plugin never leaves the
+   page; the catalogue runs underneath, two cards to a line. */
+.plugins-page { container-type: inline-size; display: grid; gap: 26px; padding-top: 4px; }
+.plugins-page[hidden] { display: none; }
+.plugins-split {
+  display: grid;
+  grid-template-columns: minmax(250px, 340px) minmax(0, 1fr);
+  align-items: start;
+  gap: 0 clamp(20px, 3cqi, 40px);
+}
+.plugins-mine { display: grid; gap: 10px; align-content: start; }
+.plugins-detail {
+  position: sticky;
+  top: 12px;
+  display: grid;
+  min-height: 260px;
+  align-content: start;
+  gap: 14px;
+  padding-left: clamp(20px, 3cqi, 40px);
+  border-left: 1px solid rgba(255,255,255,.08);
+}
+.plugins-detail__empty {
+  display: grid;
+  min-height: 240px;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  color: rgba(244,242,248,.42);
+  font-size: 13px;
+}
+.plugins-detail__empty[hidden] { display: none; }
+.plugins-detail__empty-mark .icon { width: 28px; height: 28px; opacity: .6; }
+
+/* One plugin, one card: the coloured icon, the name and its pill, two short
+   lines, and a single control or chevron on the right. */
+.plugin-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-height: 78px;
+  padding: 12px 14px 12px 12px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  background: rgba(255,255,255,.028);
+  transition:
+    border-color 180ms cubic-bezier(.2,.8,.2,1),
+    background 180ms cubic-bezier(.2,.8,.2,1),
+    transform 180ms cubic-bezier(.2,.8,.2,1),
+    box-shadow 220ms cubic-bezier(.2,.8,.2,1);
+}
+.plugin-card.is-openable:hover,
+.plugin-card:has(.plugin-card__open[data-nav-focus]),
+.plugin-card:has(.plugin-card__open:focus-visible) {
+  border-color: rgba(255,255,255,.18);
+  background: rgba(255,255,255,.05);
+  transform: translateY(-1px);
+}
+.plugin-card.is-selected {
+  border-color: rgba(185,168,255,.55);
+  background: linear-gradient(120deg, rgba(150,128,255,.13), rgba(255,255,255,.03) 70%);
+  box-shadow: 0 0 0 1px rgba(185,168,255,.18), 0 10px 28px -18px rgba(150,128,255,.8);
+}
+/* The whole card is the open target; anything of its own sits above it. */
+.plugin-card__open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  padding: 0;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  cursor: pointer;
+}
+.plugin-card__open:focus-visible { outline: 2px solid rgba(185,168,255,.8); outline-offset: 2px; }
+.plugin-card__action, .plugin-card__flag { position: relative; z-index: 2; }
+.plugin-card__copy { display: grid; min-width: 0; gap: 3px; }
+.plugin-card__title { display: flex; min-width: 0; align-items: center; gap: 8px; }
+.plugin-card__title strong {
+  overflow: hidden;
+  color: #f6f4fa;
+  font-size: 15px;
+  font-weight: 580;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-card__copy small {
+  overflow: hidden;
+  color: rgba(244,242,248,.52);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-card__copy small + small { color: rgba(244,242,248,.38); font-size: 11.5px; }
+.plugin-card__chevron { display: grid; color: rgba(244,242,248,.4); transition: color 160ms ease, transform 180ms cubic-bezier(.2,.8,.2,1); }
+.plugin-card__chevron .icon { width: 16px; height: 16px; }
+.plugin-card.is-openable:hover .plugin-card__chevron { color: #fff; transform: translateX(2px); }
+.plugin-card.is-selected .plugin-card__chevron { color: #d9d0ff; }
+/* The corner mark: something to know (an update), or something wrong. */
+.plugin-card__flag {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  display: grid;
+  color: #b9cff0;
+  animation: plugin-flag-in 260ms cubic-bezier(.2,.8,.2,1) both;
+}
+.plugin-card__flag .icon { width: 15px; height: 15px; }
+.plugin-card__flag--warn { color: #f2c46d; }
+.plugin-card:has(.plugin-card__flag) .plugin-card__chevron { margin-top: 14px; }
+@keyframes plugin-flag-in {
+  from { opacity: 0; transform: scale(.6); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Plugins ship no icon, so the tile is drawn from what they are: a glyph on
+   its shelf's colour. */
+.plugin-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  flex: none;
+  place-items: center;
+  border-radius: 14px;
+  color: #fff;
+  background: linear-gradient(150deg, #57536a, #36334a);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 6px 16px -10px rgba(0,0,0,.8);
+}
+.plugin-icon .icon { width: 26px; height: 26px; }
+/* A real logo fills the tile edge to edge; the tile only clips and lights it. */
+.plugin-icon--logo { overflow: hidden; background: #fff; }
+.plugin-icon--logo img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.plugin-icon[data-category="compatibility"] { background: linear-gradient(150deg, #a3241a, #6d130d); }
+.plugin-icon[data-category="streaming"] { background: linear-gradient(150deg, #646b78, #3c414b); }
+.plugin-icon[data-category="emulation"] { background: linear-gradient(150deg, #e2453c, #a81f2e); }
+.plugin-icon[data-category="visuals"] { background: linear-gradient(150deg, #2aa39a, #13665f); }
+.plugin-icon[data-category="library"] { background: linear-gradient(150deg, #4c7ef0, #2449a8); }
+.plugin-icon[data-category="music"] { background: linear-gradient(150deg, #2fbf62, #177a3c); }
+.plugin-icon[data-category="saves"] { background: linear-gradient(150deg, #8b6cf2, #5532b8); }
+
+/* The category pill: a word on a tint of the same colour as the icon. */
+.plugin-pill {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px;
+  color: rgba(244,242,248,.7);
+  background: rgba(255,255,255,.05);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.plugin-pill[data-category="compatibility"] { border-color: rgba(240,110,95,.35); color: #ffb8ad; background: rgba(200,60,45,.14); }
+.plugin-pill[data-category="streaming"] { border-color: rgba(170,180,200,.35); color: #d5dbe6; background: rgba(140,150,170,.12); }
+.plugin-pill[data-category="emulation"] { border-color: rgba(255,120,110,.35); color: #ffc0b8; background: rgba(226,69,60,.14); }
+.plugin-pill[data-category="visuals"] { border-color: rgba(70,210,195,.35); color: #a6efe6; background: rgba(42,163,154,.14); }
+.plugin-pill[data-category="library"] { border-color: rgba(110,150,255,.38); color: #c3d4ff; background: rgba(76,126,240,.14); }
+.plugin-pill[data-category="music"] { border-color: rgba(80,220,130,.35); color: #b2f0c7; background: rgba(47,191,98,.14); }
+.plugin-pill[data-category="saves"] { border-color: rgba(170,145,255,.38); color: #d6c9ff; background: rgba(139,108,242,.14); }
+.plugin-pill[data-category="tools"] { border-color: rgba(240,190,90,.35); color: #f6dba4; background: rgba(240,180,41,.12); }
+
+/* The one filled control on a card or a detail header. */
+.plugin-install-button {
+  min-width: 84px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid rgba(255,255,255,.22);
+  border-radius: 10px;
+  color: #f6f4fa;
+  background: rgba(255,255,255,.06);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms cubic-bezier(.2,.8,.2,1);
+}
+.plugin-install-button:hover:not(:disabled),
+.plugin-install-button[data-nav-focus] { border-color: rgba(255,255,255,.4); background: rgba(255,255,255,.12); }
+.plugin-install-button:active:not(:disabled) { transform: scale(.97); }
+.plugin-install-button:disabled { cursor: default; opacity: .7; }
+.plugin-text-button {
+  padding: 0;
+  border: 0;
+  color: rgba(244,242,248,.7);
+  background: none;
+  font-size: 12.5px;
+  font-weight: 560;
+  cursor: pointer;
+  transition: color 140ms ease;
+}
+.plugin-text-button:hover, .plugin-text-button[data-nav-focus] { color: #fff; }
+.plugin-text-button--danger { color: #f0a3a3; }
+.plugin-text-button--danger:hover { color: #ffc4c4; }
+.plugin-soon { color: rgba(244,242,248,.45); font-size: 12px; font-weight: 560; }
+.plugin-card--soon { opacity: .8; }
+html:not([data-beta]) .plugins-debug-only { display: none !important; }
+
+/* The bar rides the bottom edge of its own card: an install has to be
+   locatable at a glance in a list where every card looks alike. */
+.plugin-progress {
+  position: absolute;
+  right: 16px;
+  bottom: 6px;
+  left: 16px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255,255,255,.09);
+}
+.plugin-progress__bar {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #b9aff6, #f0edff);
+  transition: width 240ms cubic-bezier(.2,.8,.2,1);
+}
+
+/* A detail: a header (name, pill, the one action), then short lines. */
+.plugin-detail { display: grid; gap: 14px; }
+.plugin-detail[hidden] { display: none; }
+.plugin-detail.is-entering { animation: plugin-detail-in 240ms cubic-bezier(.2,.8,.2,1) var(--enter-delay, 0ms) both; }
+@keyframes plugin-detail-in {
+  from { opacity: 0; transform: translateX(10px); }
+  to { opacity: 1; transform: none; }
+}
+.plugin-detail__header { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+.plugin-detail__header .plugin-icon { width: 40px; height: 40px; border-radius: 11px; }
+.plugin-detail__header .plugin-icon .icon { width: 21px; height: 21px; }
+.plugin-detail__title { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; }
+.plugin-detail__title strong {
+  overflow: hidden;
+  color: #f7f5fa;
+  font-size: 19px;
+  font-weight: 620;
+  letter-spacing: -.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.plugin-detail__actions { display: flex; align-items: center; gap: 8px; }
+.plugin-detail__section {
+  margin: 4px 0 0;
+  color: rgba(244,242,248,.5);
   font-size: 11px;
   font-weight: 640;
   letter-spacing: .1em;
   text-transform: uppercase;
 }
-/* Two columns of integrations, like a connections page: a tile, the name,
-   one line of what it does, one action. */
-.plugins-group__list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); column-gap: 36px; }
-/* The label and the file-install action share the group's first line, so the
-   action never pushes the catalogue down by a whole row. */
-.plugins-group__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-.plugins-group__header .plugins-group__label { margin: 0; }
-.plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.plugins-group__action { font-size: 12.5px; }
-.plugins-group__action .icon { width: 14px; height: 14px; }
-.plugins-automatic-updates {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: #b7b2c1;
-  font-size: 12px;
-}
-/* A grid, not a flex row with `space-between`: the copy column has to start at
-   the same x on every row, and a row that happens to have no chevron must not
-   pull its status label across. */
-/* The row's grid outranks the UA `[hidden]` rule, so it is restated: an iOS
-   build hides the rows it cannot run. */
-.plugin-row[hidden] { display: none; }
-.plugin-row,
-.plugin-catalog-row {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 14px;
-  padding: 12px 0;
-}
-/* Every row keeps a gutter on the right for a chevron, so the one row that
-   has one (a built-in's settings) lines its button up with all the others. */
-.plugin-row, .plugin-catalog-row { position: relative; padding-right: 34px; }
-.plugin-row > .plugin-open-button { position: absolute; top: 50%; right: 0; transform: translateY(-50%); }
-/* Rows sit on the page, not between rules: the tiles already pace the list. */
-.plugins-group__list > .settings-row + .settings-row { border-top: 0; }
-.plugin-tile {
-  display: grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 12px;
-  color: #e9e5ef;
-  background: rgba(255,255,255,.035);
-}
-.plugin-tile .icon { width: 22px; height: 22px; }
-.plugin-row .settings-row__copy,
-.plugin-catalog-row .settings-row__copy { gap: 3px; }
-.plugin-row .settings-row__copy strong,
-.plugin-catalog-row .settings-row__copy strong { font-size: 15px; font-weight: 520; }
-.plugin-row .settings-row__copy small:first-of-type,
-.plugin-catalog-row .settings-row__copy small:first-of-type { overflow: hidden; color: rgba(244,242,248,.5); text-overflow: ellipsis; white-space: nowrap; }
-/* The row's one action, as a bare glyph. */
-/* Plugins wear the Libraries tab's account button. `is-on` is the blue a
-   connected store wears ("Installed"); `is-safe` keeps a non-destructive
-   hover action (Settings) out of the red. */
-.plugin-state-button.is-on,
-.plugin-state-button:has(.source-account-row__account-hover) {
-  color: #dcebfa;
-  border-color: rgba(114,170,232,.78);
-  background: rgba(76,146,222,.14);
-}
-.plugin-state-button.is-on:disabled { cursor: default; opacity: 1; transform: none; }
-/* A built-in's "Installed" is a statement, not a control: its settings sit
-   behind the chevron beside it. */
-.plugin-state-button.is-static,
-.plugin-state-button.is-static:hover { cursor: default; color: #dcebfa; border-color: rgba(114,170,232,.78); background: rgba(76,146,222,.14); transform: none; }
-.plugin-state-button:disabled:not(.is-on) { cursor: default; opacity: .7; transform: none; }
-html:not([data-beta]) .plugins-debug-only { display: none !important; }
-.plugin-row__state[hidden] { display: none; }
-.plugin-action-button {
-  display: grid;
-  width: 34px;
-  height: 34px;
+/* Back only matters when the detail replaces the list (narrow widths). */
+.plugin-back-button {
+  display: none;
+  width: 30px;
+  height: 30px;
   padding: 0;
   place-items: center;
-  border-radius: 50%;
-  color: #f4f2f8;
-  background: none;
-  transition: background 160ms ease;
+  border: 0;
+  border-radius: 8px;
+  color: #d8d2e6;
+  background: rgba(255,255,255,.06);
+  cursor: pointer;
 }
-.plugin-action-button:hover:not(:disabled),
-.plugin-action-button[data-nav-focus] { background: rgba(255,255,255,.1); }
-.plugin-action-button:disabled { color: rgba(244,242,248,.45); cursor: default; }
-.plugin-action-button .icon { width: 20px; height: 20px; }
-.plugin-row__state {
-  flex: none;
-  color: #a9e6b3;
-  font-size: 12.5px;
-  font-weight: 560;
-  white-space: nowrap;
+.plugin-back-button .icon { width: 15px; height: 15px; }
+/* Inside the detail column, Wine's body is lines like the rest: no inset,
+   no scroller of its own, the runner as a compact strip. */
+.plugins-detail .wine-settings-body { display: grid; gap: 12px; padding: 0; overflow: visible; }
+.plugins-detail .wine-runner-summary { padding: 10px 12px; border-radius: 14px; }
+.plugins-detail .wine-runner-summary h2 { font-size: 13.5px; }
+.plugins-detail .wine-settings-heading {
+  margin: 4px 0 0;
+  color: rgba(244,242,248,.5);
+  font-size: 11px;
+  font-weight: 640;
+  letter-spacing: .1em;
+  text-transform: uppercase;
 }
-/* A plugin the host refused to load must not read in the same green as one
-   that runs. */
-.plugin-row__state--soon { color: #b9b2cb; font-weight: 500; }
-.plugin-row--soon { opacity: .84; }
-.plugin-row__state--warn { color: #ecd08a; }
-.plugin-row__state--error { color: #f0a3a3; }
-.plugin-row__health { display: block; margin-top: 2px; color: #a9e6b3; }
-.plugin-row__health--degraded { color: #f0a3a3; }
-.plugin-row__update-error { display: block; margin-top: 2px; color: #f0a3a3; }
-/* Replaces the single Uninstall button as the row's fourth grid column, so a
-   row with an update, a rollback and a log toggle still lines up with one
-   that only has Uninstall. */
-.plugin-row__actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
+.plugins-detail .wine-directory-empty { padding: 12px 14px; font-size: 12.5px; }
+.plugins-detail .wine-profile-card { padding: 12px 14px; gap: 6px; }
+
+/* Streaming's setup sits under the plugin's own detail, which already has
+   the header. */
+#plugin-managed-panel:not([hidden]) ~ #gamestream-setup-panel > .plugin-detail__header { display: none; }
+
+.plugin-facts { display: grid; }
+.plugin-fact {
+  display: grid;
+  grid-template-columns: minmax(90px, 140px) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid rgba(255,255,255,.06);
+  font-size: 13px;
 }
-/* The log is guest text, several lines long, so it gets its own row rather
-   than fighting the four-column grid a plugin row otherwise keeps to. */
+.plugin-fact:first-child { border-top: 0; }
+.plugin-fact__label { color: rgba(244,242,248,.48); }
+.plugin-fact__value { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 10px; color: #ece8f3; }
+.plugin-fact[data-tone="ok"] .plugin-fact__value { color: #a9e6b3; }
+.plugin-fact[data-tone="warn"] .plugin-fact__value { color: #f2c46d; }
+.plugin-detail__footer { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding-top: 2px; }
 .plugin-row__log {
-  grid-column: 1 / -1;
   padding: 10px 12px;
   border: 1px solid rgba(255,255,255,.08);
   border-radius: 10px;
@@ -2616,77 +2813,93 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .plugin-row__log ul { margin: 0; padding-left: 18px; }
 .plugin-row__log li + li { margin-top: 4px; }
 .plugin-row__log--error { color: #f0a3a3; }
-.plugin-uninstall-button { font-size: 12.5px; }
-/* The row's only control is its caret: a bare glyph that brightens on hover,
-   with nothing drawn around it. */
-.plugin-open-button {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  flex: none;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  color: #cec8dd;
-  background: none;
-  cursor: pointer;
-  transition: color 140ms ease;
-}
-.plugin-open-button .icon { width: 15px; height: 15px; }
-.plugin-open-button:hover, .plugin-open-button[data-nav-focus] { color: #fff; }
 
-/* The search field is a hairline and a caret: no box, no fill. */
+/* Settings as lines: label, status, inputs on the same row when they fit. */
+.plugin-fields { display: grid; }
+.plugin-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 11px 0;
+  border-top: 1px solid rgba(255,255,255,.06);
+}
+.plugin-field:first-child { border-top: 0; }
+.plugin-field__label { color: #f0edf6; font-size: 13.5px; font-weight: 560; }
+.plugin-field__inputs { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 6px; }
+.plugin-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 9px;
+  outline: 0;
+  color: #f4f2f8;
+  background: rgba(10,10,16,.35);
+  font-size: 12.5px;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.plugin-input:focus, .plugin-input[data-nav-focus] { border-color: rgba(185,168,255,.7); background: rgba(10,10,16,.55); }
+.plugin-input::placeholder { color: rgba(244,242,248,.36); }
+.plugin-more summary { color: rgba(244,242,248,.62); font-size: 12.5px; font-weight: 560; cursor: pointer; }
+.plugin-more__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; margin-top: 10px; }
+.plugin-more__grid label { display: grid; gap: 4px; color: rgba(244,242,248,.55); font-size: 11.5px; }
+
+/* The catalogue: a title, its two quiet actions, a hairline search, cards. */
+.plugins-group { display: grid; gap: 12px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,.08); }
+.plugins-group[hidden] { display: none; }
+.plugins-group__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plugins-group__title { margin: 0; color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; }
+.plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.plugins-group__action { width: 32px; height: 32px; padding: 0; justify-content: center; }
+.plugins-group__action .icon { width: 15px; height: 15px; }
+.plugins-automatic-updates { display: flex; align-items: center; gap: 7px; margin-right: 6px; color: #b7b2c1; font-size: 12px; }
+.plugins-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 12px; }
 .plugins-search {
   display: flex;
   height: 34px;
+  max-width: 420px;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
   padding: 0 2px;
-  border: 0;
-  border-bottom: 1px solid rgba(255,255,255,.24);
-  border-radius: 0;
+  border-bottom: 1px solid rgba(255,255,255,.2);
   color: #b3abc6;
-  background: none;
+  transition: border-color 160ms ease;
 }
+.plugins-search:focus-within { border-bottom-color: rgba(255,255,255,.55); }
 .plugins-search .icon { width: 15px; height: 15px; flex: none; }
-.plugins-search__input {
-  min-width: 0;
-  flex: 1;
-  border: 0;
-  outline: 0;
-  color: #f4f2f8;
-  background: transparent;
-  font-size: 13.5px;
-}
+.plugins-search__input { min-width: 0; flex: 1; border: 0; outline: 0; color: #f4f2f8; background: transparent; font-size: 13.5px; }
 .plugins-search__input::placeholder { color: #b3abc6; }
-.plugin-catalog-row { position: relative; }
 
-.plugin-catalog-row__status { color: #c3b5ff !important; }
-.plugin-catalog-row__status--error { color: #f0a3a3 !important; }
-/* The bar rides the bottom edge of its own row: an install has to be locatable
-   at a glance in a list where every other row looks the same. */
-.plugin-progress {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 2px;
-  background: rgba(255,255,255,.09);
+/* Narrow: the detail takes the list's place, with a way back. */
+@container (max-width: 640px) {
+  .plugins-split { grid-template-columns: minmax(0, 1fr); }
+  .plugins-detail { position: static; min-height: 0; padding-left: 0; border-left: 0; }
+  .plugins-detail__empty { display: none; }
+  .plugins-page[data-detail-open] .plugins-mine,
+  .plugins-page[data-detail-open] .plugins-group { display: none; }
+  .plugins-page:not([data-detail-open]) .plugins-detail { display: none; }
+  .plugin-back-button { display: grid; }
 }
-.plugin-progress__bar {
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #b9aff6, #f0edff);
-  transition: width 200ms ease;
+
+@media (prefers-reduced-motion: reduce) {
+  .plugin-card, .plugin-card__chevron, .plugin-install-button, .plugin-progress__bar { transition: none; }
+  .plugin-card.is-openable:hover { transform: none; }
+  .plugin-detail.is-entering, .plugin-card__flag { animation: none; }
 }
+[data-motion="reduced"] .plugin-card,
+[data-motion="reduced"] .plugin-card__chevron,
+[data-motion="reduced"] .plugin-install-button { transition: none; }
+[data-motion="reduced"] .plugin-card.is-openable:hover { transform: none; }
+[data-motion="reduced"] .plugin-detail.is-entering,
+[data-motion="reduced"] .plugin-card__flag { animation: none; }
 
 /* Third-party runners: one group per installed runner plugin, one card per
    profile the user built for it ("Add an emulator"). */
-#runners-panel-body { display: grid; gap: 16px; padding: 4px 18px 18px; }
+#runners-panel-body { display: grid; gap: 16px; }
+/* The plugin's own header already names it. */
+.plugins-detail .runner-group__header strong { display: none; }
 .runner-group { display: grid; gap: 10px; }
 .runner-group__header { display: flex; align-items: center; gap: 10px; }
 .runner-group__header strong { color: #f2eff7; font-size: 14px; }
@@ -2730,7 +2943,7 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
    to a line with a tick; the one in front of the person is open; the rest wait,
    numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
    so nothing here is a new kind of control. */
-#gamestream-setup-body { padding: 4px 18px 18px; }
+#gamestream-setup-body { padding: 0; }
 .gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
 .gs-step { display: grid; gap: 10px; padding: 14px 0; }
 .gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }
@@ -2779,8 +2992,6 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
   user-select: all;
 }
 
-.plugin-back-button { height: 32px; padding: 0 12px; }
-.plugin-back-button .icon { width: 14px; height: 14px; }
 
 /* A choice is a row like any other: copy on the left, its control on the
    right, a hairline between. No plate behind it. */
@@ -2870,7 +3081,6 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
   border-bottom: 1px solid rgba(255,255,255,.08);
 }
 .steam-inline-panel[hidden] { display: none !important; }
-.steam-inline-panel__title { font-size: 15px; }
 
 .source-accounts-body { display: grid; }
 .source-account-list { display: grid; }
@@ -3372,7 +3582,7 @@ html[data-form-factor="compact"] .launch-splash__content {
 }
 html[data-form-factor="compact"] .launch-splash__logo { --splash-logo-box: clamp(52px, 20svh, 96px); }
 html[data-form-factor="compact"] .launch-splash__eyebrow { font-size: 13px; }
-html[data-form-factor="compact"] .browse-bar__segment-logo { height: 15px; }
+html[data-form-factor="compact"] .browse-bar__segment-mark { width: 15px; height: 15px; }
 
 /* ---------------------------------------------------------------------------
    Phone — the compact layout, pointed at with a finger (`src/form-factor.ts`)
@@ -3422,10 +3632,11 @@ html[data-device="phone"] .topbar.is-library-menu-open .primary-nav { transition
 
 /* Out of the mark the pills are buttons over the artwork, and an icon has no
    text shadow to stand on: each wears the glass plate the current page's pill
-   already has, a shade lighter. So does the bell, a third of the bar here — a
-   white glyph on a white glint was a dot floating on its own. */
+   already has, a shade lighter. So do the feedback button and the bell beside
+   it — a white glyph on a white glint was a dot floating on its own. */
 html[data-device="phone"] .primary-nav { gap: 6px; }
 html[data-device="phone"] .nav-link:not(.is-active),
+html[data-device="phone"] .feedback-button,
 html[data-device="phone"] .notifications-button {
   border: 1px solid rgba(255,255,255,.12);
   color: #e4e1e8;
@@ -3434,6 +3645,7 @@ html[data-device="phone"] .notifications-button {
   backdrop-filter: blur(18px) saturate(130%);
 }
 html[data-device="phone"] .nav-link:not(.is-active)[data-nav-focus],
+html[data-device="phone"] .feedback-button[data-nav-focus],
 html[data-device="phone"] .notifications-button[data-nav-focus],
 html[data-device="phone"] .notifications-button[aria-expanded="true"] {
   border-color: rgba(255,255,255,.28);
@@ -3459,28 +3671,15 @@ html[data-device="phone"] .game-card { --card-radius: 10px; }
 html[data-device="phone"] .browse-bar { gap: 10px; }
 html[data-device="phone"] .browse-bar__segments { gap: 16px; }
 html[data-device="phone"] .browse-bar__segment { font-size: var(--fs-bar); }
-html[data-device="phone"] .browse-bar__segment-logo { height: 12px; }
+html[data-device="phone"] .browse-bar__segment { gap: 6px; }
+html[data-device="phone"] .browse-bar__segment-mark { width: 13px; height: 13px; }
+html[data-device="phone"] .browse-bar__mode-icon { width: 12px; height: 12px; }
 html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; padding: 0 12px; font-size: var(--fs-bar); }
 
 /* Wallpaper Searcher settings: one compact block per source. */
-.ws-sources { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 10px; margin-top: 6px; }
-.ws-source { display: grid; align-content: start; gap: 6px; padding: 12px 14px; border: 1px solid rgba(255,255,255,.08); border-radius: 12px; background: rgba(255,255,255,.025); }
-.ws-source--recommended { border-color: rgba(185,168,255,.3); }
-.ws-source__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.ws-source__head strong { color: #f4f2f8; font-size: 13.5px; font-weight: 600; }
-.ws-source > small, .ws-advanced > small { color: rgba(244,242,248,.52); font-size: 12px; line-height: 1.4; }
-.ws-source code, .ws-advanced code { font-size: 11.5px; color: rgba(244,242,248,.72); }
-.ws-source .credentials-form__input, .ws-advanced .credentials-form__input { width: 100%; min-height: 32px; font-size: 12.5px; }
-.ws-source__pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.ws-source--recommended .plugin-field__label::after { content: " ★"; color: #c9b8ff; font-size: 11px; }
 .ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
 .ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
-.ws-advanced { margin-top: 12px; }
-.ws-advanced summary { cursor: pointer; color: rgba(244,242,248,.72); font-size: 12.5px; font-weight: 560; }
-.ws-advanced[open] summary { margin-bottom: 8px; }
-.ws-advanced__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; margin-top: 8px; }
-.ws-advanced__grid label { display: grid; gap: 4px; color: rgba(244,242,248,.6); font-size: 11.5px; }
-.ws-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
-.ws-actions small { color: rgba(244,242,248,.45); font-size: 12px; }
 
 /* An update's highlights: a short, airy list under the version line. */
 .update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
@@ -3522,8 +3721,13 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 
 /* Centred on every card, the paired marks as a group, whatever wraps them
    (Steam's row sits one level deeper, inside its own block). */
-.source-grid .steam-source-block,
 .source-grid #steam-source-row { display: block; width: 100%; height: 100%; }
+/* Steam's block is unwrapped, like the other lists, so its card is one cell of
+   the grid and the panel it opens is a row of its own. Left inside the card's
+   cell, the panel overflowed it (the card is 100% of the cell tall) and slid
+   under the next cards, which covered its buttons. */
+.source-grid .steam-source-block { display: contents; }
+.source-grid .steam-inline-panel { grid-column: 1 / -1; }
 .source-grid .source-account-row { width: 100%; box-sizing: border-box; }
 .source-grid .source-account-row__mark { align-self: center; margin-inline: auto; place-items: center; justify-content: center; }
 .source-grid .source-account-row__mark .icon,

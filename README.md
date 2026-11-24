@@ -53,7 +53,7 @@ Latest build on the [releases page](https://github.com/justeozan/orivo/releases)
 | Windows | Orivo_x64-setup.exe |
 | Linux | .AppImage, .deb, .rpm |
 
-Not signed yet. macOS: open Orivo once, then System Settings › Privacy & Security › Open Anyway — macOS 15 removed the right-click → Open shortcut (if "damaged": `xattr -dr com.apple.quarantine /Applications/Orivo.app`). Windows: More info → Run anyway. Self-updating afterwards.
+macOS: signed and notarized by Apple, it opens with a double-click. Windows: not signed yet, More info → Run anyway. Self-updating afterwards.
 
 ## Build
 

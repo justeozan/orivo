@@ -243,6 +243,8 @@ export interface GameSummary {
   coverUrl: string;
   heroUrl: string;
   landscapeUrl: string;
+  /** Transparent wordmark; when empty or broken the title text stands. */
+  logoUrl?: string;
   genres: string[];
   tags: string[];
   supportedPlatforms: Array<"windows" | "macos" | "linux" | "ios" | "android">;
@@ -296,6 +298,7 @@ export interface GameDetailView extends GameSummary {
     | "install-steam"
     | "install-epic"
     | "configure-wine"
+    | "locate"
     | "view-offer"
     | "unavailable";
 }

@@ -20,14 +20,26 @@ describe("platform features", () => {
         localRunners: false,
         storeChoices: true,
         stepsAside: false,
+        selfUpdates: false,
       }),
-    ).toEqual({ downloadablePlugins: false, localRunners: false, storeChoices: true, stepsAside: false });
+    ).toEqual({
+      downloadablePlugins: false,
+      localRunners: false,
+      storeChoices: true,
+      stepsAside: false,
+      selfUpdates: false,
+    });
   });
 
   // Like every other flag, an answer the host did not give is the desktop's.
   it("steps aside for a game unless the host says it cannot", () => {
     expect(readPlatformFeatures({ storeChoices: false }).stepsAside).toBe(true);
     expect(readPlatformFeatures({ stepsAside: false }).stepsAside).toBe(false);
+  });
+
+  it("updates itself unless the host says a store does it", () => {
+    expect(readPlatformFeatures({ storeChoices: false }).selfUpdates).toBe(true);
+    expect(readPlatformFeatures({ selfUpdates: false }).selfUpdates).toBe(false);
   });
 
   it("keeps the desktop answer for any flag the host did not send as a boolean", () => {

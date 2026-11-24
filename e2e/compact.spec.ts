@@ -166,8 +166,16 @@ test.describe("the Library scene", () => {
   });
 
   test("shows the whole title, on the shortest screen too", async ({ page }) => {
+    // The hero names the game with its wordmark once that has decoded, with
+    // the title text otherwise; whichever stands has to be whole.
     const titleFits = () =>
       page.evaluate(() => {
+        const logo = document.querySelector<HTMLImageElement>("#hero-logo")!;
+        if (!logo.hidden) {
+          const box = logo.getBoundingClientRect();
+          const identity = logo.closest(".hero-identity")?.getBoundingClientRect() ?? box;
+          return box.height >= 24 && box.top >= identity.top - 1 && box.bottom <= identity.bottom + 1;
+        }
         const title = document.querySelector("#hero-title")!;
         const fontSize = Number.parseFloat(getComputedStyle(title).fontSize);
         return title.getBoundingClientRect().height >= fontSize * 0.9;
@@ -338,13 +346,10 @@ test.describe("every route", () => {
     });
   }
 
-  test("the Third-party runners panel stays inside the screen", async ({ page }) => {
+  test("a plugin's detail stays inside the screen", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
-    // Reached with no click at all: the panel is inline with the browser.
-    await expect(page.locator("#runners-panel")).toBeVisible();
-    await expect(page.locator("#runners-panel-body")).toContainText(
-      "Install a runner plugin to add an emulator",
-    );
+    await page.locator("[data-plugin-open='wallpaper-searcher']").click();
+    await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
     const overflow = await documentOverflow(page);
     expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
   });

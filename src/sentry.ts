@@ -100,12 +100,45 @@ export function initErrorReporting(
         // Traces are on at a low rate — enough to see a slow library load, not
         // enough to make a hobby project's quota a problem.
         tracesSampleRate: 0.1,
+        // Session Replay is what turns a rage click into something Sentry can
+        // flag: it watches the clicks, and the replay shows what was under them.
+        // One session in ten is recorded, and every session that hits an error
+        // is kept from the minute before it.
+        replaysSessionSampleRate: 0.1,
+        replaysOnErrorSampleRate: 1.0,
         integrations: [
+          loaded.replayIntegration({
+            // The recording is a layout, not a screen: text, form fields and
+            // media are replaced by blocks before they leave the machine. Game
+            // titles, folder paths and account names stay on the player's side;
+            // the clicks, the scrolling and the rage are all that is left.
+            maskAllText: true,
+            maskAllInputs: true,
+            blockAllMedia: true,
+            // The compression worker is a blob: script, which the app's CSP
+            // (`script-src 'self'`) refuses. Uncompressed replays are larger on
+            // the wire but only one session in ten sends one.
+            useCompression: false,
+          }),
           loaded.feedbackIntegration({
             // Orivo places the trigger itself, next to the profile picture. Sentry's
             // own floating button would fight the layout and sit over the rail.
             autoInject: false,
             colorScheme: "dark",
+            // The widget lives in a Shadow DOM that styles.css cannot reach, so
+            // its palette is set here. The values mirror the glass panels beside
+            // the profile picture: the panel's near-black, the --text colour,
+            // the violet of --violet running into the blue of the Play ring.
+            themeDark: {
+              background: "rgba(22, 20, 23, 0.96)",
+              foreground: "#f4f2f7",
+              accentBackground: "linear-gradient(105deg, #7d54f4 0%, #4d63ff 100%)",
+              accentForeground: "#ffffff",
+              successColor: "#67da94",
+              errorColor: "#ef7074",
+              boxShadow: "0 18px 44px rgba(0, 0, 0, 0.36), inset 0 1px rgba(255, 255, 255, 0.055)",
+              outline: "1.5px solid rgba(185, 168, 255, 0.6)",
+            },
             showBranding: false,
             formTitle: t("misc.feedback.title"),
             buttonLabel: t("misc.feedback.button"),

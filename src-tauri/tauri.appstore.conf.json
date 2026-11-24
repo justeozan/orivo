@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "identifier": "run.evey.orivo",
+  "bundle": {
+    "targets": [
+      "app"
+    ],
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "entitlements": "Entitlements.appstore.plist",
+      "infoPlist": "Info.appstore.plist",
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

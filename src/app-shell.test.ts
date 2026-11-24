@@ -631,7 +631,14 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     expect(setup.hidden).toBe(false);
-    expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(true);
+    // The setup opens beside the list, under the plugin's own detail, and the
+    // plugin's card says it is the one open.
+    const page = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
+    expect(page.hasAttribute("data-detail-open")).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(false);
+    expect(
+      root.querySelector("[data-plugin-card='com.orivo.gamestream']")?.classList.contains("is-selected"),
+    ).toBe(true);
     // Nothing found on this machine, so the first step is the active one.
     expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
     expect(setup.textContent).toContain("Install Moonlight");
@@ -640,7 +647,47 @@ describe("application shell against the desktop backend", () => {
     setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
     await settleAll();
     expect(setup.hidden).toBe(true);
+    expect(page.hasAttribute("data-detail-open")).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(true);
+  });
+
+  it("opens an installed plugin's detail beside the list, with Update and Uninstall", async () => {
+    backend.plugins = [
+      {
+        id: "dev.example.saves",
+        name: "Save Keeper",
+        version: "1.0.0",
+        extensions: [],
+        state: "ready",
+        message: "",
+        trusted: false,
+        rollbackTo: null,
+        rollbackTrusted: null,
+        updateTo: "1.1.0",
+      },
+    ];
+    mount();
+    await goto("#/settings/plugins");
+    await settleAll();
+
+    const card = root.querySelector<HTMLElement>("[data-plugin-card='dev.example.saves']")!;
+    // Its shelf, who made it, and the mark that says there is an update.
+    expect(card.querySelector(".plugin-pill")?.textContent).toBe("Saves");
+    expect(card.textContent).toContain("Community");
+    expect(card.querySelector(".plugin-card__flag--info")).not.toBeNull();
+
+    card.querySelector<HTMLButtonElement>(".plugin-card__open")!.click();
+    await settleAll();
+
+    const detail = root.querySelector<HTMLElement>("#plugin-managed-panel")!;
+    expect(detail.hidden).toBe(false);
+    expect(detail.querySelector("[data-plugin-update='dev.example.saves']")).not.toBeNull();
+    expect(detail.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
+    expect(detail.textContent).toContain("v1.0.0 → v1.1.0");
+    // The list and the catalogue stay where they are.
     expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
+    expect(root.querySelector("[data-plugin-card='dev.example.saves']")?.classList.contains("is-selected")).toBe(true);
+    expect(root.querySelector<HTMLElement>("#plugins-detail-empty")!.hidden).toBe(true);
   });
 
   it("shows how a finished game streaming setup stands instead of the wizard", async () => {
@@ -1112,6 +1159,30 @@ describe("application shell against the desktop backend", () => {
     // games — and the launch status, which appears mid-session — sits above it,
     // where the identity block absorbs the difference.
     expect(Array.from(hero?.children ?? [])).toEqual([identity, feedback, actions]);
+  });
+
+  it("dims a game whose files moved, and turns Play into Locate", async () => {
+    backend.library = [{ ...alpha, launchable: false, installState: "not-installed", missing: true }, beta];
+    mount();
+    await settle();
+
+    const cards = Array.from(root.querySelectorAll<HTMLElement>("#game-cards .game-card"));
+    expect(cards.map((card) => card.classList.contains("is-missing"))).toEqual([true, false]);
+    expect(cards[0].getAttribute("aria-label")).toContain("Not installed");
+    expect(root.querySelector<HTMLElement>("#hero-missing")?.hidden).toBe(false);
+    const play = root.querySelector<HTMLButtonElement>("#play-button")!;
+    expect(play.dataset.kind).toBe("locate");
+    expect(play.textContent).toContain("Locate");
+    expect(play.hasAttribute("aria-disabled")).toBe(false);
+
+    // Pressing it asks where the game is now, and never tries to start it.
+    tauri.invoke.mockClear();
+    play.click();
+    await settle();
+    expect(tauri.invoke.mock.calls.filter(([command]) => command === "locate_game")).toEqual([
+      ["locate_game", { gameId: alpha.id }],
+    ]);
+    expect(launchedGameIds()).toEqual([]);
   });
 
   it("gives the hero one line: the genre, then the studio", async () => {
@@ -1942,10 +2013,28 @@ describe("the application shell on iOS", () => {
       | Record<string, boolean>
       | undefined,
     choices: [] as Record<string, unknown>[],
+    library: [] as Record<string, unknown>[],
+    playport: false,
   };
   const stardew = { id: "steam:413150", title: "Stardew Valley", source: "steam", launchable: false };
+  const bioshock = {
+    id: "gog:2022341186",
+    title: "BioShock",
+    source: "gog",
+    launchable: false,
+    supportedPlatforms: ["windows"],
+  };
+  const superMeatBoy = {
+    id: "epic:SuperMeatBoy",
+    title: "Super Meat Boy",
+    source: "epic",
+    launchable: false,
+    supportedPlatforms: ["windows"],
+    installState: "not-installed",
+  };
   const appStore = { id: "app-store", label: "iPhone & iPad version", detail: "App Store · ConcernedApe LLC" };
   const steamPage = { id: "steam-page", label: "View on Steam", detail: "Its page on the Steam store" };
+  const playport = { id: "playport", label: "PC version", detail: "Playport · Runs" };
 
   const mount = (): void => {
     root = document.createElement("div");
@@ -1962,6 +2051,8 @@ describe("the application shell on iOS", () => {
     window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
     backend.features = { downloadablePlugins: false, localRunners: false, storeChoices: true };
     backend.choices = [appStore, steamPage];
+    backend.library = [stardew];
+    backend.playport = false;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockReset();
     tauri.invoke.mockImplementation(async (command) => {
@@ -1969,9 +2060,11 @@ describe("the application shell on iOS", () => {
         case "get_platform_features":
           return backend.features;
         case "get_library":
-          return [stardew];
+          return backend.library;
         case "get_store_choices":
           return backend.choices;
+        case "is_playport_installed":
+          return backend.playport;
         case "get_preferences":
           return {};
         case "get_steam_account_status":
@@ -1997,15 +2090,13 @@ describe("the application shell on iOS", () => {
     await settle();
 
     const catalog = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
-    const row = (plugin: string) =>
-      catalog.querySelector<HTMLElement>(`[data-plugin-open='${plugin}']`)!.closest<HTMLElement>(".plugin-row")!;
     // Nothing to download, so no catalogue, no updates and no file picker.
     expect(catalog.querySelector<HTMLElement>(".plugins-group--catalog")!.hidden).toBe(true);
     // Wine starts nothing on an iPhone, and neither does any other runner.
-    expect(row("wine").hidden).toBe(true);
+    expect(catalog.querySelector("[data-plugin-card='wine']")).toBeNull();
     expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
     expect(root.querySelector<HTMLElement>("#gamestream-setup-panel")!.hidden).toBe(true);
-    expect(row("wallpaper-searcher").hidden).toBe(false);
+    expect(catalog.querySelector("[data-plugin-card='wallpaper-searcher']")).not.toBeNull();
   });
 
   it("offers the iPhone version and the Steam page beside Install", async () => {
@@ -2052,6 +2143,76 @@ describe("the application shell on iOS", () => {
 
     expect(commandArgs("install_steam_game")).toEqual([{ gameId: "steam:413150" }]);
     expect(commandArgs("get_store_choices")).toEqual([]);
+  });
+
+  const playButton = (): HTMLButtonElement => root.querySelector<HTMLButtonElement>("#play-button")!;
+  /** Orivo coming back to the front, the moment an app can have come or gone. */
+  const returnToForeground = async (): Promise<void> => {
+    document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+  };
+
+  it("sends a GOG game to Playport, and only while Playport is installed", async () => {
+    backend.library = [bioshock];
+    backend.choices = [playport];
+    mount();
+    await settle();
+
+    // Nothing on an iPhone takes a GOG game without Playport.
+    expect(playButton().textContent).toContain("Unavailable");
+    expect(playButton().getAttribute("aria-disabled")).toBe("true");
+
+    // Playport installed while Orivo was in the background.
+    backend.playport = true;
+    await returnToForeground();
+    expect(playButton().textContent).toContain("Install");
+    expect(playButton().hasAttribute("aria-disabled")).toBe(false);
+
+    playButton().click();
+    await settle();
+    // Its only answer opens straight away.
+    expect(menu().hidden).toBe(true);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "gog:2022341186", choiceId: "playport" }]);
+
+    // And deleted again.
+    backend.playport = false;
+    await returnToForeground();
+    expect(playButton().getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("never asks an iPhone for an Epic launcher it cannot have", async () => {
+    backend.library = [superMeatBoy];
+    mount();
+    await settle();
+
+    // Install used to ask the Epic Games Launcher, which no iPhone has.
+    expect(playButton().textContent).toContain("Unavailable");
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+
+    backend.playport = true;
+    backend.choices = [playport];
+    await returnToForeground();
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "epic:SuperMeatBoy", choiceId: "playport" }]);
+  });
+
+  it("asks nothing about Playport on a computer", async () => {
+    backend.features = undefined;
+    backend.library = [superMeatBoy];
+    mount();
+    await settle();
+    await returnToForeground();
+
+    expect(commandArgs("is_playport_installed")).toEqual([]);
+    // A computer's Epic launcher is still the one asked to install.
+    expect(playButton().textContent).toContain("Install");
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([{ gameId: "epic:SuperMeatBoy" }]);
   });
 });
 
@@ -2260,20 +2421,22 @@ describe("starting a game from the shell", () => {
  * Source and Platform read as the brands' own logos. The word stays in the
  * button, where assistive technology and speech control still find it.
  */
-describe("the browse bar's logos", () => {
+describe("the browse bar: sources and sort", () => {
   let root: HTMLElement;
-  const streamed = (id: string) => ({
+  const streamed = (id: string, playTimeSeconds: number) => ({
     id,
     title: id,
     source: "local",
     runner: "com.orivo.gamestream",
     launchable: true,
+    lastPlayedAt: "",
+    playTimeSeconds,
   });
   const library = [
-    streamed("a"),
-    streamed("b"),
-    { id: "c", title: "c", source: "local", launchable: true },
-    { id: "steam:7", title: "d", source: "steam", launchable: true },
+    streamed("a", 3_600),
+    streamed("b", 0),
+    { id: "c", title: "c", source: "local", launchable: true, lastPlayedAt: "2026-11-20T10:00:00Z", playTimeSeconds: 600 },
+    { id: "steam:7", title: "d", source: "steam", launchable: true, lastPlayedAt: "2026-11-22T10:00:00Z", playTimeSeconds: 7_200 },
   ];
 
   beforeEach(() => {
@@ -2308,57 +2471,59 @@ describe("the browse bar's logos", () => {
   });
 
   const segments = () => Array.from(root.querySelectorAll<HTMLButtonElement>("#browse-segments .browse-bar__segment"));
-  const showMode = async (label: string): Promise<void> => {
-    for (let press = 0; press < 4; press += 1) {
-      if (root.querySelector("#browse-mode-label")?.textContent === label) return;
-      root.querySelector<HTMLButtonElement>("#browse-mode")!.click();
-      await settle();
-    }
-    throw new Error(`the bar never reached ${label}`);
-  };
+  const railIds = () =>
+    Array.from(root.querySelectorAll<HTMLElement>("#game-cards .game-card")).map((card) => card.dataset.gameId ?? "");
+  const sortLabel = () => root.querySelector("#browse-mode-label")?.textContent;
 
-  it("gives a source with no wordmark a standard glyph and its name in the interface's type", async () => {
+  it("always leads with All Games, then each source the library holds, in a fixed order", async () => {
     await settle();
-    await showMode("Source");
-
-    const [moonlight, local] = segments();
-    for (const segment of [moonlight, local]) {
-      expect(segment.classList.contains("has-logo")).toBe(false);
-      expect(segment.querySelector("img")!.hidden).toBe(true);
-      expect(segment.querySelector<HTMLElement>(".browse-bar__segment-icon")!.hidden).toBe(false);
-    }
-    expect(moonlight.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("cast");
-    expect(local.querySelector(".browse-bar__segment-icon")!.getAttribute("data-icon")).toBe("monitor");
-    expect(moonlight.textContent).toBe("Moonlight");
+    expect(segments().map((segment) => segment.dataset.segmentId)).toEqual(["all", "steam", "local", "stream"]);
+    expect(segments().map((segment) => segment.textContent)).toEqual(["All Games", "Steam", "Local", "Stream"]);
+    expect(segments()[0].getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("goes back to words where the bar sorts by something with no brand", async () => {
+  it("gives every source the same two things: a vector mark, then its name", async () => {
     await settle();
-    await showMode("Source");
-    await showMode("Activity");
-
     for (const segment of segments()) {
-      expect(segment.classList.contains("has-logo")).toBe(false);
-      expect(segment.querySelector("img")!.hidden).toBe(true);
+      const [mark, label] = Array.from(segment.children) as HTMLElement[];
+      expect(mark.className).toBe("browse-bar__segment-mark");
+      expect(mark.getAttribute("aria-hidden")).toBe("true");
+      expect(mark.querySelector("svg.source-mark")).not.toBeNull();
+      expect(label.className).toBe("browse-bar__segment-label");
     }
+    expect(root.querySelector("#browse-segments img")).toBeNull();
   });
 
-  it("gives the word back for good when a logo fails to load", async () => {
+  it("files a source's games under it and names the rail after it", async () => {
     await settle();
-    await showMode("Source");
-    const [moonlight] = segments();
+    segments().find((segment) => segment.dataset.segmentId === "stream")!.click();
+    await settle();
+    expect(railIds().sort()).toEqual(["a", "b"]);
+    expect(root.querySelector("#recently-played-title")?.textContent).toBe("Stream");
+  });
 
-    // Moonlight has no wordmark any more, so the logo under test is a store's.
-    void moonlight;
-    const branded = segments().find((segment) => segment.classList.contains("has-logo"));
-    if (!branded) throw new Error("the Steam segment must wear its logo");
-    branded.querySelector("img")!.dispatchEvent(new Event("error"));
-    // A repaint, as every selection makes, must not try the same file again.
-    await showMode("Activity");
-    await showMode("Source");
+  it("cycles the order of the rail, Recent, New, Most played, and leaves the row alone", async () => {
+    await settle();
+    const row = segments().map((segment) => segment.dataset.segmentId);
+    const button = root.querySelector<HTMLButtonElement>("#browse-mode")!;
 
-    expect(
-      segments().find((segment) => segment.dataset.segmentId === branded.dataset.segmentId)?.classList.contains("has-logo"),
-    ).toBe(false);
+    expect(sortLabel()).toBe("Recent");
+    expect(railIds().slice(0, 2)).toEqual(["steam:7", "c"]);
+
+    button.click();
+    await settle();
+    expect(sortLabel()).toBe("New");
+    expect(railIds()[0]).toBe("b");
+    expect(button.getAttribute("aria-label")).toBe("Sorted by New, press to change");
+
+    button.click();
+    await settle();
+    expect(sortLabel()).toBe("Most played");
+    expect(railIds()[0]).toBe("steam:7");
+
+    button.click();
+    await settle();
+    expect(sortLabel()).toBe("Recent");
+    expect(segments().map((segment) => segment.dataset.segmentId)).toEqual(row);
   });
 });

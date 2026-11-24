@@ -204,6 +204,40 @@ describe("primary action resolution", () => {
       resolvePrimaryAction(detailWith({ primaryAction: "play" }), "game_1", null, { storeChoices: true }),
     ).toMatchObject({ label: "Play", intent: "play" });
   });
+
+  it("gives a GOG or Epic game an Install on iOS only while Playport can take it", () => {
+    // What the host sends for both on an iPhone: no launcher, no store page.
+    const onIphone = (overrides: Partial<GameDetailViewModel>) =>
+      detailWith({ primaryAction: "unavailable", hostPlatform: "other", launchable: false, ...overrides });
+    const gog = onIphone({ source: "gog", supportedPlatforms: ["windows", "linux"] });
+    const epic = onIphone({ source: "epic", supportedPlatforms: [] });
+
+    for (const game of [gog, epic]) {
+      expect(resolvePrimaryAction(game, "game_1", null, { storeChoices: true, playport: true })).toMatchObject({
+        kind: "store-choices",
+        label: "Install",
+        icon: "download",
+        intent: "store-choices",
+        disabled: false,
+      });
+      // No Playport, nowhere to send it: the button stays the quiet one.
+      expect(resolvePrimaryAction(game, "game_1", null, { storeChoices: true })).toMatchObject({
+        kind: "unavailable",
+        disabled: true,
+      });
+    }
+    // A Linux-only GOG title gives Playport nothing to run.
+    const linuxOnly = onIphone({ source: "gog", supportedPlatforms: ["linux"] });
+    expect(
+      resolvePrimaryAction(linuxOnly, "game_1", null, { storeChoices: true, playport: true }).disabled,
+    ).toBe(true);
+    // Nor does a store Playport does not sign in to, nor a computer.
+    expect(
+      resolvePrimaryAction(onIphone({ source: "ubisoft" }), "game_1", null, { storeChoices: true, playport: true })
+        .disabled,
+    ).toBe(true);
+    expect(resolvePrimaryAction(gog, "game_1", null, { playport: true }).disabled).toBe(true);
+  });
 });
 
 describe("media grouping and preview", () => {
@@ -799,12 +833,9 @@ describe("wallpaper search state", () => {
       cover: "/media/igdb/covers/",
       landscape: "/media/igdb/landscapes/",
       background: "/media/igdb/heroes/",
-      // No wordmarks ship with the app, so this row is empty in the browser.
-      logo: "",
+      logo: "/media/igdb/logos/",
     };
-    for (const category of WALLPAPER_CATEGORIES.filter(
-      (category) => category !== "logo",
-    )) {
+    for (const category of WALLPAPER_CATEGORIES) {
       const view = createFallbackWallpaperSearch(category, "elden ring");
       expect(view).toMatchObject({
         phase: "ready",

@@ -70,7 +70,10 @@ export function host(page: Page, name: PageName): Locator {
 /** Waits until the named page host is visible and has painted real content. */
 export async function waitForPage(page: Page, name: PageName): Promise<void> {
   const ready: Record<PageName, string> = {
-    library: `${HOST_ID.library}:not([hidden]) #hero-title`,
+    // The hero names the game with its wordmark once one has decoded and with
+    // the title text until then (or for good, when there is none), so either
+    // one standing means the page has painted.
+    library: `${HOST_ID.library}:not([hidden]) :is(#hero-title, #hero-logo):not([hidden])`,
     // The hero heading is present for both the populated rail and the empty
     // state, so a filter that matches nothing still counts as "ready".
     store: `${HOST_ID.store}:not([hidden]) .store-hero__title`,

@@ -8,7 +8,7 @@ together.
 | | |
 | --- | --- |
 | Record | **Orivo Games**, Apple ID `6813145265`, bundle ID `run.evey.orivo` |
-| Versions | iOS 0.3.7 — the app's own version, which a build has to match — and macOS 1.0 (not submitted) |
+| Versions | iOS and macOS 0.3.11 — the app's own version, which a build has to match |
 | Devices | iPhone and iPad (`TARGETED_DEVICE_FAMILY = "1,2"`) |
 | Listing language | English (U.S.) |
 | Privacy policy | <https://github.com/justeozan/orivo/blob/main/PRIVACY.md> |
@@ -18,9 +18,10 @@ together.
 ## Building for the record
 
 iOS builds are `run.evey.orivo`: `src-tauri/tauri.ios.conf.json` overrides the
-identifier for iOS only. Desktop and Android stay `io.orivo.desktop`, which
-names the data directory and the Android package existing installs live
-under.
+identifier for iOS, as `tauri.android.conf.json` does for Android, whose Google
+Play record has the same package ([`google-play.md`](google-play.md)). The
+desktop stays `io.orivo.desktop`, which names the data directory existing
+installs live under.
 
 `src-tauri/gen/apple` is generated and gitignored, and `tauri ios init` gives
 it Tauri's logo as the app icon. After an init, before any iOS build:
@@ -28,6 +29,10 @@ it Tauri's logo as the app icon. After an init, before any iOS build:
 ```sh
 scripts/sync-ios-project.sh   # identifier + Orivo's icon (run-ios-simulator.sh runs it)
 ```
+
+The sideload edition ([`ios-sideload.md`](ios-sideload.md)) is another app,
+`run.evey.orivo.sideload`, built unsigned by the release workflow: nothing in
+this record refers to it, and the App Store app never mentions it.
 
 The icon set in `src-tauri/icons/ios` is RGB on purpose. `tauri icon` writes
 RGBA even from an opaque source, and App Store Connect rejects the channel
@@ -51,6 +56,12 @@ xcrun altool --upload-package <the exported .ipa> --type ios \
   --api-key <key id> --api-issuer <issuer id>
 ```
 
+The build number (`CFBundleVersion`) is the app version unless told
+otherwise, and App Store Connect refuses a second upload under the same one.
+To send another build of a version already uploaded, give it a higher number
+for that build only, without touching the committed config:
+`pnpm tauri ios build … --config '{"bundle":{"iOS":{"bundleVersion":"2"}}}'`.
+
 Export compliance is answered in `src-tauri/Info.ios.plist`
 (`ITSAppUsesNonExemptEncryption`), so a build needs no questionnaire.
 
@@ -72,6 +83,43 @@ A=$(ls $T/build/tauri-*/out/swift-rs/Tauri/release/libTauri.a)
   --globalize-symbol=_string_from_bytes "$A"
 rm -rf $(dirname $T/.fingerprint/tauri-*/lib-tauri)   # the lib unit only, not its build script
 ```
+
+## The Mac App Store edition
+
+The Mac build on the record is not the DMG. It is built with the cargo
+feature `app-store`, runs in the App Sandbox and goes through the same review
+as iOS, so `platform.rs` turns off what the review or the sandbox refuses:
+downloaded plugins (no code from anywhere but the App Store, and no JIT
+entitlement), the runners (a sandboxed process cannot run Wine or a store's
+own downloader) and the updater, which is not even registered. Quiky is not
+compiled in. Steam, Epic, GOG and the others still start games through their
+own apps' URL schemes.
+
+The sandbox's `$HOME` is the app's container, so Steam's and Epic's folders,
+where the installed games are written, are out of reach. Settings › Libraries
+offers to open each one once with the system folder picker, already on the
+right folder; the grant is kept as a read-only security-scoped bookmark and
+reopened at every launch (`folder_access.rs`). Libraries themselves come from
+the accounts and need no folder.
+
+Signing needs the team's Apple Distribution certificate, a *Mac Installer
+Distribution* certificate ("3rd Party Mac Developer Installer") and a Mac App
+Store profile for `run.evey.orivo`, all three created through the API key.
+`src-tauri/tauri.appstore.conf.json`, `Entitlements.appstore.plist` and
+`Info.appstore.plist` hold the rest:
+
+```sh
+VITE_SENTRY_DSN=… SENTRY_AUTH_TOKEN=… \
+ORIVO_MAS_PROFILE=<path to the .provisionprofile> scripts/build-mac-app-store.sh
+xcrun altool --upload-package <the .pkg it prints> --type macos \
+  --api-key <key id> --api-issuer <issuer id>
+```
+
+It builds for Apple Silicon by default, which App Store Connect accepts only
+with macOS 12 as the minimum (hence `minimumSystemVersion` in its config); `ORIVO_MAS_TARGET=universal-apple-darwin`
+adds Intel, with `rustup target add x86_64-apple-darwin` first. A build
+signed for the store does not open outside it: test it through TestFlight,
+or re-sign a copy ad hoc with the same entitlements to watch the sandbox.
 
 ## Listing
 
@@ -101,10 +149,22 @@ An iOS build runs no PC game and may download no code, and two things follow
   (`src-tauri/src/store_choices.rs`): its own iOS version when the App Store
   sells one by a studio Steam names, then its Steam page, which is always
   there. One answer opens directly; two are offered beside the button.
+- **Playport.** On a device where Playport is installed, the PC version comes
+  first in that menu, and a GOG or Epic Games game, which has no other answer
+  there, gets an Install of its own ([`playport.md`](playport.md)). Playport
+  runs Windows games on the device itself; Orivo only asks whether it is there
+  (`canOpenURL`, with `playport` in `LSApplicationQueriesSchemes`) and brings
+  it to the front. Playport is sideloaded, so Orivo never names, links or
+  recommends it where it is not installed: without it, the menu is what it was.
 
 Streaming from a computer and emulation are not offered on iOS. The Moonlight
 app for iOS registers no URL scheme, so no other app can start a stream in it,
 and Orivo has no source of ROMs there.
+
+Nor does Orivo update itself there: the App Store installs new versions, so the
+host answers `self_updates: false`, nothing looks for a release on GitHub, and
+Settings › About has no Updates row. Android builds do the same, for Google
+Play ([`google-play.md`](google-play.md)).
 
 ## Age rating: 12+
 
@@ -131,6 +191,7 @@ workflow sets it from a repository secret.
 | --- | --- | --- | --- | --- |
 | Diagnostics | Crash Data | Sentry error reports | App Functionality | No |
 | Diagnostics | Performance Data | Sentry traces, 10 % of sessions | App Functionality | No |
+| Usage Data | Product Interaction | Sentry Session Replay (clicks and scrolling, text and media masked), 10 % of sessions and every session with an error | App Functionality | No |
 | Contact Info | Name | optional field of the Feedback form | App Functionality | Yes |
 | Contact Info | Email Address | optional field of the Feedback form | App Functionality | Yes |
 | User Content | Customer Support | the Feedback message and its optional screenshot | App Functionality | Yes |
@@ -145,6 +206,8 @@ Not "collected" in Apple's sense:
 - The library, preferences, wishlist and the IGDB / SteamGridDB / Google keys:
   stored on the device only.
 - Requests to the stores' public catalogs and CDNs: no personal data is sent.
+- The request for Playport's public compatibility list (playport.dev), made
+  only on a device where Playport is installed: nothing is sent with it.
 
 No advertising or analytics SDK, no advertising identifier.
 

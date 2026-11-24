@@ -27,6 +27,13 @@ pnpm tauri dev     # the desktop app
 pnpm dev           # the frontend alone, in a browser, on fixture data
 ```
 
+A desktop development build runs as `io.orivo.desktop.dev` ("Orivo Dev"): its
+own library, artwork, caches and keychain entries, apart from the Orivo you
+have installed. A library written by an unreleased build can stop opening in
+the released one, so the two never share. To try a change on your real
+library, copy `catalog.json` (and `game-state.json`) from the `io.orivo.desktop`
+folder into `io.orivo.desktop.dev`.
+
 Everything below must pass before you open a pull request:
 
 ```sh

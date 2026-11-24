@@ -253,6 +253,8 @@ pub enum PrimaryAction {
     /// it is the one connected store that gets its own install action.
     InstallEpic,
     ConfigureWine,
+    /// A local game whose files moved where no search found them.
+    Locate,
     ViewOffer,
     Unavailable,
 }
@@ -814,6 +816,11 @@ pub fn set_game_wishlist(
 /// the detail page both read it, so the two can never disagree about whether a
 /// game is on this machine — the way they once could about its badge.
 pub fn install_state_of(game: &Game) -> InstallStateView {
+    // A local game whose files moved where no search found them is, for this
+    // machine, not installed until it is located.
+    if crate::moved_games::marked_missing(game) {
+        return InstallStateView::NotInstalled;
+    }
     // Only a store whose client this machine can be asked about has a real
     // answer. Epic is that store today; everything else is honestly unknown.
     let asks_a_local_client = matches!(
@@ -905,7 +912,8 @@ fn project_catalog_game(
         _ if game.source == CatalogGameSource::Steam => GameSourceView::Steam,
         _ => GameSourceView::from_catalog_source(game.source).unwrap_or(GameSourceView::Local),
     };
-    let launchable = match &game.launch_target {
+    let missing = crate::moved_games::marked_missing(game);
+    let launchable = !missing && match &game.launch_target {
         LaunchTarget::Steam { .. } => game.installation_path.is_some(),
         LaunchTarget::Direct => !game.id.starts_with("showcase-"),
         LaunchTarget::Runner {
@@ -952,8 +960,10 @@ fn project_catalog_game(
             {
                 PrimaryAction::InstallEpic
             }
+            // Its files moved: the way back is to say where they are now.
+            (LaunchTarget::Direct, _) if missing && cfg!(desktop) => PrimaryAction::Locate,
             (LaunchTarget::Runner { runner_id, .. }, GameSourceView::Wine)
-                if runner_id == WINE_STAGING_RUNNER_ID =>
+                if runner_id == WINE_STAGING_RUNNER_ID && !missing =>
             {
                 PrimaryAction::ConfigureWine
             }

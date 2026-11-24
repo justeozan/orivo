@@ -60,9 +60,10 @@ jobs:
           - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
           - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
           - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
+          - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
 
           The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
-          The `.aab` (Android App Bundle) is for Google Play uploads.
+          The `.apk` is the build Google Play signs, so it updates an install from Google Play and the other way round. The `.aab` (Android App Bundle) is what Google Play received; it is not an installer.
 
           Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
           NOTES
@@ -157,6 +158,61 @@ jobs:
             libxdo-dev \
             libssl-dev
 
+      # Signed with the Developer ID certificate and notarized with an App Store
+      # Connect API key, so Gatekeeper opens the downloaded app like any other.
+      # tauri-action reads these from the environment: it imports the .p12 into
+      # a throwaway keychain, signs with the hardened runtime, notarizes and
+      # staples. They go through GITHUB_ENV, set only on macOS and only once
+      # every secret is there, because an empty APPLE_CERTIFICATE is not "no
+      # signing" to Tauri, it is a certificate that fails to decode. A missing
+      # secret stops the build: an unsigned DMG is what this step exists to end,
+      # and publishing one by accident would put the "damaged app" prompt back
+      # in front of every new user.
+      - name: Prepare macOS signing and notarization
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_ISSUER APPLE_API_PRIVATE_KEY; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::macOS signing secrets are missing (${missing[*]}). Without them the DMG would ship unsigned and Gatekeeper would call it damaged, so this build stops here instead. See docs/RELEASING.md, section 4."
+            exit 1
+          fi
+          # GITHUB_ENV takes one line per NAME=value. A .p12 encoded with
+          # `openssl base64` (or pasted from a wrapped terminal) arrives on
+          # several lines, which would cut the certificate at the first one;
+          # base64 decodes the same without the whitespace.
+          certificate="$(printf '%s' "$APPLE_CERTIFICATE" | tr -d '[:space:]')"
+          # The others are single values: a trailing newline from pasting is
+          # dropped, one in the middle is a broken secret.
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_API_KEY APPLE_API_ISSUER; do
+            value="$(printf '%s' "${!name}")"
+            case "$value" in
+              *$'\n'*) echo "::error::$name spans several lines; set it again as a single line."; exit 1 ;;
+            esac
+            printf -v "$name" '%s' "$value"
+          done
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+          printf '%s\n' "$APPLE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          {
+            echo "APPLE_CERTIFICATE=$certificate"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=Developer ID Application: Ozan SAHIN (P27N8S83TV)"
+            echo "APPLE_API_KEY=$APPLE_API_KEY"
+            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+            echo "APPLE_API_KEY_PATH=$key_path"
+          } >> "$GITHUB_ENV"
+
       # Every matrix worker uploads to the same *draft* release. Keeping it
       # private until the final job verifies every installer and updater entry
       # prevents users from ever seeing a half-finished multi-platform release.
@@ -172,6 +228,10 @@ jobs:
           # what a build from source does, and what every official build did
           # until this was passed through.
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          # Uploads the source maps so a crash report reads as `app.ts:7450`
+          # instead of a minified column. Optional: unset, the build is the
+          # same and reports stay minified.
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         with:
           tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (inputs.version && format('v{0}', inputs.version) || 'v__VERSION__') }}
           releaseName: 'Orivo __VERSION__'
@@ -182,23 +242,56 @@ jobs:
             - **Windows:** use the `-setup.exe` installer (or `.msi` for managed installs).
             - **Linux:** use `.AppImage`, `.deb` or `.rpm` for your distribution.
             - **Android:** download the `.apk` to install on your device (requires "Install from unknown sources").
+            - **iPhone & iPad:** Orivo comes from the App Store. The `_ios-sideload.ipa` is the sideload edition, for AltStore, SideStore or Sideloadly: see https://orivo.evey.run/sideload.
 
             The `.app.tar.gz` and updater archives are for Orivo's verified updater; they are not manual installers.
-            The `.aab` (Android App Bundle) is for Google Play uploads.
+            The `.apk` is the build Google Play signs, so it updates an install from Google Play and the other way round. The `.aab` (Android App Bundle) is what Google Play received; it is not an installer.
 
             Orivo updates itself: existing installs pick this release up automatically the next time they check for updates.
 
-            Orivo is not code-signed yet. On macOS, right-click the app and choose **Open** the first time (Gatekeeper blocks a double-click). On Windows, click **More info** then **Run anyway** on the SmartScreen prompt.
+            The macOS app is signed and notarized by Apple: it opens with a double-click. Windows is not code-signed yet: click **More info** then **Run anyway** on the SmartScreen prompt.
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') || contains(inputs.version, '-') }}
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
 
+      # The build only proves a signature was attempted. This is what a
+      # downloaded copy goes through: Gatekeeper's verdict on the app, and the
+      # notarization ticket stapled to it so the first launch works offline.
+      - name: Verify the macOS app is signed and notarized
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$(find target -path '*/release/bundle/macos/*.app' -maxdepth 6 -type d | head -1)"
+          if [ -z "$app" ]; then
+            echo "::error::No .app bundle found under target/*/release/bundle/macos."
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # Notarization passes without the JIT entitlement, then the hardened
+          # runtime kills the app (SIGKILL) the first time wasmtime compiles a
+          # plugin. Only the signed entitlements catch that before users do.
+          entitlements="$(codesign -d --entitlements - "$app" 2>/dev/null)"
+          for key in com.apple.security.cs.allow-jit com.apple.security.cs.allow-unsigned-executable-memory; do
+            if ! grep -q "$key" <<<"$entitlements"; then
+              echo "::error::$app is signed without $key: plugins would be killed by the hardened runtime. Check bundle.macOS.entitlements in src-tauri/tauri.conf.json."
+              exit 1
+            fi
+          done
+          spctl --assess --type execute --verbose=2 "$app"
+          xcrun stapler validate "$app"
+
   android:
-    name: Build Android (arm64 APK + AAB)
+    name: Build Android (AAB, and the APK Google Play signs)
     runs-on: ubuntu-latest
     needs: prepare-draft
+    # `id-token` is what Workload Identity Federation trades for a Google Play
+    # access token, so no key to Orivo's Play record is stored anywhere.
+    permissions:
+      contents: write
+      id-token: write
     env:
       # One place: the SDK package to install, and the path Tauri is pointed at.
       NDK_VERSION: 27.0.12077973
@@ -210,6 +303,12 @@ jobs:
     # missing one must fail loudly; what must never happen again is the *other*
     # failure mode, a platform silently dropping out of a published release.
     # `verify-updater-manifest` therefore also counts the .apk asset itself.
+    #
+    # Google Play signs Orivo with a key only Play holds (docs/google-play.md).
+    # The bundle built here is signed with the upload key, which Play checks
+    # and replaces; the APK this release offers is the one Play generates from
+    # that bundle and signs, so a sideloaded install and a Play install are the
+    # same app to Android and take each other's updates.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -293,35 +392,203 @@ jobs:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: pnpm tauri android init --ci --skip-targets-install
 
-      # The keystore is the app's identity: the same key must sign every
-      # version, or Android refuses the update as a different app. It lives only
-      # in repository secrets, and `key.properties` is gitignored.
-      - name: Write the release signing keystore
+      # The upload key: Play takes a bundle only when this key signed it. It
+      # lives only in repository secrets, and `key.properties` is gitignored.
+      - name: Write the upload keystore
         shell: bash
         env:
-          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
         run: |
           set -euo pipefail
           if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
-            echo "::error::Android signing secrets are missing (ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS). Without them Gradle produces an unsigned APK that no device will install, so this job stops here instead."
+            echo "::error::Android upload key secrets are missing (ANDROID_UPLOAD_KEYSTORE_BASE64, ANDROID_UPLOAD_KEYSTORE_PASSWORD, ANDROID_UPLOAD_KEY_ALIAS). Google Play refuses a bundle the upload key did not sign, so this job stops here instead."
             exit 1
           fi
           project=src-tauri/gen/android
-          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$project/release.jks"
-          printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$project/upload.jks"
+          printf 'storeFile=upload.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEYSTORE_PASSWORD" > "$project/key.properties"
 
-      - name: Build Android APK + AAB
+      - name: Build the Android App Bundle
         shell: bash
         env:
           JAVA_HOME: ${{ env.JAVA_HOME }}
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           RUSTFLAGS: "-C link-arg=-Wl,-z,max-page-size=16384"
-        run: pnpm tauri android build --target aarch64 --apk --aab
+        run: pnpm tauri android build --target aarch64 --aab
 
-      - name: Upload APK to release
+      # A pre-release shares its version code with the release it precedes
+      # (Tauri derives the code from major, minor and patch alone), and Play
+      # takes a version code once: a pre-release would lock its release out. So
+      # only a release goes to Play; a pre-release keeps its bundle on GitHub.
+      - name: Check the bundle and name the release
+        id: bundle
+        shell: bash
+        env:
+          REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REF_TAG" ]; then
+            tag="$REF_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v$INPUT_VERSION"
+          else
+            tag="v$(node -p "require('./package.json').version")"
+          fi
+          version="${tag#v}"
+          aab=src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
+          if [ ! -f "$aab" ]; then
+            echo "::error::No bundle at $aab."
+            ls -R src-tauri/gen/android/app/build/outputs || true
+            exit 1
+          fi
+          # A bundle Gradle could not sign carries no signature at all, and
+          # Play's refusal of it would be the less readable error. The output is
+          # read whole first: `grep -q` closing the pipe early would make
+          # jarsigner fail on a signed bundle under `pipefail`.
+          verification="$("$JAVA_HOME/bin/jarsigner" -verify "$aab" 2>&1 || true)"
+          if ! grep -q "jar verified" <<<"$verification"; then
+            echo "::error::$aab is not signed with the upload key."
+            printf '%s\n' "$verification"
+            exit 1
+          fi
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "aab=$aab"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Keep a pre-release's bundle on GitHub
+        if: steps.bundle.outputs.prerelease == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bundle.outputs.tag }}
+          AAB: ${{ steps.bundle.outputs.aab }}
+          VERSION: ${{ steps.bundle.outputs.version }}
+        run: |
+          echo "Pre-release $VERSION: the bundle stays on GitHub, Google Play gets the release."
+          gh release upload "$TAG" "$AAB" --clobber
+
+      - name: Check the Google Play settings
+        if: steps.bundle.outputs.prerelease != 'true'
+        env:
+          PROVIDER: ${{ vars.GOOGLE_PLAY_WORKLOAD_IDENTITY_PROVIDER }}
+          SERVICE_ACCOUNT: ${{ vars.GOOGLE_PLAY_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$PROVIDER" ] || [ -z "$SERVICE_ACCOUNT" ]; then
+            echo "::error::Repository variables GOOGLE_PLAY_WORKLOAD_IDENTITY_PROVIDER and GOOGLE_PLAY_SERVICE_ACCOUNT are not set. Without them the bundle cannot reach Google Play, and there is no Play-signed APK for this release."
+            exit 1
+          fi
+
+      - name: Get a Google Play token
+        if: steps.bundle.outputs.prerelease != 'true'
+        id: play-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GOOGLE_PLAY_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GOOGLE_PLAY_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/androidpublisher
+
+      - name: Send the bundle to Google Play and publish the APK it signs
+        if: steps.bundle.outputs.prerelease != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_PLAY_ACCESS_TOKEN: ${{ steps.play-auth.outputs.access_token }}
+          TAG: ${{ steps.bundle.outputs.tag }}
+          AAB: ${{ steps.bundle.outputs.aab }}
+          VERSION: ${{ steps.bundle.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Match the desktop assets, which carry the product name and version.
+          apk="$RUNNER_TEMP/Orivo_${VERSION}_android.apk"
+          node scripts/google-play-release.mjs "$AAB" "$VERSION" "$apk"
+          gh release upload "$TAG" "$apk" "$AAB" --clobber
+
+  ios-sideload:
+    name: Build iOS sideload edition (unsigned .ipa)
+    runs-on: macos-latest
+    needs: prepare-draft
+    # The App Store app under another identifier, unsigned, for AltStore,
+    # SideStore and Sideloadly to sign with the player's own Apple ID; see
+    # docs/ios-sideload.md. orivo.evey.run builds its AltStore source from the
+    # `.ipa` and the `.json` this job attaches.
+    #
+    # Not a release gate yet, for the reason the Android job once was not
+    # (#56): it has only been built on a workstation, and a build this
+    # repository has not proved on a runner must not hold back the platforms it
+    # has. A failure costs that release its sideload build and nothing else —
+    # the source skips a release without one. Once it has passed on a real
+    # release, make it a gate the way `android` is: list it in
+    # `verify-updater-manifest`'s `needs`, require the `.ipa` there, and drop
+    # `continue-on-error`.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Check the app version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          REF_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          expected="${REF_TAG#v}"
+          conf="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$conf" != "$expected" ] || [ "$pkg" != "$expected" ]; then
+            echo "::error::Tag $REF_TAG does not match the app version (src-tauri/tauri.conf.json: $conf, package.json: $pkg)."
+            exit 1
+          fi
+          echo "App version $expected matches tag $REF_TAG."
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # llvm-tools carries the llvm-objcopy that build-ios-sideload.sh needs
+      # under Xcode 27 (see "Xcode 27 and swift-rs" in docs/app-store.md).
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+          components: llvm-tools
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: ios-sideload
+
+      # `tauri ios init` writes the Xcode project through XcodeGen, which the
+      # runner image does not ship. `gen/apple` is gitignored, so every run
+      # generates it.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # No VITE_SENTRY_DSN, unlike the desktop builds: this is the App Store
+      # app, and the App Store build is answered "Data Not Collected".
+      - name: Build the sideload edition
+        run: scripts/build-ios-sideload.sh "$RUNNER_TEMP/ios-sideload"
+
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REF_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
@@ -335,23 +602,11 @@ jobs:
           else
             tag="v$(node -p "require('./package.json').version")"
           fi
-          version="${tag#v}"
-          outputs=src-tauri/gen/android/app/build/outputs
-
-          # Gradle drops the `-unsigned` suffix once a signingConfig applies, so
-          # the presence of this name is itself the proof that signing ran.
-          apk="$outputs/apk/universal/release/app-universal-release.apk"
-          aab="$outputs/bundle/universalRelease/app-universal-release.aab"
-          if [ ! -f "$apk" ]; then
-            echo "::error::No signed APK at $apk. Gradle writes app-universal-release-unsigned.apk when it finds no signing config, and an unsigned APK cannot be installed."
-            ls -R "$outputs/apk" || true
-            exit 1
-          fi
-
-          # Match the desktop assets, which carry the product name and version.
-          staged="$RUNNER_TEMP/Orivo_${version}_android.apk"
-          cp "$apk" "$staged"
-          gh release upload "$tag" "$staged" "$aab" --clobber
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          out="$RUNNER_TEMP/ios-sideload"
+          # prepare-draft created the release before this job started.
+          gh release upload "$tag" "$out/Orivo_${version}_ios-sideload.ipa" \
+            "$out/Orivo_${version}_ios-sideload.json" --clobber
 
   verify-updater-manifest:
     name: Verify staged release
@@ -441,7 +696,11 @@ jobs:
           require_count "Linux AppImage" '\.AppImage$' 1
           require_count "Linux Debian package" '\.deb$' 1
           require_count "Linux RPM package" '\.rpm$' 1
-          require_count "Android APK" '\.apk$' 1
+          # A pre-release gets no APK: Google Play, which signs it, only
+          # takes the release (see the android job).
+          if [[ "${tag#v}" != *-* ]]; then
+            require_count "Android APK" '\.apk$' 1
+          fi
 
           manifest="$RUNNER_TEMP/latest.json"
           gh release download "$tag" --pattern latest.json --dir "$RUNNER_TEMP" --clobber

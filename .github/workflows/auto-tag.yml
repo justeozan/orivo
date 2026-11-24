@@ -1,0 +1,76 @@
+name: Auto tag on merge
+
+# Merging a PR labelled release:patch, release:minor or release:major cuts a
+# release: this workflow works out the next version and starts `tag.yml`, which
+# bumps the version files, pushes the tag and dispatches `release.yml`.
+# A PR without one of those labels releases nothing.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Start the tag workflow
+    # Only a merged PR, never one that was merely closed.
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pick the bump from the PR labels
+        id: bump
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          bump=""
+          # The biggest label wins when a PR carries several.
+          for level in patch minor major; do
+            case ",$LABELS," in *",release:$level,"*) bump="$level" ;; esac
+          done
+          if [ -z "$bump" ]; then
+            echo "No release:* label on the PR: nothing to release."
+          fi
+          echo "bump=$bump" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout main
+        if: steps.bump.outputs.bump != ''
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Work out the next version and start tag.yml
+        if: steps.bump.outputs.bump != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUMP: ${{ steps.bump.outputs.bump }}
+        run: |
+          set -euo pipefail
+          # The highest of package.json and the latest tag, so a version bumped
+          # by hand or a tag pushed alone is never reused.
+          current=$(node -p "require('./package.json').version" | sed 's/-.*//')
+          latest=$(git tag --list 'v[0-9]*' | sed 's/^v//; s/-.*//' | sort -V | tail -n1)
+          base=$(printf '%s\n%s\n' "$current" "${latest:-0.0.0}" | sort -V | tail -n1)
+          IFS=. read -r major minor patch <<< "$base"
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          version="$major.$minor.$patch"
+          echo "Releasing v$version ($BUMP bump from $base)."
+          gh workflow run tag.yml --ref main -f version="$version"
+          {
+            echo "### Release requested: v$version"
+            echo ""
+            echo "PR #${{ github.event.pull_request.number }} carried \`release:$BUMP\`. Follow it in [Actions → Tag release](${{ github.server_url }}/${{ github.repository }}/actions/workflows/tag.yml)."
+          } >> "$GITHUB_STEP_SUMMARY"

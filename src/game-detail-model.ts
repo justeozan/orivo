@@ -17,6 +17,7 @@ import { WALLPAPER_CATEGORIES } from "./contracts";
 import { displayTitle } from "./game-title";
 import { backgroundMedia } from "./media-role";
 import type { IconName } from "./icons";
+import { playportTakes } from "./playport";
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                       */
@@ -230,7 +231,11 @@ export interface GameDetailFact {
 }
 
 export interface PrimaryActionDescriptor {
-  kind: GameDetailPrimaryAction;
+  /**
+   * The host's action, or `store-choices` where the page makes one the host
+   * left unavailable: a GOG or Epic game on iOS, while Playport is installed.
+   */
+  kind: GameDetailPrimaryAction | "store-choices";
   label: string;
   /**
    * 0-100 while a download runs. The button fills to this, which is why the
@@ -238,7 +243,7 @@ export interface PrimaryActionDescriptor {
    */
   progress?: number | null;
   icon: IconName;
-  intent: "play" | "navigate" | "open-offer" | "install-epic" | "store-choices" | "none";
+  intent: "play" | "navigate" | "open-offer" | "install-epic" | "store-choices" | "locate" | "none";
   route: AppRoute | null;
   offerId: string | null;
   disabled: boolean;
@@ -291,6 +296,7 @@ const PRIMARY_ACTIONS: readonly GameDetailPrimaryAction[] = [
   "install-steam",
   "install-epic",
   "configure-wine",
+  "locate",
   "view-offer",
   "unavailable",
 ];
@@ -574,6 +580,7 @@ function normaliseSummary(value: unknown): GameSummary | null {
     coverUrl: text(value.coverUrl),
     heroUrl: text(value.heroUrl),
     landscapeUrl: text(value.landscapeUrl),
+    logoUrl: text(value.logoUrl),
     genres: visibleLabels(stringList(value.genres)),
     tags: visibleLabels(stringList(value.tags)),
     supportedPlatforms: platforms,
@@ -931,9 +938,12 @@ export function resolvePrimaryAction(
   options: {
     /**
      * Whether this device asks where a game can be got instead of installing
-     * it (`platform-features.ts`): iOS, which can run no PC game.
+     * it (`platform-features.ts`): iOS and Android, where no Steam client
+     * takes a download request.
      */
     storeChoices?: boolean;
+    /** Whether Playport is installed on this device (`playport.ts`). */
+    playport?: boolean;
   } = {},
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
@@ -969,7 +979,7 @@ export function resolvePrimaryAction(
         hint: t("detail.action.playHint", { title: detail.title }),
       };
     case "install-steam": {
-      // Steam cannot install anything on an iPhone. The same word the Library
+      // Steam cannot install anything on a phone. The same word the Library
       // hero uses opens where this device can get the game instead.
       if (options.storeChoices) {
         return {
@@ -1031,6 +1041,18 @@ export function resolvePrimaryAction(
         hint: t("detail.action.epicInstallHint", { title: detail.title }),
       };
     }
+    // Its files moved where no search found them: the way back is to say
+    // where they are now.
+    case "locate":
+      return {
+        ...base,
+        kind: "locate",
+        label: t("detail.action.locate"),
+        icon: "folder",
+        intent: "locate",
+        disabled: false,
+        hint: t("detail.action.locateHint", { title: detail.title }),
+      };
     case "configure-wine":
       return {
         ...base,
@@ -1058,6 +1080,19 @@ export function resolvePrimaryAction(
       };
     }
     case "unavailable":
+      // A GOG or Epic game has nowhere to go on an iPhone — unless Playport is
+      // there to take it, and then the host's menu has that one answer.
+      if (options.storeChoices && options.playport && playportTakes(detail)) {
+        return {
+          ...base,
+          kind: "store-choices",
+          label: t("detail.action.install"),
+          icon: "download",
+          intent: "store-choices",
+          disabled: false,
+          hint: t("detail.action.storeChoicesHint", { title: detail.title }),
+        };
+      }
       return base;
   }
 }
@@ -2021,11 +2056,13 @@ export function createFallbackWallpaperSearch(
       ["The Witcher 3", "/media/igdb/heroes/the-witcher-3-wild-hunt.jpg"],
       ["Hades II", "/media/igdb/heroes/hades-2.jpg"],
     ],
-    // No wordmarks ship with the app: a logo is a transparent PNG per game and
-    // there is nothing generic to stand in for one. The row renders empty in
-    // the browser, which is what a game with no published logo looks like in
-    // the real app too.
-    logo: [],
+    logo: [
+      ["Elden Ring", "/media/igdb/logos/elden-ring.webp"],
+      ["Cyberpunk 2077", "/media/igdb/logos/cyberpunk-2077.webp"],
+      ["Horizon Forbidden West", "/media/igdb/logos/horizon-forbidden-west.webp"],
+      ["The Witcher 3", "/media/igdb/logos/the-witcher-3.webp"],
+      ["Hades II", "/media/igdb/logos/hades-2.webp"],
+    ],
   };
   return {
     phase: "ready",
@@ -2067,6 +2104,7 @@ export function createFallbackGameDetail(gameId: GameId): GameDetailViewModel {
     coverUrl: "/media/igdb/covers/elden-ring.jpg",
     heroUrl: "/media/igdb/heroes/elden-ring-wallpaper.jpg",
     landscapeUrl: "/media/igdb/landscapes/elden-ring.jpg",
+    logoUrl: "/media/igdb/logos/elden-ring.webp",
     genres: ["Action RPG"],
     tags: ["Open world", "Souls-like"],
     supportedPlatforms: ["windows"],

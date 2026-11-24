@@ -458,11 +458,11 @@ node perf/bundle/measure-bundle.mjs
 
 # Android, avec le verrou d'émulateur de l'orchestrateur (voir docs/agent-workplan.md)
 adb -s emulator-5556 install -r -g chemin/vers.apk
-adb -s emulator-5556 shell am force-stop io.orivo.desktop
-adb -s emulator-5556 shell am start -W -n io.orivo.desktop/.MainActivity
-adb -s emulator-5556 shell dumpsys gfxinfo io.orivo.desktop reset
+adb -s emulator-5556 shell am force-stop run.evey.orivo
+adb -s emulator-5556 shell am start -W -n run.evey.orivo/.MainActivity
+adb -s emulator-5556 shell dumpsys gfxinfo run.evey.orivo reset
 # … interagir …
-adb -s emulator-5556 shell dumpsys gfxinfo io.orivo.desktop
+adb -s emulator-5556 shell dumpsys gfxinfo run.evey.orivo
 ```
 
 `--test-threads=1` sur le banc Rust évite que les mesures de compilation

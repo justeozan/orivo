@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring a generated src-tauri/gen/apple in line with the repository.
 #
-#   ./scripts/sync-ios-project.sh
+#   ./scripts/sync-ios-project.sh [config]
 #
 # `tauri ios init` writes that project once, from Tauri's own templates, and the
 # directory is gitignored, so two things in it are wrong for Orivo until this
@@ -10,10 +10,14 @@
 #   The bundle identifier. iOS builds are `run.evey.orivo`, the identifier of
 #   the App Store Connect record (src-tauri/tauri.ios.conf.json). A project
 #   generated before that override still says `io.orivo.desktop`, and a build
-#   carrying it uploads to no record at all. Desktop and Android keep
-#   `io.orivo.desktop`: it names the data directory and the Android package
-#   that existing installs live under, so renaming it there would hand every
-#   one of them an empty library.
+#   carrying it uploads to no record at all. Android is `run.evey.orivo` too,
+#   the package of the Google Play record (src-tauri/tauri.android.conf.json).
+#   The desktop keeps `io.orivo.desktop`: it names the data directory existing
+#   installs live under, so renaming it there would hand every one of them an
+#   empty library. The sideload edition passes its own config
+#   (src-tauri/tauri.ios-sideload.conf.json, see build-ios-sideload.sh), whose
+#   identifier then wins: it is a different app, and must not be mistaken for
+#   the App Store one on a device that has both.
 #
 #   The app icon. Init fills the asset catalog with Tauri's logo, and the App
 #   Store icon is the one Xcode compiles from that catalog. The committed set in
@@ -32,8 +36,9 @@ if [ ! -d "$APPLE" ]; then
   exit 1
 fi
 
+IOS_CONF="${1:-src-tauri/tauri.ios.conf.json}"
 IOS_ID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["identifier"])' \
-  src-tauri/tauri.ios.conf.json)"
+  "$IOS_CONF")"
 
 # Single-quoted perl programs, for the reason run-ios-simulator.sh gives: in
 # double quotes bash expands `$1` before perl ever sees it.

@@ -1,10 +1,16 @@
 //! Where a game can be got on a device that cannot run it.
 //!
-//! An iPhone or an iPad runs no PC game, so "Install" there cannot hand a
-//! download to Steam the way it does on a computer: `steam://` has no handler
-//! on iOS, and the launcher answers `SteamUnsupported` — which is what the
-//! button used to show. What it can honestly offer is the game's own iOS
-//! version, when the App Store sells one, and the game's store page otherwise.
+//! An iPhone, an iPad or an Android device has no Steam client to take a
+//! download, so "Install" there cannot hand one to Steam the way it does on a
+//! computer: `steam://` has no handler on either, and the launcher answers
+//! `SteamUnsupported` — which is what the button used to show. What it can
+//! honestly offer is the game's own iOS version, when the App Store sells one
+//! and the device is an iPhone or an iPad, and the game's store page otherwise.
+//! Google Play has no public search to ask the same question of, so Android
+//! gets the page. (An Epic game is another matter on Android: Orivo downloads
+//! it itself, for Winlator — `epic_android.rs`.) Where Playport is installed,
+//! which only an iPhone or an iPad can be, it comes first: the PC version
+//! itself, played on the device (`playport`).
 //!
 //! Finding the iOS version is a search, so it is strict on purpose: a wrong
 //! answer sends the player to somebody else's app, while a missed one only
@@ -23,7 +29,11 @@ use std::{
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::store::StoreHttp;
+use crate::{
+    catalog::LaunchTarget,
+    playport::{Compatibility, CompatibilityList, PlayportGame},
+    store::StoreHttp,
+};
 
 const APP_STORE_SEARCH: &str = "https://itunes.apple.com/search";
 /// The App Store's own genre id for Games.
@@ -65,8 +75,20 @@ pub enum StoreChoice {
         track_id: u64,
         seller: String,
     },
+    /// The PC version, in Playport, offered only where Playport is installed.
+    /// `None` when Playport's compatibility list could not be read.
+    Playport { verdict: Option<Compatibility> },
     /// The game's page on the Steam store.
     SteamPage { app_id: u32 },
+}
+
+/// Where a choice leads once it is picked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// A store page, opened through the store allowlist like every offer.
+    Page(String),
+    /// Playport, which is an app rather than a page: see `playport::open`.
+    Playport,
 }
 
 /// One row of the menu "Install" opens. The id is all the WebView sends back.
@@ -82,6 +104,7 @@ impl StoreChoice {
     pub fn id(&self) -> &'static str {
         match self {
             Self::AppStore { .. } => "app-store",
+            Self::Playport { .. } => "playport",
             Self::SteamPage { .. } => "steam-page",
         }
     }
@@ -91,6 +114,19 @@ impl StoreChoice {
             Self::AppStore { seller, .. } => {
                 ("iPhone & iPad version".to_string(), format!("App Store · {seller}"))
             }
+            // In the list's own words, so the row agrees with what a player
+            // finds looking the game up there; "broken" is said as the report
+            // it is.
+            Self::Playport { verdict } => (
+                "PC version".to_string(),
+                match verdict {
+                    Some(Compatibility::Runs) => "Playport · Runs",
+                    Some(Compatibility::Broken) => "Playport · Reported broken",
+                    Some(Compatibility::Unlisted) => "Playport · Not on its compatibility list yet",
+                    None => "Playport",
+                }
+                .to_string(),
+            ),
             Self::SteamPage { .. } => (
                 "View on Steam".to_string(),
                 "Its page on the Steam store".to_string(),
@@ -105,25 +141,73 @@ impl StoreChoice {
 
     /// Built from an identifier, never from a URL a response carried: the
     /// search result's own `trackViewUrl` is not trusted with the opener.
-    pub fn url(&self) -> String {
+    pub fn destination(&self) -> Destination {
         match self {
-            Self::AppStore { track_id, .. } => format!("https://apps.apple.com/app/id{track_id}"),
-            Self::SteamPage { app_id } => format!("https://store.steampowered.com/app/{app_id}/"),
+            Self::AppStore { track_id, .. } => {
+                Destination::Page(format!("https://apps.apple.com/app/id{track_id}"))
+            }
+            Self::Playport { .. } => Destination::Playport,
+            Self::SteamPage { app_id } => {
+                Destination::Page(format!("https://store.steampowered.com/app/{app_id}/"))
+            }
         }
     }
 }
 
+/// Everything "Install" can offer for one library game on this device, in
+/// the order the menu shows it: the PC version in Playport, the game's own iOS
+/// version (looked for only where `app_store` says the device installs from
+/// the App Store), then its Steam page.
+///
+/// `playport` is the game as Playport would name it, and only where Playport
+/// is installed. A GOG or Epic Games game has no other answer here: neither
+/// store publishes a page the catalog can name.
+pub async fn choices_for_game(
+    http: &dyn StoreHttp,
+    title: &str,
+    launch_target: &LaunchTarget,
+    region: &str,
+    app_store: bool,
+    playport: Option<&PlayportGame>,
+    compatibility: &CompatibilityList,
+) -> Vec<StoreChoice> {
+    // Playport's list and the stores live on different hosts, so neither
+    // question waits for the other's answer.
+    let in_playport = async {
+        match playport {
+            Some(game) => Some(StoreChoice::Playport {
+                verdict: compatibility.verdict(http, game).await,
+            }),
+            None => None,
+        }
+    };
+    let from_steam = async {
+        match launch_target {
+            LaunchTarget::Steam { app_id } => {
+                choices_for_steam_game(http, title, *app_id, region, app_store).await
+            }
+            _ => Vec::new(),
+        }
+    };
+    let (in_playport, from_steam) = futures_util::future::join(in_playport, from_steam).await;
+    in_playport.into_iter().chain(from_steam).collect()
+}
+
 /// Everything "Install" can offer for a Steam game here: its iOS version when
-/// one is found, then its Steam page, which is always there.
+/// one is found on a device that can install it (`app_store`), then its Steam
+/// page, which is always there.
 pub async fn choices_for_steam_game(
     http: &dyn StoreHttp,
     title: &str,
     app_id: u32,
     region: &str,
+    app_store: bool,
 ) -> Vec<StoreChoice> {
     let mut choices = Vec::new();
-    if let Some(native) = find_ios_version(http, title, app_id, region).await {
-        choices.push(native);
+    if app_store {
+        if let Some(native) = find_ios_version(http, title, app_id, region).await {
+            choices.push(native);
+        }
     }
     choices.push(StoreChoice::SteamPage { app_id });
     choices
@@ -394,11 +478,25 @@ mod tests {
     #[test]
     fn opens_pages_built_from_identifiers_only() {
         let native = StoreChoice::AppStore { track_id: 42, seller: "Studio".into() };
-        assert_eq!(native.url(), "https://apps.apple.com/app/id42");
+        assert_eq!(native.destination(), Destination::Page("https://apps.apple.com/app/id42".into()));
         assert_eq!(
-            StoreChoice::SteamPage { app_id: 1_245_620 }.url(),
-            "https://store.steampowered.com/app/1245620/"
+            StoreChoice::SteamPage { app_id: 1_245_620 }.destination(),
+            Destination::Page("https://store.steampowered.com/app/1245620/".into())
         );
+        // Playport is an app, not a page: it never reaches the store allowlist.
+        assert_eq!(StoreChoice::Playport { verdict: None }.destination(), Destination::Playport);
+    }
+
+    #[test]
+    fn the_playport_row_says_what_its_list_says() {
+        let detail = |verdict| StoreChoice::Playport { verdict }.view().detail;
+        assert_eq!(detail(Some(Compatibility::Runs)), "Playport · Runs");
+        assert_eq!(detail(Some(Compatibility::Broken)), "Playport · Reported broken");
+        assert_eq!(detail(Some(Compatibility::Unlisted)), "Playport · Not on its compatibility list yet");
+        // A list that could not be read says where the row leads, and no more.
+        assert_eq!(detail(None), "Playport");
+        let view = StoreChoice::Playport { verdict: None }.view();
+        assert_eq!((view.id.as_str(), view.label.as_str()), ("playport", "PC version"));
     }
 
     #[test]
@@ -428,6 +526,13 @@ mod tests {
     struct FakeHttp {
         steam: Result<Value, String>,
         apple: Result<Value, String>,
+        playport: Result<Value, String>,
+    }
+
+    impl FakeHttp {
+        fn new(steam: Result<Value, String>, apple: Result<Value, String>) -> Self {
+            Self { steam, apple, playport: Err("not asked".into()) }
+        }
     }
 
     impl StoreHttp for FakeHttp {
@@ -439,6 +544,8 @@ mod tests {
                 self.steam.clone()
             } else if url.starts_with(APP_STORE_SEARCH) {
                 self.apple.clone()
+            } else if url.starts_with("https://playport.dev/") {
+                self.playport.clone()
             } else {
                 Err(format!("unexpected request {url}"))
             };
@@ -450,15 +557,19 @@ mod tests {
         tauri::async_runtime::block_on(future)
     }
 
-    #[test]
-    fn offers_the_ios_version_first_and_the_steam_page_after_it() {
-        let http = FakeHttp {
-            steam: Ok(json!({ "413150": { "success": true, "data": {
+    fn stardew() -> FakeHttp {
+        FakeHttp::new(
+            Ok(json!({ "413150": { "success": true, "data": {
                 "name": "Stardew Valley", "developers": ["ConcernedApe"], "publishers": ["ConcernedApe"]
             }}})),
-            apple: Ok(search(vec![result("Stardew Valley", "ConcernedApe", "ConcernedApe LLC", GAMES_GENRE_ID, 5)])),
-        };
-        let choices = block_on(choices_for_steam_game(&http, "Stardew Valley", 413_150, "US"));
+            Ok(search(vec![result("Stardew Valley", "ConcernedApe", "ConcernedApe LLC", GAMES_GENRE_ID, 5)])),
+        )
+    }
+
+    #[test]
+    fn offers_the_ios_version_first_and_the_steam_page_after_it() {
+        let http = stardew();
+        let choices = block_on(choices_for_steam_game(&http, "Stardew Valley", 413_150, "US", true));
         assert_eq!(
             choices,
             vec![
@@ -469,24 +580,108 @@ mod tests {
     }
 
     #[test]
+    fn an_android_device_is_offered_the_steam_page_and_never_the_app_store() {
+        // The same answers that put the iOS version first above: an Android
+        // device cannot install it, so it must not even be looked for.
+        let choices = block_on(choices_for_steam_game(&stardew(), "Stardew Valley", 413_150, "US", false));
+        assert_eq!(choices, vec![StoreChoice::SteamPage { app_id: 413_150 }]);
+    }
+
+    #[test]
     fn an_unreachable_store_still_leaves_the_steam_page() {
-        let http = FakeHttp {
-            steam: Err("offline".into()),
-            apple: Err("offline".into()),
-        };
-        let choices = block_on(choices_for_steam_game(&http, "Elden Ring", 1_245_620, "US"));
+        let http = FakeHttp::new(Err("offline".into()), Err("offline".into()));
+        let choices = block_on(choices_for_steam_game(&http, "Elden Ring", 1_245_620, "US", true));
         assert_eq!(choices, vec![StoreChoice::SteamPage { app_id: 1_245_620 }]);
+    }
+
+    fn playport_list() -> Value {
+        json!({ "games": [
+            { "name": "Stardew Valley", "store": "steam", "id": "413150", "status": "runs" },
+            { "name": "BioShock", "store": "gog", "id": "2022341186", "status": "broken" },
+        ]})
+    }
+
+    fn provider_target(provider: &str, app_ref: &str) -> LaunchTarget {
+        LaunchTarget::Provider { provider: provider.into(), app_ref: app_ref.into() }
+    }
+
+    #[test]
+    fn puts_the_pc_version_in_playport_before_every_other_answer() {
+        let http = FakeHttp { playport: Ok(playport_list()), ..stardew() };
+        let stardew_valley = PlayportGame::Steam { app_id: 413_150 };
+        let target = LaunchTarget::Steam { app_id: 413_150 };
+        let list = CompatibilityList::new();
+        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "US", true, Some(&stardew_valley), &list));
+        assert_eq!(
+            choices,
+            vec![
+                StoreChoice::Playport { verdict: Some(Compatibility::Runs) },
+                StoreChoice::AppStore { track_id: 5, seller: "ConcernedApe LLC".into() },
+                StoreChoice::SteamPage { app_id: 413_150 },
+            ]
+        );
+    }
+
+    #[test]
+    fn without_playport_a_steam_game_keeps_the_answers_it_had() {
+        let target = LaunchTarget::Steam { app_id: 413_150 };
+        let list = CompatibilityList::new();
+        let choices = block_on(choices_for_game(&stardew(), "Stardew Valley", &target, "US", true, None, &list));
+        assert_eq!(
+            choices,
+            vec![
+                StoreChoice::AppStore { track_id: 5, seller: "ConcernedApe LLC".into() },
+                StoreChoice::SteamPage { app_id: 413_150 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gog_or_epic_game_has_playport_or_nothing() {
+        let http = FakeHttp {
+            playport: Ok(playport_list()),
+            ..FakeHttp::new(Err("not asked".into()), Err("not asked".into()))
+        };
+        let list = CompatibilityList::new();
+        let gog = provider_target("gog", "2022341186");
+        let bioshock = PlayportGame::Gog { product_id: "2022341186".into() };
+        assert_eq!(
+            block_on(choices_for_game(&http, "BioShock", &gog, "US", true, Some(&bioshock), &list)),
+            vec![StoreChoice::Playport { verdict: Some(Compatibility::Broken) }]
+        );
+        assert_eq!(block_on(choices_for_game(&http, "BioShock", &gog, "US", true, None, &list)), Vec::new());
+        let epic = provider_target("epic", "ns:item:SuperMeatBoy");
+        let super_meat_boy = PlayportGame::Epic { title: "Super Meat Boy".into() };
+        assert_eq!(
+            block_on(choices_for_game(&http, "Super Meat Boy", &epic, "US", true, Some(&super_meat_boy), &list)),
+            vec![StoreChoice::Playport { verdict: Some(Compatibility::Unlisted) }]
+        );
+    }
+
+    #[test]
+    fn an_unreadable_playport_list_still_leaves_the_row() {
+        let http = FakeHttp::new(Err("offline".into()), Err("offline".into()));
+        let stardew_valley = PlayportGame::Steam { app_id: 413_150 };
+        let target = LaunchTarget::Steam { app_id: 413_150 };
+        let list = CompatibilityList::new();
+        let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "US", true, Some(&stardew_valley), &list));
+        assert_eq!(
+            choices,
+            vec![StoreChoice::Playport { verdict: None }, StoreChoice::SteamPage { app_id: 413_150 }]
+        );
     }
 
     #[test]
     fn the_answer_to_a_menu_is_the_choice_it_offered() {
         let choices = [
+            StoreChoice::Playport { verdict: Some(Compatibility::Runs) },
             StoreChoice::AppStore { track_id: 8, seller: "Studio".into() },
             StoreChoice::SteamPage { app_id: 10 },
         ];
         remember("steam:10", &choices);
-        assert_eq!(recall("steam:10", "app-store"), Some(choices[0].clone()));
-        assert_eq!(recall("steam:10", "steam-page"), Some(choices[1].clone()));
+        assert_eq!(recall("steam:10", "playport"), Some(choices[0].clone()));
+        assert_eq!(recall("steam:10", "app-store"), Some(choices[1].clone()));
+        assert_eq!(recall("steam:10", "steam-page"), Some(choices[2].clone()));
         assert_eq!(recall("steam:10", "something-else"), None);
         assert_eq!(recall("steam:11", "steam-page"), None);
     }

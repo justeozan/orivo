@@ -278,6 +278,15 @@ pub struct Catalog {
     /// or fail together.
     #[serde(default)]
     pub plugin_grants: Vec<PluginGrantRecord>,
+    /// Library entries this build cannot read, kept exactly as they were.
+    ///
+    /// A newer Orivo can add a source, a launch target or a field shape that
+    /// this build has never heard of. Refusing the whole library over one such
+    /// entry locks the user out of every other game, and dropping it would
+    /// lose it for the newer build too. So the entry is left out of the
+    /// library here and written back untouched on every save.
+    #[serde(skip)]
+    pub unreadable_games: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -1313,6 +1322,7 @@ impl Default for Catalog {
             runner_profiles: Vec::new(),
             runner_inventory: Vec::new(),
             plugin_grants: Vec::new(),
+            unreadable_games: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -1328,7 +1338,7 @@ impl Catalog {
     /// migrated record, so a failed write cannot damage the source file.
     pub fn load_with_migration(path: &Path) -> Result<LoadedCatalog, CatalogError> {
         let contents = fs::read_to_string(path)?;
-        let mut catalog: Self = serde_json::from_str(&contents)?;
+        let mut catalog = Self::parse_keeping_unreadable_games(&contents)?;
         let mut rewritten_game_ids = BTreeMap::new();
         let migrated_from = match catalog.schema_version {
             CURRENT_SCHEMA_VERSION => None,
@@ -1407,9 +1417,68 @@ impl Catalog {
         })
     }
 
+    /// Parse a catalog document, setting aside every game entry this build
+    /// cannot read (see `unreadable_games`) instead of failing the whole file.
+    /// Anything wrong outside the games list is still an error.
+    fn parse_keeping_unreadable_games(contents: &str) -> Result<Self, CatalogError> {
+        // The common case keeps serde's precise line and column on errors and
+        // costs nothing extra.
+        let strict_error = match serde_json::from_str::<Self>(contents) {
+            Ok(catalog) => return Ok(catalog),
+            Err(error) => error,
+        };
+        let Ok(mut document) = serde_json::from_str::<serde_json::Value>(contents) else {
+            return Err(strict_error.into());
+        };
+        let Some(serde_json::Value::Array(entries)) = document.get_mut("games") else {
+            return Err(strict_error.into());
+        };
+        let mut unreadable = Vec::new();
+        for entry in std::mem::take(entries) {
+            match Game::deserialize(&entry) {
+                Ok(_) => entries.push(entry),
+                Err(error) => {
+                    eprintln!(
+                        "catalog: keeping an entry this version cannot read ({}): {error}",
+                        entry.get("id").and_then(|id| id.as_str()).unwrap_or("no id")
+                    );
+                    unreadable.push(entry);
+                }
+            }
+        }
+        if unreadable.is_empty() {
+            return Err(strict_error.into());
+        }
+        let mut catalog: Self = serde_json::from_value(document)?;
+        catalog.unreadable_games = unreadable;
+        Ok(catalog)
+    }
+
     pub fn save_atomically(&self, path: &Path) -> Result<(), CatalogError> {
         self.validate()?;
-        let json = serde_json::to_string_pretty(self)? + "\n";
+        let json = if self.unreadable_games.is_empty() {
+            serde_json::to_string_pretty(self)?
+        } else {
+            let mut document = serde_json::to_value(self)?;
+            if let Some(games) = document.get_mut("games").and_then(|g| g.as_array_mut()) {
+                // An id this build has since given to a game of its own wins:
+                // two entries under one id would make the file invalid for
+                // every build, the newer one included.
+                let taken: BTreeSet<&str> = self.games.iter().map(|g| g.id.as_str()).collect();
+                games.extend(
+                    self.unreadable_games
+                        .iter()
+                        .filter(|entry| {
+                            entry
+                                .get("id")
+                                .and_then(|id| id.as_str())
+                                .is_none_or(|id| !taken.contains(id))
+                        })
+                        .cloned(),
+                );
+            }
+            serde_json::to_string_pretty(&document)?
+        } + "\n";
         let temporary_path = path.with_extension("json.tmp");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -5943,6 +6012,73 @@ mod tests {
         assert!(loaded.catalog.runner_inventory.is_empty());
         assert!(loaded.catalog.plugin_grants.is_empty());
         loaded.catalog.validate().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// The current catalog with one game written by a newer Orivo, under a
+    /// source this build has never heard of.
+    fn catalog_with_a_game_from_a_newer_build(path: &Path) -> serde_json::Value {
+        let mut catalog = Catalog::default();
+        catalog
+            .games
+            .push(Game::from_executable(std::env::current_exe().unwrap()).unwrap());
+        let newer = serde_json::json!({
+            "id": "stream:host:hades",
+            "title": "Hades",
+            "source": "a_source_from_the_future",
+            "source_id": "hades",
+        });
+        let mut document = serde_json::to_value(&catalog).unwrap();
+        document["games"].as_array_mut().unwrap().push(newer.clone());
+        fs::write(path, serde_json::to_string_pretty(&document).unwrap()).unwrap();
+        newer
+    }
+
+    #[test]
+    fn a_game_from_a_newer_build_does_not_lock_the_library() {
+        let directory = temporary_migration_directory("unreadable-game");
+        let path = directory.join("catalog.json");
+        let newer = catalog_with_a_game_from_a_newer_build(&path);
+
+        let catalog = Catalog::load(&path).unwrap();
+        assert_eq!(catalog.games.len(), 1);
+        assert_eq!(catalog.unreadable_games, vec![newer.clone()]);
+
+        // Saving here writes the entry back untouched for the newer build.
+        catalog.save_atomically(&path).unwrap();
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let games = on_disk["games"].as_array().unwrap();
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[1], newer);
+        assert_eq!(Catalog::load(&path).unwrap(), catalog);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_kept_entry_gives_way_to_a_game_now_holding_its_id() {
+        let directory = temporary_migration_directory("unreadable-game-id");
+        let path = directory.join("catalog.json");
+        catalog_with_a_game_from_a_newer_build(&path);
+
+        let mut catalog = Catalog::load(&path).unwrap();
+        let mut same_id = catalog.games[0].clone();
+        same_id.id = "stream:host:hades".into();
+        catalog.games.push(same_id);
+        catalog.save_atomically(&path).unwrap();
+
+        let reloaded = Catalog::load(&path).unwrap();
+        assert_eq!(reloaded.games.len(), 2);
+        assert!(reloaded.unreadable_games.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_broken_document_is_still_refused() {
+        let directory = temporary_migration_directory("broken-document");
+        let path = directory.join("catalog.json");
+        fs::write(&path, r#"{"schema_version": "nine", "games": []}"#).unwrap();
+        assert!(matches!(Catalog::load(&path), Err(CatalogError::Json(_))));
         fs::remove_dir_all(directory).unwrap();
     }
 

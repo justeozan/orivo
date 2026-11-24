@@ -745,6 +745,57 @@ describe("game detail page on a device that cannot install", () => {
     expect(container.querySelector<HTMLElement>(".gd-store-choices .play-launch-menu")!.hidden).toBe(true);
     expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "steam-page");
   });
+
+  const playport = { id: "playport", label: "PC version", detail: "Playport · Runs" };
+
+  async function mountGogGame(playportInstalled: boolean) {
+    const detail = createFallbackGameDetail(GAME_ID);
+    // What an iPhone's host sends for a GOG game: no client, no store page.
+    detail.source = "gog";
+    detail.primaryAction = "unavailable";
+    detail.hostPlatform = "other";
+    detail.supportedPlatforms = ["windows"];
+    detail.launchable = false;
+    detail.offers = [];
+    const storeChoices = {
+      list: vi.fn(async () => [playport]),
+      open: vi.fn(async () => {}),
+    };
+    const page = createGameDetailPage({
+      navigate: () => {},
+      back: () => {},
+      play: () => {},
+      client: clientWithDetail(detail),
+      storeChoices: () => storeChoices,
+      playportInstalled: () => playportInstalled,
+    });
+    host = new PageLifecycleHost(container, page);
+    await host.activate({ page: "game", gameId: GAME_ID, from: "library" });
+    await flush();
+    return storeChoices;
+  }
+
+  it("sends a GOG game to Playport when Playport is installed", async () => {
+    const storeChoices = await mountGogGame(true);
+    expect(primary().disabled).toBe(false);
+    expect(primary().textContent).toBe("Install");
+
+    primary().click();
+    await flush();
+
+    // Its one answer opens without a menu.
+    expect(storeChoices.list).toHaveBeenCalledWith(GAME_ID);
+    expect(storeChoices.open).toHaveBeenCalledWith(GAME_ID, "playport");
+  });
+
+  it("leaves a GOG game unavailable where nothing can take it", async () => {
+    const storeChoices = await mountGogGame(false);
+    expect(primary().disabled).toBe(true);
+    expect(primary().dataset.action).toBe("unavailable");
+    primary().click();
+    await flush();
+    expect(storeChoices.list).not.toHaveBeenCalled();
+  });
 });
 
 describe("watching an Epic install", () => {

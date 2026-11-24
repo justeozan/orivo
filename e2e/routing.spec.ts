@@ -148,7 +148,9 @@ test.describe("hash router", () => {
         await fresh.goto(`${origin}/${hash}`, { waitUntil: "domcontentloaded" });
         await fresh.waitForSelector("#app-page-game:not([hidden]) .gd-hero__title", { state: "visible" });
         await fresh.locator(".gd-back").click();
-        await fresh.waitForSelector("#app-page-library:not([hidden]) #hero-title", { state: "visible" });
+        await fresh.waitForSelector("#app-page-library:not([hidden]) :is(#hero-title, #hero-logo):not([hidden])", {
+          state: "visible",
+        });
 
         expect(fresh.url(), `${hash}: Back left the application`).toContain("#/library");
         expect(fresh.url()).not.toContain("about:blank");

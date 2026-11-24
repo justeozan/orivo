@@ -384,3 +384,39 @@ describe("About panel updater after the shell is torn down", () => {
     }
   });
 });
+
+describe("About panel updater where a store delivers new versions", () => {
+  /**
+   * Tauri's updater has no installer on iOS or Android, so a check there only
+   * ends in an error — which an App Store reviewer would find in Settings.
+   * When the host says it does not update itself, nothing is checked and the
+   * row is not shown.
+   */
+  it("neither checks nor shows the updates row", async () => {
+    vi.useFakeTimers();
+    try {
+      window.location.hash = "";
+      window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+      (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
+      tauri.invoke.mockReset();
+      tauri.invoke.mockImplementation(async (command: string) =>
+        command === "get_platform_features" ? { selfUpdates: false } : undefined,
+      );
+      updater.check.mockReset();
+
+      document.body.replaceChildren();
+      const root = document.createElement("div");
+      document.body.append(root);
+      detachShell = mountApp(root, { storePage: stubPage(), gameDetailPage: stubPage() });
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(updater.check).not.toHaveBeenCalled();
+      expect(root.querySelector<HTMLElement>("#updates-row")?.hidden).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+      window.location.hash = "";
+    }
+  });
+});

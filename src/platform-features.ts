@@ -21,6 +21,11 @@ export interface PlatformFeatures {
    * app by itself, so there it is neither done nor offered as a setting.
    */
   stepsAside: boolean;
+  /**
+   * Orivo checks for and installs its own new versions. Desktop only: on a
+   * phone or tablet a new version comes from the store.
+   */
+  selfUpdates: boolean;
 }
 
 export const DESKTOP_FEATURES: PlatformFeatures = {
@@ -28,6 +33,7 @@ export const DESKTOP_FEATURES: PlatformFeatures = {
   localRunners: true,
   storeChoices: false,
   stepsAside: true,
+  selfUpdates: true,
 };
 
 function isTauriRuntime(): boolean {
@@ -45,6 +51,7 @@ export function readPlatformFeatures(value: unknown): PlatformFeatures {
     localRunners: flag("localRunners"),
     storeChoices: flag("storeChoices"),
     stepsAside: flag("stepsAside"),
+    selfUpdates: flag("selfUpdates"),
   };
 }
 

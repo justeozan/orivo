@@ -1,4 +1,5 @@
 import "./game-detail-page.css";
+import { applyLogoFit, prepareLogo } from "./logo-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { WALLPAPER_CATEGORIES } from "./contracts";
 import type {
@@ -119,8 +120,11 @@ export interface GameDetailPageClient {
    * error, when the game has none or the store cannot be reached.
    */
   getStoreMedia(gameId: string, signal: AbortSignal): Promise<StoreMediaView>;
-  /** Remove a game from the library (does not touch the game's own files). */
-  removeGame(gameId: string, signal: AbortSignal): Promise<void>;
+  /**
+   * Remove a game from the library (does not touch the game's own files).
+   * Resolves `true` when a games folder still holds it, so it will come back.
+   */
+  removeGame(gameId: string, signal: AbortSignal): Promise<boolean | void>;
   setGameHidden(
     gameId: string,
     hidden: boolean,
@@ -243,6 +247,11 @@ export interface GameDetailPageOptions {
    */
   onLibraryChanged?(): void;
   /**
+   * Asks where a game that moved is now (the host's file dialog). Resolves
+   * true when the card was pointed at what the player picked.
+   */
+  locate?(gameId: string): Promise<boolean>;
+  /**
    * Says something to the user when the page cannot: a save that finished (or
    * failed) after they left it. Without it the outcome goes to the console.
    */
@@ -259,6 +268,11 @@ export interface GameDetailPageOptions {
    * follows the shell as soon as it has learned what the platform is.
    */
   storeChoices?(): StoreChoicesClient | null;
+  /**
+   * Whether Playport is installed (`playport.ts`), which is what gives a GOG
+   * or Epic game somewhere to go where Install asks. Asked each time too.
+   */
+  playportInstalled?(): boolean;
   client?: GameDetailPageClient;
 }
 
@@ -394,8 +408,9 @@ export function createDefaultGameDetailPageClient(): GameDetailPageClient {
       );
     },
     async removeGame(gameId, signal) {
-      if (!isTauriRuntime()) return;
-      await invokeWhileActive("remove_game", { gameId }, signal);
+      if (!isTauriRuntime()) return false;
+      const result = await invokeWhileActive<unknown>("remove_game", { gameId }, signal);
+      return (result as { returnsFromGamesFolder?: unknown } | null)?.returnsFromGamesFolder === true;
     },
     async setGameHidden(gameId, hidden, signal) {
       if (!isTauriRuntime()) return;
@@ -699,6 +714,11 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
   };
 
   const storeChoicesClient = (): StoreChoicesClient | null => options.storeChoices?.() ?? null;
+  /** What the device lets Install do, read afresh for every resolution. */
+  const actionOptions = () => ({
+    storeChoices: storeChoicesClient() !== null,
+    playport: options.playportInstalled?.() ?? false,
+  });
 
   /**
    * Install on a device that installs nothing: open the one place the host
@@ -745,9 +765,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const context = activation;
     const gameId = state.gameId;
     if (!isActive(context) || !gameId) return;
-    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent, {
-      storeChoices: storeChoicesClient() !== null,
-    });
+    const action = resolvePrimaryAction(state.detail, gameId, epicProgressPercent, actionOptions());
     if (action.disabled) return;
     if (action.intent === "store-choices") {
       const choicesClient = storeChoicesClient();
@@ -762,6 +780,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
     if (action.intent === "navigate" && action.route) {
       options.navigate(action.route);
+      return;
+    }
+    if (action.intent === "locate") {
+      if (options.locate && (await options.locate(gameId)) && isFresh(context, gameId)) {
+        await loadDetail(context, gameId);
+      }
       return;
     }
     if (action.intent === "install-epic") {
@@ -885,10 +909,10 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = state.detail?.title ?? t("detail.thisGame");
     if (!isActive(context) || !gameId) return;
     try {
-      await client.removeGame(gameId, context.signal);
+      const returns = await client.removeGame(gameId, context.signal);
       if (!isActive(context)) return;
       options.onLibraryChanged?.();
-      showTransientStatus(t("detail.remove.done", { title }));
+      showTransientStatus(t(returns === true ? "detail.remove.returns" : "detail.remove.done", { title }));
       options.back();
     } catch (error) {
       if (!isActive(context) || isUserCancellation(error)) return;
@@ -1249,7 +1273,7 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
       detail,
       state.gameId,
       epicProgressPercent,
-      { storeChoices: storeChoicesClient() !== null },
+      actionOptions(),
     );
     const button = element(
       "button",
@@ -2242,6 +2266,23 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     const title = element("h1", "gd-hero__title", detail.title);
     title.id = "gd-hero-title";
     copy.append(title);
+    // The wordmark replaces the text only once it has decoded: the h1 keeps
+    // the accessible name and stands whenever there is no logo or it fails.
+    if (detail.logoUrl) {
+      const source = detail.logoUrl;
+      void prepareLogo(source).then((logo) => {
+        if (!logo || !title.isConnected) return;
+        const image = document.createElement("img");
+        image.className = "gd-hero__logo";
+        image.alt = "";
+        image.decoding = "async";
+        image.src = logo.src;
+        applyLogoFit(image, logo);
+        title.replaceChildren(image);
+        title.classList.add("has-logo");
+        title.setAttribute("aria-label", detail.title);
+      });
+    }
     // The approved design's meta row starts straight at the developer name —
     // no source logo in front of it.
     const subline = element("div", "gd-hero__subline");
