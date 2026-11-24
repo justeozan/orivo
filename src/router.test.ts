@@ -32,6 +32,38 @@ describe("HashRouter.back", () => {
   });
 });
 
+describe("HashRouter.navigate", () => {
+  it("tells its listeners at once, and the hashchange that follows is only an echo", async () => {
+    window.location.hash = "#/settings/general";
+    const router = new HashRouter();
+    const heard: string[] = [];
+    const stop = router.start((route) => heard.push(appRouteToHash(route)));
+
+    router.navigate({ page: "settings", section: "libraries", attachGameId: null });
+    router.navigate({ page: "settings", section: "general", attachGameId: null });
+    // Before any queued hashchange has run: the page already shows the route
+    // the URL names, so the next key lands on it and not on the one before.
+    expect(heard).toEqual(["#/settings/general", "#/settings/libraries", "#/settings/general"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(heard).toHaveLength(3);
+    stop();
+  });
+
+  it("still follows a hash it did not set itself", async () => {
+    window.location.hash = "#/library";
+    const router = new HashRouter();
+    const heard: string[] = [];
+    const stop = router.start((route) => heard.push(appRouteToHash(route)));
+
+    // Back, forward or a typed URL reach the router only through hashchange.
+    window.location.hash = "#/store";
+    await new Promise((resolve) => window.addEventListener("hashchange", resolve, { once: true }));
+    expect(heard).toEqual(["#/library", "#/store"]);
+    stop();
+  });
+});
+
 describe("hash routing", () => {
   it("uses Library as the stable default", () => {
     expect(parseAppRoute("")).toEqual({ page: "library" });

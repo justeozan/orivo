@@ -8425,7 +8425,7 @@ function shell(): string {
       </header>
 
       <div class="selector">
-      <div id="app-page-library" class="app-page app-page--library">
+      <main id="app-page-library" class="app-page app-page--library">
       <div class="hero-media" aria-hidden="true">
         <div id="hero-ground" class="hero-ground art-ground"></div>
         <img id="hero-a" class="hero-image" alt="" />
@@ -8566,7 +8566,7 @@ function shell(): string {
              every one of them can be waiting on a sign-in window. -->
         <div id="onboarding-panel" class="onboarding__panel"></div>
       </section>
-      </div>
+      </main>
 
       <div id="app-page-store" class="app-page app-page--store"></div>
       <div id="app-page-me" class="app-page app-page--scroll app-page--overlay"></div>
@@ -8574,7 +8574,7 @@ function shell(): string {
       <div id="app-page-game" class="app-page app-page--fit app-page--overlay"></div>
 
       <div id="app-page-settings" class="app-page app-page--scroll app-page--settings">
-        <div class="settings-layout">
+        <main class="settings-layout">
           <!-- One word and one glyph per section. The sidebar carries the
                section's name and nothing else: its description is already the
                line under the page title, so saying it twice cost a second line
@@ -8963,16 +8963,16 @@ function shell(): string {
               </div>
             </section>
           </div>
-        </div>
+        </main>
       </div>
 
       <div id="app-page-not-found" class="app-page app-page--scroll app-page--not-found">
-        <section class="not-found">
+        <main class="not-found">
           <p class="not-found__code">404</p>
           <h1 class="not-found__title">${t("app.notFound.title")}</h1>
           <p id="not-found-detail" class="not-found__detail"></p>
           <button type="button" class="settings-button settings-button--primary" data-app-action="go-library">${t("app.notFound.back")}</button>
-        </section>
+        </main>
       </div>
 
       <p id="toast" class="toast" role="status" aria-live="polite"></p>

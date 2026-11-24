@@ -131,7 +131,18 @@ export type RouteListener = (route: AppRoute) => void;
 
 export class HashRouter {
   readonly #listeners = new Set<RouteListener>();
-  readonly #onHashChange = (): void => this.#emit();
+  /**
+   * The hash the listeners were last told about. `navigate()` tells them at
+   * once, because `hashchange` is a queued task: a busy page (a key held
+   * down, a controller, a CI runner) can take further keys before it runs,
+   * and they would land on a page still showing the route the URL has left.
+   * The event that follows is then only the echo of what they already have.
+   */
+  #heard: string | null = null;
+  readonly #onHashChange = (): void => {
+    // Back, forward or a hand-typed URL: something the router did not do.
+    if (window.location.hash !== this.#heard) this.#emit();
+  };
   /**
    * Entries this router pushed itself. `window.history.length` also counts
    * entries from before the app was loaded, so trusting it sends `back()`
@@ -146,6 +157,7 @@ export class HashRouter {
   start(listener: RouteListener): () => void {
     this.#listeners.add(listener);
     if (this.#listeners.size === 1) window.addEventListener("hashchange", this.#onHashChange);
+    this.#heard = window.location.hash;
     listener(this.current);
     return () => {
       this.#listeners.delete(listener);
@@ -161,6 +173,7 @@ export class HashRouter {
     } else if (window.location.hash !== hash) {
       this.#pushDepth += 1;
       window.location.hash = hash;
+      this.#emit();
     } else {
       this.#emit();
     }
@@ -176,6 +189,7 @@ export class HashRouter {
   }
 
   #emit(): void {
+    this.#heard = window.location.hash;
     const route = this.current;
     for (const listener of this.#listeners) listener(route);
   }

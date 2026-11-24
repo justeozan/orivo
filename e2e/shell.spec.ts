@@ -18,7 +18,7 @@ const ROUTES: Array<{ hash: string; name: PageName; label: string }> = [
   { hash: "#/nowhere-at-all", name: "not-found", label: "Not found" },
 ];
 
-/** The routes whose page root is a `<main>` today. */
+/** The routes whose page is mounted on demand, each with its own `<main>`. */
 const ROUTES_WITH_MAIN = ROUTES.filter((route) => route.name === "store" || route.name === "game");
 
 test.describe("landmark structure", () => {
@@ -58,15 +58,9 @@ test.describe("landmark structure", () => {
   });
 
   test("every route exposes a main landmark", async ({ page }) => {
-    // KNOWN PRODUCT DEFECT — only the Store (`main.store-page`) and the game
-    // detail (`main.gd-page`) build their page root as a `<main>`. The Library
-    // host, the Settings host (`div.settings-layout`) and the 404 host
-    // (`section.not-found`) render zero `<main>` elements, so on those three
-    // routes a screen reader has no main landmark to jump to at all.
-    // Repro: open #/settings/general and run
-    // `[...document.querySelectorAll("main")].filter(m => !m.closest("[hidden]")).length` → 0.
-    test.fail();
-
+    // The Library host, the Settings layout and the 404 page are each a
+    // <main>, like the Store's and the game page's roots, so a screen reader
+    // can jump to the page from the topbar on every route.
     for (const route of ROUTES) {
       await openRoute(page, route.hash, route.name);
       const report = await mainLandmarks(page);
