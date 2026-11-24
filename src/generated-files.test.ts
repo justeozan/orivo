@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { STORE_CATALOG } from "./generated/store-catalog";
 
 /**
  * Files a script writes live in `src/generated/`, and only there, so that a
@@ -31,5 +32,17 @@ describe("generated files", () => {
       (path) => !path.startsWith("generated") && /\.generated\.\w+$/.test(path),
     );
     expect(strays).toEqual([]);
+  });
+
+  // `scripts/build-store-catalog.mjs` writes the catalogue twice: as
+  // TypeScript for the WebView, and as JSON that `store.rs` embeds with
+  // `include_str!`. They drifted once already — the TypeScript was regenerated
+  // after the cards moved to the store capsule, the JSON was not, and the
+  // desktop Store kept showing the old scenes.
+  it("give the WebView and the Rust host the same Store catalogue", () => {
+    const embedded = JSON.parse(
+      readFileSync(join(ROOT, "src-tauri/resources/store-catalog.json"), "utf8"),
+    );
+    expect(STORE_CATALOG).toEqual(embedded);
   });
 });
