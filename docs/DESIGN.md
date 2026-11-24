@@ -299,6 +299,64 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
 - **La galerie de droite est bornée par la bande et défile.** Ses tuiles gardent leur cadre 16:9: se partager la hauteur donnait 2px par tuile sur une galerie de quatorze images, et les laisser à leur taille naturelle en tranchait une sur le bord de la bande.
 - Les états de chargement, d'erreur et de page introuvable ne prennent pas ce cadre: ce sont des états courts et centrés, qui paraîtraient perdus étirés sur un viewport.
 
+### 4.4 Réglages et panneaux de plugin — limpide, visuel, compact, épuré
+
+**La règle à lire avant de dessiner un panneau de Settings ou de plugin.** Chaque panneau construit sans elle est sorti trop bavard, et il a fallu le reprendre à la main. Les reprises du 25 octobre et du 15 novembre 2026 en sont l'origine : Libraries en cartes, Plugins en cartes avec un panneau de détail, Wallpaper Searcher par source, mise à jour en puces.
+
+**Principe :** un panneau se comprend d'un coup d'œil. Ce sont la forme et la couleur qui donnent l'information : logo, pastille, bouton. Le texte nomme les choses, il ne les explique pas. Si un panneau a besoin d'une phrase pour être compris, c'est sa structure qu'il faut revoir, pas sa phrase.
+
+#### Le texte
+
+| Élément | Budget | Oui | Non |
+| --- | --- | --- | --- |
+| Libellé | 1 à 3 mots | `Outils de build` | `xcodegen, zstd et glslang` |
+| État | 1 à 2 mots, dans une pastille | `Manquant` · `Prêt` · `Xcode 26.4` | `Manquant : lz4,capstone,fontTools,nsz,zbic` |
+| Bouton | un verbe, avec son objet s'il le faut | `Installer` · `Construire` | `Construire une IPA iPhone…` sous une phrase d'aide |
+| Ligne secondaire | un fait, 6 mots au plus | une version, `2 sur 9` | une phrase avec un sujet et un verbe |
+| Vide | rien : la section n'est pas dessinée | — | `Les jeux que vous construisez apparaissent ici, avec leurs réglages.` |
+
+- **Aucun paragraphe dans un panneau.** Pas d'intro sous l'en-tête : l'icône, le nom et la pastille de catégorie disent déjà de quoi il s'agit. Pas de note sous un bouton. Une précision utile va dans le `title` de l'élément (son infobulle) ou derrière un (i).
+- **Ce qu'Orivo fait en coulisses ne s'affiche pas.** Une phrase comme « Orivo transmet votre prod.keys et ne l'ouvre jamais » ou « Choisissez le dossier qui contient… » est une garantie ou un mode d'emploi. Sa place est dans `docs/`, ou dans le sélecteur natif qui s'ouvre au clic.
+- Les détails longs restent dans l'infobulle, comme une liste de modules ou un chemin de logs. Une pastille ne grandit jamais avec la donnée qu'elle porte.
+
+#### La forme
+
+- **Une ligne par chose.** Le libellé à gauche, la pastille d'état, puis une seule action à droite (`plugin-field`). Les lignes sont séparées d'un filet : jamais de carte dans une carte, ni de bloc de code.
+- **Un état est une pastille.** On utilise `ws-pill` (neutre) et `ws-pill--on` (prêt ou connecté). La couleur porte l'état, le mot le confirme.
+- **Ce qui est réglé se replie.** Une liste de prérequis ne montre que ce qui manque. Quand tout est prêt, elle tient en une ligne avec une pastille `Prêt`. Un compteur (`6/9`) est une pastille, pas un titre.
+- **Le bouton fait la chose, dans Orivo.** On ne montre pas de commande à copier, et on n'ouvre pas de Terminal. Le bouton lance la commande sans poser de question (`-y`, `NONINTERACTIVE`), et l'hôte choisit la commande à partir de l'id que la page lui envoie. Pendant que ça tourne, la ligne montre une barre et la dernière ligne de sortie ; un chevron déplie le log complet, qui s'ouvre de lui-même en cas d'échec. Une commande administrateur passe par la fenêtre de mot de passe de macOS. Quand plusieurs étapes s'enchaînent, l'en-tête propose « Tout installer ».
+- **Une action principale par panneau.** Elle va dans l'en-tête (`plugin-detail__actions`, `plugin-install-button`). Les actions de ligne restent discrètes (`settings-button--quiet`). Une action rare devient une icône avec son `aria-label`, comme Vérifier à nouveau avec `refresh`.
+- **Une collection est une grille.** Stores, plugins et sources s'affichent en petites cartes sur 2 ou 3 colonnes : logo, nom, bouton. Jamais en longues lignes empilées.
+- **L'avancé est fermé par défaut.** Les termes de recherche, la version, les journaux et les profils techniques vont dans un `<details class="plugin-more">` fermé, ou derrière Beta features.
+- **Une progression, c'est une barre et une ligne.** La ligne a la forme `Étape 2/7 · Shaders · ~12 min`, avec un seul bouton Arrêter. À la fin, une ligne : le résultat, ou l'erreur telle que l'outil l'a dite.
+- **Les titres de section** (petites capitales `plugin-detail__section`) n'apparaissent que si le panneau a au moins deux sections visibles.
+- **Les étapes guidées numérotées** (`gs-steps`) servent seulement à un parcours qu'on suit dans l'ordre une seule fois, comme l'appairage de Game streaming. Elles ne servent pas pour une liste de prérequis.
+
+#### Les composants à reprendre
+
+Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
+
+| Composant | Classes |
+| --- | --- |
+| En-tête de détail | `plugin-detail__header` · `plugin-icon` · `plugin-pill` · `plugin-detail__actions` |
+| Bouton | `plugin-install-button` (principal) · `settings-button settings-button--quiet` |
+| Ligne | `plugin-fields` / `plugin-field` · `plugin-field__label` · `plugin-field__inputs` |
+| Fiche | `plugin-facts` / `plugin-fact` (libellé · valeur) |
+| État | `ws-pill` · `ws-pill--on` |
+| Avancé | `details.plugin-more` |
+| Grille | `plugin-card` · `.source-grid .source-account-row` |
+
+#### Avant / après — Switch (nxnative), 21 novembre 2026
+
+| Avant | Après |
+| --- | --- |
+| Une intro de deux lignes sous l'en-tête | rien |
+| `6 SUR 9 PRÊTS` comme titre de section, et `Vérifier à nouveau` en toutes lettres | `Prérequis`, la pastille `6/9`, une icône ↻ |
+| `xcodegen, zstd et glslang` / `Manquant : glslang` | `Outils de build` · pastille `Manquant` (glslang dans l'infobulle) · `Installer` |
+| Une phrase d'aide sur deux lignes au-dessus des boutons de build | `Construire pour ce Mac` · `IPA` ; l'aide passe dans l'infobulle |
+| `Installez d'abord ce qui manque ci-dessus.` | les boutons sont désactivés, et la pastille `6/9` dit pourquoi |
+| `Les jeux que vous construisez apparaissent ici…` | la section n'existe pas tant qu'il n'y a pas de jeu |
+
 ## 5. Hero Cinématique partagé
 
 - Le hero est une image plein fond de jeu, non une carte.
@@ -493,6 +551,7 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - Pas de spinners circulaires; utiliser skeletons ou barres de chargement.
 - Pas d'images manquantes ou placeholders abstraits.
 - Pas d'elements qui se chevauchent de maniere incoherente; chaque bloc garde sa zone.
+- Pas de paragraphe d'explication dans un panneau de réglages, pas de commande à copier, pas de phrase pour un état vide (§4.4).
 
 ## 14. Content Honesty Rules
 
@@ -533,3 +592,4 @@ Orivo shows what it actually knows. These are product rules, not copy suggestion
 - **Application pages**: every hash resolves to a page, an unknown one included; ids in the URL stay opaque.
 - **Application pages**: the inactive page is `hidden` and `inert`, and Back restores scroll, focus and filters.
 - **Application pages**: nothing on screen is a price, a section or a reason that the data does not actually support.
+- **Réglages et plugins (§4.4)** : aucun paragraphe, les états en pastilles, une ligne par chose, ce qui est prêt replié, l'avancé fermé, les textes dans leur budget de mots.

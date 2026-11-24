@@ -25,6 +25,7 @@ export type IconName =
   | "close"
   | "refresh"
   | "folder"
+  | "trash"
   | "monitor"
   | "cast"
   | "plus"
@@ -118,6 +119,7 @@ const paths: Record<IconName, string> = {
   close: '<path d="m6 6 12 12M18 6 6 18" />',
   refresh: '<path d="M20 11a8 8 0 1 0 1.2 4.2M20 5v6h-6" />',
   folder: '<path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />',
+  trash: '<path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />',
   // Lucide's "monitor", "cast" and "wine" (ISC licence): the Source row's
   // glyphs for Local, Moonlight streaming and Wine, which have no wordmark.
   monitor: '<rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" />',

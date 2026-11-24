@@ -2993,6 +2993,57 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 }
 
 
+/* Native Switch (Switch Natif), drawn by DESIGN.md §4.4: a head line with a count pill,
+   then one plugin-field line per missing item (name, pill, its button). */
+#nxnative-body { padding: 0; }
+.nxnative-panel { display: grid; gap: 18px; }
+.nxnative-section { display: grid; gap: 6px; }
+.nxnative-head { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+.nxnative-head .plugin-field__label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nxnative-icon-button { display: grid; width: 32px; height: 32px; padding: 0; place-items: center; }
+.nxnative-icon-button .icon { width: 15px; height: 15px; }
+.nxnative-check { grid-template-columns: minmax(0, 1fr) auto auto; padding: 8px 0; }
+.nxnative-check[title] .plugin-field__label { cursor: help; }
+.nxnative-check__actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.nxnative-check .plugin-install-button { min-width: 0; }
+.nxnative-head .plugin-install-button { min-width: 0; }
+#nxnative-panel button:disabled { opacity: .38; cursor: default; }
+.nxnative-check__under { display: grid; grid-column: 1 / -1; gap: 6px; min-width: 0; }
+.nxnative-live { overflow: hidden; margin: 0; color: rgba(244,242,248,.5); font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.nxnative-live--error { color: #f2a3a3; font-family: inherit; white-space: normal; }
+.nxnative-log {
+  overflow: auto;
+  max-height: 220px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 10px;
+  color: #b7b2c1;
+  background: rgba(10,10,16,.45);
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.nxnative-pill--busy { border-color: rgba(185,168,255,.5); color: #ddd4ff; }
+.nxnative-pill--error { border-color: rgba(240,120,120,.5); color: #f6b4b4; background: rgba(220,70,70,.12); }
+.nxnative-indeterminate { position: relative; overflow: hidden; height: 3px; border-radius: 3px; background: rgba(255,255,255,.08); }
+.nxnative-indeterminate::after { position: absolute; inset: 0 auto 0 0; width: 30%; border-radius: 3px; background: #9c8cff; content: ""; animation: nxnative-slide 1.2s cubic-bezier(.4,0,.2,1) infinite; }
+@keyframes nxnative-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .nxnative-indeterminate::after { width: 100%; opacity: .5; animation: none; } }
+html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacity: .5; animation: none; }
+.nxnative-note { margin: 0; color: rgba(244,242,248,.55); font-size: 12.5px; }
+.nxnative-note--ok { color: #a9e6b3; }
+.nxnative-note--error { color: #f2a3a3; }
+.nxnative-progress { width: 100%; height: 4px; accent-color: #9c8cff; }
+.nxnative-game summary strong { color: #f0edf6; font-size: 13.5px; font-weight: 560; }
+.nxnative-game__summary { display: flex; align-items: center; gap: 12px; }
+.nxnative-game__summary strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nxnative-settings { padding-top: 6px; }
+.nxnative-settings .plugin-field { grid-template-columns: minmax(0, 1fr) auto; }
+.nxnative-settings__section { margin: 10px 0 0; color: rgba(244,242,248,.5); font-size: 11px; font-weight: 640; letter-spacing: .1em; text-transform: uppercase; }
+.nxnative-range { display: flex; align-items: center; gap: 10px; }
+.nxnative-range output { min-width: 3ch; color: #d0cadf; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+
 /* A choice is a row like any other: copy on the left, its control on the
    right, a hairline between. No plate behind it. */
 .settings-choices { display: grid; padding: 0; }

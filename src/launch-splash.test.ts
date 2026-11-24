@@ -9,7 +9,7 @@ import {
   type LaunchSplashOptions,
 } from "./launch-splash";
 
-const { holdMs, deadlineMs, fadeMs, settleMs } = LAUNCH_SPLASH_TIMING;
+const { holdMs, deadlineMs, windowDeadlineMs, fadeMs, settleMs } = LAUNCH_SPLASH_TIMING;
 
 const hades = {
   id: "steam:1145350",
@@ -182,6 +182,38 @@ describe("starting a game", () => {
     expect(stepAside).toHaveBeenCalledTimes(1);
   });
 
+  it("waits for a watched game's window, however long it loads, and steps aside when it is up", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "window");
+    // Losing focus is not the game: the player may be clicking elsewhere.
+    window_.send("blur");
+    await vi.advanceTimersByTimeAsync(deadlineMs * 2);
+    expect(stepAside).not.toHaveBeenCalled();
+    expect(splash.isOpen()).toBe(true);
+
+    splash.gameWindow(hades.id, true);
+    expect(stepAside).toHaveBeenCalledTimes(1);
+  });
+
+  it("goes back to Orivo when a watched game ends before its window", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "window");
+    splash.gameWindow("steam:1", false);
+    expect(splash.isOpen()).toBe(true);
+
+    splash.gameWindow(hades.id, false);
+    expect(splash.isOpen()).toBe(false);
+    await vi.advanceTimersByTimeAsync(windowDeadlineMs);
+    expect(stepAside).not.toHaveBeenCalled();
+  });
+
+  it("still steps aside for a watched game whose host never says", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "window");
+    await vi.advanceTimersByTimeAsync(windowDeadlineMs);
+    expect(stepAside).toHaveBeenCalledTimes(1);
+  });
+
   it("stays when the player asked Orivo to, and fades back to the library after its beat", async () => {
     mount({ shouldStepAside: () => false }).open(hades);
     splash.launched(hades.id, "process");
@@ -329,6 +361,7 @@ describe("the host's launch answer", () => {
   it("reads who puts the game on screen, and assumes Orivo did when it does not say", () => {
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "client" })).toBe("client");
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "process" })).toBe("process");
+    expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "window" })).toBe("window");
     expect(readLaunchHandoff({ status: "Launching Spacewar" })).toBe("process");
     expect(readLaunchHandoff(undefined)).toBe("process");
     expect(readLaunchHandoff({ handoff: "steam" })).toBe("process");

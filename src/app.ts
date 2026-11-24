@@ -177,6 +177,7 @@ import {
   createGameStreamSetup,
   mountGameStreamSetup,
 } from "./gamestream-setup";
+import { mountNxnativePanel } from "./nxnative-panel";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
@@ -266,7 +267,7 @@ interface WineSettingsState {
 }
 
 /** The built-in plugins Orivo ships with; the chevron opens their detail view. */
-type PluginId = "wine" | "wallpaper-searcher" | "game-streaming";
+type PluginId = "wine" | "wallpaper-searcher" | "game-streaming" | "nxnative";
 /**
  * `list` is the browser with nothing open beside it; a PluginId opens a
  * built-in's detail, and `plugin:<id>` the detail of one the registry
@@ -711,6 +712,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     launchFeedback: get<HTMLElement>("#launch-feedback"),
     wineSettingsPanel: get<HTMLElement>("#wine-settings-panel"),
     wineSettingsBody: get<HTMLElement>("#wine-settings-body"),
+    nxnativePanel: get<HTMLElement>("#nxnative-panel"),
+    nxnativeBody: get<HTMLElement>("#nxnative-body"),
     runnersPanel: get<HTMLElement>("#runners-panel"),
     runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     gamestreamSetupPanel: get<HTMLElement>("#gamestream-setup-panel"),
@@ -2769,6 +2772,60 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     openLibrary: () => navigate({ page: "library" }),
   });
   mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
+  // Native Switch games (nxnative): a Mac-only built-in, set up and built from
+  // its own panel. Its build events are listened to from startup, so a build
+  // left running behind another page still lands in the library.
+  const nxnativeAvailable =
+    isTauriRuntime() &&
+    platformFeatures.localRunners &&
+    typeof navigator !== "undefined" &&
+    /Macintosh/.test(navigator.userAgent);
+  const nxnativePanel = nxnativeAvailable
+    ? mountNxnativePanel(refs.nxnativeBody, {
+        invoke: (command, args) => invoke(command, args),
+        listen: (event, handler) => listen(event, handler),
+        toast: (message) => showToast(message),
+        libraryChanged: () => void refreshLibrary(),
+        play: (gameId) => void launchGame(gameId),
+        removed: () => {
+          nxnativeInstalled = false;
+          state.pluginView = "list";
+          renderPluginList();
+          showToast(t("nxnative.removedToast"));
+        },
+      })
+    : null;
+  // Removed by the player: the card leaves the installed list and waits in the
+  // catalogue, where Add brings it back. Read from the host (it keeps the choice).
+  let nxnativeInstalled = true;
+  if (nxnativeAvailable) {
+    void invoke<boolean>("nxnative_installed")
+      .then((installed) => {
+        nxnativeInstalled = installed;
+        renderPluginList();
+      })
+      .catch(() => undefined);
+  }
+  const restoreNxnative = async (): Promise<void> => {
+    try {
+      await invoke("nxnative_restore");
+      nxnativeInstalled = true;
+      openPluginDetail("nxnative");
+    } catch (error) {
+      showToast(String(error));
+    }
+  };
+  // A game whose window the host watches for (a built Switch game): Orivo
+  // steps aside when that window is up, and comes back if the game ends first.
+  if (isTauriRuntime()) {
+    void listen<{ gameId: string; shown: boolean }>("game-window", ({ payload }) => {
+      launchSplash.gameWindow(payload.gameId, payload.shown);
+      if (!payload.shown) {
+        const game = state.games.find((candidate) => candidate.id === payload.gameId);
+        if (game) showToast(t("app.launch.failed", { title: game.title }));
+      }
+    });
+  }
   let gamestreamSetupOpen = false;
 
   /** The view a registry plugin's card opens: streaming opens its own setup. */
@@ -2868,6 +2925,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       progress: update?.phase === "downloading" ? pluginPercent(update) : null,
     });
     card.dataset.pluginManaged = plugin.id;
+    return card;
+  };
+
+  /** Native Switch after a removal: a catalogue card with the verb that brings it back. */
+  const renderRemovedNxnativeCard = (): HTMLElement => {
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "plugin-install-button";
+    add.dataset.nxnativeAdd = "";
+    add.textContent = t("nxnative.add");
+    add.setAttribute("aria-label", `${t("nxnative.add")} ${t("nxnative.name")}`);
+    add.addEventListener("click", () => void restoreNxnative());
+    const card = pluginCard({
+      id: "nxnative",
+      name: t("nxnative.name"),
+      category: pluginCategory("nxnative", t("nxnative.name")),
+      lines: [t("app.plugins.builtIn")],
+      open: null,
+      action: add,
+    });
+    card.classList.add("plugin-card--catalog");
     return card;
   };
 
@@ -3188,6 +3266,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (platformFeatures.localRunners && !winlator) {
       cards.push(renderBuiltInCard("wine", "Wine", t("app.plugins.openWine")));
     }
+    if (nxnativeAvailable && nxnativeInstalled && !winlator) {
+      cards.push(renderBuiltInCard("nxnative", t("nxnative.name"), t("nxnative.open")));
+    }
     cards.push(renderBuiltInCard("wallpaper-searcher", "Wallpaper Searcher", t("app.plugins.openWallpaper")));
     // On Android, Winlator is the runner Orivo ships with: it is set up where
     // its games come from, under Libraries.
@@ -3313,6 +3394,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.pluginsDetailEmpty.hidden = view !== "list";
     refs.wallpaperPluginPanel.hidden = view !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = view !== "wine";
+    refs.nxnativePanel.hidden = view !== "nxnative" || !nxnativePanel || !nxnativeInstalled;
     refs.gamestreamSetupPanel.hidden = view !== "game-streaming" || !platformFeatures.localRunners;
     // The setup reads the PC and the plugin when it is opened and stops its
     // pairing watch when it is left, whichever way that happens: the back
@@ -3347,8 +3429,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
     );
     const soon = renderComingSoonPlugins(term);
-    refs.pluginsCatalogList.replaceChildren(...matches.map(renderPluginCatalogCard), ...soon);
-    refs.pluginsCatalogEmpty.hidden = matches.length + soon.length > 0;
+    const removedBuiltIn =
+      nxnativeAvailable && !nxnativeInstalled && (!term || t("nxnative.name").toLocaleLowerCase().includes(term))
+        ? [renderRemovedNxnativeCard()]
+        : [];
+    refs.pluginsCatalogList.replaceChildren(...removedBuiltIn, ...matches.map(renderPluginCatalogCard), ...soon);
+    refs.pluginsCatalogEmpty.hidden = matches.length + soon.length + removedBuiltIn.length > 0;
     // An empty registry and a search that matched nothing are different
     // problems, and telling the user to refine a search they never typed is
     // the kind of dead end this panel used to have.
@@ -3396,6 +3482,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     state.pluginView = id;
     renderPluginList();
     renderWineSettingsPanel();
+    if (id === "nxnative") nxnativePanel?.open();
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
@@ -6988,6 +7075,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const pluginId = target?.closest<HTMLButtonElement>("[data-plugin-open]")?.dataset.pluginOpen;
     if (
       pluginId === "wine" ||
+      pluginId === "nxnative" ||
       pluginId === "wallpaper-searcher" ||
       pluginId === "game-streaming" ||
       pluginId?.startsWith(MANAGED_PLUGIN_VIEW)
@@ -8804,6 +8892,19 @@ function shell(): string {
                         <div class="plugin-detail__actions"></div>
                       </header>
                       <div id="wine-settings-body" class="wine-settings-body"></div>
+                    </section>
+
+                    <section id="nxnative-panel" class="plugin-detail" aria-labelledby="nxnative-panel-title" hidden>
+                      <header class="plugin-detail__header">
+                        <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
+                        <span class="plugin-icon" data-category="emulation" aria-hidden="true">${icon("gamepad")}</span>
+                        <div class="plugin-detail__title">
+                          <strong id="nxnative-panel-title">${t("nxnative.name")}</strong>
+                          <span class="plugin-pill" data-category="emulation">${t("app.pluginCategory.emulation")}</span>
+                        </div>
+                        <div class="plugin-detail__actions"></div>
+                      </header>
+                      <div id="nxnative-body"></div>
                     </section>
 
                     <!-- A registry plugin's detail (plugin-managed): version,

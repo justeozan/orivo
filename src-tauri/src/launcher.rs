@@ -449,6 +449,15 @@ pub fn install_steam(app_id: u32) -> Result<(), LaunchError> {
 }
 
 fn launch_direct(game: &Game) -> Result<Option<GameProcess>, LaunchError> {
+    launch_direct_with_env(game, &[])
+}
+
+/// A direct start with variables added to the game's environment: how a built
+/// nxnative app is started as a console would (`nxnative::console_env`).
+pub fn launch_direct_with_env(
+    game: &Game,
+    env: &[(&str, String)],
+) -> Result<Option<GameProcess>, LaunchError> {
     let executable = game
         .executable_path
         .as_ref()
@@ -463,6 +472,7 @@ fn launch_direct(game: &Game) -> Result<Option<GameProcess>, LaunchError> {
     let mut command = Command::new(executable);
     command
         .args(&game.arguments)
+        .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
