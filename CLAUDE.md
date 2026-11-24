@@ -1,3 +1,5 @@
+@AGENTS.md
+
 # Orivo
 
 Avant toute interface (un panneau, un écran, un texte affiché), lire `docs/DESIGN.md`. Pour Settings et les plugins, c'est **§4.4** qui fait foi : limpide, visuel, compact, épuré.

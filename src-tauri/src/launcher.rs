@@ -7,7 +7,7 @@ use std::{
 
 #[derive(Debug)]
 pub enum LaunchError {
-    MissingExecutable(std::path::PathBuf),
+    MissingExecutable,
     PermissionDenied(std::path::PathBuf),
     SteamNotInstalled,
     #[cfg(not(target_os = "macos"))]
@@ -51,15 +51,22 @@ pub enum LaunchError {
     /// hands addresses to explorer, whose status means nothing, so never there.
     #[cfg_attr(windows, allow(dead_code))]
     ShortcutDispatchFailed(ExitStatus),
+    /// The game asks for administrator rights and the player said no to
+    /// Windows' prompt.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    ElevationDeclined(PathBuf),
     Process(io::Error),
 }
+
+/// What Play says when a game is no longer where Orivo left it, and could
+/// not be found where it went.
+pub const MOVED_GAME_MESSAGE: &str = "This game is no longer where Orivo left it. Press Locate to show Orivo where it is now.";
 
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingExecutable(path) => {
-                write!(f, "executable does not exist: {}", path.display())
-            }
+            // The path stays on this side: the WebView is told what to do.
+            Self::MissingExecutable => write!(f, "{}", MOVED_GAME_MESSAGE),
             Self::PermissionDenied(path) => {
                 write!(f, "executable is not readable: {}", path.display())
             }
@@ -109,6 +116,11 @@ impl std::fmt::Display for LaunchError {
                     "The game's launcher could not accept the request ({status})"
                 )
             }
+            Self::ElevationDeclined(path) => write!(
+                f,
+                "{} needs administrator rights, and Windows' request was declined.",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
             Self::Process(error) => write!(f, "process could not be started: {error}"),
         }
     }
@@ -121,16 +133,36 @@ pub fn launch(game: &Game) -> Result<(), LaunchError> {
     launch_owned(game).map(drop)
 }
 
+/// A game process Orivo started itself, and can therefore time.
+pub enum GameProcess {
+    Child(std::process::Child),
+    /// Started through Windows' elevation prompt: Orivo holds only a handle to
+    /// it, since a process running as administrator is not its child.
+    #[cfg(windows)]
+    Elevated(elevated::ElevatedProcess),
+}
+
+impl GameProcess {
+    /// Block until the game has exited.
+    pub fn wait(&mut self) -> io::Result<()> {
+        match self {
+            Self::Child(child) => child.wait().map(drop),
+            #[cfg(windows)]
+            Self::Elevated(process) => process.wait(),
+        }
+    }
+}
+
 /// Start a game and hand back the process when the game is one Orivo started
 /// itself. A store client's hand-off has no process of Orivo's to return: the
 /// client owns the game, so how long it ran is not Orivo's to know.
-pub fn launch_owned(game: &Game) -> Result<Option<std::process::Child>, LaunchError> {
+pub fn launch_owned(game: &Game) -> Result<Option<GameProcess>, LaunchError> {
     match &game.launch_target {
         LaunchTarget::Direct => match game.executable_path.as_deref() {
             // A shortcut the player kept is opened, as a double-click would:
             // the launcher or the shell it hands off to owns the game.
             Some(path) if is_shortcut_file(path) => open_shortcut(path).map(|()| None),
-            _ => launch_direct(game).map(Some),
+            _ => launch_direct(game),
         },
         LaunchTarget::Steam { app_id } => {
             if !game
@@ -416,7 +448,7 @@ pub fn install_steam(app_id: u32) -> Result<(), LaunchError> {
     dispatch_steam_uri(steam_install_uri(app_id))
 }
 
-fn launch_direct(game: &Game) -> Result<std::process::Child, LaunchError> {
+fn launch_direct(game: &Game) -> Result<Option<GameProcess>, LaunchError> {
     launch_direct_with_env(game, &[])
 }
 
@@ -425,13 +457,13 @@ fn launch_direct(game: &Game) -> Result<std::process::Child, LaunchError> {
 pub fn launch_direct_with_env(
     game: &Game,
     env: &[(&str, String)],
-) -> Result<std::process::Child, LaunchError> {
+) -> Result<Option<GameProcess>, LaunchError> {
     let executable = game
         .executable_path
         .as_ref()
-        .ok_or_else(|| LaunchError::MissingExecutable(std::path::PathBuf::new()))?;
+        .ok_or_else(|| LaunchError::MissingExecutable)?;
     if !executable.is_file() {
-        return Err(LaunchError::MissingExecutable(executable.clone()));
+        return Err(LaunchError::MissingExecutable);
     }
     if !is_executable(executable) {
         return Err(LaunchError::PermissionDenied(executable.clone()));
@@ -448,7 +480,149 @@ pub fn launch_direct_with_env(
         command.current_dir(directory);
     }
 
-    command.spawn().map_err(LaunchError::Process)
+    match command.spawn() {
+        Ok(child) => Ok(Some(GameProcess::Child(child))),
+        // A game whose manifest asks for administrator rights (or that Windows
+        // takes for an installer) cannot be created by a normal process. A
+        // double-click would show the elevation prompt, so Orivo asks for it too.
+        #[cfg(windows)]
+        Err(error) if error.raw_os_error() == Some(elevated::ERROR_ELEVATION_REQUIRED) => {
+            elevated::spawn(
+                executable,
+                &game.arguments,
+                game.working_directory.as_deref(),
+            )
+        }
+        Err(error) => Err(LaunchError::Process(error)),
+    }
+}
+
+/// Windows' elevation prompt, for a game that cannot start without it.
+#[cfg(windows)]
+mod elevated {
+    use super::{GameProcess, LaunchError};
+    use std::{
+        ffi::OsStr,
+        io,
+        os::windows::{
+            ffi::OsStrExt,
+            io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        },
+        path::Path,
+    };
+    use windows_sys::Win32::{
+        Foundation::ERROR_CANCELLED,
+        System::Threading::{INFINITE, WaitForSingleObject},
+        UI::Shell::{
+            SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+        },
+    };
+
+    pub const ERROR_ELEVATION_REQUIRED: i32 =
+        windows_sys::Win32::Foundation::ERROR_ELEVATION_REQUIRED as i32;
+    const SW_SHOWNORMAL: i32 = 1;
+    const WAIT_OBJECT_0: u32 = 0;
+
+    pub struct ElevatedProcess(OwnedHandle);
+
+    impl ElevatedProcess {
+        pub fn wait(&mut self) -> io::Result<()> {
+            // SAFETY: the handle is owned and open for as long as `self` lives.
+            let result = unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) };
+            if result == WAIT_OBJECT_0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+    }
+
+    fn wide(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// The `runas` verb is what Explorer uses for a program that needs
+    /// elevation: Windows shows its prompt, and the game starts only if the
+    /// player accepts it.
+    pub fn spawn(
+        executable: &Path,
+        arguments: &[String],
+        directory: Option<&Path>,
+    ) -> Result<Option<GameProcess>, LaunchError> {
+        let verb = wide(OsStr::new("runas"));
+        let file = wide(executable.as_os_str());
+        let parameters = wide(OsStr::new(&super::windows_command_line(arguments)));
+        let directory = directory.map(|directory| wide(directory.as_os_str()));
+
+        // SAFETY: every field is plain data, and all-zero is the documented
+        // "not set" for each of them.
+        let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+        info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+        info.lpVerb = verb.as_ptr();
+        info.lpFile = file.as_ptr();
+        info.lpParameters = parameters.as_ptr();
+        info.lpDirectory = directory
+            .as_ref()
+            .map_or(std::ptr::null(), |directory| directory.as_ptr());
+        info.nShow = SW_SHOWNORMAL;
+
+        // SAFETY: `info` and the strings it points to outlive the call.
+        if unsafe { ShellExecuteExW(&mut info) } == 0 {
+            let error = io::Error::last_os_error();
+            return Err(if error.raw_os_error() == Some(ERROR_CANCELLED as i32) {
+                LaunchError::ElevationDeclined(executable.to_path_buf())
+            } else {
+                LaunchError::Process(error)
+            });
+        }
+        if info.hProcess.is_null() {
+            // Started, but Windows did not say which process it is: the game
+            // runs, only its play time goes uncounted.
+            return Ok(None);
+        }
+        // SAFETY: `SEE_MASK_NOCLOSEPROCESS` hands this handle to the caller,
+        // who is now its only owner.
+        let handle = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+        Ok(Some(GameProcess::Elevated(ElevatedProcess(handle))))
+    }
+}
+
+/// Join arguments into one Windows command line, quoted the way the C runtime
+/// splits it back (the rules `std::process::Command` follows), needed here
+/// because the elevation prompt takes the line as a single string.
+#[cfg(any(windows, test))]
+fn windows_command_line(arguments: &[String]) -> String {
+    let mut line = String::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        if index > 0 {
+            line.push(' ');
+        }
+        let quoted = argument.is_empty() || argument.contains([' ', '\t', '\n', '\u{b}', '"']);
+        if quoted {
+            line.push('"');
+        }
+        let mut backslashes = 0;
+        for character in argument.chars() {
+            if character == '\\' {
+                backslashes += 1;
+            } else {
+                if character == '"' {
+                    // The backslashes before a quote are doubled, and the
+                    // quote itself escaped.
+                    line.push_str(&"\\".repeat(backslashes + 1));
+                }
+                backslashes = 0;
+            }
+            line.push(character);
+        }
+        if quoted {
+            // Backslashes before the closing quote would escape it otherwise.
+            line.push_str(&"\\".repeat(backslashes));
+            line.push('"');
+        }
+    }
+    line
 }
 
 /// Whether a Direct game's file is a shortcut Orivo opens rather than runs:
@@ -463,7 +637,7 @@ pub fn is_shortcut_file(path: &Path) -> bool {
 
 fn open_shortcut(path: &Path) -> Result<(), LaunchError> {
     if !path.is_file() {
-        return Err(LaunchError::MissingExecutable(path.to_path_buf()));
+        return Err(LaunchError::MissingExecutable);
     }
     let is_url = path
         .extension()
@@ -668,11 +842,11 @@ fn is_executable(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Windows has no execute bit, and a read-only attribute does not stop a
+/// program from running: only whether the file can be read matters.
 #[cfg(not(unix))]
 fn is_executable(path: &std::path::Path) -> bool {
-    path.metadata()
-        .map(|metadata| !metadata.permissions().readonly())
-        .unwrap_or(false)
+    std::fs::File::open(path).is_ok()
 }
 
 #[cfg(test)]
@@ -700,7 +874,10 @@ mod tests {
         let marker = root.join("marker.txt");
         std::fs::write(
             &script,
-            format!("@echo off\r\necho %~1^|%~2^|%CD%> \"{}\"\r\n", marker.display()),
+            format!(
+                "@echo off\r\necho %~1^|%~2^|%CD%> \"{}\"\r\n",
+                marker.display()
+            ),
         )
         .unwrap();
         let link = root.join("Game.lnk");
@@ -716,8 +893,10 @@ mod tests {
         .unwrap();
 
         let game = crate::game_folder::game_for_path(&link).unwrap();
-        let mut child = launch_owned(&game).unwrap().expect("a process of Orivo's own");
-        assert!(child.wait().unwrap().success());
+        let mut child = launch_owned(&game)
+            .unwrap()
+            .expect("a process of Orivo's own");
+        child.wait().unwrap();
         let written = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
             written.trim(),
@@ -749,12 +928,34 @@ mod tests {
     }
 
     #[test]
+    fn quotes_arguments_for_a_windows_command_line_as_the_c_runtime_reads_them() {
+        let line = |values: &[&str]| {
+            windows_command_line(
+                &values
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(line(&[]), "");
+        assert_eq!(line(&["-windowed", "-dx11"]), "-windowed -dx11");
+        assert_eq!(
+            line(&["--name=Player One", ""]),
+            r#""--name=Player One" """#
+        );
+        assert_eq!(line(&[r#"say "hi""#]), r#""say \"hi\"""#);
+        assert_eq!(line(&[r"C:\Games\"]), r"C:\Games\");
+        assert_eq!(line(&[r"C:\My Games\"]), r#""C:\My Games\\""#);
+        assert_eq!(line(&[r#"a\"b"#]), r#""a\\\"b""#);
+    }
+
+    #[test]
     fn reports_missing_executable_before_spawning() {
         let game = Game::from_executable("/definitely/not/a/game").unwrap();
 
         assert!(matches!(
             launch(&game),
-            Err(LaunchError::MissingExecutable(_))
+            Err(LaunchError::MissingExecutable)
         ));
     }
 

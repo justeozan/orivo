@@ -981,7 +981,10 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* Install is the dark pill from the reference: glass first, its light held
    back until the pointer or the pad reaches it. */
 .play-button[data-kind="install"],
+.play-button[data-kind="locate"],
 .play-button[data-kind="downloading"] { --play-field: .3; }
+.play-button[data-kind="locate"]:hover,
+.play-button[data-kind="locate"][data-nav-focus],
 .play-button[data-kind="install"]:hover,
 .play-button[data-kind="install"][data-nav-focus] { --play-field: .85; }
 /* Nothing to start: no field, no sheen, a still grey rim. */
@@ -1709,6 +1712,15 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* A picture that never came is hidden outright: Android's WebView draws an
    <img> left without a usable source as a broken-picture glyph. */
 .card-art.is-missing { visibility: hidden; }
+/* A game whose files moved where no search found them reads the way a game
+   that is not installed reads in any launcher: its art stays, so it is still
+   recognisable, but drained and in shadow. Selected, it comes up a little,
+   enough to be looked at, never enough to pass for a playable one. */
+.game-card.is-missing .card-art { filter: grayscale(.92) brightness(.38); transition: opacity 250ms ease, transform 560ms cubic-bezier(.22, .74, .2, 1), filter 300ms ease; }
+.game-card.is-missing.is-selected .card-art { filter: grayscale(.8) brightness(.58); }
+.game-card.is-missing { border-color: rgba(255,255,255,.1); }
+.hero-media.is-missing .hero-image { filter: grayscale(.75) brightness(.6); }
+.genre-chip--missing { border-color: rgba(255,255,255,.24); color: #fff; background: rgba(12,11,15,.72); font-weight: 600; }
 /* With no picture of the game at all, the card turns to glass: the scene
    behind it shows through, frosted and bent, and its name stands on it — no
    real cover is there to carry the title. The rim and the two inner lights
@@ -1827,34 +1839,47 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
   transform: translateX(17px);
 }
 
-/* The segments are a group in the middle of the bar, not a scale stretched
-   across it: labels alone, gathered and centred, with weight for the one you
-   are on. A rule under each word was one graphic too many for a row of words. */
-.browse-bar__segments { min-width: 0; flex: 1; justify-content: center; gap: clamp(18px, 2.6vw, 40px); }
-.browse-bar__segment { min-width: 0; flex: none; padding: 0; color: #97929f; background: none; font-size: 12.5px; text-align: center; transition: color 180ms ease; }
-.browse-bar__segment-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* A wordmark-less source (Local, Moonlight, Wine): a standard glyph in the
-   segment's own colour, then its name in the interface's type. */
-.browse-bar__segment-icon { display: inline-flex; margin-right: 6px; }
-.browse-bar__segment-icon[hidden] { display: none; }
-.browse-bar__segment-icon .icon { width: 14px; height: 14px; }
+/* The source row: a group in the middle of the bar, not a scale stretched
+   across it. Every segment is the same two things — its source's mark and its
+   name, in the interface's own type — so Steam, Switch and Local read as one
+   row. The one you are on is lit, the others dimmed; the mark dims with its
+   word because it is drawn in the word's colour.
+   A library with many sources scrolls sideways rather than squeezing every
+   name into an ellipsis. The auto margins centre the row while it fits and
+   fall to nothing once it does not, so its start is never cut off the way
+   `justify-content: center` cuts it. */
+.browse-bar__segments {
+  min-width: 0;
+  flex: 1;
+  gap: clamp(18px, 2.4vw, 34px);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  /* Room for the focus pill, which overhangs the word by 7px, and for the
+     fade at each end: a row that runs past the bar dissolves into it instead
+     of stopping on half a word, which is what says it scrolls. A row that
+     fits never reaches the fade. */
+  margin-block: -8px;
+  padding: 8px 18px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent);
+}
+.browse-bar__segments::-webkit-scrollbar { display: none; }
+.browse-bar__segment:first-child { margin-left: auto; }
+.browse-bar__segment:last-child { margin-right: auto; }
+.browse-bar__segment { flex: none; gap: 7px; padding: 0; color: #97929f; background: none; font-size: 13px; font-weight: 500; letter-spacing: .005em; white-space: nowrap; transition: color 180ms ease; }
+.browse-bar__segment-label { white-space: nowrap; }
+.browse-bar__segment-mark { display: inline-flex; flex: none; width: 16px; height: 16px; filter: drop-shadow(0 1px 2px rgba(6,6,10,.7)); }
+.browse-bar__segment-mark .icon { width: 100%; height: 100%; }
 .browse-bar__segment:hover { color: #ded9e4; }
 .browse-bar__segment.is-active { color: #f4f2f7; font-weight: 600; }
-/* Source and Platform wear the brands' own logos: white, every one the same
-   height, dimmed as a word is until it is the segment on the rail. The word
-   stays in the button for whoever cannot see the picture. The shadow is the
-   one the words carry, so a logo reads over a bright wallpaper as well. */
-.browse-bar__segment.has-logo { position: relative; }
-.browse-bar__segment-logo { display: block; width: auto; height: 18px; opacity: .52; filter: drop-shadow(0 1px 2px rgba(6,6,10,.7)); transition: opacity 180ms ease; }
-.browse-bar__segment-logo[hidden] { display: none; }
-.browse-bar__segment.has-logo .browse-bar__segment-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.browse-bar__segment.has-logo:hover .browse-bar__segment-logo { opacity: .82; }
-.browse-bar__segment.has-logo.is-active .browse-bar__segment-logo { opacity: 1; }
 
-/* Glass, like every other floating control, and no chevron: the word already
-   changes each time it is pressed, which is the whole affordance. */
+/* The sort: glass, like every other floating control, and no chevron. Its
+   glyph and its word change each time it is pressed, which is the whole
+   affordance. */
 .browse-bar__mode {
   flex: none;
+  gap: 7px;
   height: 32px;
   padding: 0 16px;
   border: 1px solid rgba(255,255,255,.14);
@@ -1871,6 +1896,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 }
 .browse-bar__mode:hover, .browse-bar__mode[data-nav-focus] { color: #fff; border-color: rgba(255,255,255,.24); background: rgba(30,28,36,.55); }
 .browse-bar__mode:active { transform: translateY(1px); }
+.browse-bar__mode-icon { display: inline-flex; width: 14px; height: 14px; opacity: .85; }
+.browse-bar__mode-icon .icon { width: 100%; height: 100%; }
 
 /* Rage changes nothing about the library and everything about the accent. */
 body[data-mood="rage"] { --violet: #f2453c; }
@@ -3606,7 +3633,7 @@ html[data-form-factor="compact"] .launch-splash__content {
 }
 html[data-form-factor="compact"] .launch-splash__logo { --splash-logo-box: clamp(52px, 20svh, 96px); }
 html[data-form-factor="compact"] .launch-splash__eyebrow { font-size: 13px; }
-html[data-form-factor="compact"] .browse-bar__segment-logo { height: 15px; }
+html[data-form-factor="compact"] .browse-bar__segment-mark { width: 15px; height: 15px; }
 
 /* ---------------------------------------------------------------------------
    Phone — the compact layout, pointed at with a finger (`src/form-factor.ts`)
@@ -3695,7 +3722,9 @@ html[data-device="phone"] .game-card { --card-radius: 10px; }
 html[data-device="phone"] .browse-bar { gap: 10px; }
 html[data-device="phone"] .browse-bar__segments { gap: 16px; }
 html[data-device="phone"] .browse-bar__segment { font-size: var(--fs-bar); }
-html[data-device="phone"] .browse-bar__segment-logo { height: 12px; }
+html[data-device="phone"] .browse-bar__segment { gap: 6px; }
+html[data-device="phone"] .browse-bar__segment-mark { width: 13px; height: 13px; }
+html[data-device="phone"] .browse-bar__mode-icon { width: 12px; height: 12px; }
 html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; padding: 0 12px; font-size: var(--fs-bar); }
 
 /* Wallpaper Searcher settings: one compact block per source. */

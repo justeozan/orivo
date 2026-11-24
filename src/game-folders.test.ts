@@ -35,12 +35,33 @@ describe("games folders", () => {
 
   it("still reads the bare count an older host sent, as a quiet scan", () => {
     const event = readGameFolderScan(3);
-    expect(event).toEqual({ requested: false, added: 3, addedIds: [], repointed: 0, hidden: 0, folders: [] });
+    expect(event).toEqual({
+      requested: false,
+      added: 3,
+      addedIds: [],
+      repointed: 0,
+      hidden: 0,
+      relocated: [],
+      missingChanged: false,
+      folders: [],
+    });
     expect(gameFolderScanMessage(event)).toBe("3 games added from your games folder.");
   });
 
   it("says nothing about a background scan that added nothing", () => {
     expect(gameFolderScanMessage(scan({ requested: false }))).toBeNull();
+    // A card turning dim is shown, not announced.
+    expect(gameFolderScanMessage(scan({ requested: false, missingChanged: true }))).toBeNull();
+  });
+
+  it("names the game that moved and was found, even after a background scan", () => {
+    const one = scan({ requested: false, relocated: ["Hades"], missingChanged: true });
+    expect(one.relocated).toEqual(["Hades"]);
+    expect(one.missingChanged).toBe(true);
+    expect(gameFolderScanMessage(one)).toBe("Hades moved: Orivo found it.");
+    expect(gameFolderScanMessage(scan({ requested: false, relocated: ["Hades", "Celeste"] }))).toBe(
+      "2 games moved: Orivo found them.",
+    );
   });
 
   it("names the folder games were added from, and the shortcuts it could not use", () => {

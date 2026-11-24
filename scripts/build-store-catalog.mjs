@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Merges the fetched Steam facts with Orivo's hand-written French curation and
- * emits `src/store-catalog.generated.ts`.
+ * emits `src/generated/store-catalog.ts`.
  *
  *   node scripts/fetch-store-catalog.mjs && node scripts/build-store-catalog.mjs
  *
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DATA = resolve(ROOT, ".context/redesign/steam-data.json");
 const CURATED_DIR = resolve(ROOT, ".context/redesign");
-const OUT = resolve(ROOT, "src/store-catalog.generated.ts");
+const OUT = resolve(ROOT, "src/generated/store-catalog.ts");
 // The same catalogue, as plain data, for the Rust shell to embed with
 // `include_str!`. One catalogue, written once, read by both sides.
 const OUT_JSON = resolve(ROOT, "src-tauri/resources/store-catalog.json");
@@ -358,12 +358,12 @@ async function main() {
     })
     .join(",\n");
 
-  const source = `// GENERATED FILE — run \`node scripts/fetch-store-catalog.mjs && node scripts/build-store-catalog.mjs\`.
+  const source = `// GENERATED FILE — DO NOT EDIT. Run \`pnpm store:build\` (after \`node scripts/fetch-store-catalog.mjs\`).
 // Facts (title, description, genres, platform support, prices) come from the
 // Steam store listing for the French region; the French editorial copy in
 // \`curation\` is Orivo's own. Nothing here is invented: a title with no quoted
 // price keeps \`priceMinor: null\`.
-import type { GameSummary } from "./contracts";
+import type { GameSummary } from "../contracts";
 
 export const STORE_CATALOG_FETCHED_AT = ${JSON.stringify(fetchedAt)};
 

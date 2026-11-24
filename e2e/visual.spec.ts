@@ -23,7 +23,7 @@ const GOLDENS: GoldenCase[] = [
     hash: "#/store",
     name: "store",
     masks: () => [],
-    // The Store's real catalogue (`store-catalog.generated.ts`) replaced the
+    // The Store's real catalogue (`src/generated/store-catalog.ts`) replaced the
     // ten-game editorial fixture; this is the first card of an unfiltered
     // "Pour toi" browse (`STORE_FIRST_GAME_ID` in e2e/helpers.ts).
   },

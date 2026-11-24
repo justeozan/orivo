@@ -359,6 +359,36 @@ test.describe("the store and settings read the same way", () => {
     await expect(page.locator("#settings-tab-general")).toBeFocused();
   });
 
+  test("the settings column keeps up when the page hears of the URL late", async ({ page }) => {
+    // `hashchange` is a queued task, and a page busy with keys — a CI runner,
+    // a key held down, a controller — can run it long after the URL changed.
+    // Hold every one back by 300ms: the tab a key comes back to has to be the
+    // one the URL names, not the one the page was showing before.
+    await page.addInitScript(() => {
+      const listen = window.addEventListener.bind(window);
+      window.addEventListener = ((type: string, listener: EventListener, options?: AddEventListenerOptions) => {
+        if (type !== "hashchange") return listen(type, listener, options);
+        return listen(type, (event: Event) => window.setTimeout(() => listener(event), 300), options);
+      }) as typeof window.addEventListener;
+    });
+    await openRoute(page, "#/settings/general", "settings");
+    await blurEverything(page);
+
+    await page.locator("#settings-tab-general").focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#settings-tab-libraries")).toBeFocused();
+    // The CI run that failed: this section had been shown...
+    await expect(page.locator("#settings-tab-libraries")).toHaveAttribute("aria-selected", "true");
+    // ...and the next three keys came before the page heard of the one after.
+    await page.keyboard.press("ArrowUp");
+    await expect(page.locator("#settings-tab-general")).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(page.locator("[data-nav-page='settings']")).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#settings-tab-general")).toBeFocused();
+    expect(await currentHash(page)).toBe("#/settings/general");
+  });
+
   test("right leaves the settings column for the section, and left comes back to its tab", async ({ page }) => {
     await openRoute(page, "#/settings/general", "settings");
     await blurEverything(page);

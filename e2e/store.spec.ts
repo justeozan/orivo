@@ -15,7 +15,7 @@ const storeHost = "#app-page-store:not([hidden])";
 /**
  * The Store rebuild (`53c0d96`, `311a91f`) replaced the provider-pill filter
  * bar with category/platform chips over the real, generated catalogue
- * (`store-catalog.generated.ts`, refreshed by `pnpm store:refresh`), and
+ * (`src/generated/store-catalog.ts`, refreshed by `pnpm store:refresh`), and
  * dropped the synthetic "Price unavailable" / stale-offer / provider-notice
  * copy that only made sense over the old all-null-price editorial fixture.
  * Real prices are fetched from Steam, so the honesty rule now lives in

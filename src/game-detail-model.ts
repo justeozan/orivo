@@ -243,7 +243,7 @@ export interface PrimaryActionDescriptor {
    */
   progress?: number | null;
   icon: IconName;
-  intent: "play" | "navigate" | "open-offer" | "install-epic" | "store-choices" | "none";
+  intent: "play" | "navigate" | "open-offer" | "install-epic" | "store-choices" | "locate" | "none";
   route: AppRoute | null;
   offerId: string | null;
   disabled: boolean;
@@ -296,6 +296,7 @@ const PRIMARY_ACTIONS: readonly GameDetailPrimaryAction[] = [
   "install-steam",
   "install-epic",
   "configure-wine",
+  "locate",
   "view-offer",
   "unavailable",
 ];
@@ -1040,6 +1041,18 @@ export function resolvePrimaryAction(
         hint: t("detail.action.epicInstallHint", { title: detail.title }),
       };
     }
+    // Its files moved where no search found them: the way back is to say
+    // where they are now.
+    case "locate":
+      return {
+        ...base,
+        kind: "locate",
+        label: t("detail.action.locate"),
+        icon: "folder",
+        intent: "locate",
+        disabled: false,
+        hint: t("detail.action.locateHint", { title: detail.title }),
+      };
     case "configure-wine":
       return {
         ...base,

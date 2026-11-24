@@ -383,7 +383,12 @@ export function mountNxnativePanel(root: HTMLElement, deps: NxnativePanelDeps): 
   const runFix = (command: "nxnative_run_fix" | "nxnative_install_all", check?: string): void => {
     if (status) status = { ...status, fixing: check ?? FIXABLE[0] };
     render();
-    void deps.invoke(command, check ? { check } : {}).catch((error) => {
+    // Each name is written out, so the IPC contract test can see the call.
+    const started =
+      command === "nxnative_install_all"
+        ? deps.invoke("nxnative_install_all", {})
+        : deps.invoke("nxnative_run_fix", { check });
+    void started.catch((error) => {
       if (status) status = { ...status, fixing: null };
       deps.toast(String(error));
       render();

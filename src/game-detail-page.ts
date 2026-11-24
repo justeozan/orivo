@@ -247,6 +247,11 @@ export interface GameDetailPageOptions {
    */
   onLibraryChanged?(): void;
   /**
+   * Asks where a game that moved is now (the host's file dialog). Resolves
+   * true when the card was pointed at what the player picked.
+   */
+  locate?(gameId: string): Promise<boolean>;
+  /**
    * Says something to the user when the page cannot: a save that finished (or
    * failed) after they left it. Without it the outcome goes to the console.
    */
@@ -775,6 +780,12 @@ export function createGameDetailPage(options: GameDetailPageOptions): AppPage {
     }
     if (action.intent === "navigate" && action.route) {
       options.navigate(action.route);
+      return;
+    }
+    if (action.intent === "locate") {
+      if (options.locate && (await options.locate(gameId)) && isFresh(context, gameId)) {
+        await loadDetail(context, gameId);
+      }
       return;
     }
     if (action.intent === "install-epic") {

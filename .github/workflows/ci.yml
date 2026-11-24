@@ -147,6 +147,17 @@ jobs:
       - name: Check the Rust crate
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      # The whole workspace's tests: the app crate (over a thousand of them),
+      # quiky-host, and orivo-plugin-sdk, whose `wit_compatibility` test is the
+      # one thing here that is *supposed* to fail on a breaking change to
+      # wit/orivo-plugin.wit. Until this step the app's own suite ran nowhere
+      # but on contributors' machines, so a refactor that moved code out of
+      # lib.rs could break a tested behaviour and still merge green. Linux and
+      # macOS run all of it; Windows runs the platform-specific subset below.
+      - name: Test the Rust workspace
+        if: matrix.platform != 'windows-latest'
+        run: cargo test --workspace
+
       # `plugin_runtime.rs` is the one module whose implementation genuinely
       # differs per platform — handle-relative opens, a granted folder's trust,
       # that folder's identity — and `cargo check` cannot say whether any of it
@@ -165,9 +176,10 @@ jobs:
       # nothing said so.
       #
       # Deliberately not the whole suite: the rest of the crate is
-      # platform-independent and already covered on macOS and Linux, and a
-      # Windows runner is the slowest in this matrix. The module paths are spelled
-      # out rather than filtered on `plugin_`, which is a substring match and also
+      # platform-independent and covered by the workspace step on macOS and
+      # Linux, and a Windows runner is the slowest in this matrix. The module
+      # paths are spelled out rather than filtered on `plugin_`, which is a
+      # substring match and also
       # caught, for instance,
       # `catalog::tests::a_profile_cannot_change_the_plugin_that_owns_it` — a test
       # in another module, which this step has no business gating on.
@@ -182,15 +194,6 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --lib --
           plugin_runtime:: plugin_scheduler:: plugin_compile_cache::
           game_folder:: shortcut:: launcher:: --nocapture
-
-      # `orivo-plugin-sdk` (sdk/) links `orivo` as an rlib and its
-      # `wit_compatibility` test is the one thing here that is *supposed* to
-      # fail on a breaking change to wit/orivo-plugin.wit — a check that never
-      # runs is not a guard. One platform is enough: the crate has no
-      # platform-specific code, unlike the app it links.
-      - name: Test the plugin SDK
-        if: matrix.platform == 'ubuntu-22.04'
-        run: cargo test -p orivo-plugin-sdk
 
   plugin-artifact:
     # `plugins/ryujinx/package/component.wasm` is committed with a SHA-256 the
