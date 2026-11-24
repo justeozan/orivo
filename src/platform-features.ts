@@ -26,6 +26,11 @@ export interface PlatformFeatures {
    * phone or tablet a new version comes from the store.
    */
   selfUpdates: boolean;
+  /**
+   * The Mac App Store edition streams through a script the player allows once,
+   * since its sandbox cannot start Moonlight with arguments itself.
+   */
+  bridgedStreaming: boolean;
 }
 
 export const DESKTOP_FEATURES: PlatformFeatures = {
@@ -34,6 +39,7 @@ export const DESKTOP_FEATURES: PlatformFeatures = {
   storeChoices: false,
   stepsAside: true,
   selfUpdates: true,
+  bridgedStreaming: false,
 };
 
 function isTauriRuntime(): boolean {
@@ -52,6 +58,7 @@ export function readPlatformFeatures(value: unknown): PlatformFeatures {
     storeChoices: flag("storeChoices"),
     stepsAside: flag("stepsAside"),
     selfUpdates: flag("selfUpdates"),
+    bridgedStreaming: flag("bridgedStreaming"),
   };
 }
 

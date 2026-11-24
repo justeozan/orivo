@@ -102,6 +102,41 @@ right folder; the grant is kept as a read-only security-scoped bookmark and
 reopened at every launch (`folder_access.rs`). Libraries themselves come from
 the accounts and need no folder.
 
+### Streaming through Moonlight
+
+The Moonlight plugin is a downloaded runner, so the edition cannot install it,
+and the sandbox would not let it work anyway: `NSWorkspace` drops the
+arguments of an app it opens, and a process the app spawns inherits the
+sandbox, so a Moonlight started that way reads its pairing from Orivo's
+container and finds none. Streaming is built in instead, through the one door
+the sandbox leaves: a script in `~/Library/Application Scripts/run.evey.orivo/`,
+which macOS runs outside the sandbox through `NSUserUnixTask`
+(`moonlight_bridge.rs`).
+
+- **One click to allow.** The app may read that folder but not write it.
+  Settings › Plugins › Moonlight opens it in the system's folder panel, the
+  player clicks Open, and the grant lets Orivo write `orivo-moonlight` there.
+  Deleting the file takes the permission back.
+- **The script starts Moonlight and nothing else**, with `list`, `pair` or
+  `stream`, and the host checks every argument before asking it
+  (`validate_arguments`). Moonlight keeps its own pairing and settings, so a
+  player who already streams with it goes straight to the games.
+- **The PC's games become `stream` cards** (`GameSource::Stream`), started with
+  `moonlight stream <PC> <game>`. No new entitlement: the edition's own are
+  enough.
+
+Measured on 2026-11-17 from a sandboxed build with these entitlements: `list`
+answers in 1.3–1.7 s and a stream starts. The alternatives were worse for the
+player: a `shortcuts://` link brings Shortcuts to the front at every launch,
+Apple Events to Terminal leave a window open and need a temporary-exception
+entitlement, and a Moonlight spawned inside the sandbox needs its own pairing
+and `network.server`. Moonlight has no URL scheme and no AppleScript
+dictionary, so nothing can talk to it directly.
+
+App Review will not have Moonlight or a gaming PC. The review notes should say
+so: the Moonlight card explains itself, and the rest of the app does not depend
+on it.
+
 Signing needs the team's Apple Distribution certificate, a *Mac Installer
 Distribution* certificate ("3rd Party Mac Developer Installer") and a Mac App
 Store profile for `run.evey.orivo`, all three created through the API key.

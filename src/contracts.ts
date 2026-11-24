@@ -10,7 +10,7 @@ export type ConnectedSource =
   "epic" | "gog" | "ubisoft" | "xbox" | "microsoft-store" | "instant-gaming";
 
 export type GameSource =
-  "steam" | "wine" | "local" | "showcase" | "store" | "android" | ConnectedSource;
+  "steam" | "wine" | "local" | "showcase" | "store" | "android" | "stream" | ConnectedSource;
 
 /**
  * How a store proves who you are. `token` stores an OAuth credential in the

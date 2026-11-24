@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Game streaming in the Mac App Store edition. Its sandbox cannot start Moonlight with what to play, so Settings › Plugins › Moonlight asks for your OK once: it opens the folder macOS keeps for Orivo's scripts, you click Open, and Orivo puts a small script there that starts Moonlight and nothing else (delete it to take the permission back). Then the same steps as on the desktop: your PC, the pairing PIN if Moonlight does not know it yet, and your games, which join the Library and start a stream in Moonlight. Moonlight keeps its own pairing and settings, so if you already stream with it there is nothing to redo.
+
 ## [0.4.0] - 2026-11-16
 
 ### Added

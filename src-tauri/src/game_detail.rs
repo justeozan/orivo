@@ -189,6 +189,7 @@ pub enum GameSourceView {
     MicrosoftStore,
     InstantGaming,
     Android,
+    Stream,
 }
 
 impl GameSourceView {
@@ -204,6 +205,7 @@ impl GameSourceView {
             CatalogGameSource::MicrosoftStore => Some(Self::MicrosoftStore),
             CatalogGameSource::InstantGaming => Some(Self::InstantGaming),
             CatalogGameSource::Android => Some(Self::Android),
+            CatalogGameSource::Stream => Some(Self::Stream),
             CatalogGameSource::Local | CatalogGameSource::Steam => None,
         }
     }

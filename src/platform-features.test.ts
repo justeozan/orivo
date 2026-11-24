@@ -21,6 +21,7 @@ describe("platform features", () => {
         storeChoices: true,
         stepsAside: false,
         selfUpdates: false,
+        bridgedStreaming: false,
       }),
     ).toEqual({
       downloadablePlugins: false,
@@ -28,7 +29,15 @@ describe("platform features", () => {
       storeChoices: true,
       stepsAside: false,
       selfUpdates: false,
+      bridgedStreaming: false,
     });
+  });
+
+  it("streams through the script only when the Mac App Store edition says so", () => {
+    expect(readPlatformFeatures({}).bridgedStreaming).toBe(false);
+    expect(
+      readPlatformFeatures({ downloadablePlugins: false, localRunners: false, bridgedStreaming: true }),
+    ).toMatchObject({ downloadablePlugins: false, localRunners: false, bridgedStreaming: true });
   });
 
   // Like every other flag, an answer the host did not give is the desktop's.

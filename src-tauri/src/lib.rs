@@ -16,6 +16,7 @@ mod game_detail;
 mod game_folder;
 mod game_media;
 mod gamestream;
+mod moonlight_bridge;
 mod launcher;
 mod moonlight_android;
 // Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
@@ -1198,6 +1199,11 @@ pub fn run() {
             gamestream::get_gamestream_settings,
             gamestream::update_gamestream_settings,
             gamestream::open_gamestream_link,
+            get_moonlight_bridge,
+            install_moonlight_bridge,
+            check_streaming_pc,
+            pair_streaming_pc,
+            import_streaming_games,
             purge_plugin_compile_cache,
             get_wine_runner_status,
             begin_wine_profile_setup,
@@ -8500,6 +8506,29 @@ async fn launch_game_inner(
         });
     }
 
+    // A game streamed from the player's PC in the Mac App Store edition:
+    // Moonlight is started by the script the player allowed, with the PC and
+    // the application name checked again on the way (`moonlight_bridge.rs`).
+    if moonlight_bridge::AVAILABLE
+        && let LaunchTarget::Provider { provider, app_ref } = &game.launch_target
+        && provider == moonlight_bridge::PROVIDER
+    {
+        let app_name = moonlight_bridge::app_name(app_ref)
+            .ok_or_else(|| format!("Import {title} again from Settings › Plugins › Streaming."))?;
+        let host = app
+            .state::<Arc<gamestream::GameStreamService>>()
+            .stream_host()
+            .map_err(|error| error.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || moonlight_bridge::stream(&host, &app_name))
+            .await
+            .map_err(|error| format!("Launch request did not finish: {error}"))?
+            .map_err(|error| error.to_string())?;
+        return Ok(LaunchResult {
+            status: format!("Streaming {title} with Moonlight"),
+            handoff: Some(LaunchHandoff::Client),
+        });
+    }
+
     // A game that is an app on this phone starts the way its home-screen icon
     // does, through the launch intent its own package declares.
     if cfg!(target_os = "android")
@@ -8782,6 +8811,108 @@ async fn sync_android_games(
         games: count,
         changed,
     })
+}
+
+/// The Mac App Store edition's way to Moonlight: whether the script is
+/// installed and finds Moonlight (`moonlight_bridge.rs`).
+#[tauri::command]
+async fn get_moonlight_bridge() -> Result<moonlight_bridge::MoonlightBridgeView, String> {
+    tauri::async_runtime::spawn_blocking(moonlight_bridge::view)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Show the Application Scripts folder and install the script once the player
+/// confirms it. Not async: the open panel has to come from the main thread.
+#[tauri::command]
+fn install_moonlight_bridge() -> Result<(), String> {
+    moonlight_bridge::install().map_err(|error| error.to_string())
+}
+
+/// Save the PC's address and ask, through Moonlight, whether it is on and
+/// paired with this Mac.
+#[tauri::command]
+async fn check_streaming_pc(
+    host: String,
+    gamestream: State<'_, Arc<gamestream::GameStreamService>>,
+) -> Result<gamestream::HostStatusView, String> {
+    let host = gamestream::normalise_host(&host).map_err(|error| error.to_string())?;
+    gamestream.update(gamestream::GameStreamSettingsUpdate {
+        host: Some(host.clone()),
+    })?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let reachable = gamestream::host_is_reachable(&host);
+        let listing = if reachable {
+            moonlight_bridge::list(&host)
+        } else {
+            Err(moonlight_bridge::BridgeError::TimedOut)
+        };
+        moonlight_bridge::host_status(&host, reachable, &listing)
+    })
+    .await
+    .map_err(|_| "Checking your PC did not finish. Try again.".to_string())
+}
+
+/// A pairing started through Moonlight: the PIN to type on the PC, or none
+/// when the PC already knows this Mac.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamingPairing {
+    host: String,
+    pin: Option<String>,
+}
+
+#[tauri::command]
+async fn pair_streaming_pc(
+    gamestream: State<'_, Arc<gamestream::GameStreamService>>,
+) -> Result<StreamingPairing, String> {
+    let host = gamestream.stream_host().map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        if moonlight_bridge::list(&host).is_ok() {
+            return Ok(StreamingPairing { host, pin: None });
+        }
+        let pin = runner_commands::pairing_pin().map_err(|error| error.to_string())?;
+        moonlight_bridge::pair(&host, &pin).map_err(|error| error.to_string())?;
+        Ok(StreamingPairing {
+            host,
+            pin: Some(pin),
+        })
+    })
+    .await
+    .map_err(|_| "Pairing did not start. Try again.".to_string())?
+}
+
+/// Put the PC's games in the library as stream cards.
+#[tauri::command]
+async fn import_streaming_games(
+    state: State<'_, AppState>,
+    gamestream: State<'_, Arc<gamestream::GameStreamService>>,
+) -> Result<usize, String> {
+    let host = gamestream.stream_host().map_err(|error| error.to_string())?;
+    let names = tauri::async_runtime::spawn_blocking(move || moonlight_bridge::list(&host))
+        .await
+        .map_err(|_| "Listing your PC's games did not finish. Try again.".to_string())?
+        .map_err(|error| error.to_string())?;
+    let games = moonlight_bridge::games_from(&names);
+    let count = games.len();
+
+    let _mutation = state
+        .catalog_mutation
+        .lock()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?;
+    let mut next = state
+        .catalog
+        .read()
+        .map_err(|_| "The game catalog is temporarily unavailable".to_string())?
+        .clone();
+    if moonlight_bridge::apply(&mut next, games) {
+        persist_catalog(&next, &state.catalog_path).map_err(|error| error.to_string())?;
+        *state
+            .catalog
+            .write()
+            .map_err(|_| "The game catalog is temporarily unavailable".to_string())? = next;
+    }
+    Ok(count)
 }
 
 /// Ask the locally installed Epic Games Launcher to begin a download for one
@@ -9695,6 +9826,9 @@ fn launch_option_label(target: &LaunchTarget, catalog: &Catalog) -> String {
         }
         LaunchTarget::Provider { provider, .. } if provider == android_games::PROVIDER => {
             "This phone".into()
+        }
+        LaunchTarget::Provider { provider, .. } if provider == moonlight_bridge::PROVIDER => {
+            "Your PC · Moonlight".into()
         }
         LaunchTarget::Provider { provider, .. } => sources::SourceProvider::from_token(provider)
             .map(|provider| provider.label().to_owned())

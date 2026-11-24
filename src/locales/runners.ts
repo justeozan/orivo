@@ -1,4 +1,9 @@
 export const en = {
+  "runners.bridge.allow": "Allow",
+  "runners.bridge.allowIntro": "Orivo needs your OK once to start Moonlight. Click Open in the window that appears.",
+  "runners.bridge.needsOk": "Needs your OK",
+  "runners.bridge.pinExpired": "The PIN expired. Pair again.",
+  "runners.bridge.ready": "Allowed · Moonlight found",
   "runners.error.addDesktopOnly": "Adding an emulator is only available in the Orivo desktop app.",
   "runners.error.checkPairing": "Orivo could not check the pairing. Try again.",
   "runners.error.checkPc": "Orivo could not check your PC. Try again.",
@@ -145,6 +150,11 @@ export const en = {
 };
 
 export const fr: Partial<Record<keyof typeof en, string>> = {
+  "runners.bridge.allow": "Autoriser",
+  "runners.bridge.allowIntro": "Orivo a besoin de ton accord une fois pour lancer Moonlight. Clique sur Ouvrir dans la fenêtre qui s’affiche.",
+  "runners.bridge.needsOk": "Ton accord est nécessaire",
+  "runners.bridge.pinExpired": "Le PIN a expiré. Associe à nouveau.",
+  "runners.bridge.ready": "Autorisé · Moonlight trouvé",
   "runners.error.addDesktopOnly": "Ajouter un émulateur n’est possible que dans l’app de bureau Orivo.",
   "runners.error.checkPairing": "Orivo n’a pas pu vérifier l’association. Réessaie.",
   "runners.error.checkPc": "Orivo n’a pas pu vérifier ton PC. Réessaie.",

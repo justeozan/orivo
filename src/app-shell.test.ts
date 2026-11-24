@@ -2075,6 +2075,42 @@ describe("the application shell on iOS", () => {
     expect(catalog.querySelector("[data-plugin-card='wallpaper-searcher']")).not.toBeNull();
   });
 
+  it("streams through Moonlight in the Mac App Store edition, without the plugin catalogue", async () => {
+    backend.features = {
+      downloadablePlugins: false,
+      localRunners: false,
+      storeChoices: false,
+      bridgedStreaming: true,
+    };
+    const answer = tauri.invoke.getMockImplementation()!;
+    tauri.invoke.mockImplementation(async (command, args) =>
+      command === "get_moonlight_bridge"
+        ? { available: true, installed: false, moonlight: null }
+        : answer(command, args),
+    );
+    mount();
+    await settle();
+    await goto("#/settings/plugins");
+    await settle();
+
+    const catalog = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
+    expect(catalog.querySelector<HTMLElement>(".plugins-group--catalog")!.hidden).toBe(true);
+    expect(catalog.querySelector("[data-plugin-card='wine']")).toBeNull();
+    const card = catalog.querySelector<HTMLElement>("[data-plugin-card='game-streaming']")!;
+    expect(card.textContent).toContain("Moonlight");
+
+    card.querySelector<HTMLButtonElement>("[data-plugin-open]")!.click();
+    await settle();
+    expect(root.querySelector<HTMLElement>("#gamestream-setup-panel")!.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("#runners-panel")!.hidden).toBe(true);
+    await vi.waitFor(() => {
+      const steps = [...root.querySelectorAll<HTMLElement>("#stream-bridge-body [data-gs-step]")];
+      expect(steps.map((step) => step.dataset.gsStep)).toEqual(["moonlight", "host", "pair", "games"]);
+    });
+    expect(root.querySelector("#stream-bridge-body [data-gs-action='allow-bridge']")).not.toBeNull();
+    expect(root.querySelector("#gamestream-setup-body")!.childElementCount).toBe(0);
+  });
+
   it("offers the iPhone version and the Steam page beside Install", async () => {
     mount();
     await settle();

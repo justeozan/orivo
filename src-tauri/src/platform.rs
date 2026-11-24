@@ -31,6 +31,11 @@ pub struct PlatformFeatures {
     /// version comes from the store, and an App Store app may not offer to
     /// update itself any other way.
     pub self_updates: bool,
+    /// Games streamed from the player's PC are started through the script the
+    /// player allows once (`moonlight_bridge.rs`), because the App Sandbox
+    /// will not let Orivo start Moonlight with arguments itself. The Mac App
+    /// Store edition only; elsewhere streaming is the Moonlight runner.
+    pub bridged_streaming: bool,
 }
 
 pub const CURRENT: PlatformFeatures = for_target(
@@ -55,6 +60,7 @@ pub const fn for_target(ios: bool, mobile: bool, app_store: bool) -> PlatformFea
         store_choices: mobile,
         steps_aside: !mobile,
         self_updates: !mobile && !app_store,
+        bridged_streaming: app_store && !mobile,
     }
 }
 
@@ -77,6 +83,7 @@ mod tests {
                 store_choices: true,
                 steps_aside: false,
                 self_updates: false,
+                bridged_streaming: false,
             }
         );
     }
@@ -91,6 +98,7 @@ mod tests {
                 store_choices: true,
                 steps_aside: false,
                 self_updates: false,
+                bridged_streaming: false,
             }
         );
     }
@@ -105,12 +113,13 @@ mod tests {
                 store_choices: false,
                 steps_aside: true,
                 self_updates: true,
+                bridged_streaming: false,
             }
         );
     }
 
     #[test]
-    fn the_mac_app_store_edition_downloads_no_code_runs_nothing_and_leaves_updates_to_the_store() {
+    fn the_mac_app_store_edition_downloads_no_code_leaves_updates_to_the_store_and_streams_through_the_script() {
         assert_eq!(
             for_target(false, false, true),
             PlatformFeatures {
@@ -119,6 +128,7 @@ mod tests {
                 store_choices: false,
                 steps_aside: true,
                 self_updates: false,
+                bridged_streaming: true,
             }
         );
     }
@@ -134,6 +144,7 @@ mod tests {
                 "storeChoices": true,
                 "stepsAside": false,
                 "selfUpdates": false,
+                "bridgedStreaming": false,
             })
         );
     }

@@ -1570,7 +1570,7 @@ fn pairing_command(application: &Path, host: &str, pin: &str) -> Command {
 /// the rest. A pairing PIN is a short-lived shared secret for a handshake that
 /// authorises a client against a machine, and skewing it costs nothing to
 /// avoid.
-fn pairing_pin() -> Result<String, RunnerHostError> {
+pub(crate) fn pairing_pin() -> Result<String, RunnerHostError> {
     loop {
         let mut bytes = [0u8; 2];
         getrandom::fill(&mut bytes).map_err(|_| RunnerHostError::ApplicationUnavailable)?;

@@ -166,6 +166,9 @@ pub enum GameSource {
     /// A game installed on this Android phone as an app of its own, started
     /// by the launch intent its package declares (`android_games.rs`).
     Android,
+    /// A game on the person's gaming PC, streamed by Moonlight through the
+    /// Mac App Store edition's script (`moonlight_bridge.rs`).
+    Stream,
 }
 
 impl GameSource {
@@ -183,6 +186,7 @@ impl GameSource {
             Self::MicrosoftStore => Some("microsoft-store"),
             Self::InstantGaming => Some("instant-gaming"),
             Self::Android => Some("android"),
+            Self::Stream => Some("stream"),
         }
     }
 
@@ -195,6 +199,7 @@ impl GameSource {
             Self::MicrosoftStore,
             Self::InstantGaming,
             Self::Android,
+            Self::Stream,
         ]
         .into_iter()
         .find(|source| source.provider_token() == Some(token))

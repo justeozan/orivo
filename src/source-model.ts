@@ -75,6 +75,8 @@ export function sourceBadge(
       return { label: "Instant Gaming", icon: "instant-gaming" };
     case "android":
       return { label: "Android", icon: "android" };
+    case "stream":
+      return { label: "Moonlight", icon: "cast" };
     default:
       return null;
   }

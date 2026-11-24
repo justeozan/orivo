@@ -176,6 +176,7 @@ import {
   createGameStreamSetup,
   mountGameStreamSetup,
 } from "./gamestream-setup";
+import { createStreamBridgeSetup, mountStreamBridgeSetup } from "./stream-bridge-setup";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
@@ -704,6 +705,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     runnersPanelBody: get<HTMLElement>("#runners-panel-body"),
     gamestreamSetupPanel: get<HTMLElement>("#gamestream-setup-panel"),
     gamestreamSetupBody: get<HTMLElement>("#gamestream-setup-body"),
+    streamBridgeBody: get<HTMLElement>("#stream-bridge-body"),
     pluginsCatalogPanel: get<HTMLElement>("#plugins-catalog-panel"),
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
@@ -2780,6 +2782,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     openLibrary: () => navigate({ page: "library" }),
   });
   mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
+  // The Mac App Store edition reaches Moonlight through a script the player
+  // allows once; the same panel shows its steps instead.
+  const streamBridgeSetup = createStreamBridgeSetup({
+    call: (command, args) => invoke(command, args),
+    openLink: async (target) => {
+      await invoke("open_gamestream_link", { target });
+    },
+    showToast,
+    onImported: () => void refreshLibrary(),
+    openLibrary: () => navigate({ page: "library" }),
+  });
+  mountStreamBridgeSetup(refs.streamBridgeBody, streamBridgeSetup);
+  // Which of the two the panel shows is the host's answer, which arrives after
+  // mount: chosen when opened, and the one opened is the one closed.
+  let openStreamingSetup: { close(): void } | null = null;
   let gamestreamSetupOpen = false;
 
   /** The view a registry plugin's card opens: streaming opens its own setup. */
@@ -3203,6 +3220,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     // On Android, Winlator is the runner Orivo ships with: it is set up where
     // its games come from, under Libraries.
     if (winlator) cards.push(renderBuiltInCard("winlator", "Winlator", t("app.plugins.setupWinlator")));
+    // The App Store edition cannot install the Moonlight plugin: streaming is
+    // built in there, through the script.
+    if (platformFeatures.bridgedStreaming) {
+      cards.push(renderBuiltInCard("game-streaming", "Moonlight", t("app.plugins.openNamed", { name: "Moonlight" })));
+    }
     const installed = pluginManager.catalog().installed;
     cards.push(...installed.map(renderManagedPluginCard));
     refs.pluginsInstalledList.replaceChildren(...cards);
@@ -3324,17 +3346,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.pluginsDetailEmpty.hidden = view !== "list";
     refs.wallpaperPluginPanel.hidden = view !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = view !== "wine";
-    refs.gamestreamSetupPanel.hidden = view !== "game-streaming" || !platformFeatures.localRunners;
+    const streamingHere = platformFeatures.localRunners || platformFeatures.bridgedStreaming;
+    refs.gamestreamSetupPanel.hidden = view !== "game-streaming" || !streamingHere;
     // The setup reads the PC and the plugin when it is opened and stops its
     // pairing watch when it is left, whichever way that happens: the back
     // button, another plugin, another section, or leaving Settings.
-    const settingUp = view === "game-streaming" && platformFeatures.localRunners;
+    const settingUp = view === "game-streaming" && streamingHere;
     if (settingUp && !gamestreamSetupOpen) {
       gamestreamSetupOpen = true;
-      void gamestreamSetup.open();
+      const chosen = platformFeatures.bridgedStreaming ? streamBridgeSetup : gamestreamSetup;
+      openStreamingSetup = chosen;
+      void chosen.open();
     } else if (!settingUp && gamestreamSetupOpen) {
       gamestreamSetupOpen = false;
-      gamestreamSetup.close();
+      openStreamingSetup?.close();
+      openStreamingSetup = null;
     }
     const managed = installed.find((plugin) => plugin.id === openManagedPluginId());
     const runs = Boolean(managed?.extensions.some((kind) => kind.toLocaleLowerCase().includes("runner")));
@@ -7833,7 +7859,7 @@ function normaliseGame(record: BackendRecord): NormalisedLibraryGame | null {
   const artworkFallback = fixture;
   const rawSource = readString(record, "source");
   const source: LibraryGame["source"] =
-    rawSource === "steam" || rawSource === "local" || rawSource === "android"
+    rawSource === "steam" || rawSource === "local" || rawSource === "android" || rawSource === "stream"
       ? rawSource
       : isConnectedSource(rawSource)
         ? rawSource
@@ -8795,6 +8821,7 @@ function shell(): string {
                         <div class="plugin-detail__actions"></div>
                       </header>
                       <div id="gamestream-setup-body"></div>
+                      <div id="stream-bridge-body"></div>
                     </section>
 
                     <!-- Runner profiles ("Add an emulator") open inside the

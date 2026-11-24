@@ -271,6 +271,11 @@ pub fn provider_launchable(provider: &str) -> bool {
     if cfg!(target_os = "android") && provider == crate::android_games::PROVIDER {
         return true;
     }
+    // A game on the player's PC: the Mac App Store edition streams it through
+    // the script the player allowed, so the script has to be there.
+    if provider == crate::moonlight_bridge::PROVIDER {
+        return crate::moonlight_bridge::launchable();
+    }
     provider_client(provider).is_some_and(|client| client.installed())
 }
 
