@@ -2,9 +2,25 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-24
+
+### Added
+
+- A local game that was moved on disk is found again instead of breaking. Before each games-folder scan, and when you press Play on it, Orivo looks for its program in your games folders, around its old place and, on macOS, through Spotlight. A match moves the card in place, with its play time and artwork, so a game that moved into another games folder no longer shows up twice. Only safe matches count: the same file or `.app` name, and a generic name like `Game.exe` also needs its folder or its title to match. A `.lnk` whose target moved follows it at the next scan.
+- When the program cannot be found, the card is dimmed with a *Not installed* pill and Play becomes *Locate*, which lets you point Orivo at the game. The mark goes away by itself when the program comes back, for example when its drive is plugged in again.
+- A game's page shows the game's logo, and its title when there is none.
+
 ### Changed
 
 - The Library's bottom bar is sorted by source, always. It starts with *All Games*, then every library you have (Steam, Epic Games, GOG…), then what plugins bring under their console (*Switch* for Ryujinx, *PSP*, *SNES*…), then *Local* for every games folder (Wine and Winlator entries included) and *Stream* for every game a client streams from another machine. A store game stays under its store whatever starts it. Each source is its mark and its name, drawn as vectors in one size and one type, instead of logos of different shapes and heights. The button on the right now sorts the rail — *Recent*, *New* (never played first, newest arrival first), *Most played* — instead of switching between Activity, Genre, Source and Platform.
+
+### Fixed
+
+- On Windows, a local game that needs administrator rights starts. Orivo used to fail with "The requested operation requires elevation", while a double-click on the same game worked. Windows now shows its usual prompt, the game starts if you accept, and its play time is still counted. If you decline, Orivo says so plainly. A `.exe` marked read-only is no longer refused.
+- The Store in the desktop app shows the same artwork as everywhere else. 43 of its cards still used an older picture.
+- On a phone, Orivo keeps its phone layout. It switched back to the desktop layout as soon as the system briefly stopped reporting a touch screen, which a controller or a paired mouse can cause. Only a change of orientation changes the layout now. In exchange, plugging a mouse into a phone no longer brings back the desktop layout.
+- In Settings, moving quickly through the tabs with the keyboard or a controller lands on the right tab. The page could lag behind its own address for a moment, and the next press went to the tab you had just left.
+- The Library, Settings and the page shown for an unknown address mark their main content, so screen readers can jump to it.
 
 ## [0.4.0] - 2026-11-16
 
