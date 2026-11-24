@@ -23,13 +23,14 @@ import * as runners from "./locales/runners";
 import * as store from "./locales/store";
 import * as me from "./locales/me";
 import * as misc from "./locales/misc";
+import * as nxnative from "./locales/nxnative";
 
-const en = { ...core.en, ...app.en, ...detail.en, ...runners.en, ...store.en, ...me.en, ...misc.en };
+const en = { ...core.en, ...app.en, ...detail.en, ...runners.en, ...store.en, ...me.en, ...misc.en, ...nxnative.en };
 
 export type MessageKey = keyof typeof en;
 type Catalogue = Partial<Record<MessageKey, string>>;
 
-const fr: Catalogue = { ...core.fr, ...app.fr, ...detail.fr, ...runners.fr, ...store.fr, ...me.fr, ...misc.fr };
+const fr: Catalogue = { ...core.fr, ...app.fr, ...detail.fr, ...runners.fr, ...store.fr, ...me.fr, ...misc.fr, ...nxnative.fr };
 
 export const LANGUAGES = ["en", "fr"] as const;
 export type Language = (typeof LANGUAGES)[number];

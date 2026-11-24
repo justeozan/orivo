@@ -3838,6 +3838,14 @@ impl Game {
         };
         let artwork_path = discover_artwork(&selected_path, &executable_path);
         let id = local_game_id(&executable_path);
+        // A Switch game nxnative packed says so in its own Info.plist, and the
+        // card says it under its title the way a Ryujinx card does.
+        let metadata = selected_path
+            .extension()
+            .is_some_and(|extension| extension == "app")
+            .then(|| crate::nxnative::inspect_bundle(&selected_path))
+            .flatten()
+            .map(|app| app.metadata_line());
 
         Ok(Self {
             id,
@@ -3851,7 +3859,7 @@ impl Game {
             installation_path: None,
             arguments: Vec::new(),
             description: None,
-            metadata: None,
+            metadata,
             artwork_source_path: artwork_path.clone(),
             artwork_path,
             cover_source_path: None,

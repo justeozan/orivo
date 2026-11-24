@@ -26,8 +26,12 @@ import { applyLogoFit, prepareLogo } from "./logo-fit";
 import { t } from "./i18n";
 import { prefersReducedMotion } from "./motion";
 
-/** Who puts the game on screen, as the host reports it with the launch. */
-export type LaunchHandoff = "process" | "client";
+/**
+ * Who puts the game on screen, as the host reports it with the launch.
+ * `window`: a game Orivo started and whose window the host watches for; it
+ * says when that window is up (`gameWindow`), and Orivo steps aside then.
+ */
+export type LaunchHandoff = "process" | "client" | "window";
 
 export interface LaunchSplashGame {
   id: string;
@@ -50,6 +54,11 @@ export interface LaunchSplashTiming {
   holdMs: number;
   /** Once the host has accepted a launch, the longest Orivo waits for the game before stepping aside anyway. */
   deadlineMs: number;
+  /**
+   * The same, for a game whose window the host watches for: it says when the
+   * window is up, so this only covers a host that never says.
+   */
+  windowDeadlineMs: number;
   /** How long the splash takes to fade when Orivo stays. Matches styles.css. */
   fadeMs: number;
   /**
@@ -63,6 +72,7 @@ export interface LaunchSplashTiming {
 export const LAUNCH_SPLASH_TIMING: Readonly<LaunchSplashTiming> = Object.freeze({
   holdMs: 1_600,
   deadlineMs: 12_000,
+  windowDeadlineMs: 120_000,
   fadeMs: 260,
   settleMs: 450,
 });
@@ -85,6 +95,8 @@ export interface LaunchSplash {
   open(game: LaunchSplashGame): void;
   /** The host accepted the launch of `gameId`. */
   launched(gameId: string, handoff: LaunchHandoff): void;
+  /** The host watched for `gameId`'s window: it is on screen (`true`), or the game ended first. */
+  gameWindow(gameId: string, shown: boolean): void;
   /** Starting `gameId` failed, before or after the host accepted it. */
   failed(gameId: string): void;
   /** Escape or B: back to Orivo, which stays. The launch itself carries on. */
@@ -114,7 +126,8 @@ export function windowForegroundSignals(target: Window = window, page: Document 
 
 /** Reads the handoff the host sent with a launch. Anything else is a game Orivo started. */
 export function readLaunchHandoff(result: unknown): LaunchHandoff {
-  return (result as { handoff?: unknown } | null | undefined)?.handoff === "client" ? "client" : "process";
+  const handoff = (result as { handoff?: unknown } | null | undefined)?.handoff;
+  return handoff === "client" || handoff === "window" ? handoff : "process";
 }
 
 type Phase = "closed" | "starting" | "waiting" | "leaving";
@@ -137,6 +150,8 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
   let covered = false;
   /** The player went somewhere else and came back to Orivo since Play. */
   let returned = false;
+  /** The host saw the game's window on screen (a `window` handoff). */
+  let windowShown = false;
   let beatPending = false;
   let returnFocusTo: HTMLElement | null = null;
   let stopWatching: (() => void) | null = null;
@@ -302,7 +317,10 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       stepAside();
       return;
     }
-    if (!(lostFocus && handoff === "process")) return; // The deadline will.
+    // A watched window is the one signal that counts: losing focus could be
+    // the player clicking elsewhere while the game is still loading.
+    const gameIsUp = handoff === "window" ? windowShown : lostFocus && handoff === "process";
+    if (!gameIsUp) return; // The deadline will.
     if (beat > 0) afterBeat(beat);
     else stepAside();
   };
@@ -333,6 +351,7 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       lostFocus = false;
       covered = false;
       returned = false;
+      windowShown = false;
       const active = document.activeElement;
       returnFocusTo = active instanceof HTMLElement && active !== document.body ? active : null;
       host.hidden = false;
@@ -350,7 +369,17 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       phase = "waiting";
       handoff = kind;
       stepsAside = options.shouldStepAside() && !returned;
-      if (stepsAside) schedule(stepAside, timing.deadlineMs);
+      if (stepsAside) schedule(stepAside, kind === "window" ? timing.windowDeadlineMs : timing.deadlineMs);
+      evaluate();
+    },
+
+    gameWindow(id, shown) {
+      if ((phase !== "starting" && phase !== "waiting") || id !== gameId) return;
+      if (!shown) {
+        close(true);
+        return;
+      }
+      windowShown = true;
       evaluate();
     },
 

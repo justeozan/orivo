@@ -18,6 +18,8 @@ mod game_media;
 mod gamestream;
 mod launcher;
 mod moonlight_android;
+mod nxnative;
+mod nxnative_commands;
 // Ignored by default: `cargo test -- --ignored --nocapture perf_bench` prints the
 // numbers docs/performance.md records. It never runs in the default `cargo test`
 // gate, so a busy CI runner can't turn a timing into a false failure.
@@ -531,6 +533,10 @@ enum LaunchHandoff {
     Process,
     /// The store's client was asked to start it.
     Client,
+    /// Orivo started the game and watches for its window: a `game-window`
+    /// event says when it is on screen, or that the game ended before
+    /// (`nxnative_commands::watch_console_start`).
+    Window,
 }
 
 /// The launch service hands Steam and the connected stores a URI, and starts
@@ -1230,6 +1236,19 @@ pub fn run() {
             get_store_choices,
             open_store_choice,
             platform::get_platform_features,
+            nxnative_commands::nxnative_status,
+            nxnative_commands::nxnative_choose_checkout,
+            nxnative_commands::nxnative_build,
+            nxnative_commands::nxnative_cancel_build,
+            nxnative_commands::nxnative_games,
+            nxnative_commands::nxnative_set_choice,
+            nxnative_commands::nxnative_open_link,
+            nxnative_commands::nxnative_run_fix,
+            nxnative_commands::nxnative_install_all,
+            nxnative_commands::nxnative_installed,
+            nxnative_commands::nxnative_remove,
+            nxnative_commands::nxnative_restore,
+            nxnative_commands::nxnative_update,
             folder_access::get_store_folder_access,
             folder_access::grant_store_folder_access,
             playport::is_playport_installed,
@@ -4943,6 +4962,25 @@ fn visible_game_id(catalog: &Catalog, direct_id: &str) -> String {
         .unwrap_or_else(|| direct_id.to_string())
 }
 
+/// Add a folder to the games folders without asking and without scanning:
+/// the background scan picks it up. A folder already there stays as it is.
+#[cfg(desktop)]
+fn remember_game_folder(app: &AppHandle, folder: &Path) {
+    let Some(record) = game_folder_record(app) else {
+        return;
+    };
+    let Ok(_record) = GAME_FOLDER_RECORD_LOCK.lock() else {
+        return;
+    };
+    let mut folders = game_folder::GameFolders::load(&record);
+    if folders.add(folder) {
+        let _ = folders.save(&record);
+    }
+}
+
+#[cfg(mobile)]
+fn remember_game_folder(_app: &AppHandle, _folder: &Path) {}
+
 /// Let the player add a folder their games live in. Every game in it is then
 /// added by a scan this starts without waiting, whose report arrives as a
 /// `game-folder-scanned` event. Choosing a folder already in the list looks
@@ -8560,14 +8598,40 @@ async fn launch_game_inner(
     // bundle accepted the URI. Keep that confirmation off the command/UI
     // executor, while direct launches still return once their process starts.
     let game_id_for_session = game.id.clone();
-    let child = tauri::async_runtime::spawn_blocking(move || launcher::launch_owned(&game))
+    // A Switch game nxnative built starts like a console's: no settings window,
+    // on the desktop Orivo is on, and Orivo steps aside when its window is up.
+    let nxnative_env = match (&game.launch_target, game.executable_path.as_deref()) {
+        (LaunchTarget::Direct, Some(path)) if cfg!(target_os = "macos") => {
+            nxnative_commands::console_env_for(&app, path)
+        }
+        _ => None,
+    };
+    let watch_window = nxnative_env.is_some();
+    let handoff = if watch_window {
+        LaunchHandoff::Window
+    } else {
+        handoff
+    };
+    let child = tauri::async_runtime::spawn_blocking(move || match nxnative_env {
+        Some(env) => launcher::launch_direct_with_env(&game, &env).map(Some),
+        None => launcher::launch_owned(&game),
+    })
         .await
         .map_err(|error| format!("Launch request did not finish: {error}"))?
         .map_err(|error| error.to_string())?;
     // Only a direct launch leaves a process of Orivo's own to time; a store
     // client's hand-off ends when the client has accepted the request.
     if let Some(child) = child {
-        watch_game_session(app.clone(), game_id_for_session, child);
+        if watch_window {
+            nxnative_commands::watch_console_start(
+                app.clone(),
+                game_id_for_session,
+                child,
+                record_session,
+            );
+        } else {
+            watch_game_session(app.clone(), game_id_for_session, child);
+        }
     }
     Ok(LaunchResult {
         status: format!("Launching {title}"),
