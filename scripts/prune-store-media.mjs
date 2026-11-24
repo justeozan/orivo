@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MEDIA_ROOT = resolve(ROOT, "public/media/store");
-const CATALOG = resolve(ROOT, "src/store-catalog.generated.ts");
+const CATALOG = resolve(ROOT, "src/generated/store-catalog.ts");
 const APPLY = process.argv.includes("--apply");
 
 const source = await readFile(CATALOG, "utf8");
