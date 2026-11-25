@@ -50,6 +50,8 @@ export interface AvailablePluginView {
   sizeBytes: number;
   /** True when this exact id is already installed. */
   installed: boolean;
+  /** Declared by the registry; absent from an index that predates categories. */
+  category?: string;
 }
 
 export interface PluginCatalogView {
@@ -227,8 +229,36 @@ function readAvailable(value: unknown): AvailablePluginView[] {
           ? raw.sizeBytes
           : 0,
       installed: raw.installed === true,
+      ...(typeof raw.category === "string" && raw.category ? { category: raw.category } : {}),
     },
   ];
+}
+
+export const PLUGIN_UPDATES_EVENT = "plugin-updates-available";
+
+/**
+ * How many installed plugins have a release waiting. The host's announcement
+ * only prompts a catalogue refresh; counting from `updateTo` means an update
+ * that has since been installed stops being counted.
+ */
+export function pendingUpdateCount(installed: ReadonlyArray<{ updateTo?: string | null }>): number {
+  return installed.filter((plugin) => plugin.updateTo).length;
+}
+
+type ListenFn = (
+  event: string,
+  handler: () => void,
+) => Promise<() => void>;
+
+/**
+ * Subscribe to the host's "releases are waiting" announcement. Returns the
+ * disposer, so unmounting the app stops the subscription.
+ */
+export function watchPluginUpdates(listenFn: ListenFn, onAnnounce: () => void): () => void {
+  const pending = listenFn(PLUGIN_UPDATES_EVENT, onAnnounce);
+  return () => {
+    void pending.then((unlisten) => unlisten()).catch(() => undefined);
+  };
 }
 
 export function readPluginCatalog(value: unknown): PluginCatalogView {

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  watchPluginUpdates,
   DEFAULT_UPDATE_POLICY,
   createDefaultPluginManagerClient,
   createPluginManagerController,
@@ -715,5 +716,45 @@ describe("a host without the plugin commands", () => {
     expect(formatInstallLabel(controller.progressFor("com.orivo.dolphin"), available())).toBe(
       "Retry",
     );
+  });
+});
+
+describe("category and update count", () => {
+  it("reads the category when the host sends one and tolerates its absence", async () => {
+    const { readPluginCatalog } = await import("./plugin-manager");
+    const view = readPluginCatalog({
+      installed: [],
+      available: [
+        { id: "a", name: "A", version: "1", summary: "", sizeBytes: 1, installed: false, category: "music" },
+        { id: "b", name: "B", version: "1", summary: "", sizeBytes: 1, installed: false },
+      ],
+    });
+    expect(view.available[0].category).toBe("music");
+    expect(view.available[1].category).toBeUndefined();
+  });
+
+  it("counts installed plugins with a newer release", async () => {
+    const { pendingUpdateCount } = await import("./plugin-manager");
+    expect(pendingUpdateCount([{ updateTo: "2" }, {}, { updateTo: null }, { updateTo: "3" }])).toBe(2);
+  });
+});
+
+describe("watchPluginUpdates", () => {
+  it("refreshes on the host announcement and stops when disposed", async () => {
+    const unlisten = vi.fn();
+    let handler: (() => void) | undefined;
+    const listenFn = vi.fn(async (_event: string, cb: () => void) => {
+      handler = cb;
+      return unlisten;
+    });
+    const onAnnounce = vi.fn();
+    const stop = watchPluginUpdates(listenFn, onAnnounce);
+    expect(listenFn).toHaveBeenCalledWith("plugin-updates-available", onAnnounce);
+    handler?.();
+    expect(onAnnounce).toHaveBeenCalledTimes(1);
+    stop();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(unlisten).toHaveBeenCalledTimes(1);
   });
 });

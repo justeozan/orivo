@@ -648,3 +648,7 @@ toast à chaque démarrage.
 - [Wasmtime — composants WebAssembly, WASI et Component Model](https://docs.wasmtime.dev/)
 - [Wasmtime — préparation et instanciation rapide](https://docs.wasmtime.dev/examples-fast-instantiation.html)
 - [Wasmtime — interruption par fuel ou epochs](https://docs.wasmtime.dev/examples-interrupting-wasm.html)
+
+## Registre distant
+
+Format de l'index, mises à jour et soumission d'un plugin communautaire : voir [plugin-registry.md](plugin-registry.md).

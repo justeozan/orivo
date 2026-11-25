@@ -22,7 +22,8 @@
 //! not named after the plugin. A refusal there rolls the update back.
 
 use crate::plugin_index::{
-    IndexCache, IndexEntry, REGISTRY_INDEX_URL, download_entry, is_upgrade, refresh_index,
+    INDEX_TTL, IndexCache, IndexEntry, REGISTRY_INDEX_URL, download_entry, is_upgrade,
+    refresh_index,
 };
 use crate::plugin_manifest::{
     HostCompatibility, PackageEntry, PackageInspection, PackageSignatureStatus, PluginManifest,
@@ -53,6 +54,8 @@ use tauri::{AppHandle, Emitter, State};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 pub const PLUGIN_INSTALL_EVENT: &str = "plugin-install-status";
+/// Payload: the ids of installed plugins that have a newer release waiting.
+pub const PLUGIN_UPDATES_EVENT: &str = "plugin-updates-available";
 
 const REGISTRY_JSON: &str = include_str!("../resources/plugin-registry.json");
 const MANIFEST_FILE: &str = "manifest.json";
@@ -130,6 +133,7 @@ pub struct AvailablePluginView {
     pub summary: String,
     pub size_bytes: u64,
     pub installed: bool,
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -170,6 +174,20 @@ pub struct PluginInstallerService {
     /// cleared when an operation starts, so `cancel_plugin_update` abandons
     /// what is running rather than poisoning what comes next.
     cancelled: AtomicBool,
+    /// Held for the length of one network operation. The periodic cycle never
+    /// resets `cancelled` or starts an install while a user's operation holds
+    /// it, so a background tick can neither erase a cancel nor race a manual
+    /// install of the same plugin.
+    busy: AtomicBool,
+}
+
+/// Releases [`PluginInstallerService::busy`] when the operation ends.
+struct OperationGuard<'a>(&'a AtomicBool);
+
+impl Drop for OperationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl PluginInstallerService {
@@ -178,6 +196,7 @@ impl PluginInstallerService {
             store: PluginStore::new(plugin_root.clone()),
             index: IndexCache::new(&plugin_root),
             cancelled: AtomicBool::new(false),
+            busy: AtomicBool::new(false),
             plugin_root,
             host_version,
         }
@@ -263,6 +282,7 @@ impl PluginInstallerService {
                 version: entry.version,
                 summary: entry.summary,
                 size_bytes: entry.size_bytes,
+                category: entry.category,
             })
             .collect();
         PluginCatalogView {
@@ -340,8 +360,14 @@ impl PluginInstallerService {
         fs::write(&path, encoded).map_err(|_| "That setting could not be saved.".to_string())
     }
 
-    fn begin_network_operation(&self) {
+    /// Claim the single operation slot and lower the cancel flag, or `None`
+    /// when another operation already runs (its cancel stays untouched).
+    fn begin_operation(&self) -> Option<OperationGuard<'_>> {
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
         self.cancelled.store(false, Ordering::Release);
+        Some(OperationGuard(&self.busy))
     }
 }
 
@@ -367,11 +393,13 @@ pub async fn refresh_plugin_registry(
     service: State<'_, Arc<PluginInstallerService>>,
 ) -> Result<PluginCatalogView, String> {
     let service = Arc::clone(&service);
-    service.begin_network_operation();
     // A registry that cannot be reached is not an error the catalogue has to
     // carry: the compiled-in list and the last cached index are still the
     // truth, and saying so would turn a flaky network into a broken Store.
-    let _ = refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await;
+    // While another operation runs, its cache is as fresh as this would make it.
+    if let Some(_slot) = service.begin_operation() {
+        let _ = refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await;
+    }
     tauri::async_runtime::spawn_blocking(move || service.catalog())
         .await
         .map_err(|_| "The plugin catalogue could not be read.".to_string())
@@ -512,32 +540,60 @@ pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstaller
             tauri::async_runtime::spawn_blocking(move || recovering.recover_interrupted_updates())
                 .await;
         // A build that may install nothing has no release to look for either.
-        if !service.policy().automatic || !crate::platform::CURRENT.downloadable_plugins {
+        if !crate::platform::CURRENT.downloadable_plugins {
             return;
         }
-        service.begin_network_operation();
-        if refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled)
-            .await
-            .is_err()
-        {
-            return;
-        }
-        // Reading every installed manifest is disk work, and the command executor
-        // is not where disk work goes: `spawn_blocking`, like the recovery step
-        // above it.
-        let listing = Arc::clone(&service);
-        let Ok(pending) =
-            tauri::async_runtime::spawn_blocking(move || pending_automatic_updates(&listing)).await
-        else {
-            return;
-        };
-        for entry in pending {
-            if service.cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            let _ = acquire_and_install(&app, &service, &entry).await;
+        loop {
+            maintenance_cycle(&app, &service).await;
+            tokio::time::sleep(INDEX_TTL).await;
         }
     });
+}
+
+/// Which pending releases to install now. Consent is the whole gate: without
+/// it nothing is installed and the user is only told.
+fn releases_to_install(automatic: bool, pending: Vec<IndexEntry>) -> Vec<IndexEntry> {
+    if automatic { pending } else { Vec::new() }
+}
+
+/// Ids the UI is told about: only what consent does not let the host install.
+fn updates_to_announce(automatic: bool, pending: &[IndexEntry]) -> Vec<String> {
+    if automatic {
+        return Vec::new();
+    }
+    pending.iter().map(|entry| entry.id.clone()).collect()
+}
+
+async fn maintenance_cycle(app: &AppHandle, service: &Arc<PluginInstallerService>) {
+    // A cancel ends the operation it was aimed at, not the loop: the flag is
+    // lowered when a cycle claims the slot. A busy slot means a user is
+    // mid-operation: skip this tick rather than touch their cancel flag.
+    let refreshed = match service.begin_operation() {
+        Some(_slot) => refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await,
+        None => return,
+    };
+    if refreshed.is_err() {
+        return;
+    }
+    // Reading every installed manifest is disk work, and the command executor
+    // is not where disk work goes: `spawn_blocking`.
+    let listing = Arc::clone(service);
+    let Ok(pending) =
+        tauri::async_runtime::spawn_blocking(move || pending_automatic_updates(&listing)).await
+    else {
+        return;
+    };
+    let automatic = service.policy().automatic;
+    let ids = updates_to_announce(automatic, &pending);
+    if !ids.is_empty() {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, PLUGIN_UPDATES_EVENT, ids);
+    }
+    for entry in releases_to_install(automatic, pending) {
+        if service.cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = acquire_and_install(app, service, &entry).await;
+    }
 }
 
 /// The releases consent covers: an installed plugin, on the official channel,
@@ -574,7 +630,9 @@ async fn acquire_and_install(
     service: &Arc<PluginInstallerService>,
     entry: &IndexEntry,
 ) -> Result<(), String> {
-    service.begin_network_operation();
+    let Some(_slot) = service.begin_operation() else {
+        return Err("Another plugin operation is running.".to_string());
+    };
     publish(app, &entry.id, "downloading", 0, "Downloading…");
     let size = entry.size_bytes.max(1);
     let mut on_progress = |read: u64| {
@@ -1065,22 +1123,79 @@ mod tests {
             sha256: "0".repeat(64),
             size_bytes: 1,
             min_orivo_version: min_orivo_version.map(str::to_string),
+            category: None,
         }
+    }
+
+    #[test]
+    fn nothing_is_installed_without_consent() {
+        let mut entry = registry_entry(None);
+        entry.category = Some("streaming".into());
+        assert!(releases_to_install(false, vec![entry.clone()]).is_empty());
+        assert_eq!(releases_to_install(true, vec![entry.clone()]), vec![entry]);
+    }
+
+    fn temp_service(tag: &str) -> PluginInstallerService {
+        let dir = std::env::temp_dir().join(format!("orivo-{tag}-{}", std::process::id()));
+        PluginInstallerService::new(dir, "0.4.3")
+    }
+
+    #[test]
+    fn a_new_cycle_lowers_a_stale_cancel() {
+        let service = temp_service("stale-cancel");
+        service.cancelled.store(true, Ordering::Release);
+        let slot = service.begin_operation();
+        assert!(slot.is_some());
+        assert!(!service.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_busy_operation_keeps_its_cancel_and_blocks_a_second_one() {
+        let service = temp_service("busy-cancel");
+        let first = service.begin_operation().expect("free slot");
+        // The user cancels the running operation; a periodic tick arrives.
+        service.cancelled.store(true, Ordering::Release);
+        assert!(service.begin_operation().is_none());
+        assert!(service.cancelled.load(Ordering::Acquire));
+        drop(first);
+        assert!(service.begin_operation().is_some());
+    }
+
+    #[test]
+    fn updates_are_announced_only_without_consent() {
+        let mut entry = registry_entry(None);
+        entry.id = "com.orivo.demo".into();
+        let pending = vec![entry];
+        assert_eq!(updates_to_announce(false, &pending), vec!["com.orivo.demo"]);
+        assert!(updates_to_announce(true, &pending).is_empty());
+        assert!(updates_to_announce(false, &[]).is_empty());
     }
 
     #[test]
     fn an_ios_build_is_offered_no_registry_plugin_at_all() {
         let ios = crate::platform::for_target(true, true, false);
         assert!(!entry_runs_here(&registry_entry(None), "0.3.7", ios));
-        assert!(!entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", ios));
+        assert!(!entry_runs_here(
+            &registry_entry(Some("0.3.0")),
+            "0.3.7",
+            ios
+        ));
     }
 
     #[test]
     fn other_builds_are_offered_what_their_version_can_run() {
         let desktop = crate::platform::for_target(false, false, false);
         assert!(entry_runs_here(&registry_entry(None), "0.3.7", desktop));
-        assert!(entry_runs_here(&registry_entry(Some("0.3.0")), "0.3.7", desktop));
-        assert!(!entry_runs_here(&registry_entry(Some("0.4.0")), "0.3.7", desktop));
+        assert!(entry_runs_here(
+            &registry_entry(Some("0.3.0")),
+            "0.3.7",
+            desktop
+        ));
+        assert!(!entry_runs_here(
+            &registry_entry(Some("0.4.0")),
+            "0.3.7",
+            desktop
+        ));
     }
 
     /// A root no other test can land in. These run in parallel and write the

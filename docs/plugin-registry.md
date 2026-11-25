@@ -1,0 +1,59 @@
+# Registre de plugins
+
+Orivo embarque une liste minimale de plugins officiels et la complète par un
+index distant **signé Ed25519** (`REGISTRY_INDEX_URL`, `src-tauri/src/plugin_index.rs`).
+L'index est relu au plus toutes les 6 h tant que l'application tourne. Une mise à
+jour n'est installée seule que si l'utilisateur a activé les mises à jour
+automatiques ; sinon l'application affiche seulement une pastille.
+
+## Statut
+
+Livré dans l'application : lecture de l'index signé, vérification périodique,
+mise à jour automatique (opt-in) ou pastille. **Pas encore livré, décision
+externe aux mainteneurs** : la création du dépôt `orivo-plugin-registry`,
+l'hébergement de l'index à l'adresse `REGISTRY_INDEX_URL`, et l'outil qui
+génère et signe l'index avec la clé de release. Tant que ce dépôt n'existe pas,
+seul le registre embarqué répond.
+
+## Format de l'index (v1)
+
+Enveloppe signée contenant un document :
+
+```json
+{
+  "schemaVersion": 1,
+  "sequence": 42,
+  "expiresAtEpochMs": 1900000000000,
+  "plugins": [
+    {
+      "id": "com.exemple.mon-plugin",
+      "name": "Mon plugin",
+      "version": "1.2.0",
+      "summary": "Une phrase.",
+      "url": "https://github.com/…/releases/download/v1.2.0/mon-plugin.orivo-plugin",
+      "sha256": "<64 caractères hexadécimaux>",
+      "sizeBytes": 123456,
+      "category": "tools",
+      "minOrivoVersion": "0.4.0"
+    }
+  ]
+}
+```
+
+- `category` est facultatif : `emulation`, `streaming`, `compatibility`,
+  `visuals`, `library`, `music`, `saves` ou `tools`. Une valeur inconnue est
+  ignorée ; sans catégorie, l'application la déduit du nom.
+- `url` : HTTPS, hôte de la liste compilée dans l'application.
+- `sequence` ne décroît jamais (refus de retour en arrière).
+
+## Publier un plugin
+
+1. Ouvrir une PR sur le dépôt `orivo-plugin-registry` ajoutant ou mettant à
+   jour l'entrée du plugin, avec le gabarit `.github/pull_request_template.md`.
+2. Le paquet est signé Ed25519 par son éditeur ; le `sha256` est celui du
+   fichier publié.
+3. Les mainteneurs relisent le code, les permissions demandées et le paquet.
+4. Après fusion, les mainteneurs régénèrent l'index et le signent avec la clé
+   de release. Un index non signé par cette clé est rejeté par l'application.
+
+Seul le canal officiel bénéficie de la mise à jour automatique.

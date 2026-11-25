@@ -20,7 +20,7 @@ import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
 import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } from "./profile";
 import { brandIcon, icon, type IconName } from "./icons";
-import { pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
+import { catalogCategories, categoryFilterChips, updateBadge, matchesCatalog, pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
 import {
   ALL_GAMES_SEGMENT,
   type BrowseSegment,
@@ -158,6 +158,8 @@ import {
   isPluginInstallBusy,
   pluginErrorMessage,
   pluginPercent,
+  pendingUpdateCount,
+  watchPluginUpdates,
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
@@ -414,6 +416,7 @@ interface State {
   settingsSearch: string;
   pluginView: PluginView;
   pluginCatalogSearch: string;
+  pluginCategoryFilter: PluginCategory | "";
   wallpaperCredentials: WallpaperCredentials;
   wallpaperCredentialsSaving: boolean;
   update: UpdateState;
@@ -651,6 +654,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     settingsSearch: "",
     pluginView: "list",
     pluginCatalogSearch: "",
+    pluginCategoryFilter: "",
     wallpaperCredentials: { ...EMPTY_WALLPAPER_CREDENTIALS },
     wallpaperCredentialsSaving: false,
     update: { ...INITIAL_UPDATE_STATE },
@@ -722,6 +726,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     pluginsInstalledList: get<HTMLElement>("#plugins-installed-list"),
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
+    pluginsCatalogFilters: get<HTMLElement>("#plugins-catalog-filters"),
     pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     pluginsCatalogGroup: get<HTMLElement>("#plugins-catalog-group"),
@@ -2745,6 +2750,24 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // same panel, which is the panel that shipped before this feature existed.
   const pluginManager = createPluginManagerController(createDefaultPluginManagerClient());
   pluginManager.onChange(() => renderPluginList());
+  refs.pluginsCatalogFilters.addEventListener("click", (event) => {
+    const chip = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-plugin-filter]");
+    if (!chip) return;
+    const category = chip.dataset.pluginFilter as PluginCategory;
+    state.pluginCategoryFilter = state.pluginCategoryFilter === category ? "" : category;
+    renderPluginList();
+  });
+  let stopWatchingPluginUpdates = (): void => {};
+  if (isTauriRuntime()) {
+    // The host announces releases it found but may not install without consent:
+    // refresh, then say so once, wherever the user is.
+    stopWatchingPluginUpdates = watchPluginUpdates(listen, () => {
+      void pluginManager.refreshCatalog().then(() => {
+        const count = pendingUpdateCount(pluginManager.catalog().installed);
+        if (count > 0) showToast(updatesLabel(count));
+      });
+    });
+  }
 
   // Health and the journal are a second, smaller surface (`plugin_health.rs`):
   // whether a plugin is degraded, and the sentences behind why. Kept apart
@@ -2878,7 +2901,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const card = pluginCard({
       id: entry.id,
       name: entry.name,
-      category: pluginCategory(entry.id, entry.name),
+      category: pluginCategory(entry.id, entry.name, [], entry.category),
       // While it comes in, the card's own line says how far along it is: an
       // install that takes a minute stays legible next to what it installs.
       lines: [
@@ -3378,6 +3401,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
   new MutationObserver(filterRunnerGroups).observe(refs.runnersPanelBody, { childList: true });
 
+  const updatesLabel = (count: number): string =>
+    t(count === 1 ? "app.plugins.updateWaiting" : "app.plugins.updatesWaiting", { count });
+
+  const renderCategoryFilters = (categories: PluginCategory[]): void => {
+    if (state.pluginCategoryFilter && !categories.includes(state.pluginCategoryFilter)) {
+      state.pluginCategoryFilter = "";
+    }
+    refs.pluginsCatalogFilters.hidden = categories.length < 2;
+    refs.pluginsCatalogFilters.replaceChildren(...categoryFilterChips(categories, state.pluginCategoryFilter));
+  };
+
+  /** One pill on the Plugins entry: how many releases wait. */
+  const renderUpdateBadge = (): void => {
+    const link = document.querySelector<HTMLElement>('[data-settings-section="plugins"]');
+    if (!link) return;
+    const count = pendingUpdateCount(pluginManager.catalog().installed);
+    link.querySelector(".plugins-update-badge")?.remove();
+    const badge = updateBadge(count, updatesLabel(count));
+    if (badge) link.append(badge);
+  };
+
   const renderPluginList = (): void => {
     const installed = pluginManager.catalog().installed;
     // A plugin removed while its detail was open leaves nothing to show.
@@ -3425,9 +3469,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
-    const matches = available.filter(
-      (entry) => !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term),
-    );
+    const matches = available.filter((entry) => matchesCatalog(entry, term, state.pluginCategoryFilter));
+    renderCategoryFilters(catalogCategories(available));
+    renderUpdateBadge();
     const soon = renderComingSoonPlugins(term);
     const removedBuiltIn =
       nxnativeAvailable && !nxnativeInstalled && (!term || t("nxnative.name").toLocaleLowerCase().includes(term))
@@ -7867,6 +7911,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     attached.abort();
     runnerManager.dispose();
     launchSplash.dispose();
+    stopWatchingPluginUpdates();
   };
 }
 
@@ -8955,6 +9000,7 @@ function shell(): string {
                     ${icon("search")}
                     <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
                   </label>
+                  <div id="plugins-catalog-filters" class="plugins-filters" hidden></div>
                   <div id="plugins-catalog-list" class="plugins-catalog"></div>
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>

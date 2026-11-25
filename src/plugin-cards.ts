@@ -17,16 +17,32 @@ export type PluginCategory =
   | "saves"
   | "tools";
 
+const PLUGIN_CATEGORIES: readonly PluginCategory[] = [
+  "emulation",
+  "streaming",
+  "compatibility",
+  "visuals",
+  "library",
+  "music",
+  "saves",
+  "tools",
+];
+
 /**
  * Plugins ship a name and a sentence-long summary but no category, so it is
  * read from what the plugin is, falling back on the kind of extension it
  * provides.
  */
+/** The registry's own category wins; an older index has none and falls back. */
 export function pluginCategory(
   id: string,
   name: string,
   extensions: readonly string[] = [],
+  declared?: string | null,
 ): PluginCategory {
+  if (declared && (PLUGIN_CATEGORIES as readonly string[]).includes(declared)) {
+    return declared as PluginCategory;
+  }
   const key = `${id} ${name}`.toLocaleLowerCase();
   if (/stream|moonlight|sunshine/.test(key)) return "streaming";
   if (/ryujinx|switch|ppsspp|psp|retroarch|emul|dolphin|pcsx|duckstation/.test(key)) return "emulation";
@@ -191,3 +207,48 @@ export function pluginCard(options: PluginCardOptions): HTMLElement {
   return card;
 }
 
+
+/** Categories actually on offer, in the fixed shelf order. */
+export function catalogCategories(
+  entries: ReadonlyArray<{ id: string; name: string; category?: string | null }>,
+): PluginCategory[] {
+  const present = new Set(entries.map((entry) => pluginCategory(entry.id, entry.name, [], entry.category)));
+  return PLUGIN_CATEGORIES.filter((category) => present.has(category));
+}
+
+/** Search term and category chip, both optional. */
+export function matchesCatalog(
+  entry: { id: string; name: string; summary: string; category?: string | null },
+  term: string,
+  category: PluginCategory | "",
+): boolean {
+  if (category && pluginCategory(entry.id, entry.name, [], entry.category) !== category) return false;
+  return !term || `${entry.name} ${entry.summary}`.toLocaleLowerCase().includes(term);
+}
+
+/** One toggle per category, built from the shared pill. */
+export function categoryFilterChips(
+  categories: readonly PluginCategory[],
+  active: PluginCategory | "",
+): HTMLButtonElement[] {
+  return categories.map((category) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "plugins-filter";
+    chip.dataset.pluginFilter = category;
+    chip.setAttribute("aria-pressed", String(active === category));
+    chip.append(pluginPill(category));
+    return chip;
+  });
+}
+
+/** The count pill on the Plugins entry; `null` when nothing waits. */
+export function updateBadge(count: number, title: string): HTMLElement | null {
+  if (count <= 0) return null;
+  const badge = document.createElement("span");
+  badge.className = "plugin-pill plugins-update-badge";
+  badge.dataset.category = "tools";
+  badge.textContent = String(count);
+  badge.title = title;
+  return badge;
+}
