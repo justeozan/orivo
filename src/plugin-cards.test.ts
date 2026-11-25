@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pluginCard, pluginCategory, pluginIcon } from "./plugin-cards";
+import { categoryFilterChips, pluginCard, pluginCategory, pluginIcon, updateBadge } from "./plugin-cards";
 
 describe("pluginCategory", () => {
   it("reads the shelf from what the plugin is", () => {
@@ -74,5 +74,42 @@ describe("pluginCard", () => {
     // Not openable: no open target and no chevron.
     expect(card.querySelector(".plugin-card__open")).toBeNull();
     expect(card.querySelector(".plugin-card__chevron")).toBeNull();
+  });
+});
+
+describe("catalogue categories and filter", () => {
+  it("prefers the registry's category and falls back on the name heuristic", async () => {
+    const { pluginCategory } = await import("./plugin-cards");
+    expect(pluginCategory("com.x.stream", "Stream", [], "music")).toBe("music");
+    expect(pluginCategory("com.x.stream", "Stream", [], "bogus")).toBe("streaming");
+    expect(pluginCategory("com.x.stream", "Stream")).toBe("streaming");
+  });
+
+  it("lists only present categories and filters by chip and search", async () => {
+    const { catalogCategories, matchesCatalog } = await import("./plugin-cards");
+    const a = { id: "a", name: "Alpha", summary: "one", category: "saves" };
+    const b = { id: "b", name: "Beta", summary: "two" };
+    expect(catalogCategories([a, b])).toEqual(["saves", "tools"]);
+    expect(matchesCatalog(a, "", "saves")).toBe(true);
+    expect(matchesCatalog(b, "", "saves")).toBe(false);
+    expect(matchesCatalog(a, "zzz", "")).toBe(false);
+    expect(matchesCatalog(a, "alp", "")).toBe(true);
+  });
+});
+
+describe("category filter chips", () => {
+  it("builds one toggle per category and marks the active one", () => {
+    const chips = categoryFilterChips(["streaming", "music"], "music");
+    expect(chips.map((chip) => chip.dataset.pluginFilter)).toEqual(["streaming", "music"]);
+    expect(chips.map((chip) => chip.getAttribute("aria-pressed"))).toEqual(["false", "true"]);
+  });
+});
+
+describe("updateBadge", () => {
+  it("shows the count, and nothing when no release waits", () => {
+    const badge = updateBadge(2, "2 updates");
+    expect(badge?.textContent).toBe("2");
+    expect(badge?.title).toBe("2 updates");
+    expect(updateBadge(0, "")).toBeNull();
   });
 });

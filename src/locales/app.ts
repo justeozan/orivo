@@ -82,6 +82,8 @@ export const en = {
   "app.soon.ludusavi": "Back up and restore your save games.",
   "app.soon.badge": "Soon",
   "app.plugins.noneToInstall": "There are no plugins to install right now.",
+  "app.plugins.updateWaiting": "1 update",
+  "app.plugins.updatesWaiting": "{count} updates",
   "app.plugins.noMatch": "No plugins match that search.",
   "app.plugin.uninstalled": "{name} has been uninstalled.",
   "app.plugin.fileNeedsDesktop": "Installing a plugin from a file needs the Orivo desktop app.",
@@ -567,6 +569,8 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.soon.ludusavi": "Sauvegarde et restaure tes sauvegardes de jeu.",
   "app.soon.badge": "Bientôt",
   "app.plugins.noneToInstall": "Aucun plugin à installer pour le moment.",
+  "app.plugins.updateWaiting": "1 mise à jour",
+  "app.plugins.updatesWaiting": "{count} mises à jour",
   "app.plugins.noMatch": "Aucun plugin ne correspond à cette recherche.",
   "app.plugin.uninstalled": "{name} a été désinstallé.",
   "app.plugin.fileNeedsDesktop":

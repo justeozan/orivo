@@ -175,6 +175,9 @@ struct IndexEntryDocument {
     /// cannot run without the host having to download it to find out.
     #[serde(default)]
     min_orivo_version: Option<String>,
+    /// Optional so an index published before categories existed stays valid.
+    #[serde(default)]
+    category: Option<String>,
 }
 
 /// One publishable plugin, after the index it came from was verified and every
@@ -190,7 +193,22 @@ pub struct IndexEntry {
     pub sha256: String,
     pub size_bytes: u64,
     pub min_orivo_version: Option<String>,
+    /// One of `PLUGIN_CATEGORIES`, or absent. An unknown value is dropped, not
+    /// fatal: a newer publisher must not make an older host reject the index.
+    pub category: Option<String>,
 }
+
+/// Mirrors `PluginCategory` in `src/plugin-cards.ts`.
+const PLUGIN_CATEGORIES: [&str; 8] = [
+    "emulation",
+    "streaming",
+    "compatibility",
+    "visuals",
+    "library",
+    "music",
+    "saves",
+    "tools",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryIndex {
@@ -355,6 +373,9 @@ fn validate_entry(entry: IndexEntryDocument) -> Option<IndexEntry> {
         sha256: entry.sha256.to_ascii_lowercase(),
         size_bytes: entry.size_bytes,
         min_orivo_version: entry.min_orivo_version,
+        category: entry
+            .category
+            .filter(|category| PLUGIN_CATEGORIES.contains(&category.as_str())),
     })
 }
 
@@ -899,6 +920,27 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn a_known_category_is_kept_an_unknown_or_missing_one_is_not_fatal() {
+        let url = "https://github.com/justeozan/orivo-plugin-registry/releases/download/v1/x.orivo-plugin";
+        let with = |extra: &str| {
+            let entry = entry_json("com.orivo.quiky", "0.1.0", url);
+            let entry = entry.replacen(
+                "\"sizeBytes\":1114",
+                &format!("\"sizeBytes\":1114{extra}"),
+                1,
+            );
+            parse_unsigned_entries(format!("[{entry}]").as_bytes())
+        };
+        assert_eq!(
+            with(",\"category\":\"streaming\"")[0].category.as_deref(),
+            Some("streaming")
+        );
+        assert_eq!(with(",\"category\":\"weird\"").len(), 1);
+        assert_eq!(with(",\"category\":\"weird\"")[0].category, None);
+        assert_eq!(with("")[0].category, None);
     }
 
     #[test]

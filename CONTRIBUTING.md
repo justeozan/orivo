@@ -174,3 +174,7 @@ merged. Say the licence in the pull request.
 
 Do not open a public issue. Write to contact@oneiby.com with what you found and
 how to reproduce it, and give it a reasonable window before disclosing.
+
+## Publishing a plugin
+
+A community plugin goes through a pull request on the registry: see [docs/plugin-registry.md](docs/plugin-registry.md) (written in French).
