@@ -1,6 +1,6 @@
 [package]
 name = "orivo"
-version = "0.4.3"
+version = "0.4.4"
 description = "A focused, local-first game library."
 authors = ["Ozan Sahin"]
 license-file = "../LICENSE"
