@@ -83,11 +83,9 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 
 #### Barre supérieure Selector
 
-- Logo Orivo à gauche, 36-42px.
-- Navigation horizontale: Home, Library, Collections, Store, Settings.
-- Etat actif dans une capsule Frosted Rail; aucune sidebar permanente.
-- Search bar centrée, 390-430px x 40px, rayon 22px.
-- Notifications et avatar à droite.
+- Une seule capsule de verre flottante, en haut à gauche: tout le reste de l'écran appartient à l'image. Voir **§4.3 › Global topbar** pour son contenu.
+- Pensée pour la manette et le grand écran: une cible ronde par contrôle, qui grandit avec la fenêtre (`--halo-item`, 40 à 48px).
+- Aucune sidebar permanente, aucun glyphe de bouton (LB, RB, Y) affiché.
 - La barre peut se réduire visuellement pendant une transition de sélection, mais ne doit pas provoquer de reflow du hero.
 
 #### Bloc hero sélectionné
@@ -189,16 +187,21 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 
 #### Global topbar
 
-- The topbar (`header.topbar`) is rendered exactly once by the shell and is identical on every page. Only *what the search searches* changes; the bar itself is never rebuilt, moved or duplicated per page.
-- Contents, left to right: brand mark (opens the library-sources menu), primary navigation (`Library`, `Store`, `Settings`), the contextual search, then notifications and avatar.
-- Exactly one navigation link carries `aria-current="page"` (and the matching active capsule). A game detail page resolves to the entry it was opened from: `?from=store` marks Store, everything else marks Library.
-- The search keeps its grid cell on every route. A page that cannot search hides it with `visibility: hidden` and disables the input, so the topbar never reflows between pages.
-- On a phone — the compact height with only a finger to point (`html[data-device="phone"]`, set by `src/form-factor.ts`) — the bar at rest is the brand mark, the bell and the avatar. The navigation comes out of the mark with its menu and goes back with it: the pills keep their place hidden (`visibility`), so nothing in the bar moves when they appear, and a press on a pill counts as inside the menu, so the finger landing on it never hides it before its click. Icons alone have no text shadow to read by over the artwork, so on a phone every pill and the bell sit on a dark glass plate, the current page's lit. The search is not shown on a phone at all. A desktop window dragged as short is compact but not a phone, and keeps the whole bar.
-- `--topbar-height` (92px, declared on `.selector`) is the single source of truth for the vertical space the topbar occupies.
+- The topbar (`header.topbar`) is rendered exactly once by the shell and is the same on every page. Only *what the search searches* and which page is lit change; the bar itself is never rebuilt, moved or duplicated per page.
+- It is **one floating glass capsule**, on the top-left edge (`.topbar-capsule`). Contents, left to right: the **mark** — the player's picture inside the Orivo ring, one control — then the page links (`Library`, `Store`, `Me` behind Beta, `Settings`), a hairline, the search, the feedback button when Sentry is configured, and the bell **only when it holds a notice**.
+- The mark opens one menu: the profile card (picture, name) on top, then the library sources. There is no separate avatar button.
+- Page links are glyphs (`src/topbar-nav.ts`), all from Phosphor (MIT) so the bar is one family: `squares-four`, `storefront`, `user`, `gear-six`, plus `magnifying-glass` and `bell`. The regular outline elsewhere, Phosphor's fill for the page on screen. Glyphs are picked from that set, not drawn. Only the current page shows its name, opening out of its glyph. Inactive glyphs are dimmed with `opacity`, never with a translucent colour, so crossing strokes do not paint twice.
+- The current page sits on a travelling plate: frosted glass, the iridescent rim of the glass Play button, a little blue light under it. It slides on a damped spring that follows the links as they resize (`placeNavIndicator`, `navPlateEase`).
+- **Reaching a link opens its page.** With the keys or a pad (`body[data-input-mode]` keyboard or gamepad), focus landing on a link navigates at once — no second press. The pointer still clicks. Coming up into the bar always lands on the current page's link (`data-nav-selected`), so entering the bar never changes page. LB / RB still cycle the pages from anywhere.
+- Exactly one navigation link carries `aria-current="page"`. A game detail page resolves to the entry it was opened from: `?from=store` marks Store, everything else marks Library.
+- The search is a magnifier until it is reached (focus, the keys, or a query typed); the field then opens out of it and the capsule widens around it. A hover alone does not open it.
+- The capsule grows to the right only, so a longer page name or an open search never moves the mark; nothing else on the page moves.
+- On a phone — the compact height with only a finger to point (`html[data-device="phone"]`, set by `src/form-factor.ts`) — the capsule loses its glass and the bar at rest is the mark and, when there is a notice, the bell. The navigation comes out of the mark with its menu and goes back with it: the pills keep their place hidden (`visibility`), so nothing in the bar moves when they appear, and a press on a pill counts as inside the menu, so the finger landing on it never hides it before its click. Icons alone have no text shadow to read by over the artwork, so on a phone every pill and the bell sit on a dark glass plate, the current page's lit. The search is not shown on a phone at all. A desktop window dragged as short is compact but not a phone, and keeps the whole bar.
+- `--topbar-height` (76px on desktop, declared on `:root`) is the single source of truth for the vertical space the topbar occupies; the capsule (`--topbar-bar-h`, from `--halo-item` and `--halo-pad`) always fits inside it.
 
 #### Notifications — the one surface that speaks unasked
 
-- The bell sits between the feedback button and the avatar. Everything it carries is optional advice about something optional (an artwork key, a store price feed), so it is the quietest control in the shell: an unread dot, one short shake on arrival, and a card that waits.
+- The bell sits at the right end of the capsule, and only while it holds a notice: the last one dismissed takes the bell with it, and focus that was in its panel lands on the mark. Everything it carries is optional advice about something optional (an artwork key, a store price feed), so it is the quietest control in the shell: an unread dot, one short shake on arrival, and a card that waits.
 - It is a **disclosure, not a dialog**. The shell has no `role="dialog"` anywhere and no focus trap; `aria-expanded` on the bell plus a named `role="group"` panel say everything a dialog role would. Escape closes it and returns focus to the bell.
 - A notice never fires on arrival — each waits out its own delay of app time. It is delivered once, and never again after it is dismissed. It is also re-checked against the app as it stands on every tick: a key added, or a page visited, retires the notice about it before it is ever shown.
 - No counts, no badges with numbers, no toast, no modal, no sound. If something genuinely needs a response, it belongs on the surface it is about, not here.
@@ -473,7 +476,7 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - **Home / Game Hub desktop large**: conserver sidebar 240px + contenu + widgets droite.
 - **Home / Game Hub desktop étroit**: réduire colonne droite à 260px, compacter gaps à 20px.
 - **Tablet (< 1024px)**: transformer la colonne droite du Home en rail horizontal sous le hero.
-- **Téléphone en paysage** (hauteur ≤ 560px et un doigt pour seul pointeur — `html[data-device="phone"]`): immersif, la scène est l'écran. Sur Android, la barre d'état et les boutons de navigation sont masqués (`MainActivity.kt`); un glissement depuis le bord les montre un instant, par-dessus la scène, sans rien déplacer. La topbar se réduit au logo Orivo, à la cloche et à l'avatar; la navigation sort du logo avec son menu. Ni recherche ni flèches de scène: le doigt parcourt le rail. Titre, wordmark, Play, cartes et mots de la barre de navigation descendent d'une taille — les cartes gardent exactement leur forme (0,672 debout, 2,5:1 sélectionnée, rayon à l'échelle), 100px de haut au plus. Une fenêtre desktop aussi courte garde tout cela.
+- **Téléphone en paysage** (hauteur ≤ 560px et un doigt pour seul pointeur — `html[data-device="phone"]`): immersif, la scène est l'écran. Sur Android, la barre d'état et les boutons de navigation sont masqués (`MainActivity.kt`); un glissement depuis le bord les montre un instant, par-dessus la scène, sans rien déplacer. La topbar se réduit au logo Orivo — l'avatar dans l'anneau — et à la cloche quand elle a quelque chose; la navigation sort du logo avec son menu. Ni recherche ni flèches de scène: le doigt parcourt le rail. Titre, wordmark, Play, cartes et mots de la barre de navigation descendent d'une taille — les cartes gardent exactement leur forme (0,672 debout, 2,5:1 sélectionnée, rayon à l'échelle), 100px de haut au plus. Une fenêtre desktop aussi courte garde tout cela.
 - Mobile (< 768px):
   - sidebar devient bottom nav ou drawer.
   - search bar prend toute la largeur disponible.

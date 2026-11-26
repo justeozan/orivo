@@ -178,6 +178,68 @@ describe("application shell", () => {
     expect(currentNavLabels(root)).toEqual(["Library"]);
   });
 
+  // On a console a tab is open the moment it is reached: walking the bar with
+  // the keys or the pad changes page with no second press. The pointer still
+  // has to click.
+  it("opens a page as soon as the keys reach its link, and not for a pointer", async () => {
+    const store = root.querySelector<HTMLButtonElement>("[data-nav-page='store']")!;
+    const settings = root.querySelector<HTMLButtonElement>("[data-nav-page='settings']")!;
+
+    document.body.dataset.inputMode = "pointer";
+    store.focus();
+    await settle();
+    expect(window.location.hash).toBe("");
+
+    document.body.dataset.inputMode = "keyboard";
+    settings.focus();
+    await settle();
+    expect(window.location.hash).toBe("#/settings/general");
+    expect(currentNavLabels(root)).toEqual(["Settings"]);
+
+    document.body.dataset.inputMode = "gamepad";
+    store.focus();
+    await settle();
+    expect(window.location.hash.startsWith("#/store")).toBe(true);
+    expect(currentNavLabels(root)).toEqual(["Store"]);
+  });
+
+  // Coming up into the bar lands on the page on screen, never on a link the
+  // keys last stood on — standing on a link opens it.
+  it("marks the current page's link as where the keys land", async () => {
+    const selected = (): string[] =>
+      Array.from(root.querySelectorAll<HTMLElement>(".primary-nav [data-nav-selected]")).map(
+        (link) => link.dataset.navPage ?? "",
+      );
+    expect(selected()).toEqual(["library"]);
+    await goto("#/store");
+    expect(selected()).toEqual(["store"]);
+  });
+
+  // One control for the mark and the player: the picture sits in the ring,
+  // and the menu the mark opens starts with the profile.
+  it("puts the player's picture in the mark and the profile at the top of its menu", async () => {
+    expect(root.querySelector("#profile-button")).toBeNull();
+    const mark = root.querySelector<HTMLButtonElement>("#library-menu-button")!;
+    expect(mark.querySelector("#profile-avatar")).not.toBeNull();
+
+    mark.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    const name = menu.querySelector<HTMLInputElement>("#profile-name")!;
+    expect(menu.hidden).toBe(false);
+    expect(name).not.toBeNull();
+    expect(menu.firstElementChild?.contains(name)).toBe(true);
+
+    name.value = "Sam";
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(mark.getAttribute("aria-label")).toBe("Sam · profile and library sources");
+
+    // Escape from the name closes the menu and gives focus back to the mark.
+    name.focus();
+    name.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(menu.hidden).toBe(true);
+    expect(document.activeElement).toBe(mark);
+  });
+
   it("hands the game route to the detail page and deactivates the origin", async () => {
     await goto("#/games/steam%3A42?from=library");
     expect(detail.routes.at(-1)).toEqual({
@@ -2044,16 +2106,17 @@ describe("application shell notifications", () => {
     tauri.invoke.mockResolvedValue(undefined);
   });
 
-  it("stays quiet with nothing to say", async () => {
+  const bellControl = (): HTMLElement => root.querySelector<HTMLElement>(".notifications-control")!;
+
+  // With nothing in it there is no bell at all: an empty bell is one more
+  // thing on the scene saying nothing.
+  it("shows no bell with nothing to say", async () => {
     mount();
     await settle();
 
+    expect(bellControl().hidden).toBe(true);
     expect(dot().hidden).toBe(true);
-    expect(bell().getAttribute("aria-label")).toBe("Notifications");
-
-    bell().click();
-    expect(panel().hidden).toBe(false);
-    expect(panel().textContent).toContain("Nothing to report");
+    expect(panel().hidden).toBe(true);
   });
 
   it("carries a delivered notice, clears its dot when read, and forgets it when dismissed", async () => {
@@ -2064,6 +2127,7 @@ describe("application shell notifications", () => {
     mount();
     await settle();
 
+    expect(bellControl().hidden).toBe(false);
     expect(dot().hidden).toBe(false);
     expect(bell().getAttribute("aria-label")).toBe("Notifications, 1 unread");
 
@@ -2076,8 +2140,16 @@ describe("application shell notifications", () => {
     );
     expect(panel().textContent).toContain("Sharper artwork");
 
-    panel().querySelector<HTMLButtonElement>("[data-notification-action='dismiss']")!.click();
+    const dismiss = panel().querySelector<HTMLButtonElement>("[data-notification-action='dismiss']")!;
+    dismiss.focus();
+    dismiss.click();
     expect(panel().querySelector(".notification-card")).toBeNull();
+    // The last notice takes the panel and the bell with it, and focus lands
+    // on the mark rather than on a control that just left the page.
+    expect(bellControl().hidden).toBe(true);
+    expect(panel().hidden).toBe(true);
+    expect(bell().getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(root.querySelector("#library-menu-button"));
 
     // Dismissal is final, and it survives a restart.
     document.body.replaceChildren();
@@ -2085,6 +2157,7 @@ describe("application shell notifications", () => {
     await settle();
     expect(root.querySelector(".notification-card")).toBeNull();
     expect(dot().hidden).toBe(true);
+    expect(bellControl().hidden).toBe(true);
   });
 
   it("takes the artwork notice straight to the keys it is about", async () => {

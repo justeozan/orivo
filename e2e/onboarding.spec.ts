@@ -97,9 +97,9 @@ test.describe("the library welcome screen", () => {
     await openWelcome(page);
 
     // Icon-only controls carry their own name; the rest are real buttons.
-    await expect(page.locator("#notifications-button")).toHaveAttribute(
+    await expect(page.locator("#library-menu-button")).toHaveAttribute(
       "aria-label",
-      "Notifications",
+      "Profile and library sources",
     );
     await expect(page.locator("#library-onboarding")).toHaveAttribute(
       "aria-label",
@@ -113,15 +113,25 @@ test.describe("the library welcome screen", () => {
     }
   });
 
+  test("shows no bell until there is a notice", async ({ page }) => {
+    await openWelcome(page);
+    // Nothing has come due in a fresh session, so there is nothing to ring.
+    await expect(page.locator("#notifications-button")).toBeHidden();
+  });
+
   test("opens and closes the notification bell", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "orivo.notifications.v1",
+        JSON.stringify({ delivered: ["artwork-keys"], read: [], dismissed: [] }),
+      );
+    });
     await openWelcome(page);
 
     await expect(page.locator("#notifications-panel")).toBeHidden();
     await page.locator("#notifications-button").click();
     await expect(page.locator("#notifications-panel")).toBeVisible();
-    // Nothing has come due in a fresh session, and the panel says so rather
-    // than opening empty.
-    await expect(page.locator("#notifications-panel")).toContainText("Nothing to report");
+    await expect(page.locator("#notifications-panel .notification-card")).toHaveCount(1);
 
     await page.keyboard.press("Escape");
     await expect(page.locator("#notifications-panel")).toBeHidden();

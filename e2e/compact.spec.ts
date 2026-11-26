@@ -56,6 +56,21 @@ interface Rect {
   height: number;
 }
 
+/**
+ * The bell is there only with a notice in it, so a test about the bell starts
+ * the app with one already delivered.
+ */
+async function openWithANotice(page: import("@playwright/test").Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "orivo.notifications.v1",
+      JSON.stringify({ delivered: ["artwork-keys"], read: [], dismissed: [] }),
+    );
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.waitForSelector(".notifications-control:not([hidden])");
+}
+
 async function rectOf(page: import("@playwright/test").Page, selector: string): Promise<Rect | null> {
   return page.evaluate((target) => {
     const node = document.querySelector(target);
@@ -244,6 +259,7 @@ test.describe("the Library scene", () => {
     // The navigation waits behind the Orivo mark on a phone, so it is measured
     // once the mark has brought it out. `me` is behind the beta flag and hidden
     // here, so it has no box to measure.
+    await openWithANotice(page);
     await page.click("#library-menu-button");
     await settle(page);
     const targets = [
@@ -301,6 +317,7 @@ test.describe("the Library scene", () => {
   });
 
   test("keeps the notification panel inside the window", async ({ page }) => {
+    await openWithANotice(page);
     await page.click("#notifications-button");
     const panel = await rectOf(page, "#notifications-panel");
     const { width, height } = await viewport(page);
