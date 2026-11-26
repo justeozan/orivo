@@ -38,6 +38,13 @@ jobs:
           # The tags, to list the PRs since the previous release.
           fetch-depth: 0
 
+      - name: Install Node
+        # release-notes.sh loads the highlights' TypeScript with Node's type
+        # stripping, which the runner's preinstalled Node may predate.
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Create the draft if it does not exist
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -731,6 +738,13 @@ jobs:
         with:
           # The tags, to list the PRs since the previous release.
           fetch-depth: 0
+
+      - name: Install Node
+        # release-notes.sh loads the highlights' TypeScript with Node's type
+        # stripping, which the runner's preinstalled Node may predate.
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Publish only after verification
         env:

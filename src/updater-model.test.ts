@@ -8,7 +8,6 @@ import {
   describeUpdateState,
   formatBytes,
   markReady,
-  releaseBullets,
   startCheck,
   startDownload,
   updateProgressPercent,
@@ -297,33 +296,5 @@ describe("updater model", () => {
     markReady(state);
     applyError(state, new Error("boom"));
     expect(state).toEqual(snapshot);
-  });
-});
-
-describe("releaseBullets", () => {
-  const body = [
-    "## [0.3.9] - 2026-10-22",
-    "### Added",
-    "- A games folder on desktop. Choose it once from the *Games folder* menu, and more.",
-    "- A startup animation. Orivo opens on its ring.",
-    "### Changed",
-    "- The browse bar shows [logos](https://x). Long explanation follows.",
-    "### Fixed",
-    "- A bug nobody needs to read about here.",
-    "## Downloads",
-    "- **macOS:** download the `.dmg`.",
-  ].join("\n");
-
-  it("keeps each new or changed thing, without Markdown", () => {
-    expect(releaseBullets(body)).toEqual([
-      "A games folder on desktop. Choose it once from the Games folder menu, and more.",
-      "A startup animation. Orivo opens on its ring.",
-      "The browse bar shows logos. Long explanation follows.",
-    ]);
-  });
-
-  it("gives nothing for notes it cannot read as sections", () => {
-    expect(releaseBullets("Just a paragraph of text.")).toEqual([]);
-    expect(releaseBullets(null)).toEqual([]);
   });
 });

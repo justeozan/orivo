@@ -1,119 +1,45 @@
-import type { IconName } from "./icons";
-import { firstSentence, releaseBullets, shortenLine, type UpdateState } from "./updater-model";
+import { NEXT_RELEASE, type ReleaseHighlights } from "./release-highlights";
 
 /**
- * What Settings › About lists under "What's new": one large line per addition,
- * read from the release notes Orivo already has. Pure, so the choice of which
- * version speaks and how each bullet is cut can be tested without a shell.
+ * Which release Settings › About shows under "What's new". Pure, so the choice
+ * of version can be tested without a shell.
  */
 
-/** The plugin shelves' colours, reused so a news tile reads like a plugin tile. */
-export type NewsCategory = "emulation" | "library" | "visuals" | "saves" | "music" | "streaming";
-
-export interface NewsItem {
-  title: string;
-  /** The next sentence, shortened; empty when the bullet had only one. */
-  detail: string;
-  category: NewsCategory;
-  icon: IconName;
-}
-
-export interface AboutNews {
-  /** The version these items describe — not always the one running. */
-  version: string;
-  items: NewsItem[];
-}
-
-/** Written large, so a few: the full notes are the changelog's job. */
-const MAX_ITEMS = 4;
-const MAX_TITLE_LENGTH = 90;
-const MAX_DETAIL_LENGTH = 110;
+/** Written large, so a few: the full list is the GitHub release's job. */
+export const MAX_HIGHLIGHTS = 4;
 
 /**
- * A tile is coloured and drawn after what the line is about, when one of these
- * words says so; the rest take the shelf colours in turn, so neighbours differ.
+ * The running version's highlights, or, when it has none (a patch release made
+ * of fixes only), the newest earlier release that has some, named with its own
+ * version. "next" is never taken: nobody has it yet. A pending update is not
+ * shown either: its highlights ship inside it, not in the copy running now.
  */
-const TOPICS: ReadonlyArray<{ pattern: RegExp; category: NewsCategory; icon: IconName }> = [
-  { pattern: /\b(stream\w*|moonlight|artemis|sunshine)\b/i, category: "streaming", icon: "cast" },
-  { pattern: /\b(switch|emulat\w*|ryujinx|console\w*)\b/i, category: "emulation", icon: "gamepad" },
-  { pattern: /\b(librar\w*|sources?|sort\w*|rail)\b/i, category: "library", icon: "library" },
-  { pattern: /\b(folders?|moved|disk|drive)\b/i, category: "visuals", icon: "folder" },
-  { pattern: /\b(artwork|trailers?|screenshots?|wallpapers?|covers?)\b/i, category: "visuals", icon: "landscape" },
-  { pattern: /\b(store|prices?|wishlist)\b/i, category: "saves", icon: "store" },
-  { pattern: /\b(iphone|ipad|android|phone)\b/i, category: "music", icon: "monitor" },
-];
-const ROTATION: readonly NewsCategory[] = ["emulation", "library", "visuals", "saves", "music"];
-
-/** The additions and changes a release body names, ready to be shown large. */
-export function releaseNews(body: string | null | undefined): NewsItem[] {
-  return releaseBullets(body)
-    .slice(0, MAX_ITEMS)
-    .map((text, index) => {
-      const title = shortenLine(firstSentence(text), MAX_TITLE_LENGTH);
-      const head = /^.+?[.!?](\s+|$)/.exec(text)?.[0] ?? text;
-      const rest = text.slice(head.length);
-      const detail = rest ? shortenLine(firstSentence(rest), MAX_DETAIL_LENGTH) : "";
-      const topic = TOPICS.find((candidate) => candidate.pattern.test(title));
-      return {
-        title,
-        detail,
-        category: topic?.category ?? ROTATION[index % ROTATION.length],
-        icon: topic?.icon ?? "sparkle",
-      };
-    });
-}
-
-/**
- * The section of CHANGELOG.md for `version`, or for the newest released version
- * before it when that one has no section of its own (a patch release made of
- * fixes only, or one cut before the notes were written). "Unreleased" is never
- * taken: it is not in anyone's hands yet.
- */
-export function changelogSection(
-  markdown: string | null | undefined,
-  version: string | null | undefined,
-): { version: string; body: string } | null {
-  if (!markdown) return null;
-  const target = parseVersion(version);
-  let best: { version: string; parsed: number[]; body: string } | null = null;
-  const sections = markdown.split(/^(?=##\s+\[)/m);
-  for (const section of sections) {
-    const heading = /^##\s+\[([^\]]+)\]/.exec(section);
-    if (!heading) continue;
-    const parsed = parseVersion(heading[1]);
+export function aboutHighlights(
+  releases: readonly ReleaseHighlights[],
+  runningVersion: string | null | undefined,
+): ReleaseHighlights | null {
+  const running = runningVersion?.trim().replace(/^v/, "") ?? "";
+  const target = parseVersion(running);
+  let best: { release: ReleaseHighlights; parsed: number[] } | null = null;
+  for (const release of releases) {
+    if (release.version === NEXT_RELEASE || release.items.length === 0) continue;
+    if (release.version === running) return trimmed(release);
+    const parsed = parseVersion(release.version);
     if (!parsed) continue;
-    if (target && compareVersions(parsed, target) > 0) continue;
-    if (!best || compareVersions(parsed, best.parsed) > 0) {
-      best = { version: heading[1].trim(), parsed, body: section };
-    }
+    // Strictly older: a pre-release of the running version (0.5.0-rc.1 under
+    // 0.5.0) parses equal and is not what this copy is.
+    if (target && compareVersions(parsed, target) >= 0) continue;
+    if (!best || compareVersions(parsed, best.parsed) > 0) best = { release, parsed };
   }
-  return best ? { version: best.version, body: best.body } : null;
+  return best ? trimmed(best.release) : null;
 }
 
-/**
- * Which notes the About page shows. A pending update speaks first, because what
- * it brings is what the button above installs; when its notes say nothing
- * readable, the running version's own changelog section does.
- */
-export function aboutNews(
-  update: UpdateState,
-  changelog: string | null,
-  runningVersion: string | null,
-): AboutNews | null {
-  const pending =
-    update.status === "available" || update.status === "downloading" || update.status === "ready";
-  if (pending && update.availableVersion) {
-    const items = releaseNews(update.notes);
-    if (items.length > 0) return { version: update.availableVersion, items };
-  }
-  const section = changelogSection(changelog, runningVersion);
-  if (!section) return null;
-  const items = releaseNews(section.body);
-  return items.length > 0 ? { version: section.version, items } : null;
+function trimmed(release: ReleaseHighlights): ReleaseHighlights {
+  return { version: release.version, items: release.items.slice(0, MAX_HIGHLIGHTS) };
 }
 
-function parseVersion(value: string | null | undefined): number[] | null {
-  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(value?.trim() ?? "");
+function parseVersion(value: string): number[] | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value);
   return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
 }
 
