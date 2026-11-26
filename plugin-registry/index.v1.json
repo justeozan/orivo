@@ -1,0 +1,5 @@
+{
+  "formatVersion": 1,
+  "document": "{\n  \"schemaVersion\": 1,\n  \"sequence\": 2,\n  \"expiresAtEpochMs\": 1806505200000,\n  \"plugins\": [\n    {\n      \"id\": \"com.orivo.gamestream\",\n      \"name\": \"Moonlight / Sunshine\",\n      \"version\": \"0.2.1\",\n      \"summary\": \"Streams a local .stream game library through Moonlight / Sunshine.\",\n      \"url\": \"https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.2.1/com.orivo.gamestream-0.2.1.orivo-plugin\",\n      \"sha256\": \"adb691493f1e024564381b8d3f2ef31575e7d4166bbfab6c4bab850659e85678\",\n      \"sizeBytes\": 15057,\n      \"minOrivoVersion\": \"0.3.7\"\n    }\n  ]\n}\n",
+  "signature": "JuR21/PcI8f5Cbuz6DoLUCimolP7ih0XkzI51yVxYeuj0fVcqWp/FOxQ66DjcEGdVr1SaYVKpaSb9Us4thADDA=="
+}
