@@ -66,12 +66,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// Where the official index is published. Hosting it — and holding the key that
-/// signs it — is a decision outside this module: the constant is the one line
-/// that changes when it is made, and until then the fetch simply fails and the
-/// compiled-in registry is what the Store shows.
+/// Where the official index is published: `plugin-registry/index.v1.json` in
+/// this repository, served from `main`. It lived in a repository of its own
+/// until 0.4.4, and builds up to that one still read
+/// `justeozan/orivo-plugin-registry`, so an index published here is pushed
+/// there too until those builds are gone (`docs/plugin-registry.md`).
 pub const REGISTRY_INDEX_URL: &str =
-    "https://raw.githubusercontent.com/justeozan/orivo-plugin-registry/main/index.v1.json";
+    "https://raw.githubusercontent.com/justeozan/orivo/main/plugin-registry/index.v1.json";
 
 /// Hosts the registry and its packages may be fetched from. Compiled in, never
 /// read from a document: see the module note.
@@ -1360,5 +1361,28 @@ mod tests {
         .expect_err("refused");
         assert!(error.contains("not where this build expects it"));
         fs::remove_dir_all(root).ok();
+    }
+
+    /// The index this repository publishes is the one every client fetches,
+    /// so it has to verify with the key compiled into this build and clear
+    /// this build's sequence floor. A document edited without re-signing, a
+    /// signature made with another key, or a floor raised past what was
+    /// published would each leave every client on the compiled-in list; this
+    /// is where that is caught, before the push to `main` serves it.
+    ///
+    /// It also fails once the committed index has expired, which is the
+    /// moment clients start refusing it too: re-sign it with a later
+    /// `expiresAtEpochMs`.
+    #[test]
+    fn the_published_index_verifies_with_the_compiled_key() {
+        let published = include_bytes!("../../plugin-registry/index.v1.json");
+        let index = parse_signed_index_with_key(
+            published,
+            &index_public_key().expect("the compiled index key decodes"),
+            MINIMUM_INDEX_SEQUENCE,
+        )
+        .expect("plugin-registry/index.v1.json is signed, current and well formed");
+        assert!(!index.entries.is_empty());
+        assert!(REGISTRY_INDEX_URL.ends_with("/main/plugin-registry/index.v1.json"));
     }
 }
