@@ -351,8 +351,8 @@ export type AppRoute =
   | { page: "library" }
   | {
       page: "store";
-      category: StoreCategory;
-      platforms: StorePlatform[];
+      /** `?store=`: every exclusive, one brand, or a plugin's tab. */
+      store: StoreTabId;
       query: string;
     }
   | { page: "game"; gameId: GameId; from: "library" | "store" | null }

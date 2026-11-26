@@ -7,7 +7,7 @@ import { expect, type Locator, type Page } from "@playwright/test";
  *
  * Every spec runs against `pnpm dev`, i.e. a plain browser with no Tauri
  * runtime. `isTauriRuntime()` is false there, so the Store serves
- * `EDITORIAL_STORE_HOME`, the game detail serves `createFallbackGameDetail()`,
+ * `editorialStoreHome()`, the game detail serves `createFallbackGameDetail()`,
  * and Settings serves `DEFAULT_PREFERENCES`. All of that is deterministic,
  * which is what makes the assertions and the goldens stable.
  */
@@ -74,9 +74,9 @@ export async function waitForPage(page: Page, name: PageName): Promise<void> {
     // the title text until then (or for good, when there is none), so either
     // one standing means the page has painted.
     library: `${HOST_ID.library}:not([hidden]) :is(#hero-title, #hero-logo):not([hidden])`,
-    // The hero heading is present for both the populated rail and the empty
-    // state, so a filter that matches nothing still counts as "ready".
-    store: `${HOST_ID.store}:not([hidden]) .store-hero__title`,
+    // The masthead's heading stands over a full shelf and an empty one alike,
+    // so a store or a search with nothing to show still counts as "ready".
+    store: `${HOST_ID.store}:not([hidden]) .store-mast__title`,
     game: `${HOST_ID.game}:not([hidden]) .gd-hero__title`,
     settings: `${HOST_ID.settings}:not([hidden]) .settings-layout`,
     "not-found": `${HOST_ID["not-found"]}:not([hidden]) .not-found__title`,
@@ -181,7 +181,7 @@ export async function measureTopPadding(page: Page): Promise<PaddingProbe> {
     const inner = activePage.firstElementChild as HTMLElement | null;
     const innerStyle = inner ? getComputedStyle(inner) : null;
     const content = activePage.querySelector<HTMLElement>(
-      ".store-hero, .gd-topline, .settings-layout, .not-found",
+      ".store-mast, .gd-topline, .settings-layout, .not-found",
     );
     const topbar = document.querySelector("header.topbar")!.getBoundingClientRect();
     // Measured, not parsed: see `topbarHeightVar`.
@@ -330,7 +330,7 @@ export interface RailVisibility {
 export async function storeCardVisibility(page: Page): Promise<RailVisibility> {
   return page.evaluate(() => {
     const viewport = { width: window.innerWidth, height: window.innerHeight };
-    const rail = document.querySelector("#app-page-store:not([hidden]) .store-rail__track");
+    const rail = document.querySelector("#app-page-store:not([hidden]) .store-shelf");
     if (!rail) return { viewport, cards: [] };
     const cards = [...rail.querySelectorAll<HTMLElement>(".store-card")].map(
       (card) => {
