@@ -131,6 +131,9 @@ test.describe("the library welcome screen", () => {
 test.describe("the library welcome screen under reduced motion", () => {
   test.beforeEach(async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
+    // Orivo animates everything by default; a player who handed the choice
+    // back to the system has it remembered from the last start.
+    await page.addInitScript(() => window.localStorage.setItem("orivo.motion", "system"));
   });
 
   test("stages nothing, and leaves nothing part-way through an entrance", async ({ page }) => {

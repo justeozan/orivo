@@ -195,7 +195,12 @@ test.describe("an iPad held upright", () => {
     for (const route of ROUTES.filter((candidate) => candidate.name !== "not-found")) {
       await openRoute(page, route.hash, route.name);
       for (const name of ["Library", "Store", "Settings"]) {
-        await expect(page.getByRole("button", { name, exact: true }), `${route.label}: ${name}`).toBeVisible();
+        // Scoped to the topbar: Settings › General offers "Library" and
+        // "Store" too, as the page to open on.
+        await expect(
+          page.locator("header.topbar").getByRole("button", { name, exact: true }),
+          `${route.label}: ${name}`,
+        ).toBeVisible();
       }
     }
   });
@@ -239,6 +244,9 @@ test.describe("the startup animation", () => {
 
   test("has nothing to hold under reduced motion: it goes as soon as the library is in", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
+    // Orivo animates everything by default; a player who handed the choice
+    // back to the system has it remembered from the last start.
+    await page.addInitScript(() => window.localStorage.setItem("orivo.motion", "system"));
     await page.goto("/?boot", { waitUntil: "domcontentloaded" });
 
     // Measured on the page's own clock, so a slow runner cannot flake it: the
