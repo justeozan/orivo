@@ -21,9 +21,16 @@ const settingsSections = new Set<SettingsSection>([
   "general",
   "libraries",
   "plugins",
-  "appearance",
   "data",
   "about",
+]);
+/**
+ * Sections that were folded into another one. Their old addresses — a
+ * bookmark, a link in the docs, a reload — still open where the settings now
+ * live rather than a not-found.
+ */
+const movedSettingsSections: ReadonlyMap<string, SettingsSection> = new Map([
+  ["appearance", "general"],
 ]);
 
 function decodeSegment(value: string): string | null {
@@ -84,7 +91,10 @@ export function parseAppRoute(hash: string): AppRoute {
 
   const settingsMatch = /^\/settings(?:\/([^/]+))?$/.exec(path);
   if (settingsMatch) {
-    const requested = settingsMatch[1] as SettingsSection | undefined;
+    const segment = settingsMatch[1];
+    const requested = segment
+      ? (movedSettingsSections.get(segment) ?? (segment as SettingsSection))
+      : undefined;
     if (requested && !settingsSections.has(requested)) {
       return { page: "not-found", path };
     }
@@ -157,6 +167,7 @@ export class HashRouter {
   start(listener: RouteListener): () => void {
     this.#listeners.add(listener);
     if (this.#listeners.size === 1) window.addEventListener("hashchange", this.#onHashChange);
+    this.#settleMovedSection();
     this.#heard = window.location.hash;
     listener(this.current);
     return () => {
@@ -188,7 +199,19 @@ export class HashRouter {
     }
   }
 
+  /**
+   * An old section's address is swapped in place for the one it moved to, so
+   * the URL names the tab that is lit and Back does not step through both.
+   */
+  #settleMovedSection(): void {
+    const { path } = readPathAndQuery(window.location.hash);
+    const segment = /^\/settings\/([^/]+)$/.exec(path)?.[1];
+    if (!segment || !movedSettingsSections.has(segment)) return;
+    window.history.replaceState(window.history.state, "", appRouteToHash(this.current));
+  }
+
   #emit(): void {
+    this.#settleMovedSection();
     this.#heard = window.location.hash;
     const route = this.current;
     for (const listener of this.#listeners) listener(route);

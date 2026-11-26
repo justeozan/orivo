@@ -2259,13 +2259,18 @@ describe("starting a game from the shell", () => {
     backend.features = undefined;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockReset();
-    tauri.invoke.mockImplementation(async (command) => {
+    tauri.invoke.mockImplementation(async (command, args) => {
       switch (command) {
         case "get_library":
           return [alpha];
         case "get_preferences":
           return backend.preferences;
         case "update_preferences":
+          // The host answers with the preferences as saved.
+          backend.preferences = {
+            ...backend.preferences,
+            ...(args as { update: Record<string, unknown> }).update,
+          };
           return backend.preferences;
         case "get_platform_features":
           return backend.features;
@@ -2396,15 +2401,64 @@ describe("starting a game from the shell", () => {
     await goto("#/settings/general");
 
     const row = root.querySelector<HTMLElement>("#preference-game-start-row")!;
-    const select = root.querySelector<HTMLSelectElement>("#preference-game-start")!;
+    const option = (value: string): HTMLButtonElement =>
+      row.querySelector<HTMLButtonElement>(`[data-segment-value='${value}']`)!;
     expect(row.hidden).toBe(false);
-    expect(select.value).toBe("step-aside");
+    expect(option("step-aside").getAttribute("aria-pressed")).toBe("true");
 
-    select.value = "stay";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+    // The lit choice is no change, and saves nothing.
+    option("step-aside").click();
+    await settle();
+    expect(calls("update_preferences")).toEqual([]);
+
+    option("stay").click();
     await settle();
 
     expect(calls("update_preferences")).toEqual([{ update: { onGameStart: "stay" } }]);
+    expect(option("stay").getAttribute("aria-pressed")).toBe("true");
+    expect(option("step-aside").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps the motion last applied until the host answers, not the default", async () => {
+    window.localStorage.setItem("orivo.motion", "reduced");
+    const answer = tauri.invoke.getMockImplementation()!;
+    let hostAnswers: () => void = () => {};
+    const held = new Promise<void>((resolve) => (hostAnswers = resolve));
+    tauri.invoke.mockImplementation(async (command, args) => {
+      if (command === "get_preferences") await held;
+      return answer(command, args);
+    });
+    try {
+      mount();
+      await settle();
+      expect(document.documentElement.dataset.motion).toBe("reduced");
+
+      // The host's answer still wins once it lands: nothing stored is "full".
+      hostAnswers();
+      await settle();
+      expect(document.documentElement.dataset.motion).toBe("full");
+    } finally {
+      window.localStorage.removeItem("orivo.motion");
+    }
+  });
+
+  it("keeps the animations choice in General, and opens the old Appearance address there", async () => {
+    mount();
+    await settle();
+    await goto("#/settings/appearance");
+
+    expect(window.location.hash).toBe("#/settings/general");
+    const general = root.querySelector<HTMLElement>("[data-settings-panel='general']")!;
+    expect(general.hidden).toBe(false);
+    expect(root.querySelector("[data-settings-panel='appearance']")).toBeNull();
+    expect(root.querySelector("[data-settings-section='appearance']")).toBeNull();
+
+    const motion = general.querySelector<HTMLElement>("[data-segmented='motion']")!;
+    motion.querySelector<HTMLButtonElement>("[data-segment-value='reduced']")!.click();
+    await settle();
+
+    expect(calls("update_preferences")).toEqual([{ update: { motion: "reduced" } }]);
+    expect(document.documentElement.dataset.motion).toBe("reduced");
   });
 
   it("does not ask where there is nothing to choose", async () => {

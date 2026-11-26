@@ -47,8 +47,16 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
-import { prefersReducedMotion, rememberMotionPreference } from "./motion";
-import { LANGUAGE_NAMES, LANGUAGES, rememberLanguagePreference, t, type LanguagePreference } from "./i18n";
+import { prefersReducedMotion, rememberedMotionPreference, rememberMotionPreference } from "./motion";
+import {
+  LANGUAGE_NAMES,
+  LANGUAGES,
+  rememberLanguagePreference,
+  t,
+  type LanguagePreference,
+  type MessageKey,
+} from "./i18n";
+import { segmentChoice, segmentedControl, syncSegmented } from "./settings-segmented";
 import type { BootSplash } from "./boot-splash";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
@@ -473,6 +481,16 @@ const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
  */
 const NOTIFICATION_TICK_MS = 30_000;
 /**
+ * Settings › General › Experimental: debug fixtures and unfinished surfaces,
+ * folded behind one row. The row counts them, so the list lives here once.
+ */
+const EXPERIMENTAL_TOGGLES = [
+  ["preference-show-showcase", "app.appearance.demo", "app.appearance.demoHint"],
+  ["preference-beta", "app.appearance.me", "app.appearance.meHint"],
+  ["preference-editorial-games", "app.appearance.editorial", "app.appearance.editorialHint"],
+  ["preference-debug-social", "app.appearance.social", "app.appearance.socialHint"],
+] as const satisfies ReadonlyArray<readonly [string, MessageKey, MessageKey]>;
+/**
  * The artwork the welcome screen stands on. Bundled with the app, and shown as
  * app chrome rather than as a claim about anyone's library — the only screen
  * in Orivo whose backdrop is not a game the user owns.
@@ -648,7 +666,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       pendingDeleteProfileId: "",
     },
     launchFeedback: null,
-    preferences: { ...DEFAULT_PREFERENCES },
+    // Until the host answers, the motion last applied stands, not the default.
+    preferences: {
+      ...DEFAULT_PREFERENCES,
+      motion: rememberedMotionPreference() ?? DEFAULT_PREFERENCES.motion,
+    },
     dataUsage: { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null },
     providerStatuses: defaultProviderStatuses(),
     settingsSearch: "",
@@ -5546,22 +5568,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderGameStartPreference = (): void => {
     const row = root.querySelector<HTMLElement>("#preference-game-start-row");
-    const select = root.querySelector<HTMLSelectElement>("#preference-game-start");
     if (row) row.hidden = !platformFeatures.stepsAside;
-    if (select) select.value = state.preferences.onGameStart;
+    syncSegmented(root.querySelector<HTMLElement>("[data-segmented='onGameStart']"), state.preferences.onGameStart);
   };
 
   const renderPreferenceControls = (): void => {
-    const startPage = root.querySelector<HTMLSelectElement>("#preference-start-page");
+    const segmented = (preference: string): HTMLElement | null =>
+      root.querySelector<HTMLElement>(`[data-segmented='${preference}']`);
+    syncSegmented(segmented("startPage"), state.preferences.startPage);
+    syncSegmented(segmented("language"), state.preferences.language);
+    syncSegmented(segmented("motion"), state.preferences.motion);
     const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
-    if (startPage) startPage.value = state.preferences.startPage;
     if (storeRegion) storeRegion.value = state.preferences.storeRegion;
-    const language = root.querySelector<HTMLSelectElement>("#preference-language");
-    if (language) language.value = state.preferences.language;
     renderGameStartPreference();
-    for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
-      input.checked = input.value === state.preferences.motion;
-    }
     const showcase = root.querySelector<HTMLInputElement>("#preference-show-showcase");
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
     const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
@@ -7215,6 +7234,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
 
+    // A segment already lit is not a change: pressing it again saves nothing
+    // and, for the language, does not reload the page.
+    const segment = segmentChoice(target);
+    if (segment && target?.closest("[aria-pressed='true']") === null) {
+      if (segment.preference === "startPage") {
+        void savePreferences({ startPage: segment.value as StartPage });
+      } else if (segment.preference === "language") {
+        void savePreferences({ language: segment.value as LanguagePreference });
+      } else if (segment.preference === "onGameStart") {
+        void savePreferences({ onGameStart: segment.value as GameStartAction });
+      } else if (segment.preference === "motion") {
+        void savePreferences({ motion: segment.value as MotionPreference });
+      }
+      return;
+    }
+
     const action = target?.closest<HTMLButtonElement>("[data-settings-action]")?.dataset
       .settingsAction;
     if (action === "reset-preferences") {
@@ -7239,23 +7274,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   refs.settingsPage.addEventListener("change", (event) => {
     const target = event.target;
     if (target instanceof HTMLSelectElement) {
-      if (target.id === "preference-start-page") {
-        void savePreferences({ startPage: target.value as StartPage });
-      } else if (target.id === "preference-store-region") {
+      if (target.id === "preference-store-region") {
         void savePreferences({ storeRegion: target.value as StoreRegion });
-      } else if (target.id === "preference-language") {
-        void savePreferences({ language: target.value as LanguagePreference });
-      } else if (target.id === "preference-game-start") {
-        void savePreferences({ onGameStart: target.value as GameStartAction });
       }
       return;
-    }
-    if (
-      target instanceof HTMLInputElement &&
-      target.name === "motion-preference" &&
-      target.checked
-    ) {
-      void savePreferences({ motion: target.value as MotionPreference });
     }
     if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
       // The controller repaints the checkbox back to the host's own value
@@ -8736,36 +8758,30 @@ function shell(): string {
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
-              <!-- One list, no cards: the section's rows sit directly on the
-                   page surface, so the only outline on screen is the one
-                   around the settings themselves. -->
-              <div class="settings-card" data-settings-searchable>
+              <!-- Plates of one-line rows: a choice of two or three words is
+                   a segmented pill, on/off is a switch, a longer list is its
+                   value and a chevron. What each does is in the row's title,
+                   not under it. -->
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-start-page">
-                    <strong>${t("settings.startPage.label")}</strong>
-                    <small>${t("settings.startPage.hint")}</small>
-                  </label>
-                  <select id="preference-start-page" class="settings-select">
-                    <option value="library">${t("settings.startPage.library")}</option>
-                    <option value="store">${t("settings.startPage.store")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${t("language.hint")}"><strong id="preference-language-label">${t("language.label")}</strong></span>
+                  ${segmentedControl("language", "preference-language-label", [
+                    { value: "system", label: t("language.system") },
+                    ...LANGUAGES.map((code) => ({ value: code, label: LANGUAGE_NAMES[code], lang: code })),
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-language">
-                    <strong>${t("language.label")}</strong>
-                    <small>${t("language.hint")}</small>
-                  </label>
-                  <select id="preference-language" class="settings-select">
-                    <option value="system">${t("language.system")}</option>
-                    ${LANGUAGES.map((code) => `<option value="${code}" lang="${code}">${LANGUAGE_NAMES[code]}</option>`).join("")}
-                  </select>
+                  <span class="settings-row__copy" title="${t("settings.startPage.hint")}"><strong id="preference-start-page-label">${t("settings.startPage.label")}</strong></span>
+                  ${segmentedControl("startPage", "preference-start-page-label", [
+                    { value: "library", label: t("settings.startPage.library") },
+                    { value: "store", label: t("settings.startPage.store") },
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-store-region">
+                  <label class="settings-row__copy" for="preference-store-region" title="${t("settings.storeRegion.hint")}">
                     <strong>${t("settings.storeRegion.label")}</strong>
-                    <small>${t("settings.storeRegion.hint")}</small>
                   </label>
-                  <select id="preference-store-region" class="settings-select">
+                  <select id="preference-store-region" class="settings-select settings-select--value">
                     <option value="automatic">${t("settings.storeRegion.automatic")}</option>
                     <option value="us">${t("app.region.us")}</option>
                     <option value="ca">${t("app.region.ca")}</option>
@@ -8779,22 +8795,52 @@ function shell(): string {
                 <!-- Desktop only: a phone switches to the game's app by itself, so
                      there is nothing to choose. Shown once the host says it can. -->
                 <div class="settings-row" id="preference-game-start-row" hidden>
-                  <label class="settings-row__copy" for="preference-game-start">
-                    <strong>${t("settings.gameStart.label")}</strong>
-                    <small>${stepAsideCopy().hint}</small>
-                  </label>
-                  <select id="preference-game-start" class="settings-select">
-                    <option value="step-aside">${stepAsideCopy().action}</option>
-                    <option value="stay">${t("settings.gameStart.stay")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${stepAsideCopy().hint}"><strong id="preference-game-start-label">${t("settings.gameStart.label")}</strong></span>
+                  ${segmentedControl("onGameStart", "preference-game-start-label", [
+                    { value: "step-aside", label: stepAsideCopy().action },
+                    { value: "stay", label: t("settings.gameStart.stay") },
+                  ])}
                 </div>
+              </div>
+
+              <p class="settings-group__label settings-group__label--plain">${t("settings.general.display")}</p>
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("settings.reset.label")}</strong>
-                    <small>${t("settings.reset.hint")}</small>
-                  </div>
-                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">${t("settings.reset.label")}</button>
+                  <span class="settings-row__copy"><strong id="motion-preference-title">${t("app.motion.title")}</strong></span>
+                  ${segmentedControl("motion", "motion-preference-title", [
+                    { value: "full", label: t("app.motion.full"), title: t("app.motion.fullHint") },
+                    { value: "system", label: t("app.motion.system"), title: t("app.motion.systemHint") },
+                    { value: "reduced", label: t("app.motion.reduced"), title: t("app.motion.reducedHint") },
+                  ])}
                 </div>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.autoplayHint")}">
+                  <input type="checkbox" id="preference-trailer-autoplay" />
+                  <span><strong>${t("app.appearance.autoplay")}</strong></span>
+                </label>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.soundHint")}">
+                  <input type="checkbox" id="preference-trailer-sound" />
+                  <span><strong>${t("app.appearance.sound")}</strong></span>
+                </label>
+              </div>
+
+              <!-- Debug and unfinished surfaces: one closed row until asked for. -->
+              <details class="settings-card settings-card--plate settings-disclosure" data-settings-searchable>
+                <summary class="settings-row" data-nav-focusable>
+                  <span class="settings-row__copy"><strong>${t("settings.experimental.label")}</strong></span>
+                  <span class="settings-row__value">${t("settings.experimental.count", { count: EXPERIMENTAL_TOGGLES.length })}</span>
+                  ${icon("chevron-right", "settings-disclosure__chevron")}
+                </summary>
+                ${EXPERIMENTAL_TOGGLES.map(
+                  ([id, label, hint]) => `
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t(hint)}">
+                  <input type="checkbox" id="${id}" />
+                  <span><strong>${t(label)}</strong></span>
+                </label>`,
+                ).join("")}
+              </details>
+
+              <div class="settings-card__header settings-card__header--start">
+                <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences" title="${t("settings.reset.hint")}">${t("settings.reset.label")}</button>
               </div>
             </section>
 
@@ -9005,59 +9051,6 @@ function shell(): string {
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>
               </section>
-            </section>
-
-            <section class="settings-panel" role="tabpanel" id="settings-panel-appearance" data-settings-panel="appearance" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
-              <!-- One card, two labelled groups: the choices already say what
-                   they do, so three more headers above them were the same
-                   information set twice. -->
-              <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label" id="motion-preference-title">${t("app.motion.title")}</p>
-                <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="full" />
-                    <span><strong>${t("app.motion.full")}</strong><small>${t("app.motion.fullHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="system" />
-                    <span><strong>${t("app.motion.system")}</strong><small>${t("app.motion.systemHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="reduced" />
-                    <span><strong>${t("app.motion.reduced")}</strong><small>${t("app.motion.reducedHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.gamePages")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-autoplay" />
-                    <span><strong>${t("app.appearance.autoplay")}</strong><small>${t("app.appearance.autoplayHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-sound" />
-                    <span><strong>${t("app.appearance.sound")}</strong><small>${t("app.appearance.soundHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.beta")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-show-showcase" />
-                    <span><strong>${t("app.appearance.demo")}</strong><small>${t("app.appearance.demoHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-beta" />
-                    <span><strong>${t("app.appearance.me")}</strong><small>${t("app.appearance.meHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-editorial-games" />
-                    <span><strong>${t("app.appearance.editorial")}</strong><small>${t("app.appearance.editorialHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-debug-social" />
-                    <span><strong>${t("app.appearance.social")}</strong><small>${t("app.appearance.socialHint")}</small></span>
-                  </label>
-                </div>
-              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>

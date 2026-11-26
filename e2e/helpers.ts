@@ -43,7 +43,6 @@ export const SETTINGS_SECTIONS = [
   { id: "general", title: "General" },
   { id: "libraries", title: "Libraries & Sources" },
   { id: "plugins", title: "Plugins & Runners" },
-  { id: "appearance", title: "Appearance" },
   { id: "data", title: "Data" },
   { id: "about", title: "About" },
 ] as const;
