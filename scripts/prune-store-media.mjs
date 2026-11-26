@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Deletes every downloaded Store image the generated catalogue does not point
- * at. `fetch-store-scenes.mjs` pulls six candidates per game so the artwork can
+ * Deletes every downloaded Store image the generated catalogue and exclusives
+ * do not point at. `fetch-store-scenes.mjs` pulls six candidates per game so the artwork can
  * be chosen by eye; only the winner ships.
  *
  *   node scripts/prune-store-media.mjs          # report only
@@ -16,11 +16,18 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MEDIA_ROOT = resolve(ROOT, "public/media/store");
-const CATALOG = resolve(ROOT, "src/generated/store-catalog.ts");
+// The exclusives share the media folder, so what they show is kept as well.
+const CATALOGS = [
+  resolve(ROOT, "src/generated/store-catalog.ts"),
+  resolve(ROOT, "src/generated/store-exclusives.ts"),
+];
 const APPLY = process.argv.includes("--apply");
 
-const source = await readFile(CATALOG, "utf8");
-const referenced = new Set([...source.matchAll(/\/media\/store\/([^"]+)/g)].map((match) => match[1]));
+const referenced = new Set();
+for (const catalog of CATALOGS) {
+  const source = await readFile(catalog, "utf8");
+  for (const match of source.matchAll(/\/media\/store\/([^"]+)/g)) referenced.add(match[1]);
+}
 
 let kept = 0;
 let removed = 0;

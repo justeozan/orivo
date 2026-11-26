@@ -4,8 +4,9 @@ import {
   host,
   libraryGameIds,
   openRoute,
-  STORE_CATALOG_SIZE,
+  STORE_EXCLUSIVES_SIZE,
   STORE_FIRST_GAME_ID,
+  STORE_PLAYSTATION_EXCLUSIVES,
   STORE_SECOND_GAME_ID,
   waitForPage,
 } from "./helpers";
@@ -15,21 +16,20 @@ const storeHost = "#app-page-store:not([hidden])";
 /**
  * The Store is one brand at a time: two chevrons walk the stores ("Tout",
  * PlayStation, Xbox, Nintendo, Steam, Epic) routed as `?store=`, the brand's
- * masthead names the one on screen, then its exclusives in rows of three. The bundled catalogue carries no exclusive
- * yet, so "Tout" keeps the whole shelf and every brand shows its empty state;
- * these specs assert exactly that, and the detail a card opens.
+ * masthead names the one on screen, then its exclusives in rows of three;
+ * these specs assert the sourced exclusives it ships with, and the detail a
+ * card opens.
  */
 test.describe("Store chevrons", () => {
   test("a chevron walks to the next store and lands in the URL", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_CATALOG_SIZE);
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_EXCLUSIVES_SIZE);
     await expect(page.locator(`${storeHost} .store-tab`)).toHaveCount(0);
 
     await page.locator("[data-focus-key='store-next']").click();
     await expect.poll(() => currentHash(page)).toBe("#/store?store=playstation");
     await expect(page.locator(`${storeHost} .store-page`)).toHaveAttribute("data-store", "playstation");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(0);
-    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("No exclusives yet");
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_PLAYSTATION_EXCLUSIVES);
 
     await page.locator("[data-focus-key='store-previous']").click();
     await page.locator("[data-focus-key='store-previous']").click();
@@ -64,8 +64,9 @@ test.describe("Store detail", () => {
     const dialog = page.locator(`${storeHost} .store-detail`);
     await expect(dialog).toBeVisible();
     await expect(dialog).toHaveAttribute("aria-modal", "true");
-    await expect(dialog.locator(".store-detail__title")).toHaveText("Planet of Lana");
+    await expect(dialog.locator(".store-detail__title")).toHaveText("Marvel's Spider-Man 2");
     await expect(dialog.locator(".store-detail__amount")).toHaveText(/^\d+,\d{2}\s?€$/);
+    await expect(dialog.locator(".store-pill--brand")).toHaveText("PlayStation exclusive");
     await expect(page.locator("[data-focus-key='detail-buy']")).toBeFocused();
 
     await page.keyboard.press("Escape");
@@ -87,7 +88,7 @@ test.describe("Store price honesty", () => {
       ),
     );
 
-    expect(cards.length).toBe(STORE_CATALOG_SIZE);
+    expect(cards.length).toBe(STORE_EXCLUSIVES_SIZE);
     for (const card of cards) {
       // A price slot only ever exists when `formatPrice` actually produced one
       // (`selectBestOffer` + `formatPrice`, store-model.ts): "Gratuit" or a

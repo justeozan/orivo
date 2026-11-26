@@ -1,0 +1,1853 @@
+// GENERATED FILE — DO NOT EDIT. Run `pnpm store:exclusives` after editing scripts/store-exclusives.json.
+// One row per game sold on a single brand's store, by the rule in
+// docs/store-exclusives.md. Every row is sourced in that JSON file; prices are
+// the brand's own French store price on the day it was checked, or null.
+import type { GameSummary } from "../contracts";
+
+export const STORE_EXCLUSIVES: GameSummary[] = [
+  {
+    "id": "store:marvels-spider-man-2",
+    "title": "Marvel's Spider-Man 2",
+    "source": "store",
+    "shortDescription": "Peter Parker et Miles Morales doivent se dépasser, avec et sans leur masque, pour sauver la ville, eux-mêmes et ceux qui leur sont chers du monstrueux Venom.",
+    "coverUrl": "/media/store/marvels-spider-man-2/cover.jpg",
+    "heroUrl": "/media/store/marvels-spider-man-2/hero.jpg",
+    "landscapeUrl": "/media/store/marvels-spider-man-2/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure",
+      "Monde ouvert"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storemarvelsspiderman2",
+        "gameId": "store:marvels-spider-man-2",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 3999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/marvels-spider-man-2/scene-1.jpg",
+      "/media/store/marvels-spider-man-2/scene-2.jpg",
+      "/media/store/marvels-spider-man-2/scene-3.jpg"
+    ],
+    "criticScore": 90
+  },
+  {
+    "id": "store:horizon-forbidden-west",
+    "title": "Horizon Forbidden West",
+    "source": "store",
+    "shortDescription": "Rejoignez Aloy tandis qu'elle s'aventure dans l'Ouest prohibé, un territoire dangereux qui abrite de mystérieuses nouvelles menaces.",
+    "coverUrl": "/media/store/horizon-forbidden-west/cover.jpg",
+    "heroUrl": "/media/store/horizon-forbidden-west/hero.jpg",
+    "landscapeUrl": "/media/store/horizon-forbidden-west/capsule.jpg",
+    "genres": [
+      "Action",
+      "RPG",
+      "Monde ouvert"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storehorizonforbiddenwest",
+        "gameId": "store:horizon-forbidden-west",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/horizon-forbidden-west/scene-1.jpg",
+      "/media/store/horizon-forbidden-west/scene-2.jpg",
+      "/media/store/horizon-forbidden-west/scene-3.jpg"
+    ],
+    "criticScore": 88
+  },
+  {
+    "id": "store:god-of-war-ragnarok",
+    "title": "God of War Ragnarök",
+    "source": "store",
+    "shortDescription": "Rejoignez Kratos et Atreus dans leur voyage légendaire en quête de réponses avant le début du Ragnarök, à travers chacun des neuf royaumes.",
+    "coverUrl": "/media/store/god-of-war-ragnarok/cover.jpg",
+    "heroUrl": "/media/store/god-of-war-ragnarok/hero.jpg",
+    "landscapeUrl": "/media/store/god-of-war-ragnarok/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storegodofwarragnarok",
+        "gameId": "store:god-of-war-ragnarok",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 7999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/god-of-war-ragnarok/scene-1.jpg",
+      "/media/store/god-of-war-ragnarok/scene-2.jpg",
+      "/media/store/god-of-war-ragnarok/scene-3.jpg"
+    ],
+    "criticScore": 94
+  },
+  {
+    "id": "store:astro-bot",
+    "title": "Astro Bot",
+    "source": "store",
+    "shortDescription": "Quand l'éternelle némésis d'ASTRO attaque le vaisseau-mère PS5 et éparpille son équipage dans l'espace, seul ASTRO peut arranger les choses.",
+    "coverUrl": "/media/store/astro-bot/cover.jpg",
+    "heroUrl": "/media/store/astro-bot/hero.jpg",
+    "landscapeUrl": "/media/store/astro-bot/capsule.jpg",
+    "genres": [
+      "Plateforme",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storeastrobot",
+        "gameId": "store:astro-bot",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 6999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/astro-bot/scene-1.jpg",
+      "/media/store/astro-bot/scene-2.jpg",
+      "/media/store/astro-bot/scene-3.jpg"
+    ],
+    "criticScore": 94
+  },
+  {
+    "id": "store:ghost-of-yotei",
+    "title": "Ghost of Yōtei",
+    "source": "store",
+    "shortDescription": "Laissez de côté l'ordre de l'époque Edo dans la version définitive de Ghost of Yōtei, avec la nouvelle extension narrative Échos de Sekigahara.",
+    "coverUrl": "/media/store/ghost-of-yotei/cover.jpg",
+    "heroUrl": "/media/store/ghost-of-yotei/hero.jpg",
+    "landscapeUrl": "/media/store/ghost-of-yotei/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure",
+      "Monde ouvert"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storeghostofyotei",
+        "gameId": "store:ghost-of-yotei",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 7999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/ghost-of-yotei/scene-1.jpg",
+      "/media/store/ghost-of-yotei/scene-2.jpg",
+      "/media/store/ghost-of-yotei/scene-3.jpg"
+    ],
+    "criticScore": 86
+  },
+  {
+    "id": "store:marvels-wolverine",
+    "title": "Marvel's Wolverine",
+    "source": "store",
+    "shortDescription": "Trois ans après avoir quitté son équipe, Logan réintègre la Team X dans ce jeu d'action d'Insomniac Games, les créateurs de Marvel's Spider-Man.",
+    "coverUrl": "/media/store/marvels-wolverine/cover.jpg",
+    "heroUrl": "/media/store/marvels-wolverine/hero.jpg",
+    "landscapeUrl": "/media/store/marvels-wolverine/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storemarvelswolverine",
+        "gameId": "store:marvels-wolverine",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/marvels-wolverine/scene-1.jpg",
+      "/media/store/marvels-wolverine/scene-2.jpg",
+      "/media/store/marvels-wolverine/scene-3.jpg"
+    ],
+    "criticScore": 75
+  },
+  {
+    "id": "store:saros",
+    "title": "Saros",
+    "source": "store",
+    "shortDescription": "Dans l'ombre d'une sinistre éclipse, Arjun Devraj cherche des réponses sur Carcosa, une planète polymorphe aux terribles secrets. Le nouveau Housemarque.",
+    "coverUrl": "/media/store/saros/cover.jpg",
+    "heroUrl": "/media/store/saros/hero.jpg",
+    "landscapeUrl": "/media/store/saros/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Roguelike"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storesaros",
+        "gameId": "store:saros",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 4959,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/saros/scene-1.jpg",
+      "/media/store/saros/scene-2.jpg",
+      "/media/store/saros/scene-3.jpg"
+    ],
+    "criticScore": 87
+  },
+  {
+    "id": "store:gran-turismo-7",
+    "title": "Gran Turismo 7",
+    "source": "store",
+    "shortDescription": "La simulation automobile la plus complète : plus de 400 véhicules reproduits avec une fidélité inégalée et plus de 90 circuits en météo dynamique.",
+    "coverUrl": "/media/store/gran-turismo-7/cover.jpg",
+    "heroUrl": "/media/store/gran-turismo-7/hero.jpg",
+    "landscapeUrl": "/media/store/gran-turismo-7/capsule.jpg",
+    "genres": [
+      "Course",
+      "Simulation"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_playstation_storegranturismo7",
+        "gameId": "store:gran-turismo-7",
+        "provider": "playstation",
+        "providerLabel": "PlayStation Store",
+        "priceMinor": 3999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "playstation",
+    "gallery": [
+      "/media/store/gran-turismo-7/scene-1.jpg",
+      "/media/store/gran-turismo-7/scene-2.jpg",
+      "/media/store/gran-turismo-7/scene-3.jpg"
+    ],
+    "criticScore": 87
+  },
+  {
+    "id": "store:gears-of-war-e-day",
+    "title": "Gears of War: E-Day",
+    "source": "store",
+    "shortDescription": "Vivez l'horreur du jour de l'Émergence aux côtés de Marcus Fenix et Dominic Santiago, alors que la Horde Locust surgit des profondeurs.",
+    "coverUrl": "/media/store/gears-of-war-e-day/cover.jpg",
+    "heroUrl": "/media/store/gears-of-war-e-day/hero.jpg",
+    "landscapeUrl": "/media/store/gears-of-war-e-day/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storegearsofwareday",
+        "gameId": "store:gears-of-war-e-day",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 4899,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/gears-of-war-e-day/scene-1.jpg",
+      "/media/store/gears-of-war-e-day/scene-2.jpg",
+      "/media/store/gears-of-war-e-day/scene-3.jpg"
+    ],
+    "criticScore": 87
+  },
+  {
+    "id": "store:halo-infinite",
+    "title": "Halo Infinite",
+    "source": "store",
+    "shortDescription": "Issu de l'une des sagas les plus emblématiques du jeu vidéo, Halo est plus grand que jamais avec une expérience multijoueur dynamique et gratuite.",
+    "coverUrl": "/media/store/halo-infinite/cover.jpg",
+    "heroUrl": "/media/store/halo-infinite/hero.jpg",
+    "landscapeUrl": "/media/store/halo-infinite/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Multijoueur"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storehaloinfinite",
+        "gameId": "store:halo-infinite",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 0,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/halo-infinite/scene-1.jpg",
+      "/media/store/halo-infinite/scene-2.jpg",
+      "/media/store/halo-infinite/scene-3.jpg"
+    ],
+    "criticScore": 87
+  },
+  {
+    "id": "store:forza-motorsport",
+    "title": "Forza Motorsport",
+    "source": "store",
+    "shortDescription": "Pilotez plus de 500 voitures réelles, dont plus de 100 inédites, sur 27 circuits dont Brands Hatch, Daytona, la Nordschleife du Nürburgring ou Sebring.",
+    "coverUrl": "/media/store/forza-motorsport/cover.jpg",
+    "heroUrl": "/media/store/forza-motorsport/hero.jpg",
+    "landscapeUrl": "/media/store/forza-motorsport/capsule.jpg",
+    "genres": [
+      "Course",
+      "Simulation"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storeforzamotorsport",
+        "gameId": "store:forza-motorsport",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 3199,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/forza-motorsport/scene-1.jpg",
+      "/media/store/forza-motorsport/scene-2.jpg",
+      "/media/store/forza-motorsport/scene-3.jpg"
+    ],
+    "criticScore": 84
+  },
+  {
+    "id": "store:halo-the-master-chief-collection",
+    "title": "Halo: The Master Chief Collection",
+    "source": "store",
+    "shortDescription": "Six jeux, une saga épique : Halo: Reach, Combat Evolved Anniversary, Halo 2: Anniversary, Halo 3, la campagne ODST et Halo 4, optimisés pour Xbox Series X|S.",
+    "coverUrl": "/media/store/halo-the-master-chief-collection/cover.jpg",
+    "heroUrl": "/media/store/halo-the-master-chief-collection/hero.jpg",
+    "landscapeUrl": "/media/store/halo-the-master-chief-collection/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storehalothemasterchiefcollection",
+        "gameId": "store:halo-the-master-chief-collection",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/halo-the-master-chief-collection/scene-1.jpg",
+      "/media/store/halo-the-master-chief-collection/scene-2.jpg",
+      "/media/store/halo-the-master-chief-collection/scene-3.jpg"
+    ],
+    "criticScore": 85
+  },
+  {
+    "id": "store:gears-5",
+    "title": "Gears 5",
+    "source": "store",
+    "shortDescription": "Alors que la guerre offre un peu de répit, Kait Diaz cherche ses liens avec l'ennemi et découvre la véritable menace qui pèse sur Sera : elle-même.",
+    "coverUrl": "/media/store/gears-5/cover.jpg",
+    "heroUrl": "/media/store/gears-5/hero.jpg",
+    "landscapeUrl": "/media/store/gears-5/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storegears5",
+        "gameId": "store:gears-5",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 874,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/gears-5/scene-1.jpg",
+      "/media/store/gears-5/scene-2.jpg",
+      "/media/store/gears-5/scene-3.jpg"
+    ],
+    "criticScore": 84
+  },
+  {
+    "id": "store:microsoft-flight-simulator",
+    "title": "Microsoft Flight Simulator (2020)",
+    "source": "store",
+    "shortDescription": "Des avions légers aux gros porteurs en passant par les planeurs et les hélicoptères, pilotez des appareils très détaillés partout dans le monde.",
+    "coverUrl": "/media/store/microsoft-flight-simulator/cover.jpg",
+    "heroUrl": "/media/store/microsoft-flight-simulator/hero.jpg",
+    "landscapeUrl": "/media/store/microsoft-flight-simulator/capsule.jpg",
+    "genres": [
+      "Simulation"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storemicrosoftflightsimulator",
+        "gameId": "store:microsoft-flight-simulator",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 2449,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/microsoft-flight-simulator/scene-1.jpg",
+      "/media/store/microsoft-flight-simulator/scene-2.jpg",
+      "/media/store/microsoft-flight-simulator/scene-3.jpg"
+    ],
+    "criticScore": 90
+  },
+  {
+    "id": "store:halo-5-guardians",
+    "title": "Halo 5: Guardians",
+    "source": "store",
+    "shortDescription": "Une expérience multijoueur épique, des outils de création de niveaux avancés et l'épisode le plus sombre de la saga Halo.",
+    "coverUrl": "/media/store/halo-5-guardians/cover.jpg",
+    "heroUrl": "/media/store/halo-5-guardians/hero.jpg",
+    "landscapeUrl": "/media/store/halo-5-guardians/capsule.jpg",
+    "genres": [
+      "Tir",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storehalo5guardians",
+        "gameId": "store:halo-5-guardians",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 499,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/halo-5-guardians/scene-1.jpg",
+      "/media/store/halo-5-guardians/scene-2.jpg",
+      "/media/store/halo-5-guardians/scene-3.jpg"
+    ],
+    "criticScore": 84
+  },
+  {
+    "id": "store:state-of-decay-2",
+    "title": "State of Decay 2",
+    "source": "store",
+    "shortDescription": "Le jeu de survie et de zombies, avec la mise à jour Homecoming et une Trumbull Valley entièrement remastérisée en monde ouvert.",
+    "coverUrl": "/media/store/state-of-decay-2/cover.jpg",
+    "heroUrl": "/media/store/state-of-decay-2/hero.jpg",
+    "landscapeUrl": "/media/store/state-of-decay-2/capsule.jpg",
+    "genres": [
+      "Survie",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_microsoft_storestateofdecay2",
+        "gameId": "store:state-of-decay-2",
+        "provider": "microsoft",
+        "providerLabel": "Microsoft Store",
+        "priceMinor": 2999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "xbox",
+    "gallery": [
+      "/media/store/state-of-decay-2/scene-1.jpg",
+      "/media/store/state-of-decay-2/scene-2.jpg",
+      "/media/store/state-of-decay-2/scene-3.jpg"
+    ],
+    "criticScore": 66
+  },
+  {
+    "id": "store:mario-kart-world",
+    "title": "Mario Kart World",
+    "source": "store",
+    "shortDescription": "Allumez les moteurs et faites la course dans un monde ouvert avec Mario Kart World sur Nintendo Switch 2 !",
+    "coverUrl": "/media/store/mario-kart-world/capsule.jpg",
+    "heroUrl": "/media/store/mario-kart-world/scene-1.jpg",
+    "landscapeUrl": "/media/store/mario-kart-world/capsule.jpg",
+    "genres": [
+      "Course",
+      "Party game"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storemariokartworld",
+        "gameId": "store:mario-kart-world",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 7999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/mario-kart-world/scene-1.jpg",
+      "/media/store/mario-kart-world/scene-2.jpg",
+      "/media/store/mario-kart-world/scene-3.jpg"
+    ],
+    "criticScore": 86
+  },
+  {
+    "id": "store:donkey-kong-bananza",
+    "title": "Donkey Kong Bananza",
+    "source": "store",
+    "shortDescription": "Rejoignez Donkey Kong et Pauline pour une aventure souterraine fracassante, exclusivement sur Nintendo Switch 2.",
+    "coverUrl": "/media/store/donkey-kong-bananza/capsule.jpg",
+    "heroUrl": "/media/store/donkey-kong-bananza/scene-1.jpg",
+    "landscapeUrl": "/media/store/donkey-kong-bananza/capsule.jpg",
+    "genres": [
+      "Plateforme",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storedonkeykongbananza",
+        "gameId": "store:donkey-kong-bananza",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 6999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/donkey-kong-bananza/scene-1.jpg",
+      "/media/store/donkey-kong-bananza/scene-2.jpg",
+      "/media/store/donkey-kong-bananza/scene-3.jpg"
+    ],
+    "criticScore": 91
+  },
+  {
+    "id": "store:zelda-tears-of-the-kingdom",
+    "title": "The Legend of Zelda: Tears of the Kingdom",
+    "source": "store",
+    "shortDescription": "Une aventure épique à travers les terres et les cieux d'Hyrule vous attend dans The Legend of Zelda: Tears of the Kingdom.",
+    "coverUrl": "/media/store/zelda-tears-of-the-kingdom/capsule.jpg",
+    "heroUrl": "/media/store/zelda-tears-of-the-kingdom/scene-1.jpg",
+    "landscapeUrl": "/media/store/zelda-tears-of-the-kingdom/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storezeldatearsofthekingdom",
+        "gameId": "store:zelda-tears-of-the-kingdom",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 6999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/zelda-tears-of-the-kingdom/scene-1.jpg",
+      "/media/store/zelda-tears-of-the-kingdom/scene-2.jpg",
+      "/media/store/zelda-tears-of-the-kingdom/scene-3.jpg"
+    ],
+    "criticScore": 96
+  },
+  {
+    "id": "store:super-mario-bros-wonder",
+    "title": "Super Mario Bros. Wonder",
+    "source": "store",
+    "shortDescription": "Attendez-vous à l'inattendu dans la nouvelle aventure 2D de Mario !",
+    "coverUrl": "/media/store/super-mario-bros-wonder/capsule.jpg",
+    "heroUrl": "/media/store/super-mario-bros-wonder/scene-1.jpg",
+    "landscapeUrl": "/media/store/super-mario-bros-wonder/capsule.jpg",
+    "genres": [
+      "Plateforme"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storesupermariobroswonder",
+        "gameId": "store:super-mario-bros-wonder",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/super-mario-bros-wonder/scene-1.jpg",
+      "/media/store/super-mario-bros-wonder/scene-2.jpg",
+      "/media/store/super-mario-bros-wonder/scene-3.jpg"
+    ],
+    "criticScore": 92
+  },
+  {
+    "id": "store:metroid-prime-4-beyond",
+    "title": "Metroid Prime 4: Beyond",
+    "source": "store",
+    "shortDescription": "Maniez de nouvelles capacités psychiques pour vous échapper de la mystérieuse planète Viewros dans Metroid Prime 4: Beyond.",
+    "coverUrl": "/media/store/metroid-prime-4-beyond/capsule.jpg",
+    "heroUrl": "/media/store/metroid-prime-4-beyond/scene-1.jpg",
+    "landscapeUrl": "/media/store/metroid-prime-4-beyond/capsule.jpg",
+    "genres": [
+      "Action",
+      "Tir"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storemetroidprime4beyond",
+        "gameId": "store:metroid-prime-4-beyond",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/metroid-prime-4-beyond/scene-1.jpg",
+      "/media/store/metroid-prime-4-beyond/scene-2.jpg",
+      "/media/store/metroid-prime-4-beyond/scene-3.jpg"
+    ],
+    "criticScore": 78
+  },
+  {
+    "id": "store:pokemon-legends-z-a",
+    "title": "Légendes Pokémon : Z-A",
+    "source": "store",
+    "shortDescription": "Découvrez une aventure Pokémon urbaine et prenez part à des combats Pokémon dynamiques et en temps réel.",
+    "coverUrl": "/media/store/pokemon-legends-z-a/capsule.jpg",
+    "heroUrl": "/media/store/pokemon-legends-z-a/scene-1.jpg",
+    "landscapeUrl": "/media/store/pokemon-legends-z-a/capsule.jpg",
+    "genres": [
+      "RPG",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storepokemonlegendsza",
+        "gameId": "store:pokemon-legends-z-a",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:38Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/pokemon-legends-z-a/scene-1.jpg",
+      "/media/store/pokemon-legends-z-a/scene-2.jpg",
+      "/media/store/pokemon-legends-z-a/scene-3.jpg"
+    ],
+    "criticScore": 78
+  },
+  {
+    "id": "store:animal-crossing-new-horizons",
+    "title": "Animal Crossing: New Horizons",
+    "source": "store",
+    "shortDescription": "Démarrez votre nouvelle vie avec la formule Évasion Île déserte de Nook Inc. !",
+    "coverUrl": "/media/store/animal-crossing-new-horizons/capsule.jpg",
+    "heroUrl": "/media/store/animal-crossing-new-horizons/scene-1.jpg",
+    "landscapeUrl": "/media/store/animal-crossing-new-horizons/capsule.jpg",
+    "genres": [
+      "Simulation",
+      "Détente"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storeanimalcrossingnewhorizons",
+        "gameId": "store:animal-crossing-new-horizons",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/animal-crossing-new-horizons/scene-1.jpg",
+      "/media/store/animal-crossing-new-horizons/scene-2.jpg",
+      "/media/store/animal-crossing-new-horizons/scene-3.jpg"
+    ],
+    "criticScore": 90
+  },
+  {
+    "id": "store:super-smash-bros-ultimate",
+    "title": "Super Smash Bros. Ultimate",
+    "source": "store",
+    "shortDescription": "Des mondes et des combattants légendaires se retrouvent pour l'affrontement ultime dans Super Smash Bros. Ultimate !",
+    "coverUrl": "/media/store/super-smash-bros-ultimate/capsule.jpg",
+    "heroUrl": "/media/store/super-smash-bros-ultimate/scene-1.jpg",
+    "landscapeUrl": "/media/store/super-smash-bros-ultimate/capsule.jpg",
+    "genres": [
+      "Combat",
+      "Party game"
+    ],
+    "tags": [],
+    "supportedPlatforms": [],
+    "availablePlatforms": [
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_nintendo_storesupersmashbrosultimate",
+        "gameId": "store:super-smash-bros-ultimate",
+        "provider": "nintendo",
+        "providerLabel": "Nintendo eShop",
+        "priceMinor": 6999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "nintendo",
+    "gallery": [
+      "/media/store/super-smash-bros-ultimate/scene-1.jpg",
+      "/media/store/super-smash-bros-ultimate/scene-2.jpg",
+      "/media/store/super-smash-bros-ultimate/scene-3.jpg"
+    ],
+    "criticScore": 93
+  },
+  {
+    "id": "steam:1245620",
+    "title": "Elden Ring",
+    "source": "store",
+    "shortDescription": "Le RPG d'action fantastique acclamé par la critique. Levez-vous, Sans-éclat, brandissez la puissance du Cercle d'Elden et devenez Seigneur de l'Entre-terre.",
+    "coverUrl": "/media/store/elden-ring/cover.jpg",
+    "heroUrl": "/media/store/elden-ring/hero.jpg",
+    "landscapeUrl": "/media/store/elden-ring/capsule.jpg",
+    "genres": [
+      "Action",
+      "RPG"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam1245620",
+        "gameId": "steam:1245620",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/elden-ring/scene-1.jpg",
+      "/media/store/elden-ring/scene-2.jpg",
+      "/media/store/elden-ring/scene-3.jpg"
+    ],
+    "criticScore": 94
+  },
+  {
+    "id": "steam:546560",
+    "title": "Half-Life: Alyx",
+    "source": "store",
+    "shortDescription": "Le retour de Valve dans l'univers de Half-Life, en VR. Entre Half-Life et Half-Life 2, un combat impossible contre le Cartel.",
+    "coverUrl": "/media/store/half-life-alyx/cover.jpg",
+    "heroUrl": "/media/store/half-life-alyx/hero.jpg",
+    "landscapeUrl": "/media/store/half-life-alyx/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure",
+      "VR"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam546560",
+        "gameId": "steam:546560",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 5799,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/half-life-alyx/scene-1.jpg",
+      "/media/store/half-life-alyx/scene-2.jpg",
+      "/media/store/half-life-alyx/scene-3.jpg"
+    ],
+    "criticScore": 93
+  },
+  {
+    "id": "steam:2246340",
+    "title": "Monster Hunter Wilds",
+    "source": "store",
+    "shortDescription": "Arpentez des terres que la nature déchaînée transforme d'un moment à l'autre, dans une histoire de monstres et d'humains luttant pour vivre en harmonie.",
+    "coverUrl": "/media/store/monster-hunter-wilds/cover.jpg",
+    "heroUrl": "/media/store/monster-hunter-wilds/hero.jpg",
+    "landscapeUrl": "/media/store/monster-hunter-wilds/capsule.jpg",
+    "genres": [
+      "Action",
+      "RPG"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam2246340",
+        "gameId": "steam:2246340",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 3999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/monster-hunter-wilds/scene-1.jpg",
+      "/media/store/monster-hunter-wilds/scene-2.jpg",
+      "/media/store/monster-hunter-wilds/scene-3.jpg"
+    ],
+    "criticScore": 88
+  },
+  {
+    "id": "steam:620",
+    "title": "Portal 2",
+    "source": "store",
+    "shortDescription": "L'« initiative de tests perpétuels » a été étendue pour vous permettre de concevoir des casse-têtes coopératifs pour vous et vos contacts !",
+    "coverUrl": "/media/store/portal-2/cover.jpg",
+    "heroUrl": "/media/store/portal-2/hero.jpg",
+    "landscapeUrl": "/media/store/portal-2/capsule.jpg",
+    "genres": [
+      "Réflexion",
+      "Coopération"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows",
+      "linux"
+    ],
+    "availablePlatforms": [
+      "pc"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam620",
+        "gameId": "steam:620",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 969,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/portal-2/scene-1.jpg",
+      "/media/store/portal-2/scene-2.jpg",
+      "/media/store/portal-2/scene-3.jpg"
+    ],
+    "criticScore": 95
+  },
+  {
+    "id": "steam:220",
+    "title": "Half-Life 2",
+    "source": "store",
+    "shortDescription": "Sorti d'un long sommeil cryogénique, Gordon Freeman émerge dans City 17 occupée. Avec Alyx Vance, il mène une résistance désespérée contre l'oppression.",
+    "coverUrl": "/media/store/half-life-2/cover.jpg",
+    "heroUrl": "/media/store/half-life-2/hero.jpg",
+    "landscapeUrl": "/media/store/half-life-2/capsule.jpg",
+    "genres": [
+      "Action",
+      "FPS"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows",
+      "linux"
+    ],
+    "availablePlatforms": [
+      "pc"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam220",
+        "gameId": "steam:220",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 969,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/half-life-2/scene-1.jpg",
+      "/media/store/half-life-2/scene-2.jpg",
+      "/media/store/half-life-2/scene-3.jpg"
+    ],
+    "criticScore": 96
+  },
+  {
+    "id": "steam:814380",
+    "title": "Sekiro: Shadows Die Twice",
+    "source": "store",
+    "shortDescription": "Suivez votre chemin vers la vengeance dans l'aventure primée de FromSoftware, les créateurs de Dark Souls. Recouvrez votre honneur. Tuez avec ingéniosité.",
+    "coverUrl": "/media/store/sekiro/cover.jpg",
+    "heroUrl": "/media/store/sekiro/hero.jpg",
+    "landscapeUrl": "/media/store/sekiro/capsule.jpg",
+    "genres": [
+      "Action",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam814380",
+        "gameId": "steam:814380",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 5999,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/sekiro/scene-1.jpg",
+      "/media/store/sekiro/scene-2.jpg",
+      "/media/store/sekiro/scene-3.jpg"
+    ],
+    "criticScore": 88
+  },
+  {
+    "id": "steam:550",
+    "title": "Left 4 Dead 2",
+    "source": "store",
+    "shortDescription": "Dans une apocalypse zombie, un jeu de tir coopératif qui entraîne votre équipe des cimetières aux marécages, de Savannah à La Nouvelle-Orléans.",
+    "coverUrl": "/media/store/left-4-dead-2/cover.jpg",
+    "heroUrl": "/media/store/left-4-dead-2/hero.jpg",
+    "landscapeUrl": "/media/store/left-4-dead-2/capsule.jpg",
+    "genres": [
+      "Action",
+      "Coopération"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows",
+      "linux"
+    ],
+    "availablePlatforms": [
+      "pc"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam550",
+        "gameId": "steam:550",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 969,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/left-4-dead-2/scene-1.jpg",
+      "/media/store/left-4-dead-2/scene-2.jpg",
+      "/media/store/left-4-dead-2/scene-3.jpg"
+    ],
+    "criticScore": 89
+  },
+  {
+    "id": "steam:730",
+    "title": "Counter-Strike 2",
+    "source": "store",
+    "shortDescription": "Counter-Strike, l'expérience compétitive par excellence depuis plus de vingt ans. Faites place au prochain chapitre : Counter-Strike 2.",
+    "coverUrl": "/media/store/counter-strike-2/cover.jpg",
+    "heroUrl": "/media/store/counter-strike-2/hero.jpg",
+    "landscapeUrl": "/media/store/counter-strike-2/capsule.jpg",
+    "genres": [
+      "Action",
+      "FPS",
+      "Gratuit"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows",
+      "linux"
+    ],
+    "availablePlatforms": [
+      "pc"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_steam_steam730",
+        "gameId": "steam:730",
+        "provider": "steam",
+        "providerLabel": "Steam",
+        "priceMinor": 0,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "steam",
+    "gallery": [
+      "/media/store/counter-strike-2/scene-1.jpg",
+      "/media/store/counter-strike-2/scene-2.jpg",
+      "/media/store/counter-strike-2/scene-3.jpg"
+    ],
+    "criticScore": 82
+  },
+  {
+    "id": "store:alan-wake-2",
+    "title": "Alan Wake 2",
+    "source": "store",
+    "shortDescription": "Saga Anderson enquête sur une série de meurtres rituels pendant qu'Alan Wake écrit une histoire sombre pour modifier la réalité. Un lien semble les unir.",
+    "coverUrl": "/media/store/alan-wake-2/cover.jpg",
+    "heroUrl": "/media/store/alan-wake-2/scene-1.jpg",
+    "landscapeUrl": "/media/store/alan-wake-2/capsule.jpg",
+    "genres": [
+      "Horreur",
+      "Aventure"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storealanwake2",
+        "gameId": "store:alan-wake-2",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": null,
+        "currency": null,
+        "region": "FR",
+        "verifiedAt": null,
+        "availability": "available",
+        "stale": true
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/alan-wake-2/scene-1.jpg",
+      "/media/store/alan-wake-2/scene-2.jpg",
+      "/media/store/alan-wake-2/scene-3.jpg"
+    ],
+    "criticScore": 89
+  },
+  {
+    "id": "store:rocket-league",
+    "title": "Rocket League",
+    "source": "store",
+    "shortDescription": "Un puissant hybride mêlant football d'arcade et carnage à quatre roues, dans d'intenses rencontres à la jouabilité intuitive basée sur la physique.",
+    "coverUrl": "/media/store/rocket-league/cover.jpg",
+    "heroUrl": "/media/store/rocket-league/scene-1.jpg",
+    "landscapeUrl": "/media/store/rocket-league/capsule.jpg",
+    "genres": [
+      "Sport",
+      "Course",
+      "Gratuit"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox",
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storerocketleague",
+        "gameId": "store:rocket-league",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": 0,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:44Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/rocket-league/scene-1.jpg",
+      "/media/store/rocket-league/scene-2.jpg",
+      "/media/store/rocket-league/scene-3.jpg"
+    ],
+    "criticScore": 86
+  },
+  {
+    "id": "store:fall-guys",
+    "title": "Fall Guys",
+    "source": "store",
+    "shortDescription": "Un jeu de groupe gratuit et multijoueur : affrontez vos amis dans des courses d'obstacles absurdes ou construisez votre propre manche chaotique.",
+    "coverUrl": "/media/store/fall-guys/cover.jpg",
+    "heroUrl": "/media/store/fall-guys/scene-1.jpg",
+    "landscapeUrl": "/media/store/fall-guys/capsule.jpg",
+    "genres": [
+      "Party game",
+      "Gratuit"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox",
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storefallguys",
+        "gameId": "store:fall-guys",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": 0,
+        "currency": "EUR",
+        "region": "FR",
+        "verifiedAt": "2026-11-26T13:43:44Z",
+        "availability": "available",
+        "stale": false
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/fall-guys/scene-1.jpg",
+      "/media/store/fall-guys/scene-2.jpg",
+      "/media/store/fall-guys/scene-3.jpg"
+    ],
+    "criticScore": 80
+  },
+  {
+    "id": "store:alan-wake-remastered",
+    "title": "Alan Wake Remastered",
+    "source": "store",
+    "shortDescription": "L'écrivain Alan Wake se lance à la recherche de sa femme disparue. Le jeu principal et ses deux extensions, « The Signal » et « The Writer », en 4K.",
+    "coverUrl": "/media/store/alan-wake-remastered/cover.jpg",
+    "heroUrl": "/media/store/alan-wake-remastered/scene-1.jpg",
+    "landscapeUrl": "/media/store/alan-wake-remastered/capsule.jpg",
+    "genres": [
+      "Horreur",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox",
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storealanwakeremastered",
+        "gameId": "store:alan-wake-remastered",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": null,
+        "currency": null,
+        "region": "FR",
+        "verifiedAt": null,
+        "availability": "available",
+        "stale": true
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/alan-wake-remastered/scene-1.jpg",
+      "/media/store/alan-wake-remastered/scene-2.jpg",
+      "/media/store/alan-wake-remastered/scene-3.jpg"
+    ],
+    "criticScore": 80
+  },
+  {
+    "id": "store:pc-building-simulator-2",
+    "title": "PC Building Simulator 2",
+    "source": "store",
+    "shortDescription": "Développez votre empire en apprenant à réparer, assembler et personnaliser des PC, avec des pièces réalistes de plus de 40 marques.",
+    "coverUrl": "/media/store/pc-building-simulator-2/cover.jpg",
+    "heroUrl": "/media/store/pc-building-simulator-2/scene-1.jpg",
+    "landscapeUrl": "/media/store/pc-building-simulator-2/capsule.jpg",
+    "genres": [
+      "Simulation"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storepcbuildingsimulator2",
+        "gameId": "store:pc-building-simulator-2",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": null,
+        "currency": null,
+        "region": "FR",
+        "verifiedAt": null,
+        "availability": "available",
+        "stale": true
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/pc-building-simulator-2/scene-1.jpg",
+      "/media/store/pc-building-simulator-2/scene-2.jpg",
+      "/media/store/pc-building-simulator-2/scene-3.jpg"
+    ],
+    "criticScore": 82
+  },
+  {
+    "id": "store:kingdom-hearts-melody-of-memory",
+    "title": "Kingdom Hearts Melody of Memory",
+    "source": "store",
+    "shortDescription": "Un jeu d'action rythmique avec plus de 20 personnages et plus de 140 chansons de la saga Kingdom Hearts, et un mode Versus en ligne.",
+    "coverUrl": "/media/store/kingdom-hearts-melody-of-memory/cover.jpg",
+    "heroUrl": "/media/store/kingdom-hearts-melody-of-memory/scene-1.jpg",
+    "landscapeUrl": "/media/store/kingdom-hearts-melody-of-memory/capsule.jpg",
+    "genres": [
+      "Rythme",
+      "Action"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation",
+      "xbox",
+      "switch"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storekingdomheartsmelodyofmemory",
+        "gameId": "store:kingdom-hearts-melody-of-memory",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": null,
+        "currency": null,
+        "region": "FR",
+        "verifiedAt": null,
+        "availability": "available",
+        "stale": true
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/kingdom-hearts-melody-of-memory/scene-1.jpg",
+      "/media/store/kingdom-hearts-melody-of-memory/scene-2.jpg",
+      "/media/store/kingdom-hearts-melody-of-memory/scene-3.jpg"
+    ],
+    "criticScore": 74
+  },
+  {
+    "id": "store:kid-a-mnesia-exhibition",
+    "title": "Kid A Mnesia Exhibition",
+    "source": "store",
+    "shortDescription": "Un univers digital et analogue sens dessus dessous, créé à partir d'œuvres et d'enregistrements originaux de Kid A et Amnesiac de Radiohead.",
+    "coverUrl": "/media/store/kid-a-mnesia-exhibition/cover.jpg",
+    "heroUrl": "/media/store/kid-a-mnesia-exhibition/scene-1.jpg",
+    "landscapeUrl": "/media/store/kid-a-mnesia-exhibition/capsule.jpg",
+    "genres": [
+      "Exploration",
+      "Musique"
+    ],
+    "tags": [],
+    "supportedPlatforms": [
+      "windows",
+      "macos"
+    ],
+    "availablePlatforms": [
+      "pc",
+      "playstation"
+    ],
+    "owned": false,
+    "launchable": false,
+    "wishlisted": false,
+    "playTimeSeconds": 0,
+    "lastPlayedAt": null,
+    "recommendationReasons": [],
+    "offers": [
+      {
+        "id": "offer_epic_storekidamnesiaexhibition",
+        "gameId": "store:kid-a-mnesia-exhibition",
+        "provider": "epic",
+        "providerLabel": "Epic Games Store",
+        "priceMinor": null,
+        "currency": null,
+        "region": "FR",
+        "verifiedAt": null,
+        "availability": "available",
+        "stale": true
+      }
+    ],
+    "exclusiveTo": "epic",
+    "gallery": [
+      "/media/store/kid-a-mnesia-exhibition/scene-1.jpg",
+      "/media/store/kid-a-mnesia-exhibition/scene-2.jpg",
+      "/media/store/kid-a-mnesia-exhibition/scene-3.jpg"
+    ]
+  }
+];

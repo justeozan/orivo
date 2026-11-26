@@ -245,6 +245,14 @@ async function media(slug, file, fallbacks) {
 }
 
 async function main() {
+  // The fetched facts and the curation live in .context/, which is local to
+  // whoever last ran `pnpm store:refresh`. Without them there is nothing to
+  // rebuild from, and the committed catalogue is left exactly as it is rather
+  // than `pnpm store:build` failing for everyone else.
+  if (!(await exists(DATA))) {
+    console.log(`store-catalog: ${DATA} not found; the committed catalogue is kept as is (pnpm store:refresh fetches it)`);
+    return;
+  }
   const { fetchedAt, games } = JSON.parse(await readFile(DATA, "utf8"));
   const curatedFiles = (await readdir(CURATED_DIR)).filter((name) => /^curated-\d+\.json$/.test(name));
   if (curatedFiles.length === 0) throw new Error("no curated-*.json files found");

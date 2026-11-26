@@ -123,8 +123,8 @@ describe("createInitialStoreState", () => {
     }
 
     // A shop is only called available when the catalog actually carries a
-    // verified price from it; the console storefronts, whose prices are unknown,
-    // stay degraded, and a shop with no feed at all is never claimed to work.
+    // verified price from it — the console stores do, through the exclusives —
+    // and a shop with no feed at all is never claimed to work.
     for (const entry of editorialProviderStatuses()) {
       if (entry.health === "available") {
         expect(pricedProviders.has(entry.provider), entry.provider).toBe(true);

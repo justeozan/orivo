@@ -34,10 +34,16 @@ export const FALLBACK_LIBRARY_IDS = [
  * that are unlikely to leave the curated list.
  */
 export const STORE_CATALOG_SIZE = 47;
-/** Steam id for "Planet of Lana" — the first card of every unfiltered browse. */
-export const STORE_FIRST_GAME_ID = "steam:1608230";
-/** Steam id for "Firewatch" — used wherever a second, distinct card is needed. */
-export const STORE_SECOND_GAME_ID = "steam:383870";
+/**
+ * The sourced exclusives (`scripts/store-exclusives.json`): what "Tout" shows,
+ * eight per brand but Epic's seven.
+ */
+export const STORE_EXCLUSIVES_SIZE = 39;
+export const STORE_PLAYSTATION_EXCLUSIVES = 8;
+/** "Marvel's Spider-Man 2" — the first pick of "Tout". */
+export const STORE_FIRST_GAME_ID = "store:marvels-spider-man-2";
+/** "Horizon Forbidden West" — used wherever a second, distinct card is needed. */
+export const STORE_SECOND_GAME_ID = "store:horizon-forbidden-west";
 
 export const SETTINGS_SECTIONS = [
   { id: "general", title: "General" },
