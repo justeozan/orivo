@@ -1,846 +1,491 @@
 /* ---------------------------------------------------------------------------
-   Store — "Découvrir"
-   Reference: .context/store-nosidebar.png, a 1536×1024 viewport at DPR 2.
-   Every length below is measured off that file (image px ÷ 2 = CSS px), so the
-   numbers look arbitrary on purpose: they are the design, not a scale.
+   Store
+   Reference: docs/design/store/ — store-wireframe.png (the layout),
+   store-playstation.png and store-xbox.png (the finish).
 
-   The page paints one full-bleed photograph and floats every surface over it.
-   Nothing is opaque except the card bodies, which have to stay readable over
-   any artwork.
+   One brand at a time: its light washes the whole page, its mark and its
+   machines stand at the top, and its games sit below as large landscape cards
+   in rows of three. Every colour on the page is drawn from one token,
+   `--store-accent`, so changing store is one variable changing — and because
+   the token is registered as a colour, the change is a crossfade.
    --------------------------------------------------------------------------- */
+
+@property --store-accent {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #7d54f4;
+}
 
 .store-page {
-  /* Layout */
-  --pad: 46px;
-  /* Cut to the capsule. Steam serves every one of them at 616×353, and the
-     frame below carries that exact ratio, so the art the game was sold with
-     arrives whole: no crop across it, no bars around it. The width rides the
-     same viewport-height axis as every other step on this page, because the
-     art's height is what it buys: a shorter window gets a narrower card rather
-     than a picture sliced to fit one that stayed wide. */
-  --card-w: clamp(252px, 40svh, 380px);
-  --card-gap: 16px;
-  --card-radius: 14px;
-  /* The fused cut. How far the picture carries on into the block below it, how
-     far it rises back over its own foot, and how far out of focus it is by the
-     time it crosses. It is let through at full strength: at anything less the
-     first row below the cut stops being the last row above it, which is the
-     one thing that has to hold. Measured over the shelf's first six capsules,
-     the break at the cut is about 1.6 levels of 255 this way, and four times
-     that at 0.85. */
-  --seam-depth: 58px;
-  --seam-rise: 22px;
-  --seam-blur: 15px;
+  /* The brand. Each tab sets the accent; everything else is derived from it. */
+  --store-accent: #7d54f4;
+  --store-deep: color-mix(in srgb, var(--store-accent) 34%, #03040a);
+  --store-glow: color-mix(in srgb, var(--store-accent) 62%, #ffffff);
 
-  /* The page never scrolls: it is exactly one screen tall. Every vertical step
-     is a clamp indexed on the viewport height, so at the design's 1536×1024 the
-     middle value resolves to the measured pixel and anything shorter shrinks
-     smoothly instead of pushing content out of view. */
-  --pad-top: clamp(66px, 11.836svh, 121.2px);
-  --pad-bottom: clamp(12px, 2.344svh, 24px);
-  --gap-eyebrow: clamp(3px, 0.82svh, 8.4px);
-  --gap-action: clamp(12px, 2.52svh, 25.8px);
-  --gap-shelf: clamp(14px, 3.535svh, 36.2px);
-  --gap-row: clamp(14px, 2.7svh, 28px);
-  --size-title: clamp(26px, 4.6875svh, 48px);
-  --lh-title: clamp(28px, 4.98svh, 51px);
-  --size-eyebrow: clamp(12px, 1.4648svh, 15px);
-  --lh-eyebrow: clamp(16px, 1.953svh, 20px);
-  --h-action: clamp(34px, 4.492svh, 46px);
-  --h-chipbar: clamp(36px, 4.492svh, 46px);
-  /* A ceiling, not a height: the card measures itself now, and at the widest
-     cut the picture and the facts together come to just over 400px. The cap is
-     what stops a very tall window from turning the shelf into four posters —
-     it must sit above what the card asks for, or it would cut the verdict off
-     the foot of every one of them. */
-  --card-max-h: 440px;
+  /* Scale. Lengths ride the viewport width so a television gets bigger cards,
+     not more empty room around the same ones. */
+  --store-gap: clamp(14px, 1.35vw, 40px);
+  --store-radius: clamp(14px, 1.05vw, 30px);
+  --store-title: clamp(17px, 1.3vw, 34px);
 
-  /* Glass. One recipe, three densities. */
-  --glass: rgba(18, 20, 24, 0.42);
-  --glass-strong: rgba(14, 16, 20, 0.55);
-  --glass-card: rgba(10, 12, 15, 0.82);
-  --glass-line: rgba(255, 255, 255, 0.09);
-  --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.07);
-  --glass-lift: 0 18px 44px rgba(0, 0, 0, 0.3);
-  --blur: blur(26px) saturate(140%);
-
-  /* Ink */
-  /* Every ink below is sampled off the design over two different backdrops, so
-     these are opaque values, not white at some alpha. */
+  /* Ink, and the one recipe of glass the page uses. */
   --ink: #ffffff;
-  --ink-2: #f1f4f3;
-  --ink-3: #c8cdcc;
-  --ink-4: #adb3b2;
-  --accent: #82b3c7;
-  /* One accent, three uses: the leaf, the section label and the stat dots. */
-  --leaf: #8fca9c;
-  --dot-on: #8fca9c;
-  --dot-off: rgba(255, 255, 255, 0.128);
+  --ink-2: rgba(255, 255, 255, 0.82);
+  --ink-3: rgba(255, 255, 255, 0.62);
+  --glass: rgba(8, 10, 16, 0.6);
+  --glass-line: rgba(255, 255, 255, 0.12);
+  --glass-sheen: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --accent: var(--store-glow);
 
   position: relative;
-  display: flex;
-  height: 100%;
-  overflow: hidden;
-  flex-direction: column;
-  isolation: isolate;
+  display: block;
+  min-height: 100%;
   color: var(--ink);
+  transition: --store-accent 720ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* The Store owns no topbar clearance — the hero runs underneath the bar, which
-   is transparent on this route — and it never scrolls. The shelf is the only
-   thing that moves, and it moves sideways. */
-.app-page--store { overflow: hidden; }
+/* The brands. Taken from each one's own identity, tuned to hold white text. */
+.store-page[data-store="all"] { --store-accent: #7d54f4; }
+.store-page[data-store="playstation"] { --store-accent: #1c5cf0; }
+.store-page[data-store="xbox"] { --store-accent: #18a51a; }
+.store-page[data-store="nintendo"] { --store-accent: #e60012; }
+.store-page[data-store="steam"] { --store-accent: #3b8fd1; --store-deep: color-mix(in srgb, #1b2838 80%, #03040a); }
+.store-page[data-store="epic"] { --store-accent: #b9bec8; --store-deep: #121317; }
+
+/* The host is the scroll container, as on every page: the shell watches it to
+   put its scrim under the topbar. The page itself owns the topbar clearance,
+   because its brand light runs up behind the bar. */
+.app-page--store {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+  scrollbar-width: thin;
+}
 
 /* ---------------------------------------------------------------------------
-   Backdrop — one photograph, two stacked layers so a preview crossfades
+   Ambient light
    --------------------------------------------------------------------------- */
 
-.store-backdrop {
+.store-ambient {
   position: fixed;
-  z-index: -1;
+  z-index: 0;
   inset: 0;
   overflow: hidden;
-  background: #07080b;
+  background: #03040a;
   pointer-events: none;
 }
 
-.store-backdrop__layer {
+.store-ambient__wash {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
+  background:
+    radial-gradient(110% 70% at 72% -6%, color-mix(in srgb, var(--store-accent) 74%, transparent) 0%, transparent 62%),
+    radial-gradient(80% 55% at 8% 6%, color-mix(in srgb, var(--store-accent) 46%, transparent) 0%, transparent 66%),
+    linear-gradient(180deg, var(--store-deep) 0%, color-mix(in srgb, var(--store-deep) 58%, #03040a) 52%, #04050a 100%);
+}
+
+/* Two long sweeps of light across the top, like the brand's own splash
+   screens. Gradients only: no blur filter, so they cost nothing to move. */
+.store-ambient__sweep {
+  position: absolute;
+  left: -25%;
+  width: 150%;
+  border-radius: 50%;
+  background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--store-glow) 58%, transparent) 0%, transparent 72%);
+  opacity: 0.5;
+  animation: store-sweep 22s ease-in-out infinite alternate;
+}
+
+.store-ambient__sweep--high { top: 3vh; height: 9vh; rotate: -7deg; }
+.store-ambient__sweep--low {
+  top: 24vh;
+  height: 5vh;
+  rotate: 4deg;
+  opacity: 0.38;
+  animation-duration: 30s;
+  animation-direction: alternate-reverse;
+}
+
+@keyframes store-sweep {
+  from { translate: -5% 0; }
+  to { translate: 5% 1.5vh; }
+}
+
+/* The shelf scrolls up under a transparent topbar. This band, fixed under the
+   bar, takes the cards out of its way: the brand's colour, then a blur that
+   fades out, so the bar always sits on calm ground. */
+.store-topfade {
+  position: fixed;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: calc(var(--topbar-height) + 18px);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--store-deep) 92%, transparent) 0%, color-mix(in srgb, var(--store-deep) 60%, transparent) 62%, transparent 100%);
   opacity: 0;
-  object-fit: cover;
-  object-position: center 42%;
-  transform: scale(1.015);
-  transition: opacity 520ms cubic-bezier(0.2, 0.8, 0.2, 1), transform 1400ms ease-out;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  -webkit-mask-image: linear-gradient(180deg, #000 55%, transparent);
+  mask-image: linear-gradient(180deg, #000 55%, transparent);
 }
 
-.store-backdrop__layer.is-active {
-  opacity: 1;
-  transform: scale(1);
-}
+.store-page--scrolled .store-topfade { opacity: 1; }
 
-.store-backdrop__scrim {
-  position: absolute;
-  inset: 0;
-}
-
-/* Left: keeps the headline legible over a bright sky. */
-.store-backdrop__scrim--left {
-  background: linear-gradient(
-    90deg,
-    rgba(6, 7, 10, 0.75) 0%,
-    rgba(6, 7, 10, 0.53) 13%,
-    rgba(6, 7, 10, 0.36) 18%,
-    rgba(6, 7, 10, 0.21) 29%,
-    rgba(6, 7, 10, 0.14) 40%,
-    rgba(6, 7, 10, 0.04) 60%,
-    rgba(6, 7, 10, 0) 75%
-  );
-}
-
-/* Bottom: it used to be solid black over the whole lower two fifths of the
-   window, because a banner, a label and a row of chips all had to be read off
-   it. Two of those are gone and the chips carry their own glass, so the veil
-   only has to keep the foot of the page quiet — the photograph runs behind the
-   shelf now, which is what the cards are made of glass to show. */
-.store-backdrop__scrim--bottom {
-  background: linear-gradient(
-    0deg,
-    rgba(9, 10, 12, 0.82) 0%,
-    rgba(9, 10, 12, 0.7) 14%,
-    rgba(9, 10, 12, 0.46) 34%,
-    rgba(9, 10, 12, 0.26) 50%,
-    rgba(9, 10, 12, 0.1) 64%,
-    rgba(9, 10, 12, 0) 74%
-  );
-}
-
-/* Game artwork is often far brighter than the default photograph, so the veil
-   deepens only while a card is previewed — the shelf at rest keeps the exact
-   contrast of the approved design. */
-.store-page--previewing .store-backdrop__scrim--left {
-  background: linear-gradient(
-    90deg,
-    rgba(6, 7, 10, 0.9) 0%,
-    rgba(6, 7, 10, 0.66) 30%,
-    rgba(6, 7, 10, 0.24) 60%,
-    rgba(6, 7, 10, 0.06) 100%
-  );
-}
-
-.store-backdrop__scrim--top {
-  /* No separate top scrim is detectable in the design: the left scrim alone
-     accounts for the darkening at the top edge. */
-  display: none;
-}
+/* ---------------------------------------------------------------------------
+   Body
+   --------------------------------------------------------------------------- */
 
 .store-page__body {
-  display: flex;
-  height: 100%;
-  overflow: hidden;
-  flex: 1;
-  flex-direction: column;
-  padding: var(--pad-top) var(--pad) var(--pad-bottom);
-}
-
-/* ---------------------------------------------------------------------------
-   Hero
-   --------------------------------------------------------------------------- */
-
-.store-hero {
   position: relative;
+  z-index: 1;
   display: flex;
-  flex: none;
-  align-items: flex-start;
-  justify-content: flex-start;
-  gap: 40px;
-}
-
-.store-hero__copy {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  max-width: 430px;
+  min-height: 100%;
   flex-direction: column;
-  align-items: flex-start;
+  gap: clamp(16px, 1.8vw, 48px);
+  padding:
+    calc(var(--topbar-height) + clamp(6px, 1.2vh, 20px))
+    var(--edge-right)
+    clamp(40px, 7vh, 120px)
+    var(--edge-left);
 }
 
-.store-hero__eyebrow {
-  margin: 0;
-  color: #d8dddc;
-  font-size: var(--size-eyebrow);
-  line-height: var(--lh-eyebrow);
-}
+/* --- Chevrons: the way between stores ------------------------------------ */
 
-.store-hero__title {
-  display: -webkit-box;
-  overflow: hidden;
-  height: calc(2 * var(--lh-title));
-  margin: var(--gap-eyebrow) 0 0;
-  color: var(--ink);
-  font-size: var(--size-title);
-  font-weight: 500;
-  letter-spacing: -0.02em;
-  line-height: var(--lh-title);
-  text-wrap: balance;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-.store-hero__action {
-  height: var(--h-action);
-  margin-top: var(--gap-action);
-  padding: 0 26px;
-  /* The topbar's search field, rounded all the way: one hairline ring, a dark
-     pane at a third of an opacity, and the photograph behind it blurred rather
-     than hidden. Orivo's glass, not a button drawn on top of it. */
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 999px;
-  color: #ede6e2;
-  background: rgba(22, 20, 23, 0.31);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.11), inset 0 1px rgba(255, 255, 255, 0.055);
-  font-size: 15px;
-  font-weight: 450;
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
-  -webkit-backdrop-filter: blur(22px) saturate(130%);
-  backdrop-filter: blur(22px) saturate(130%);
-}
-
-.store-hero__action:hover,
-.store-hero__action[data-nav-focus] {
-  border-color: rgba(255, 255, 255, 0.3);
-  color: #fdfbfa;
-  background: rgba(34, 32, 36, 0.44);
-}
-
-.store-hero__action:active { transform: scale(0.985); }
-
-/* The cheapest verified offer for the card being previewed. It is taken out of
-   flow on purpose: appearing and disappearing must not move the headline, the
-   shelf, or anything else on the page. */
-.store-hero__offer {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin: clamp(4px, 0.98svh, 10px) 0 0;
-  color: var(--ink-3);
-  font-size: 13px;
-  opacity: 1;
-  white-space: nowrap;
-  transition: opacity 180ms ease;
-}
-
-/* Kept in the DOM and merely invisible, so no reflow can happen at all. */
-.store-hero__offer[hidden] {
-  display: block;
-  opacity: 0;
-  pointer-events: none;
-}
-
-/* --- Highlights card ------------------------------------------------------ */
-
-.store-highlights {
-  position: absolute;
-  top: 2px;
-  right: 0;
-  width: 344px;
-  flex: none;
-  padding: clamp(12px, 1.953svh, 20px) 25px clamp(13px, 2.148svh, 22px);
-  border: 1px solid rgba(255, 255, 255, 0.145);
-  border-radius: 18px;
-  /* Measured off the design: a lifted blue-grey, not near-black, and only
-     lightly blurred — the ridge behind it stays faintly readable. */
-  background: rgba(46, 56, 68, 0.5);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
-  -webkit-backdrop-filter: blur(24px) saturate(130%);
-  backdrop-filter: blur(24px) saturate(130%);
-}
-
-.store-highlights__list {
-  display: flex;
-  margin: 0;
-  padding: 0;
-  flex-direction: column;
-  gap: clamp(9px, 1.855svh, 19px);
-  list-style: none;
-}
-
-.store-highlight {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 250px);
-  align-items: start;
-  gap: 24px;
-}
-
-.store-highlight__icon {
-  display: grid;
-  height: 20px;
-  place-items: center;
-  color: #e9ecea;
-}
-
-.store-highlight__icon .icon {
-  width: 20px;
-  height: 20px;
-  stroke-width: 1.6;
-}
-
-.store-highlight__title {
-  overflow: hidden;
-  margin: 0;
-  color: #f3f5f4;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.012em;
-  line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.store-highlight__text {
-  display: -webkit-box;
-  overflow: hidden;
-  margin: 3px 0 0;
-  color: #a9b0b1;
-  font-size: 12.5px;
-  line-height: 17px;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
-/* --- "Découvrir pourquoi" panel ------------------------------------------- */
-
-.store-why {
-  position: absolute;
-  z-index: 3;
-  top: 120px;
-  left: 0;
-  width: min(430px, 100%);
-  padding: 20px 22px 22px;
-  border: 1px solid var(--glass-line);
-  border-radius: 16px;
-  background: rgba(12, 14, 18, 0.72);
-  box-shadow: var(--glass-sheen), 0 26px 60px rgba(0, 0, 0, 0.44);
-  animation: store-why-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  -webkit-backdrop-filter: blur(34px) saturate(150%);
-  backdrop-filter: blur(34px) saturate(150%);
-}
-
-@keyframes store-why-in {
-  from { opacity: 0; transform: translateY(-6px); }
-}
-
-.store-why[hidden] { display: none; }
-
-.store-why__title {
-  margin: 0 0 10px;
-  font-size: 17px;
-  font-weight: 600;
-}
-
-.store-why__text {
-  margin: 0 0 10px;
-  color: rgba(255, 255, 255, 0.66);
-  font-size: 13.5px;
-  line-height: 1.45;
-}
-
-.store-why__text:last-child { margin-bottom: 0; }
-
-.store-why__close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  display: grid;
-  width: 26px;
-  height: 26px;
-  place-items: center;
-  border-radius: 50%;
-  color: var(--ink-3);
-  background: rgba(255, 255, 255, 0.07);
-}
-
-.store-why__close:hover, .store-why__close[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.13); }
-.store-why__close .icon { width: 13px; height: 13px; }
-
-/* ---------------------------------------------------------------------------
-   Shelf
-   --------------------------------------------------------------------------- */
-
-.store-shelf {
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  margin-top: var(--gap-shelf);
-}
-
-.store-rail {
-  position: relative;
-  display: flex;
-  min-height: 0;
-  flex: 1 1 auto;
-  align-items: flex-start;
-}
-
-.store-rail__track {
-  display: flex;
-  width: 100%;
-  /* `overflow-x: auto` forces a vertical scrollport too, which would clip the
-     featured card's outer glow. The 3px inset gives the glow room and the
-     matching negative margin plus extra height hands the row back its exact
-     measured height. */
-  height: calc(100% + 6px);
-  overflow-x: auto;
-  overflow-y: hidden;
-  /* The cards are as tall as what they say, and the band they are given is
-     taller than that. They sit at the foot of it, with the chip bar: the room
-     the banner and the label gave back goes above them, into the one part of
-     the window where the photograph is not veiled. */
-  align-items: flex-end;
-  padding: 3px;
-  margin: -3px;
-  gap: var(--card-gap);
-  scroll-behavior: smooth;
-  scrollbar-width: none;
-}
-
-.store-rail__track::-webkit-scrollbar { display: none; }
-.store-rail__track[hidden] { display: none; }
-
-.store-rail__arrow {
+/* One on each side of the page, level with the masthead's middle. Glass, the
+   brand's light on approach, nothing written on them. */
+.store-switch {
   position: absolute;
   z-index: 2;
   top: 50%;
   display: grid;
-  width: 46px;
-  height: 46px;
+  width: clamp(40px, 2.9vw, 72px);
+  height: clamp(40px, 2.9vw, 72px);
   place-items: center;
-  /* What makes this disc visible in the design is the blur, not a fill: the
-     background only lifts by ~1.5%, and no ring is detectable at all. */
-  border: 0;
-  border-radius: 50%;
-  color: var(--ink-2);
-  background: rgba(255, 255, 255, 0.015);
-  transform: translateY(-50%);
-  transition: background 160ms ease, transform 160ms ease;
-  -webkit-backdrop-filter: blur(14px) saturate(120%);
-  backdrop-filter: blur(14px) saturate(120%);
-}
-
-.store-rail__arrow:hover,
-.store-rail__arrow[data-nav-focus] {
-  background: rgba(255, 255, 255, 0.1);
-  transform: translateY(-50%) scale(1.06);
-}
-
-.store-rail__arrow[hidden] { display: none; }
-.store-rail__arrow .icon { width: 16px; height: 16px; stroke-width: 1.7; }
-.store-rail__arrow--previous { left: -12px; }
-.store-rail__arrow--next { right: -12px; }
-
-/* ---------------------------------------------------------------------------
-   Card
-   --------------------------------------------------------------------------- */
-
-.store-card {
-  position: relative;
-  width: var(--card-w);
-  /* The block under the picture is the hero's panel of reasons — the same
-     lifted blue-grey behind the same blur — with one change: its colour is the
-     artwork's own, read off the capsule when the card is built. The hue and
-     what is left of the saturation say which game it is; the lightness follows
-     the foot of the picture, so a near-white cover is not handed a dark slab to
-     stand on. These are the fallbacks, and what a picture with no colour in it
-     keeps. */
-  --card-hue: 211;
-  --card-sat: 21%;
-  --card-lum: 23%;
-  /* The picture keeps the capsule's shape and the body keeps its facts, so the
-     card is exactly the sum of the two: a taller shelf hands the space back to
-     the page rather than padding the foot of every card with nothing. */
-  height: auto;
-  max-height: min(100%, var(--card-max-h));
-  flex: none;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.145);
-  border-radius: var(--card-radius);
-  /* The pane is the whole card, not the block: put it on the block alone and it
-     has to arrive from nothing at the cut, which leaves a band a few pixels
-     under the cut where neither it nor the reflection covers much — 46% of the
-     page showing through at the worst row, read as a bright line across every
-     card. Behind the artwork it costs nothing, the artwork being opaque. */
-  background: hsl(var(--card-hue) var(--card-sat) var(--card-lum) / 0.52);
-  transition: border-color 200ms ease, box-shadow 200ms ease;
-}
-
-/* The recommendation Orivo is making. At rest that is the first card; while a
-   card is previewed it follows the pointer. */
-.store-card--featured {
-  /* Exactly two pixels of signal in the design: a solid inner stroke and one
-     outer ring at 72% of it. No wider halo is present. */
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgba(130, 179, 199, 0.72);
-}
-
-.store-card__open {
-  display: flex;
-  width: 100%;
-  height: 100%;
   padding: 0;
-  flex-direction: column;
-  color: inherit;
-  background: transparent;
-  text-align: left;
-}
-
-.store-card__media {
-  position: relative;
-  /* The capsule's own shape, so the whole of it is shown. The body keeps what
-     the frame leaves; a shorter window now shortens the facts rather than the
-     picture, because a picture cut to fit is the thing this frame exists to
-     avoid. */
-  aspect-ratio: 616 / 353;
-  min-height: 0;
-  flex: none;
-  overflow: hidden;
-  background: #14161b;
-}
-
-.store-card__art {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center 42%;
-  transition: transform 420ms cubic-bezier(0.2, 0.8, 0.2, 1);
-}
-
-/* Walked with the keys or a pad, a card scrolled into view brings the next one
-   with it: the shelf moves at the card before its edge, not once the edge is
-   reached, so what comes next is always in sight. */
-.store-rail__track[data-nav-driven] .store-card__open {
-  scroll-margin-inline: calc(var(--card-w) + var(--card-gap) + 16px);
-}
-
-.store-card:hover .store-card__art,
-.store-card:has(.store-card__open[data-nav-focus]) .store-card__art { transform: scale(1.035); }
-
-/* Capsule art reads as its own title block, so the veil under it carries no
-   text at all. What is left of it is the foot of the picture being taken down
-   to meet its own reflection in the block below — which is why it is now as
-   deep as that reflection is bright, and no deeper. */
-.store-card__media--wordmark .store-card__veil { height: 34%; opacity: 0.22; }
-.store-card__media--missing .store-card__art { opacity: 0; }
-
-/* Reads the title back off any artwork. */
-.store-card__veil {
-  position: absolute;
-  inset: auto 0 0;
-  /* A straight ramp, measured: 0 at 52% of the media height to .95 at its foot. */
-  height: 52%;
-  background: linear-gradient(0deg, rgba(10, 12, 14, 0.95) 0%, rgba(10, 12, 14, 0) 100%);
-}
-
-.store-card__title {
-  position: absolute;
-  right: 16px;
-  bottom: 17px;
-  left: 16px;
-  overflow: hidden;
-  color: #eef1f0;
-  font-size: 16px;
-  font-weight: 500;
-  letter-spacing: 0.15em;
-  line-height: 1;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.store-card__title--long { font-size: 13px; letter-spacing: 0.08em; }
-
-/* The price is real, verified and region-correct — but the shelf at rest is a
-   reading surface, so it only surfaces on the card being considered. */
-.store-card__price {
-  position: absolute;
-  top: 11px;
-  left: 11px;
-  padding: 3px 9px;
   border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 7px;
+  border-radius: 50%;
   color: var(--ink);
-  background: rgba(10, 12, 15, 0.62);
+  background: rgba(255, 255, 255, 0.07);
   box-shadow: var(--glass-sheen);
-  opacity: 0;
-  font-size: 12px;
-  font-weight: 500;
-  transition: opacity 180ms ease;
-  -webkit-backdrop-filter: blur(14px);
-  backdrop-filter: blur(14px);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background 200ms ease, border-color 200ms ease, box-shadow 260ms ease;
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
 }
 
-.store-card--previewing .store-card__price,
-.store-card:focus-within .store-card__price { opacity: 1; }
-.store-card__price:empty { display: none; }
+.store-switch--previous { left: calc(-1 * var(--edge-left) + clamp(10px, 1vw, 28px)); }
+.store-switch--next { right: calc(-1 * var(--edge-right) + clamp(10px, 1vw, 28px)); }
 
-.store-card__body {
+.store-switch:hover,
+.store-switch:focus-visible,
+.store-switch[data-nav-focus] {
+  border-color: color-mix(in srgb, var(--store-glow) 70%, transparent);
+  background: color-mix(in srgb, var(--store-accent) 46%, rgba(255, 255, 255, 0.06));
+  box-shadow: var(--glass-sheen), 0 0 26px color-mix(in srgb, var(--store-accent) 52%, transparent);
+  outline: none;
+}
+
+.store-switch:focus-visible,
+.store-switch[data-nav-focus] { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.store-switch .icon { width: clamp(18px, 1.25vw, 30px); height: clamp(18px, 1.25vw, 30px); }
+
+/* --- Masthead: the store's mark, and the machines it sells for ------------ */
+
+.store-mast {
+  position: relative;
+  display: grid;
+  min-height: clamp(150px, 25vh, 480px);
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  align-items: end;
+  margin-bottom: clamp(14px, 2.6vh, 56px);
+}
+
+.store-mast__brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  align-self: center;
+  gap: clamp(14px, 1.5vw, 40px);
+  padding-left: clamp(0px, 3vw, 96px);
+}
+
+.store-mast__logo {
+  display: grid;
+  width: clamp(58px, 6vw, 168px);
+  height: clamp(58px, 6vw, 168px);
+  flex: none;
+  place-items: center;
+  color: var(--ink);
+  filter: drop-shadow(0 0 28px color-mix(in srgb, var(--store-glow) 55%, transparent));
+}
+
+.store-mast__logo .icon,
+.store-mast__image { width: 100%; height: 100%; object-fit: contain; }
+.store-mast__logo[hidden],
+.store-mast__name[hidden],
+.store-mast__shop[hidden],
+.store-mast__lockup[hidden] { display: none; }
+
+/* A store's own logo, wordmark included, set at the height the name would be. */
+.store-mast__lockup {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: clamp(44px, 4.6vw, 128px);
+  object-fit: contain;
+  object-position: left center;
+  /* No glow: a store's own logo is shown as its owner ships it. */
+}
+
+.store-mast__dot {
+  width: 62%;
+  height: 62%;
+  border-radius: 50%;
+  background: var(--store-accent);
+  box-shadow: 0 0 40px var(--store-accent);
+}
+
+.store-mast__title {
+  min-width: 0;
+  margin: 0;
+  font-size: clamp(30px, 3.4vw, 96px);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.02;
+  text-shadow: 0 4px 30px rgba(0, 0, 0, 0.25);
+}
+
+.store-mast__shop { margin-left: 0.2em; font-weight: 400; }
+.store-mast__shop:empty { display: none; }
+
+.store-mast__consoles {
   position: relative;
   display: flex;
-  /* The colour is the card's, behind this. What the block adds is the blur —
-     and no hairline of light along its top edge, where the hero's panel wears
-     one: a surface that begins exactly at the cut is a line across it. */
-  -webkit-backdrop-filter: blur(24px) saturate(130%);
-  backdrop-filter: blur(24px) saturate(130%);
-  /* Not clipped: the reflection has to reach back over the foot of the picture
-     for the two to cross-fade at all. The card clips it, which is where the
-     rounded corner is anyway. */
-  flex: none;
-  flex-direction: column;
-  padding: clamp(7px, 1.081svh, 11.07px) 16px clamp(11px, 1.777svh, 18.2px);
+  height: clamp(140px, 25vh, 440px);
+  align-items: flex-end;
+  justify-content: center;
 }
 
-/* The facts ride over the picture's continuation, and are never blurred by it. */
-.store-card__body > * { position: relative; z-index: 1; }
+/* Each machine is fitted to its own box and stands on its floor, so a tall
+   tower and a wide handheld read as one shelf. The centre one stands in front. */
+.store-console {
+  position: relative;
+  display: block;
+  width: 31%;
+  height: 74%;
+  flex: none;
+  margin-inline: -3%;
+  -webkit-box-reflect: below 2px linear-gradient(transparent 70%, rgba(255, 255, 255, 0.16));
+}
 
-/* There is no edge between the picture and the facts. The block carries on
-   with the same picture — mirrored, so the first row of the reflection is the
-   picture's last one, and out of focus, so nothing in it can be read as a
-   second image. It rises a little over the foot of the artwork as well, which
-   is what takes the hard line out of the cut: on both sides of it, the same
-   colours at the same moment, one sharp and one not. */
-.store-card__body::before {
-  content: "";
+.store-console--centre { z-index: 1; width: 42%; height: 100%; }
+.store-console--left { order: 0; }
+.store-console--centre { order: 1; }
+.store-console--right { order: 2; }
+
+/* Each render is fitted to its box and stands on the floor, so a tower and a
+   handheld read as one shelf. */
+.store-console__art {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center bottom;
+  filter: drop-shadow(0 0 34px color-mix(in srgb, var(--store-accent) 42%, transparent));
+}
+
+/* The bright line the machines stand on. */
+.store-mast__horizon {
   position: absolute;
-  z-index: 0;
-  top: calc(-1 * var(--seam-rise));
-  right: calc(-1 * var(--seam-blur) * 2);
-  left: calc(-1 * var(--seam-blur) * 2);
-  height: calc(var(--seam-depth) + var(--seam-rise));
-  /* The element is flipped, so everything below it is written upside down: the
-     background is anchored at what becomes the cut, and the mask runs from the
-     far end back to it. Anchoring to the box rather than to the cut itself puts
-     the end of the picture inside the part the mask throws away — a blur that
-     runs off the end of a picture thins it, and thinning it here would draw the
-     very line this exists to remove. The reflection therefore begins a hair's
-     breadth up the picture rather than at its last row: at this radius, nothing
-     to see. */
-  /* The veil over the foot of the artwork is part of what the picture looks
-     like there, so the reflection wears it too — mirrored like everything else
-     in this element: deepest at the cut, gone again over the distance the veil
-     itself covers. Without it the reflection comes back unveiled and lays a
-     bright ridge along the join, which is the one thing it is here to avoid.
-     The reach is the veil's own height: a share of the frame, and the frame is
-     the card's width cut to the capsule's shape. */
-  --veil-ink: 10, 12, 14;
-  --veil-alpha: 0.95;
-  --veil-reach: calc((var(--card-w) - 2px) * 0.298);
-  background-image:
-    linear-gradient(
-      to top,
-      rgba(var(--veil-ink), var(--veil-alpha)) var(--seam-rise),
-      rgba(var(--veil-ink), 0) calc(var(--seam-rise) + var(--veil-reach))
-    ),
-    var(--card-art);
-  background-position: center bottom;
-  background-repeat: no-repeat;
-  background-size: auto, cover;
-  filter: blur(var(--seam-blur));
-  transform: scaleY(-1);
-  /* Written from the far end back to the cut, because the element is upside
-     down. Full strength where it meets the picture, then off fast: the facts
-     are read on the block, not on the photograph. */
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    rgba(0, 0, 0, 0.05) calc(var(--seam-depth) - 30px),
-    rgba(0, 0, 0, 0.14) calc(var(--seam-depth) - 17px),
-    rgba(0, 0, 0, 0.36) calc(var(--seam-depth) - 7px),
-    #000 var(--seam-depth),
-    transparent calc(var(--seam-depth) + var(--seam-rise))
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent 0,
-    rgba(0, 0, 0, 0.05) calc(var(--seam-depth) - 30px),
-    rgba(0, 0, 0, 0.14) calc(var(--seam-depth) - 17px),
-    rgba(0, 0, 0, 0.36) calc(var(--seam-depth) - 7px),
-    #000 var(--seam-depth),
-    transparent calc(var(--seam-depth) + var(--seam-rise))
-  );
+  right: calc(-1 * var(--edge-right));
+  bottom: 0;
+  left: 30%;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--store-glow) 28%, #ffffff 58%, var(--store-glow) 82%, transparent);
+  box-shadow: 0 0 26px 5px color-mix(in srgb, var(--store-glow) 55%, transparent);
+  opacity: 0.7;
   pointer-events: none;
 }
 
-/* Capsule art wears a far lighter veil over a shorter run, and so does its
-   reflection. */
-.store-card__media--wordmark ~ .store-card__body::before {
-  --veil-alpha: 0.21;
-  --veil-reach: calc((var(--card-w) - 2px) * 0.195);
+.store-mast--enter .store-mast__brand { animation: store-rise 560ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.store-mast--enter .store-console { animation: store-rise 720ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.store-mast--enter .store-console--left { animation-delay: 90ms; }
+.store-mast--enter .store-console--right { animation-delay: 160ms; }
+
+@keyframes store-rise {
+  from { opacity: 0; transform: translateY(22px) scale(0.97); }
+  to { opacity: 1; transform: none; }
 }
 
-/* Nothing to continue: no artwork, no reflection. */
-.store-card__media--missing ~ .store-card__body::before { display: none; }
+/* --- Shelf ---------------------------------------------------------------- */
 
-.store-card__genres {
-  overflow: hidden;
-  /* Lifted with the surface under it: the block used to be near-black and is
-     now a pane of glass over a photograph, which is several stops brighter. */
-  color: #e9edeb;
-  font-size: 13px;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.store-card__chips {
+.store-shelf {
   display: flex;
-  margin-top: clamp(6px, 0.97svh, 9.93px);
-  gap: 8px;
-}
-
-.store-card__chip {
-  display: inline-flex;
-  height: clamp(21px, 2.637svh, 27px);
-  align-items: center;
-  padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  border-radius: 8px;
-  color: #dfe3e1;
-  background: rgba(255, 255, 255, 0.07);
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-
-/* A game with no scores of its own leaves no gap where they would have been. */
-.store-card__stats:empty { display: none; }
-
-.store-card__stats {
-  display: flex;
-  margin-top: clamp(4px, 0.615svh, 6.3px);
   flex-direction: column;
+  gap: clamp(22px, 2.4vw, 64px);
 }
 
-/* What the card says under the art, as the window loses height. The picture
-   keeps its shape all the way down, so these are what yields: the five-dot
-   scores first, then the one-line verdict. The genre and the two chips are the
-   last to go, and they never do. */
-@media (max-height: 580px) {
-  .store-card__stats { display: none; }
-}
-@media (max-height: 500px) {
-  .store-card__tagline { display: none; }
+.store-shelf[hidden] { display: none; }
+
+.store-section__title {
+  margin: 0 0 clamp(10px, 0.85vw, 22px);
+  font-size: var(--store-title);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.store-card__stat {
+.store-grid {
   display: grid;
-  height: clamp(17px, 2.15svh, 22px);
-  grid-template-columns: 96px auto;
-  align-items: center;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--store-gap);
 }
 
-.store-card__stat-label {
+/* --- Card ----------------------------------------------------------------- */
+
+.store-card { position: relative; border-radius: var(--store-radius); }
+
+.store-card__open {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--store-radius);
+  color: inherit;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.store-card__open:focus-visible { outline: none; }
+
+/* Cut to the capsule: Steam serves every one at 616×353, so the art the game
+   was sold with arrives whole, wordmark included. */
+.store-card__media {
+  position: relative;
+  display: block;
   overflow: hidden;
-  color: #d5dad9;
-  font-size: 12.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  aspect-ratio: 616 / 353;
+  border-radius: var(--store-radius);
+  background: color-mix(in srgb, var(--store-deep) 70%, #101218);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  transition: transform 260ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 260ms ease;
 }
 
-.store-card__dots { display: flex; gap: 4px; }
-
-.store-card__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--dot-off);
+.store-card__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
-.store-card__dot--on {
-  background: var(--dot-on);
-  box-shadow: 0 0 4px rgba(143, 202, 156, 0.4);
+.store-card__media--missing .store-card__art { visibility: hidden; }
+
+.store-card__veil {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 58%, rgba(0, 0, 0, 0.42));
+  pointer-events: none;
 }
 
-.store-card__tagline {
-  /* Exactly one line on every card: a tagline that wrapped would make one card
-     taller than its neighbours and break the shelf's shared baselines. */
-  overflow: hidden;
-  height: 17px;
-  margin-top: clamp(6px, 1.123svh, 11.5px);
-  color: #c2c8c6;
-  font-size: 12.5px;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The selected card, as the consoles draw it: a white rim, the brand's glow. */
+.store-card__open:hover .store-card__media,
+.store-card__open:focus-visible .store-card__media,
+.store-card__open[data-nav-focus] .store-card__media {
+  transform: scale(1.02);
+  box-shadow:
+    0 0 0 clamp(2px, 0.16vw, 4px) #ffffff,
+    0 0 38px 6px color-mix(in srgb, var(--store-accent) 78%, transparent),
+    0 26px 54px rgba(0, 0, 0, 0.42);
 }
 
-/* The longest curated lines are set a half-step down rather than clipped. */
-.store-card__tagline--long { font-size: 11.5px; letter-spacing: -0.005em; }
+/* Only for art that does not carry the game's name. */
+.store-card__title {
+  position: absolute;
+  right: 6%;
+  bottom: 9%;
+  left: 6%;
+  font-size: clamp(16px, 1.35vw, 34px);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.08;
+  text-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+}
+
+.store-card__price {
+  position: absolute;
+  z-index: 2;
+  right: clamp(8px, 0.7vw, 16px);
+  bottom: clamp(8px, 0.7vw, 16px);
+  padding: clamp(4px, 0.32vw, 8px) clamp(9px, 0.62vw, 15px);
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+  background: rgba(6, 8, 12, 0.66);
+  box-shadow: var(--glass-sheen);
+  font-size: clamp(12px, 0.78vw, 18px);
+  font-weight: 650;
+  line-height: 1;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+}
+
+/* The numbered row: an outlined numeral on the left of the art, over a shade
+   that keeps it legible on a bright cover. */
+.store-card--ranked .store-card__veil {
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.55) 0%, rgba(0, 0, 0, 0.18) 34%, transparent 55%),
+    linear-gradient(180deg, transparent 58%, rgba(0, 0, 0, 0.42));
+}
+
+.store-card__rank {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 5%;
+  color: transparent;
+  font-size: clamp(60px, 7.2vw, 200px);
+  font-weight: 300;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  transform: translateY(-50%);
+  -webkit-text-stroke: clamp(1.5px, 0.13vw, 3.5px) rgba(255, 255, 255, 0.94);
+  text-shadow: 0 6px 30px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
 
 .store-card__wishlist {
   position: absolute;
-  z-index: 2;
-  top: 14px;
-  right: 12px;
+  z-index: 3;
+  top: clamp(8px, 0.7vw, 16px);
+  right: clamp(8px, 0.7vw, 16px);
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: clamp(32px, 2.1vw, 50px);
+  height: clamp(32px, 2.1vw, 50px);
   place-items: center;
+  border: 1px solid var(--glass-line);
   border-radius: 50%;
   color: var(--ink);
-  background: transparent;
+  background: rgba(6, 8, 12, 0.55);
   opacity: 0;
-  transition: opacity 180ms ease, background 180ms ease, transform 160ms ease;
+  transition: opacity 180ms ease, transform 160ms ease;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
 }
 
 .store-card:hover .store-card__wishlist,
-.store-card--featured .store-card__wishlist,
-.store-card__wishlist:focus-visible,
-.store-card__wishlist[data-nav-focus],
+.store-card:focus-within .store-card__wishlist,
 .store-card__wishlist[aria-pressed="true"] { opacity: 1; }
 
-.store-card__wishlist:hover, .store-card__wishlist[data-nav-focus] { background: rgba(0, 0, 0, 0.3); transform: scale(1.08); }
-.store-card__wishlist .icon { width: 22px; height: 22px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5)); }
+.store-card__wishlist:hover,
+.store-card__wishlist[data-nav-focus],
+.store-card__wishlist:focus-visible { transform: scale(1.08); outline: 2px solid var(--ink); outline-offset: 1px; }
+.store-card__wishlist .icon { width: clamp(16px, 1.05vw, 26px); height: clamp(16px, 1.05vw, 26px); }
 .store-card__wishlist[aria-pressed="true"] { color: #ff8fa8; }
 
 /* --- Install (Quiky plugin) ----------------------------------------------- */
@@ -850,22 +495,22 @@
    look. It sits under the wishlist: neither has to move when both are there. */
 .store-card__install {
   position: absolute;
-  z-index: 2;
-  top: 54px;
-  right: 12px;
+  z-index: 3;
+  top: calc(clamp(8px, 0.7vw, 16px) + clamp(32px, 2.1vw, 50px) + 8px);
+  right: clamp(8px, 0.7vw, 16px);
   display: inline-flex;
-  height: 26px;
+  height: 28px;
   align-items: center;
   padding: 0 10px;
   gap: 6px;
   border: 1px solid var(--glass-line);
-  border-radius: 8px;
+  border-radius: 999px;
   color: var(--ink);
-  background: rgba(10, 12, 15, 0.62);
+  background: rgba(6, 8, 12, 0.62);
   box-shadow: var(--glass-sheen);
   opacity: 0;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
   transition: opacity 180ms ease, background 180ms ease, border-color 180ms ease;
   -webkit-backdrop-filter: blur(14px);
@@ -875,9 +520,7 @@
 /* An install already under way, or one that stopped short, is not a hover
    detail: it stays on screen until the shopper deals with it. */
 .store-card:hover .store-card__install,
-.store-card--featured .store-card__install,
-.store-card__install:focus-visible,
-.store-card__install[data-nav-focus],
+.store-card:focus-within .store-card__install,
 .store-card__install[data-phase="queued"],
 .store-card__install[data-phase="downloading"],
 .store-card__install[data-phase="extracting"],
@@ -921,11 +564,10 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin: 14px var(--pad) 0;
   padding: 14px 16px;
   border: 1px solid var(--glass-line);
   border-radius: 16px;
-  background: rgba(10, 12, 15, 0.56);
+  background: var(--glass);
   box-shadow: var(--glass-sheen);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
@@ -1003,154 +645,245 @@
   opacity: 1;
 }
 
-/* --- Empty shelf ---------------------------------------------------------- */
+/* --- Empty tab ------------------------------------------------------------ */
 
 .store-empty {
   display: flex;
-  width: 100%;
-  height: min(100%, var(--card-max-h));
+  min-height: clamp(180px, 22vw, 520px);
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  border: 1px dashed rgba(255, 255, 255, 0.12);
-  border-radius: var(--card-radius);
+  gap: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  border-radius: var(--store-radius);
   color: var(--ink-3);
+  background: rgba(255, 255, 255, 0.03);
   text-align: center;
 }
 
 .store-empty[hidden] { display: none; }
-.store-empty .icon { width: 22px; height: 22px; }
-.store-empty__title { margin: 4px 0 0; color: var(--ink); font-size: 16px; font-weight: 600; }
-.store-empty__copy { margin: 0; max-width: 420px; font-size: 13px; line-height: 1.45; }
+.store-empty .icon { width: clamp(22px, 1.5vw, 36px); height: clamp(22px, 1.5vw, 36px); }
+.store-empty__title { margin: 0; color: var(--ink); font-size: var(--store-title); font-weight: 600; }
 
 /* ---------------------------------------------------------------------------
-   Filter bar
+   Detail — the game, opened from its card
    --------------------------------------------------------------------------- */
 
-.store-filters {
-  display: flex;
-  flex: none;
-  margin-top: var(--gap-row);
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-}
-
-.store-chipbar {
-  display: flex;
-  height: var(--h-chipbar);
-  align-items: center;
-  padding: 5px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.045);
-  -webkit-backdrop-filter: var(--blur);
-  backdrop-filter: var(--blur);
-}
-
-.store-chip {
-  display: inline-flex;
-  height: clamp(28px, 3.32svh, 34px);
-  align-items: center;
-  gap: 9.5px;
-  padding: 0 14px;
-  border-radius: 999px;
-  /* Selected and unselected share one ink in the design; only the pill moves. */
-  color: var(--ink-2);
-  background: transparent;
-  font-size: clamp(13px, 1.5625svh, 16px);
-  font-weight: 400;
-  white-space: nowrap;
-  transition: background 160ms ease, color 160ms ease;
-}
-
-.store-chip:hover { background: rgba(255, 255, 255, 0.05); }
-/* The pointer's tint is too faint to find a chip by; the keys get a stronger one. */
-.store-chip[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.12); }
-
-.store-chip--active {
-  background: rgba(255, 255, 255, 0.09);
-}
-
-.store-chip--platform { padding: 0 12px; }
-.store-chip__icon { display: grid; place-items: center; }
-.store-chip__icon .icon { width: 16px; height: 16px; }
-.store-chip__caret .icon { width: 13px; height: 13px; }
-
-/* PC is the only platform Orivo launches natively today, so its selected state
-   carries the same blue as the Windows glyph rather than plain white. */
-.store-chip--platform.store-chip--active[data-platform="pc"] {
-  color: #eaf1f7;
-  background: rgba(76, 146, 222, 0.2);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.085);
-}
-
-.store-chip--platform.store-chip--active[data-platform="pc"] .store-chip__icon { color: #5a9fe0; }
-
-/* A chip that is on already wears a plate; the keys brighten it. */
-.store-chip--active[data-nav-focus] { color: var(--ink); background: rgba(255, 255, 255, 0.18); }
-.store-chip--platform.store-chip--active[data-platform="pc"][data-nav-focus] { background: rgba(76, 146, 222, 0.34); }
-
-.store-platform-group { position: relative; }
-
-.store-more-panel {
-  position: absolute;
-  z-index: 6;
-  right: 0;
-  bottom: calc(100% + 10px);
-  width: 300px;
-  padding: 12px 14px;
-  border: 1px solid var(--glass-line);
-  border-radius: 14px;
-  background: rgba(12, 14, 18, 0.76);
-  box-shadow: var(--glass-sheen), 0 24px 56px rgba(0, 0, 0, 0.46);
-  -webkit-backdrop-filter: blur(32px) saturate(150%);
-  backdrop-filter: blur(32px) saturate(150%);
-}
-
-.store-more-panel[hidden] { display: none; }
-
-.store-more-panel__title {
-  margin: 0 0 8px;
-  color: var(--ink-4);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-}
-
-/* Two columns of dot-and-name: the whole set fits in a glance. */
-.store-more-panel__list {
+.store-detail {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
   display: grid;
-  margin: 0;
-  padding: 0;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 7px 14px;
-  list-style: none;
+  padding: clamp(14px, 5vh, 96px) clamp(14px, 5vw, 160px);
+  place-items: center;
 }
 
-.store-more-panel__item {
+.store-detail[hidden] { display: none; }
+
+.store-detail__scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--store-deep) 50%, rgba(2, 3, 7, 0.84));
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  backdrop-filter: blur(22px) saturate(130%);
+}
+
+.store-detail__panel {
+  position: relative;
+  display: grid;
+  width: min(1680px, 100%);
+  max-height: 100%;
+  overflow: hidden;
+  grid-template-areas: "stage info";
+  grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: clamp(18px, 1.4vw, 36px);
+  background: rgba(9, 11, 17, 0.86);
+  box-shadow:
+    0 40px 120px rgba(0, 0, 0, 0.55),
+    0 0 90px color-mix(in srgb, var(--store-accent) 32%, transparent);
+}
+
+.store-detail__stage {
+  position: relative;
+  overflow: hidden;
+  grid-area: stage;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+
+/* The pictures cross-fade, and each one drifts in slowly while it is up. */
+.store-detail__slide {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transform: scale(1.07);
+  transition: opacity 900ms ease, transform 6.5s linear;
+}
+
+.store-detail__slide.is-active { opacity: 1; transform: scale(1); }
+
+.store-detail__dots {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  grid-area: stage;
+  align-self: end;
+  justify-self: center;
+  gap: 8px;
+  margin-bottom: clamp(10px, 1vw, 22px);
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.store-detail__dots[hidden] { display: none; }
+
+.store-detail__dot {
+  width: clamp(7px, 0.45vw, 12px);
+  height: clamp(7px, 0.45vw, 12px);
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: width 260ms ease, background 260ms ease;
+}
+
+.store-detail__dot[aria-current="true"] { width: clamp(20px, 1.3vw, 34px); background: #ffffff; }
+
+.store-detail__info {
   display: flex;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  grid-area: info;
+  flex-direction: column;
+  gap: clamp(10px, 0.8vw, 20px);
+  padding: clamp(22px, 2.2vw, 56px);
+  padding-top: clamp(48px, 3.6vw, 88px);
+}
+
+.store-detail__pills { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.store-pill {
+  padding: clamp(4px, 0.3vw, 8px) clamp(10px, 0.65vw, 16px);
+  border: 1px solid var(--glass-line);
+  border-radius: 999px;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: clamp(11px, 0.72vw, 16px);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.store-pill--brand {
+  border-color: color-mix(in srgb, var(--store-glow) 60%, transparent);
+  color: var(--ink);
+  background: color-mix(in srgb, var(--store-accent) 42%, transparent);
+}
+
+.store-detail__title {
+  margin: 0;
+  font-size: clamp(26px, 2.3vw, 64px);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+.store-detail__lead {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--ink-2);
+  font-size: clamp(14px, 0.92vw, 22px);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.store-detail__buy {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 1vw, 24px);
+  margin-top: auto;
+}
+
+.store-detail__price { display: flex; flex-direction: column; gap: 4px; }
+.store-detail__amount { font-size: clamp(28px, 2.2vw, 60px); font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
+.store-detail__offer { color: var(--ink-3); font-size: clamp(12px, 0.75vw, 17px); }
+
+.store-detail__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+.store-detail__action {
+  display: inline-flex;
+  height: clamp(40px, 2.7vw, 64px);
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  cursor: default;
+  padding: 0 clamp(16px, 1.2vw, 30px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: var(--ink);
+  background: #1a1b1f;
+  font-size: clamp(14px, 0.9vw, 21px);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 180ms ease, border-color 180ms ease, box-shadow 220ms ease;
 }
 
-.store-more-panel__dot {
-  width: 7px;
-  height: 7px;
-  flex: none;
+.store-detail__action:hover { border-color: rgba(255, 255, 255, 0.28); background: #23242a; }
+
+.store-detail__action--primary {
+  border-color: transparent;
+  color: #ffffff;
+  background: linear-gradient(100deg, color-mix(in srgb, var(--store-accent) 92%, #ffffff), var(--store-accent));
+  box-shadow: 0 8px 30px color-mix(in srgb, var(--store-accent) 48%, transparent);
+}
+
+.store-detail__action--primary:hover { background: linear-gradient(100deg, color-mix(in srgb, var(--store-accent) 80%, #ffffff), var(--store-accent)); }
+.store-detail__action--icon { width: clamp(40px, 2.7vw, 64px); padding: 0; }
+.store-detail__action[aria-pressed="true"] { color: #ff8fa8; }
+.store-detail__action .icon { width: clamp(16px, 1vw, 24px); height: clamp(16px, 1vw, 24px); }
+
+.store-detail__action:focus-visible,
+.store-detail__action[data-nav-focus],
+.store-detail__close:focus-visible,
+.store-detail__close[data-nav-focus],
+.store-detail__dot:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 3px;
+}
+
+/* In the detail the install is an ordinary action beside the others. */
+.store-detail__install {
+  position: static;
+  height: clamp(40px, 2.7vw, 64px);
+  padding: 0 clamp(14px, 1vw, 24px);
+  opacity: 1;
+  font-size: clamp(13px, 0.85vw, 19px);
+}
+
+.store-detail__close {
+  position: absolute;
+  z-index: 3;
+  top: clamp(12px, 1vw, 24px);
+  right: clamp(12px, 1vw, 24px);
+  display: grid;
+  width: clamp(36px, 2.3vw, 54px);
+  height: clamp(36px, 2.3vw, 54px);
+  place-items: center;
+  border: 1px solid var(--glass-line);
   border-radius: 50%;
-  background: #7c8798;
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.45);
+  cursor: pointer;
 }
 
-.store-more-panel__item[data-health="available"] .store-more-panel__dot { background: var(--dot-on); }
-.store-more-panel__item[data-health="degraded"] .store-more-panel__dot { background: #e8c46a; }
-.store-more-panel__item[data-health="unavailable"] .store-more-panel__dot { background: #e78a8a; }
-
-.store-more-panel__name { overflow: hidden; color: var(--ink); font-size: 12.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.store-detail__close .icon { width: clamp(16px, 1.05vw, 26px); height: clamp(16px, 1.05vw, 26px); }
 
 /* ---------------------------------------------------------------------------
    Status
@@ -1185,109 +918,59 @@
 .store-icon { display: inline-grid; place-items: center; }
 
 /* ---------------------------------------------------------------------------
-   Narrow windows. The design is authored at 1536×1024; below that the shelf
-   keeps its card size and scrolls, and the hero panel drops under the copy.
+   Narrower windows. Three columns hold down to 900px — a small laptop keeps
+   the mockup's rows — and below that the rows wrap.
    --------------------------------------------------------------------------- */
 
-@media (max-width: 1320px) {
-  .store-page { --pad: 32px; }
-  .store-highlights { width: 310px; padding: clamp(11px, 1.76svh, 18px) 18px; }
-  .store-highlight { gap: 16px; }
-  .store-hero__copy { max-width: 400px; }
+@media (max-width: 1100px) {
+  .store-mast { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 }
 
-/* Below this the two hero columns genuinely stop fitting side by side, so the
-   panel drops under the copy and the shelf keeps the room it has left. */
-@media (max-width: 940px) {
-  .store-page { --pad: 24px; }
-  .store-hero { flex-direction: column; gap: clamp(10px, 1.95svh, 20px); }
-  /* Under the copy, in flow: pinned to the corner as on a wide window, a panel
-     this wide lay across the headline. */
-  .store-highlights { position: static; width: 100%; max-width: 520px; margin-top: 0; }
-  .store-highlights__list { gap: clamp(7px, 1.17svh, 12px); }
-  .store-filters { flex-wrap: nowrap; }
-  .store-chipbar { min-width: 0; overflow-x: auto; scrollbar-width: none; }
-  .store-chipbar::-webkit-scrollbar { display: none; }
+@media (max-width: 900px) {
+  .store-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .store-detail__panel {
+    grid-template-areas: "stage" "info";
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+  .store-detail__info { overflow: visible; padding-top: clamp(18px, 2vw, 32px); }
 }
 
-/* Very short windows cannot show three rows of reasons, so the panel keeps a
-   line each. What the card drops, and when, is decided beside the card. */
-@media (max-height: 700px) {
-  .store-highlight__text { -webkit-line-clamp: 1; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html:not([data-motion="full"]) .store-backdrop__layer,
-  html:not([data-motion="full"]) .store-card__fill,
-  html:not([data-motion="full"]) .store-card__art { transition: none; }
-  html:not([data-motion="full"]) .store-rail__track { scroll-behavior: auto; }
-  html:not([data-motion="full"]) .store-why { animation: none; }
+@media (max-width: 600px) {
+  .store-grid { grid-template-columns: minmax(0, 1fr); }
+  .store-mast { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .store-mast__brand { padding-left: 0; }
+  .store-mast__consoles { height: clamp(110px, 22vh, 180px); }
+  .store-mast__horizon { left: calc(-1 * var(--edge-left)); }
 }
 
 /* ---------------------------------------------------------------------------
    Compact — see the block at the end of styles.css.
-
-   The Store keeps its promise of being exactly one screen: what changes is how
-   much of that screen the hero is allowed to take, so the rail below it still
-   has room for a portrait card.
    --------------------------------------------------------------------------- */
-/* One screen is no longer a promise the page can keep: the hero, the shelf and
-   the chip bar together leave the rail about 40px, which turns a portrait card
-   into a strip. The page scrolls instead — the same concession me-page.css
-   already makes below 620px — and the rail gets its full card height back. */
-html[data-form-factor="compact"] .app-page--store { overflow-y: auto; overflow-x: hidden; }
-html[data-form-factor="compact"] .store-page {
-  height: auto;
-  min-height: 100%;
-  overflow: visible;
-}
-/* The shell's edges rather than the page's own `--pad`, so the copy and the
-   first card clear a camera cutout and the iPhone's landscape insets. */
-html[data-form-factor="compact"] .store-page__body {
-  height: auto;
-  overflow: visible;
-  padding-inline: var(--edge-left) var(--edge-right);
-}
-html[data-form-factor="compact"] .store-rail { min-height: var(--card-max-h); }
-/* `min(100%, …)` resolves against an auto track once the page scrolls, so the
-   phone pins the card rather than letting it measure itself. */
-html[data-form-factor="compact"] .store-card { height: var(--card-max-h); max-height: none; }
 
-html[data-form-factor="compact"] .store-page {
-  --pad-top: calc(var(--topbar-height) + 8px);
-  --pad-bottom: 8px;
-  /* Same cut, one screen down: wide enough that the capsule still reads at a
-     phone's size rather than becoming a 78px strip. */
-  --card-w: 190px;
-  --card-max-h: 208px;
-  --card-gap: 10px;
-  /* The card is half the size here and the block under it is two lines, so the
-     cut fades over a third of the distance rather than swallowing them. */
-  --seam-depth: 34px;
-  --seam-rise: 11px;
-  --seam-blur: 8px;
-  --size-title: clamp(20px, 5.4svh, 26px);
-  --lh-title: clamp(22px, 5.8svh, 28px);
-  /* The previewed card's price hangs out of flow under the action, in this
-     gap: its 4px margin and 16px line need 20, and at 10 the shelf covered
-     it. The 16px it costs comes out of the foot of the cards, which is empty. */
-  --gap-shelf: 26px;
-  --gap-action: 8px;
-  --h-action: 40px;
-  --h-chipbar: 40px;
+/* The bar scrolls sideways rather than wrapping onto three lines. */
+html[data-form-factor="compact"] .store-mast { margin-bottom: 18px; }
+/* The compact shell brings its own scrim under the bar once the page scrolls. */
+html[data-form-factor="compact"] .store-topfade { display: none; }
+html[data-form-factor="compact"] .store-detail { padding: max(10px, env(safe-area-inset-top)) 10px 10px; }
+
+/* ---------------------------------------------------------------------------
+   Motion. Everything above that moves stops here when motion is reduced —
+   by the system, unless Orivo's own setting says "full", or by that setting.
+   --------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-motion="full"]) .store-page { transition: none; }
+  html:not([data-motion="full"]) .store-ambient__sweep,
+  html:not([data-motion="full"]) .store-mast--enter .store-mast__brand,
+  html:not([data-motion="full"]) .store-mast--enter .store-console { animation: none; }
+  html:not([data-motion="full"]) .store-card__media,
+  html:not([data-motion="full"]) .store-detail__slide { transition: none; transform: none; }
 }
-/* A three-row panel pinned to the right edge has nowhere to go on a short
-   screen, and it is the one piece of the hero the shelf can do without. */
-html[data-form-factor="compact"] .store-highlights { display: none; }
-/* The chips scroll inside their bars below 940px. A phone held sideways can be
-   wider than that — 956px on an iPhone Pro Max — and still too narrow for both
-   bars, which then pushed the whole page sideways. */
-html[data-form-factor="compact"] .store-filters { flex-wrap: nowrap; }
-html[data-form-factor="compact"] .store-chipbar { min-width: 0; overflow-x: auto; scrollbar-width: none; }
-html[data-form-factor="compact"] .store-chipbar::-webkit-scrollbar { display: none; }
-/* The panel opens upwards from the chip bar, which sits at the foot of the
-   screen once the page is scrolled to it: what is above it is the room. */
-html[data-form-factor="compact"] .store-more-panel {
-  max-height: calc(100svh - var(--topbar-height) - var(--h-chipbar) - 40px);
-  overflow-y: auto;
-}
+
+[data-motion="reduced"] .store-page { transition: none; }
+[data-motion="reduced"] .store-ambient__sweep,
+[data-motion="reduced"] .store-mast--enter .store-mast__brand,
+[data-motion="reduced"] .store-mast--enter .store-console { animation: none; }
+[data-motion="reduced"] .store-card__media,
+[data-motion="reduced"] .store-detail__slide { transition: none; transform: none; }

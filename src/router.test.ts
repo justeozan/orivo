@@ -89,18 +89,28 @@ describe("hash routing", () => {
     expect(parseAppRoute("#/games/local:%2FUsers%2Fsecret").page).toBe("not-found");
   });
 
-  it("normalises Store filters and ignores unknown providers", () => {
-    expect(
-      parseAppRoute(
-        "#/store?category=short-sessions&platform=steam&platform=steam&platform=unknown&q=co-op",
-      ),
-    ).toEqual({
+  it("round-trips every Store tab and drops the old filters", () => {
+    for (const store of ["playstation", "xbox", "nintendo", "steam", "epic"] as const) {
+      const route = parseAppRoute(`#/store?store=${store}`);
+      expect(route).toEqual({ page: "store", store, query: "" });
+      expect(appRouteToHash(route)).toBe(`#/store?store=${store}`);
+    }
+    expect(parseAppRoute("#/store?category=short-sessions&platform=pc&q=co-op")).toEqual({
       page: "store",
-      // A shelf the bar no longer offers lands on the default one.
-      category: "for-you",
-      platforms: [],
+      store: "all",
       query: "co-op",
     });
+    // "Tout" is the default, so the canonical Store URL stays bare.
+    expect(appRouteToHash({ page: "store", store: "all", query: "" })).toBe("#/store");
+  });
+
+  it("keeps a plugin tab and refuses a store it cannot name", () => {
+    const route = parseAppRoute("#/store?store=plugin%3Aio.orivo.demo%3Adeals");
+    expect(route).toEqual({ page: "store", store: "plugin:io.orivo.demo:deals", query: "" });
+    expect(parseAppRoute(appRouteToHash(route))).toEqual(route);
+    for (const bad of ["gog", "plugin:", "plugin:Not.A.Plugin", "plugin:io.orivo.demo:<b>"]) {
+      expect(parseAppRoute(`#/store?store=${encodeURIComponent(bad)}`)).toMatchObject({ store: "all" });
+    }
   });
 
   it("keeps Settings attachment IDs opaque", () => {

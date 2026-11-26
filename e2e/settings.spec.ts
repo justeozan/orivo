@@ -65,8 +65,7 @@ test.describe("Settings is a page, not a modal", () => {
 
     await page.locator("[data-nav-page='store']").click();
     await waitForPage(page, "store");
-    // The Store nav link always requests the PC platform by default.
-    expect(await currentHash(page)).toBe("#/store?platform=pc");
+    expect(await currentHash(page)).toBe("#/store");
   });
 });
 

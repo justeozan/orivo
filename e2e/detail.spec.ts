@@ -22,13 +22,12 @@ test.describe("game detail origins", () => {
     expect(await currentHash(page)).toBe("#/library");
   });
 
-  test("opens from the Store with from=store and returns to the filtered Store", async ({ page }) => {
-    // The provider-pill filter bar (`provider=steam`) was retired with the
-    // Store rebuild (`311a91f`); category + platform chips replaced it.
-    await openRoute(page, "#/store?category=short-sessions&platform=pc", "store");
-    const filteredCount = await page.locator("#app-page-store:not([hidden]) .store-card").count();
+  test("opens from the Store's detail with from=store and returns to the same store", async ({ page }) => {
+    await openRoute(page, "#/store?q=lana", "store");
+    const count = await page.locator("#app-page-store:not([hidden]) .store-card").count();
 
     await page.locator("[data-focus-key='game-steam:1608230']").click();
+    await page.locator("[data-focus-key='detail-page']").click();
     await waitForPage(page, "game");
 
     expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
@@ -37,8 +36,8 @@ test.describe("game detail origins", () => {
 
     await page.locator(`${detailHost} .gd-back`).click();
     await waitForPage(page, "store");
-    expect(await currentHash(page)).toBe("#/store?category=short-sessions&platform=pc");
-    await expect(page.locator("#app-page-store:not([hidden]) .store-card")).toHaveCount(filteredCount);
+    expect(await currentHash(page)).toBe("#/store?q=lana");
+    await expect(page.locator("#app-page-store:not([hidden]) .store-card")).toHaveCount(count);
   });
 
   test("the origin comes from the URL, not from the last visited page", async ({ page }) => {

@@ -24,9 +24,8 @@ const GOLDENS: GoldenCase[] = [
     hash: "#/store",
     name: "store",
     masks: () => [],
-    // The Store's real catalogue (`src/generated/store-catalog.ts`) replaced the
-    // ten-game editorial fixture; this is the first card of an unfiltered
-    // "Pour toi" browse (`STORE_FIRST_GAME_ID` in e2e/helpers.ts).
+    // "Tout" over the bundled catalogue (`src/generated/store-catalog.ts`):
+    // the masthead, then the first rows.
   },
   {
     golden: "game-detail",
@@ -107,12 +106,10 @@ for (const golden of GOLDENS) {
         expect(widths.root.scroll, `${golden.golden}: page root`).toBeLessThanOrEqual(widths.root.client + 1);
       }
 
-      // Sideways scrolling is allowed only in the Store's card rail, which
-      // advertises itself by leaving a card peeking past the edge. The
-      // category/platform chip bars (`.store-chipbar`) fit inside both
-      // acceptance widths without overflowing, so they never reach this
-      // check; anything else scrolling sideways is content escaping its column.
-      const DELIBERATE_RAILS = ["store-rail__track"];
+      // Sideways scrolling is allowed only where a row says so; the Store has
+      // none any more (its rows wrap), so anything scrolling sideways is
+      // content escaping its column.
+      const DELIBERATE_RAILS: string[] = [];
       const scrollers = await page.evaluate(() => {
         const activePage = [...document.querySelectorAll<HTMLElement>(".app-page")].find((el) => !el.hidden)!;
         return [activePage, ...activePage.querySelectorAll<HTMLElement>("*")]

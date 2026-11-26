@@ -7450,7 +7450,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const page = link.dataset.navPage;
       if (page === "store") {
         if (currentRoute.page === "store") return;
-        navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" });
+        navigate({ page: "store", store: "all", query: "" });
       } else if (page === "me") {
         if (currentRoute.page === "me") return;
         navigate({ page: "me" });
@@ -7745,8 +7745,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         navigate(
           {
             page: "store",
-            category: current.category,
-            platforms: [...current.platforms],
+            store: current.store,
             query: refs.search.value.trim(),
           },
           { replace: true },
@@ -7767,8 +7766,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       event.preventDefault();
       navigate({
         page: "store",
-        category: route.category,
-        platforms: [...route.platforms],
+        store: route.store,
         query: refs.search.value.trim(),
       });
       return;
@@ -8231,7 +8229,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const hash = window.location.hash;
     const isDefaultEntry = hash === "" || hash === "#" || hash === "#/";
     if (isDefaultEntry && state.preferences.startPage === "store") {
-      navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" }, { replace: true });
+      navigate({ page: "store", store: "all", query: "" }, { replace: true });
     }
   })();
 

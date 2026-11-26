@@ -383,11 +383,14 @@ test.describe("the other pages", () => {
     await expect(page.locator("#app-page-library")).toBeVisible();
   });
 
-  test("the Store shows portrait cards that start on screen", async ({ page }) => {
+  test("the Store shows its cards whole, starting on screen", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     const card = await rectOf(page, ".store-card");
-    const { height } = await viewport(page);
-    expect(card!.height).toBeGreaterThan(card!.width);
+    const { width, height } = await viewport(page);
+    // Landscape, like the art each one carries, and never wider than the phone.
+    expect(card!.width).toBeGreaterThan(card!.height);
+    expect(card!.left).toBeGreaterThanOrEqual(0);
+    expect(card!.right).toBeLessThanOrEqual(width);
     expect(card!.top).toBeLessThan(height);
   });
 
@@ -435,29 +438,28 @@ test.describe("the other pages", () => {
   test("the Store and the game page keep their copy off the screen's edges", async ({ page }, testInfo) => {
     const insets = safeAreaOf(testInfo);
     await openRoute(page, "#/store", "store");
-    for (const selector of [".store-hero__title", ".store-card"]) {
+    for (const selector of [".store-mast__title", ".store-card"]) {
       expect((await rectOf(page, selector))!.left, selector).toBeGreaterThanOrEqual(insets.left);
     }
     await openRoute(page, "#/games/steam%3A1245620", "game");
     expect((await rectOf(page, ".gd-hero__title"))!.left).toBeGreaterThanOrEqual(insets.left);
   });
 
-  test("the Store's price line stays clear of the shelf", async ({ page }) => {
+  test("the Store's detail fits the phone, its price and verbs on screen", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    // Any card that carries a real price previews it under the hero's action.
-    const priced = page.locator(".store-card:has(.store-card__price)").first();
-    test.skip((await priced.count()) === 0, "the catalogue carries no price to preview");
-    await priced.hover();
-    await expect(page.locator(".store-hero__offer")).not.toHaveAttribute("hidden", "");
-    const offer = await rectOf(page, ".store-hero__offer");
-    const shelf = await rectOf(page, ".store-shelf");
-    expect(offer!.bottom).toBeLessThanOrEqual(shelf!.top);
+    await page.locator("#app-page-store .store-card__open").first().click();
+    const dialog = page.locator("#app-page-store .store-detail");
+    await expect(dialog).toBeVisible();
+    const close = await rectOf(page, ".store-detail__close");
+    const { width, height } = await viewport(page);
+    expect(close!.right).toBeLessThanOrEqual(width);
+    expect(close!.top).toBeGreaterThanOrEqual(0);
+    expect(close!.bottom).toBeLessThanOrEqual(height);
   });
 
-  test("the Store's chips scroll inside their bars, on the widest phone too", async ({ page }) => {
-    // An iPhone Pro Max: wider than the 940px at which the bars start
-    // scrolling, still too narrow for both of them, and the page was pushed
-    // sideways instead.
+  test("the Store never pushes the page sideways, on the widest phone too", async ({ page }) => {
+    // An iPhone Pro Max: the widest phone, where a row that overflows would
+    // push the whole page sideways.
     await page.setViewportSize({ width: 956, height: 440 });
     await openRoute(page, "#/store", "store");
     const overflow = await page.evaluate(() => {

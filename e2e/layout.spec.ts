@@ -86,7 +86,7 @@ test.describe("shell / page padding integration", () => {
     const storeTopbar = await topbarBox(page);
     const storeGeometry = await page.evaluate(() => {
       const host = document.getElementById("app-page-store")!;
-      const hero = document.querySelector(".store-hero")!.getBoundingClientRect();
+      const hero = document.querySelector(".store-mast")!.getBoundingClientRect();
       return {
         hostPaddingTop: Number.parseFloat(getComputedStyle(host).paddingTop) || 0,
         hostOverflowY: getComputedStyle(host).overflowY,
@@ -94,10 +94,10 @@ test.describe("shell / page padding integration", () => {
       };
     });
     expect(storeGeometry.hostPaddingTop, "the Store host no longer owns a padding clearance").toBe(0);
-    expect(storeGeometry.hostOverflowY, "the Store host no longer scrolls vertically").toBe("hidden");
+    expect(storeGeometry.hostOverflowY, "the Store host is its page's scroll container").toBe("auto");
     expect(
       storeGeometry.heroTop,
-      "the Store hero copy must still clear the topbar's real bottom edge",
+      "the Store's masthead must still clear the topbar's real bottom edge",
     ).toBeGreaterThanOrEqual(storeTopbar.y + storeTopbar.height);
 
     await openRoute(page, "#/games/steam%3A1245620?from=store", "game");
@@ -154,7 +154,7 @@ test.describe("shell / page padding integration", () => {
       await page.setViewportSize({ width: 820, height: 900 });
       await openRoute(page, "#/store", "store");
       let topbar = await topbarBox(page);
-      let heroTop = await page.evaluate(() => document.querySelector(".store-hero")!.getBoundingClientRect().top);
+      let heroTop = await page.evaluate(() => document.querySelector(".store-mast")!.getBoundingClientRect().top);
       expect(await topbarHeightVar(page), "820px: --topbar-height").toBeCloseTo(NARROW_TOPBAR_HEIGHT, 0);
       expect(heroTop, "820px: the Store hero must clear the taller topbar").toBeGreaterThanOrEqual(
         topbar.y + topbar.height,
@@ -163,7 +163,7 @@ test.describe("shell / page padding integration", () => {
       await page.setViewportSize({ width: 900, height: 900 });
       await openRoute(page, "#/store", "store");
       topbar = await topbarBox(page);
-      heroTop = await page.evaluate(() => document.querySelector(".store-hero")!.getBoundingClientRect().top);
+      heroTop = await page.evaluate(() => document.querySelector(".store-mast")!.getBoundingClientRect().top);
       expect(await topbarHeightVar(page), "900px: --topbar-height").toBeCloseTo(TOPBAR_HEIGHT, 0);
       expect(heroTop, "900px: the Store hero must clear the topbar").toBeGreaterThanOrEqual(
         topbar.y + topbar.height,
@@ -199,48 +199,39 @@ test.describe("shell / page padding integration", () => {
     expect(offenders, "a host that scrolls by exactly the topbar height scrolls nothing").toEqual([]);
   });
 
-  test("the Store rail scrolls its overflow horizontally, not the page vertically", async ({ page }) => {
-    // The vertical grid that used to spill into a second row is gone: the
-    // Store rebuild (`311a91f`) fits every filter, the hero and one row of
-    // cards inside the viewport (see the "fit" test above) and moves its
-    // overflow into `.store-rail__track` instead, scrolling sideways.
+  test("the Store scrolls its shelf inside its own page, never sideways", async ({ page }) => {
+    // The Store is a page of rows now (docs/design/store/): its host is the
+    // one scroll container, as every page host is.
     await openRoute(page, "#/store", "store");
     await waitForImages(page);
 
-    const track = await page.evaluate(() => {
-      const el = document.querySelector<HTMLElement>(".store-rail__track")!;
-      return { scrollWidth: el.scrollWidth, clientWidth: el.clientWidth, overflowX: getComputedStyle(el).overflowX };
+    const geometry = await page.evaluate(() => {
+      const root = document.querySelector<HTMLElement>("#app-page-store")!;
+      const shelf = document.querySelector<HTMLElement>("#app-page-store .store-shelf")!;
+      return {
+        overflowX: getComputedStyle(root).overflowX,
+        overflowY: getComputedStyle(root).overflowY,
+        scrollHeight: root.scrollHeight,
+        clientHeight: root.clientHeight,
+        shelfScrollWidth: shelf.scrollWidth,
+        shelfClientWidth: shelf.clientWidth,
+      };
     });
-    expect(track.overflowX, "the rail track must be the horizontal scroll container").toBe("auto");
-    expect(track.scrollWidth, "the rail must have more cards than fit in one viewport").toBeGreaterThan(
-      track.clientWidth,
-    );
-
-    // Scrolling the rail to its end must reveal card content, not blank space.
-    const atEnd = await page.evaluate(() => {
-      const el = document.querySelector<HTMLElement>(".store-rail__track")!;
-      el.scrollLeft = el.scrollWidth;
-      const cards = [...el.querySelectorAll<HTMLElement>(".store-card")];
-      const rightmost = cards.reduce(
-        (best, card) => Math.max(best, card.getBoundingClientRect().right),
-        Number.NEGATIVE_INFINITY,
-      );
-      return { rightmost: Math.round(rightmost), trackRight: el.getBoundingClientRect().right };
-    });
-    expect(
-      atEnd.trackRight - atEnd.rightmost,
-      `scrolled to the end, ${atEnd.trackRight - atEnd.rightmost}px past the last card is empty`,
-    ).toBeLessThan(40);
+    expect(geometry.overflowY).toBe("auto");
+    expect(geometry.scrollHeight, "the shelf runs past one screen").toBeGreaterThan(geometry.clientHeight);
+    // Nothing scrolls sideways, and the shelf itself fits its column.
+    expect(geometry.overflowX).toBe("hidden");
+    expect(geometry.shelfScrollWidth, "no row runs past its column").toBeLessThanOrEqual(geometry.shelfClientWidth + TOL);
   });
 
-  test("the hero and the first card start above the fold", async ({ page }) => {
+  test("the masthead and the first row start above the fold", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await waitForImages(page);
 
-    const heroTop = await page.evaluate(() => document.querySelector(".store-hero")!.getBoundingClientRect().top);
+    const mastTop = await page.evaluate(() => document.querySelector(".store-mast")!.getBoundingClientRect().top);
     const rail = await storeCardVisibility(page);
 
-    expect(heroTop, "the Store hero must be visible without scrolling").toBeLessThan(
+    expect(mastTop, "the Store masthead must be visible without scrolling").toBeLessThan(
       rail.viewport.height * 0.35,
     );
     expect(rail.cards.length).toBeGreaterThan(0);
@@ -251,12 +242,10 @@ test.describe("shell / page padding integration", () => {
 });
 
 test.describe("Store card grid at the acceptance sizes", () => {
-  test("the cards are on screen, measured against the viewport", async ({ page }, testInfo) => {
-    // The vertical, five-across grid this test used to measure was replaced by
-    // a single horizontal rail (`311a91f`): every card now shares one `top`,
-    // and whether a card is portrait or landscape depends on how much height
-    // the acceptance size leaves it, so the invariant that survives is
-    // "one full row, always on screen, with enough peek to read as scrollable".
+  test("the first row is whole and on screen, measured against the viewport", async ({ page }, testInfo) => {
+    // Rows of three large cards, two below 900px: the cards grow with the
+    // window instead of the row gaining columns, which is what a television
+    // needs. Every card of the first row is inside the viewport's width.
     await openRoute(page, "#/store", "store");
     await waitForImages(page);
 
@@ -265,32 +254,21 @@ test.describe("Store card grid at the acceptance sizes", () => {
 
     const firstRowTop = rail.cards[0].top;
     const row = rail.cards.filter((card) => Math.abs(card.top - firstRowTop) <= TOL);
-    expect(row.length, "every card must share the rail's single row").toBe(rail.cards.length);
-
-    const fullyVisible = row.filter((card) => card.fullyVisible);
-    const peeking = row.filter((card) => card.peeking);
+    const columns = rail.viewport.width > 900 ? 3 : rail.viewport.width > 600 ? 2 : 1;
 
     testInfo.annotations.push({
       type: "store-cards",
       description:
-        `${testInfo.project.name}: row=${row.length} fullyVisible=${fullyVisible.length} ` +
-        `card=${row[0].width}x${row[0].height} top=${row[0].top} bottom=${row[0].bottom}`,
+        `${testInfo.project.name}: row=${row.length} card=${row[0].width}x${row[0].height} ` +
+        `top=${row[0].top} bottom=${row[0].bottom}`,
     });
 
+    expect(row.length, `the first row holds ${columns} cards:\n${describeCards(rail)}`).toBe(columns);
     for (const card of row) {
-      expect(card.top, `${card.id} top`).toBeGreaterThanOrEqual(0);
-      expect(card.bottom, `${card.id} bottom must be above the fold`).toBeLessThanOrEqual(
-        rail.viewport.height,
-      );
+      expect(card.left, `${card.id} left`).toBeGreaterThanOrEqual(0);
+      expect(card.right, `${card.id} right`).toBeLessThanOrEqual(rail.viewport.width);
+      expect(card.top, `${card.id} must start above the fold`).toBeLessThan(rail.viewport.height);
     }
-    expect(
-      fullyVisible.length,
-      `at least two cards must be fully visible at ${rail.viewport.width}px:\n${describeCards(rail)}`,
-    ).toBeGreaterThanOrEqual(2);
-    expect(
-      peeking.length,
-      `at least one card must peek past the edge to read as scrollable:\n${describeCards(rail)}`,
-    ).toBeGreaterThan(0);
   });
 
   test("the shell topbar height variable matches the rendered topbar", async ({ page }) => {

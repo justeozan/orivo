@@ -205,14 +205,14 @@ test.describe("an iPad held upright", () => {
     }
   });
 
-  test("keeps the Store's panel of reasons off its headline", async ({ page }) => {
+  test("keeps the Store's machines off its headline", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    const [title, panel] = await Promise.all(
-      [".store-hero__title", ".store-highlights"].map((selector) =>
+    const [title, consoles] = await Promise.all(
+      [".store-mast__title", ".store-mast__consoles"].map((selector) =>
         page.locator(`#app-page-store ${selector}`).boundingBox(),
       ),
     );
-    expect(panel!.y).toBeGreaterThanOrEqual(title!.y + title!.height);
+    expect(consoles!.x).toBeGreaterThanOrEqual(title!.x + title!.width);
   });
 
   test("keeps the game page's back pill above the title", async ({ page }) => {

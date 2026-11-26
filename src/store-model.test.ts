@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
 import type { GameSummary, ProviderStatus, StoreOffer, StoreProvider } from "./contracts";
+import { setLanguage } from "./i18n";
 import {
+  adjacentStore,
   createInitialStoreState,
+  criticScoreOf,
   EDITORIAL_GAMES,
-  EDITORIAL_PROVIDER_STATUSES,
+  editorialProviderStatuses,
   isOfferStale,
   reduceStorePageState,
   selectBestOffer,
   selectStoreGames,
-  fitStats,
-  matchesCategory,
-  matchesPlatforms,
-  storeCategoryLabel,
-  STORE_CATEGORIES,
+  selectStoreSections,
+  selectTabGames,
   type StoreBrowsePage,
   type StoreHomeView,
   type StorePageState,
@@ -85,12 +85,11 @@ function stateWith(overrides: Partial<StorePageState> = {}): StorePageState {
 }
 
 describe("createInitialStoreState", () => {
-  it("starts on the editorial catalog with no filters applied", () => {
+  it("starts on the editorial catalog, on every store", () => {
     const state = createInitialStoreState();
 
     expect(state.phase).toBe("loading");
-    expect(state.category).toBe("for-you");
-    expect(state.platforms).toEqual([]);
+    expect(state.store).toBe("all");
     expect(state.query).toBe("");
     expect(state.browseGames).toBeNull();
     expect(state.nextCursor).toBeNull();
@@ -126,7 +125,7 @@ describe("createInitialStoreState", () => {
     // A shop is only called available when the catalog actually carries a
     // verified price from it; the console storefronts, whose prices are unknown,
     // stay degraded, and a shop with no feed at all is never claimed to work.
-    for (const entry of EDITORIAL_PROVIDER_STATUSES) {
+    for (const entry of editorialProviderStatuses()) {
       if (entry.health === "available") {
         expect(pricedProviders.has(entry.provider), entry.provider).toBe(true);
       } else {
@@ -134,7 +133,7 @@ describe("createInitialStoreState", () => {
       }
     }
 
-    const instantGaming = EDITORIAL_PROVIDER_STATUSES.find(
+    const instantGaming = editorialProviderStatuses().find(
       (entry) => entry.provider === "instant-gaming",
     );
     expect(instantGaming?.health).toBe("not-configured");
@@ -157,18 +156,16 @@ describe("createInitialStoreState", () => {
 });
 
 describe("reduceStorePageState", () => {
-  it("applies route filters on activate while online", () => {
+  it("applies the route's store and search on activate while online", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready", browseGames: [game()] }), {
       type: "activate",
-      category: "relaxing",
-      platforms: ["pc"],
+      store: "nintendo",
       query: "unrailed",
       online: true,
     });
 
     expect(next.phase).toBe("ready");
-    expect(next.category).toBe("relaxing");
-    expect(next.platforms).toEqual(["pc"]);
+    expect(next.store).toBe("nintendo");
     expect(next.query).toBe("unrailed");
     expect(next.browseGames).toBeNull();
     expect(next.errorMessage).toBe("");
@@ -177,8 +174,7 @@ describe("reduceStorePageState", () => {
   it("activates into the offline phase without dropping saved picks", () => {
     const next = reduceStorePageState(stateWith({ phase: "ready" }), {
       type: "activate",
-      category: "for-you",
-      platforms: [],
+      store: "all",
       query: "",
       online: false,
     });
@@ -322,24 +318,12 @@ describe("reduceStorePageState", () => {
     ).toBe(superseded);
   });
 
-  it("resets pagination when a filter changes", () => {
+  it("resets pagination when the search changes, and keeps it across a change of store", () => {
     const browsing = stateWith({ browseGames: [game()], nextCursor: "store_30" });
 
-    const byCategory = reduceStorePageState(browsing, {
-      type: "category-changed",
-      category: "short-sessions",
-    });
-    expect(byCategory.category).toBe("short-sessions");
-    expect(byCategory.browseGames).toBeNull();
-    expect(byCategory.nextCursor).toBeNull();
-
-    const byPlatform = reduceStorePageState(browsing, {
-      type: "platforms-changed",
-      platforms: ["pc", "playstation"],
-    });
-    expect(byPlatform.platforms).toEqual(["pc", "playstation"]);
-    expect(byPlatform.browseGames).toBeNull();
-    expect(byPlatform.nextCursor).toBeNull();
+    const byStore = reduceStorePageState(browsing, { type: "store-changed", store: "xbox" });
+    expect(byStore.store).toBe("xbox");
+    expect(byStore.browseGames).toEqual(browsing.browseGames);
 
     const byQuery = reduceStorePageState(browsing, { type: "query-changed", query: "hades" });
     expect(byQuery.query).toBe("hades");
@@ -380,183 +364,144 @@ describe("reduceStorePageState", () => {
   });
 });
 
+describe("selectTabGames", () => {
+  const plain = game({ id: "plain", title: "Plain" });
+  const other = game({ id: "other", title: "Other" });
+
+  it("keeps the whole shelf under Tout while no game is exclusive, and leaves a brand empty", () => {
+    const shelf = [plain, other];
+    expect(selectTabGames(shelf, "all").map((entry) => entry.id)).toEqual(["plain", "other"]);
+    expect(selectTabGames(shelf, "playstation")).toEqual([]);
+    expect(selectTabGames(shelf, "steam")).toEqual([]);
+  });
+
+  it("shows only exclusives once one exists, each brand its own", () => {
+    const astro = game({ id: "astro", title: "Astro Bot", exclusiveTo: "playstation" });
+    const halo = game({ id: "halo", title: "Halo", exclusiveTo: "xbox" });
+    const shelf = [plain, astro, other, halo];
+    expect(selectTabGames(shelf, "all").map((entry) => entry.id)).toEqual(["astro", "halo"]);
+    expect(selectTabGames(shelf, "playstation").map((entry) => entry.id)).toEqual(["astro"]);
+    expect(selectTabGames(shelf, "xbox").map((entry) => entry.id)).toEqual(["halo"]);
+    expect(selectTabGames(shelf, "nintendo")).toEqual([]);
+  });
+
+  it("shows a plugin tab's own games and nothing from the catalogue", () => {
+    const fromPlugin = game({ id: "io.orivo.demo:one", title: "From the plugin" });
+    expect(selectTabGames([plain], "plugin:io.orivo.demo", [fromPlugin])).toEqual([fromPlugin]);
+    expect(selectTabGames([plain], "plugin:io.orivo.demo", null)).toEqual([]);
+  });
+});
+
 describe("selectStoreGames", () => {
-  const shortSteam = game({
-    id: "short-steam",
-    title: "Unrailed",
-    tags: ["Short Sessions", "Relaxing"],
-    offers: [offer({ gameId: "short-steam", provider: "steam" })],
-  });
-  const shortInstant = game({
-    id: "short-instant",
-    title: "Astro Duel 2",
-    tags: ["Short Sessions"],
-    offers: [
-      offer({ gameId: "short-instant", provider: "instant-gaming", providerLabel: "Instant Gaming" }),
-    ],
-  });
-  const storySteam = game({
-    id: "story-steam",
-    title: "Baldur's Gate 3",
-    tags: ["Strong Stories"],
-    genres: ["RPG"],
-    offers: [offer({ gameId: "story-steam", provider: "steam" })],
-  });
-  const home = homeView({ games: [shortSteam, shortInstant, storySteam] });
+  const unrailed = game({ id: "unrailed", title: "Unrailed", tags: ["Short Sessions"] });
+  const astro = game({ id: "astro", title: "Astro Duel 2", tags: ["Short Sessions"] });
+  const baldur = game({ id: "baldur", title: "Baldur's Gate 3", genres: ["RPG"] });
+  const home = homeView({ games: [unrailed, astro, baldur] });
 
-  it("prefers server browse results when they exist", () => {
-    const browsed = game({ id: "from-backend" });
-    const state = stateWith({ home, browseGames: [browsed], category: "strong-stories" });
-
-    expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["from-backend"]);
-  });
-
-  it("passes everything through for for-you and all-games", () => {
-    expect(selectStoreGames(stateWith({ home, category: "for-you" }))).toHaveLength(3);
-    expect(selectStoreGames(stateWith({ home, category: "all-games" }))).toHaveLength(3);
-  });
-
-  it("combines the category filter with the platform filter", () => {
-    const shortConsole = game({
-      id: "short-console",
-      title: "Astro Duel 2",
-      tags: ["Short Sessions"],
-      supportedPlatforms: [],
-      offers: [
-        offer({ gameId: "short-console", provider: "playstation", providerLabel: "PlayStation Store" }),
-      ],
-    });
-    const shelf = homeView({ games: [shortSteam, shortConsole, storySteam] });
-
+  it("never offers a game the library already has, by id or by title", () => {
     expect(
-      selectStoreGames(
-        stateWith({ home: shelf, category: "short-sessions", platforms: ["playstation"] }),
-      ).map((entry) => entry.id),
-    ).toEqual(["short-console"]);
-    expect(
-      selectStoreGames(stateWith({ home: shelf, category: "short-sessions", platforms: ["pc"] })).map(
-        (entry) => entry.id,
-      ),
-    ).toEqual(["short-steam"]);
-  });
-
-  it("matches the story and relaxing categories on tags and genres", () => {
-    expect(
-      selectStoreGames(stateWith({ home, category: "strong-stories" })).map((entry) => entry.id),
-    ).toEqual(["story-steam"]);
-    expect(
-      selectStoreGames(stateWith({ home, category: "relaxing" })).map((entry) => entry.id),
-    ).toEqual(["short-steam"]);
+      selectStoreGames(stateWith({ home, ownedGameIds: ["unrailed", "baldursgate3"] })).map((entry) => entry.id),
+    ).toEqual(["astro"]);
   });
 
   it("searches title, description, genres and tags, ignoring case and accents", () => {
-    expect(
-      selectStoreGames(stateWith({ home, query: "  BALDUR'S  " })).map((entry) => entry.id),
-    ).toEqual(["story-steam"]);
-    expect(selectStoreGames(stateWith({ home, query: "baldur" })).map((entry) => entry.id)).toEqual([
-      "story-steam",
-    ]);
-    expect(selectStoreGames(stateWith({ home, query: "RPG" })).map((entry) => entry.id)).toEqual([
-      "story-steam",
-    ]);
-    expect(selectStoreGames(stateWith({ home, query: "ástro" })).map((entry) => entry.id)).toEqual([
-      "short-instant",
+    expect(selectStoreGames(stateWith({ home, query: "  BALDUR'S  " })).map((entry) => entry.id)).toEqual(["baldur"]);
+    expect(selectStoreGames(stateWith({ home, query: "RPG" })).map((entry) => entry.id)).toEqual(["baldur"]);
+    expect(selectStoreGames(stateWith({ home, query: "ástro" })).map((entry) => entry.id)).toEqual(["astro"]);
+  });
+
+  it("takes the host's answer to a search on Tout whole", () => {
+    const fromHost = game({ id: "from-host", title: "Nothing like the query" });
+    const state = stateWith({ home, query: "baldur", browseGames: [fromHost] });
+    expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["from-host"]);
+  });
+
+  it("narrows a brand tab rather than searching the whole catalogue", () => {
+    const exclusive = game({ id: "halo", title: "Halo Infinite", exclusiveTo: "xbox" });
+    const shelf = homeView({ games: [baldur, exclusive] });
+    expect(selectStoreGames(stateWith({ home: shelf, store: "xbox", query: "baldur" }))).toEqual([]);
+    expect(selectStoreGames(stateWith({ home: shelf, store: "xbox", query: "halo" })).map((entry) => entry.id)).toEqual([
+      "halo",
     ]);
   });
 
   it("returns an empty list rather than inventing results", () => {
-    expect(selectStoreGames(stateWith({ home, platforms: ["switch"] }))).toEqual([]);
+    expect(selectStoreGames(stateWith({ home, query: "zzz" }))).toEqual([]);
   });
 });
 
-describe("matchesPlatforms", () => {
-  // A game sold on Steam has no PlayStation offer even when it ships on
-  // PlayStation, so the filter must read availability, not only offers.
-  it("keeps a Steam-sold game whose availability includes PS5, not only exclusives", () => {
-    const multiPlatform = game({ id: "steam:1", availablePlatforms: ["pc", "playstation"] });
-    const pcOnly = game({ id: "steam:2", availablePlatforms: ["pc"] });
-    const unknown = game({ id: "steam:3" });
-    const exclusive = game({
-      id: "psn:1",
-      supportedPlatforms: [],
-      offers: [offer({ gameId: "psn:1", provider: "playstation" })],
-    });
-
-    expect(matchesPlatforms(multiPlatform, ["playstation"])).toBe(true);
-    expect(matchesPlatforms(multiPlatform, ["pc"])).toBe(true);
-    expect(matchesPlatforms(multiPlatform, ["xbox"])).toBe(false);
-    expect(matchesPlatforms(pcOnly, ["playstation"])).toBe(false);
-    expect(matchesPlatforms(unknown, ["playstation"])).toBe(false);
-    expect(matchesPlatforms(exclusive, ["playstation"])).toBe(true);
-    expect(
-      selectStoreGames(
-        stateWith({
-          home: homeView({ games: [multiPlatform, pcOnly, unknown, exclusive] }),
-          platforms: ["playstation"],
-        }),
-      ).map((entry) => entry.id),
-    ).toEqual(["steam:1", "psn:1"]);
+describe("adjacentStore", () => {
+  const order = ["all", "playstation", "xbox"] as const;
+  it("steps both ways and loops at the ends", () => {
+    expect(adjacentStore(order, "all", 1)).toBe("playstation");
+    expect(adjacentStore(order, "xbox", 1)).toBe("all");
+    expect(adjacentStore(order, "all", -1)).toBe("xbox");
+  });
+  it("starts over from an end when the store on screen has gone", () => {
+    expect(adjacentStore(order, "plugin:io.orivo.gone", 1)).toBe("all");
+    expect(adjacentStore(order, "plugin:io.orivo.gone", -1)).toBe("xbox");
   });
 });
 
-describe("matchesCategory", () => {
-  it("files a game a shop sent by the genres that shop gave it", () => {
-    // No editorial entry at all: what the card is filed under has to come from
-    // the game's own facts, in the language the shop answered in.
-    const live = game({ curation: undefined, genres: ["Aventure", "Occasionnel"], tags: ["Solo"] });
-    expect(matchesCategory(live, "strong-stories")).toBe(true);
-    expect(matchesCategory(live, "relaxing")).toBe(true);
-    expect(matchesCategory(live, "good-for-brain")).toBe(false);
-    expect(matchesCategory(live, "all-games")).toBe(true);
-  });
-});
+describe("selectStoreSections", () => {
+  const scored = (id: string, criticScore?: number): GameSummary => game({ id, title: id, criticScore });
 
-describe("fitStats", () => {
-  it("prints the scores a game was actually given", () => {
-    const stats = fitStats(
-      game({
-        curation: {
-          genres: [],
-          duration: "",
-          mode: "",
-          stats: [
-            { label: "Réflexion", value: 5 },
-            { label: "Créativité", value: 4 },
-            { label: "Relaxation", value: 4 },
-            { label: "Une quatrième", value: 2 },
-          ],
-          tagline: "",
-          heroTitle: "",
-          heroLead: "",
-          highlights: [],
-          categories: [],
-          platforms: [],
-        },
-      }),
-    );
-    expect(stats.map((stat) => stat.label)).toEqual(["Réflexion", "Créativité", "Relaxation"]);
-  });
+  it("ranks on published scores only, takes the ranking first and repeats no game", () => {
+    const games = [
+      scored("a"),
+      scored("b", 70),
+      scored("c", 91),
+      scored("d"),
+      scored("e", 85),
+      scored("f", 60),
+      scored("g"),
+    ];
+    const sections = selectStoreSections(games);
 
-  it("invents none for a game nobody wrote about", () => {
-    // The card used to fill this row from the game's own tags, scored
-    // `3 + hash(id) % 3` and read out as "4 sur 5". A shop's catalogue is full
-    // of games with tags and no editorial entry, and none of them may be
-    // rated by a number the shelf made up.
-    expect(fitStats(game({ tags: ["Open World", "Survival", "Crafting"] }))).toEqual([]);
-    expect(fitStats(game({ tags: [] }))).toEqual([]);
-  });
-});
-
-describe("storeCategoryLabel", () => {
-  it("labels every known category", () => {
-    expect(STORE_CATEGORIES.map((option) => storeCategoryLabel(option.id))).toEqual([
-      "For you",
-      "All games",
+    expect(sections.topRated.map((entry) => [entry.game.id, entry.rank, entry.score])).toEqual([
+      ["c", 1, 91],
+      ["e", 2, 85],
+      ["b", 3, 70],
     ]);
+    expect(sections.featured.map((entry) => entry.id)).toEqual(["a", "d", "f"]);
+    expect(sections.rest.map((entry) => entry.id)).toEqual(["g"]);
+    const shown = [...sections.featured, ...sections.topRated.map((entry) => entry.game), ...sections.rest];
+    expect(new Set(shown.map((entry) => entry.id)).size).toBe(games.length);
   });
 
-  it("falls back to every game for an unknown category", () => {
-    expect(storeCategoryLabel("mystery" as never)).toBe("All games");
+  it("numbers nobody when no game carries a score", () => {
+    const sections = selectStoreSections(["a", "b", "c", "d", "e"].map((id) => scored(id)));
+    expect(sections.topRated).toEqual([]);
+    expect(sections.featured.map((entry) => entry.id)).toEqual(["a", "b", "c"]);
+    expect(sections.rest.map((entry) => entry.id)).toEqual(["d", "e"]);
+  });
+
+  it("keeps a tab of three or fewer on one row", () => {
+    const sections = selectStoreSections([scored("a", 90), scored("b", 80)]);
+    expect(sections).toEqual({ featured: [scored("a", 90), scored("b", 80)], topRated: [], rest: [] });
+  });
+});
+
+describe("criticScoreOf", () => {
+  it("prefers the game's own score, then the bundled catalogue's, else none", () => {
+    const bundled = EDITORIAL_GAMES.find((entry) => criticScoreOf(entry) !== null);
+    expect(bundled).toBeDefined();
+    expect(criticScoreOf({ ...bundled!, criticScore: 12 })).toBe(12);
+    expect(criticScoreOf(game({ id: "nobody:knows" }))).toBeNull();
+  });
+});
+
+describe("editorialProviderStatuses", () => {
+  it("reads its messages in the language the interface is in when asked", () => {
+    try {
+      setLanguage("fr");
+      const french = editorialProviderStatuses().find((entry) => entry.provider === "steam")?.message;
+      setLanguage("en");
+      const english = editorialProviderStatuses().find((entry) => entry.provider === "steam")?.message;
+      expect(french).not.toBe(english);
+    } finally {
+      setLanguage("en");
+    }
   });
 });
 
