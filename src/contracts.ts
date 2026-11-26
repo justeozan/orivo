@@ -65,6 +65,19 @@ export type StoreProvider =
 export type StorePlatform =
   "pc" | "playstation" | "xbox" | "switch" | "emulators";
 
+/**
+ * A storefront the Store has a tab for, and the one a game can be exclusive
+ * to. Consoles are named by their maker's store (Nintendo, not Switch): the
+ * tab sells for every machine that store serves.
+ */
+export type StoreBrand = "playstation" | "xbox" | "nintendo" | "steam" | "epic";
+
+/**
+ * A Store tab, as `?store=` carries it: every exclusive (`all`), one brand, or
+ * a tab a plugin added (`plugin:<plugin id>` or `plugin:<plugin id>:<key>`).
+ */
+export type StoreTabId = "all" | StoreBrand | `plugin:${string}`;
+
 export type ProviderHealth =
   "available" | "degraded" | "unavailable" | "not-configured";
 export type StoreCategory =
@@ -263,6 +276,12 @@ export interface GameSummary {
   offers: StoreOffer[];
   /** Present only for Store games Orivo has written editorial copy for. */
   curation?: StoreCuration;
+  /**
+   * The one store this game is sold on, among those the Store has a tab for.
+   * Absent for a game sold in more than one place, and for one nobody has
+   * checked: an exclusive is a curated, sourced fact, never inferred.
+   */
+  exclusiveTo?: StoreBrand;
 }
 
 export interface GameDetailView extends GameSummary {
