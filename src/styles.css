@@ -14,11 +14,17 @@
      `--topbar-inset-top` + its 40px height = 65px. `--topbar-height` adds the
      breathing room below it and is the single source of both the page hosts'
      top padding and the height of the topbar scrim. */
-  --topbar-inset-top: 25px;
+  --topbar-inset-top: 16px;
   --topbar-inset-left: 32px;
   --topbar-inset-right: 34px;
   --topbar-height: 76px;
-  --topbar-bar-h: 40px;
+  /* The capsule: every control in it is one round size, which grows with a
+     big screen so the bar still reads from a sofa. 42px on a 1536px window,
+     48 from 1745 up — the capsule is then 60, and 16 + 60 is the 76 above. */
+  --halo-item: clamp(40px, 2.75vw, 48px);
+  --halo-pad: 5px;
+  --halo-icon: clamp(19px, 1.3vw, 22px);
+  --topbar-bar-h: calc(var(--halo-item) + 2 * var(--halo-pad) + 2px);
   --search-h: 40px;
   --search-r: 22px;
   --avatar-size: 40px;
@@ -200,8 +206,6 @@ button { border: 0; cursor: pointer; }
    Every button is named on its own: a form control does not inherit
    `text-shadow` from its container, so listing the container alone silently
    leaves every label in it flat. */
-.topbar--over-art .primary-nav,
-.topbar--over-art .nav-link,
 .hero-content h1,
 .hero-meta,
 .rail-header h2,
@@ -212,24 +216,39 @@ button { border: 0; cursor: pointer; }
   text-shadow: 0 1px 2px rgba(6,6,10,.7), 0 2px 16px rgba(6,6,10,.55);
 }
 
-/* Glyphs and translucent pills cannot take a text shadow, and their surfaces
-   were tuned against the scrims this page no longer has. Over bare artwork they
-   carry a little more of their own. */
-.topbar--over-art .search-control::before { background: rgba(16,15,19,.6); }
-
 .topbar {
   position: absolute;
   z-index: 5;
   top: var(--topbar-inset-top);
   left: var(--topbar-inset-left);
   right: var(--topbar-inset-right);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, min(352px, 31vw)) minmax(0, 1fr);
+  display: flex;
+  justify-content: flex-start;
   align-items: center;
-  gap: 12px;
   min-height: var(--topbar-bar-h);
   color: var(--text);
 }
+
+/* The whole bar is one floating capsule of glass, on the window's left edge,
+   where the eye starts and where the mark has always been. It is its own
+   ground over any artwork, so nothing in it needs a text shadow, and it grows
+   to the right only: a page whose name is longer, or a search opened, never
+   moves the mark. */
+.topbar-capsule {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: var(--halo-pad);
+  border: 1px solid rgba(255,255,255,.11);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.015)), rgba(14,13,20,.46);
+  box-shadow: 0 16px 48px rgba(0,0,0,.3), 0 2px 8px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.07);
+  -webkit-backdrop-filter: blur(26px) saturate(160%);
+  backdrop-filter: blur(26px) saturate(160%);
+}
+.topbar-capsule__divider { flex: none; width: 1px; height: calc(var(--halo-item) * .52); margin: 0 5px; background: rgba(255,255,255,.13); }
 .topbar.is-library-menu-open, .topbar.is-notifications-open { z-index: 25; }
 
 /* The scrim stretches from the topbar back out to the viewport edges, so it is
@@ -265,25 +284,59 @@ button { border: 0; cursor: pointer; }
   background: linear-gradient(180deg, rgba(6,6,10,.16) 0%, rgba(6,6,10,.07) 52%, transparent 100%);
 }
 
-.nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
-
-.nav-cluster { min-width: 0; gap: clamp(12px, 1.45vw, 22px); }
+.primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
 
 .library-menu-control { position: relative; flex: none; }
+/* The mark and the player in one: the player's picture is set in the ring's
+   hole, the way a stone sits in a setting. The ring's artwork fills only 81%
+   of its file, so the button is drawn that much larger and gives the
+   difference back in negative margins: the ring itself is exactly one control
+   wide and the capsule does not grow. Its hole is not centred in the file —
+   it sits at 51% across and 49% down, 54% of the width — so the picture is
+   placed on those numbers, just under the ring's own dark inner edge. */
 .brand-mark-button {
-  display: grid;
-  width: var(--brand-mark-size);
-  height: var(--brand-mark-size);
-  margin: -5px;
-  padding: 5px;
-  place-items: center;
-  border-radius: 12px;
+  --brand-box: calc(var(--halo-item) / .81);
+  position: relative;
+  display: block;
+  flex: none;
+  width: var(--brand-box);
+  height: var(--brand-box);
+  margin: calc((var(--halo-item) - var(--brand-box)) / 2);
+  padding: 0;
+  border-radius: 50%;
   background: transparent;
-  transition: background 160ms ease, transform 160ms ease;
+  transition: transform 160ms ease, filter 200ms ease;
 }
-.brand-mark-button:hover, .brand-mark-button[data-nav-focus], .brand-mark-button[aria-expanded="true"] { background: rgba(255,255,255,.08); }
-.brand-mark-button:active { transform: scale(.96); }
-.brand-mark { width: 32px; height: 30px; object-fit: contain; }
+.brand-avatar {
+  position: absolute;
+  left: 51%;
+  top: 49%;
+  width: 55%;
+  height: 55%;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #28242c;
+  transform: translate(-50%, -50%);
+}
+.brand-mark {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 6px rgba(110,96,255,.45));
+}
+.brand-mark[hidden] { display: none; }
+.brand-mark-button:hover, .brand-mark-button[aria-expanded="true"] { filter: brightness(1.08); }
+/* Focus rings the ring, not the transparent margin of its file. */
+.brand-mark-button[data-nav-focus]::after {
+  position: absolute;
+  inset: 7%;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(218,216,255,.9), 0 0 22px rgba(160,150,255,.45);
+  content: "";
+}
+.brand-mark-button:active { transform: scale(.95); }
 .brand-mark-button:hover .brand-mark { animation: brand-mark-spin 620ms cubic-bezier(.2,.72,.25,1); }
 /* Wins over the hover spin: switching Rage on while the pointer rests on the
    mark must still play the arrival. */
@@ -295,15 +348,15 @@ button { border: 0; cursor: pointer; }
 .library-source-menu {
   position: absolute;
   z-index: 22;
-  top: calc(100% + 11px);
-  left: -5px;
+  top: calc(100% + var(--halo-pad) + 12px);
+  left: calc(-1 * var(--halo-pad));
   width: min(330px, calc(100vw - 40px));
   overflow: hidden;
   padding: 5px 6px;
   border: 1px solid rgba(255,255,255,.15);
   border-radius: 16px;
   color: #f4f2f7;
-  background: rgba(22,20,23,.48);
+  background: rgba(22,20,23,.66);
   box-shadow: 0 10px 30px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.055);
   -webkit-backdrop-filter: blur(22px) saturate(130%);
   backdrop-filter: blur(22px) saturate(130%);
@@ -390,30 +443,50 @@ button { border: 0; cursor: pointer; }
 /* A connected source listed for information only: same anatomy as an action
    row, but it never lights up as a pressable item. */
 
-.top-divider { width: 1px; height: 22px; background: rgba(255,255,255,.11); }
+.primary-nav { min-width: 0; gap: 2px; white-space: nowrap; }
 
-.primary-nav { min-width: 0; gap: 4px; white-space: nowrap; }
-
+/* A page is its glyph. The current one also says its name, which opens out of
+   the glyph on the same spring the plate travels on, so the plate and the
+   word arrive together. */
 .nav-link {
-  gap: 8px;
-  min-height: var(--tap-min);
-  padding: 0 11px;
-  border-radius: 8px;
-  color: #d5d2d8;
+  height: var(--halo-item);
+  min-width: var(--halo-item);
+  justify-content: center;
+  padding: 0 calc((var(--halo-item) - var(--halo-icon)) / 2);
+  border-radius: 999px;
+  color: #f4f2f7;
   background: transparent;
-  font-size: 13px;
-  font-weight: 450;
-  transition: background 160ms ease, color 160ms ease;
+  font-size: clamp(14px, .92vw, 16px);
+  font-weight: 600;
+  letter-spacing: -.01em;
+  transition: color 200ms ease, background 160ms ease, padding 560ms cubic-bezier(.3, 1.3, .4, 1);
 }
+.nav-link > span {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-width 560ms cubic-bezier(.3, 1.3, .4, 1), margin 560ms cubic-bezier(.3, 1.3, .4, 1), opacity 220ms ease;
+}
+.nav-link.is-active { padding: 0 20px 0 16px; color: #fff; }
+.nav-link.is-active > span { max-width: 180px; margin-left: 9px; opacity: 1; transition-delay: 0ms, 0ms, 90ms; }
 
 /* The shared `display: flex` above outranks the UA `[hidden]` rule, so a nav
    link hidden behind a preference would still paint. */
 .nav-link[hidden] { display: none !important; }
-.nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
-.nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
-/* The page indicator (app.ts `placeNavIndicator`): the active link's plate,
-   lifted out of the link so it can travel. A slight overshoot on the way in
-   is what makes it feel carried rather than teleported. */
+.nav-link .icon { flex: none; width: var(--halo-icon); height: var(--halo-icon); }
+/* Outline elsewhere, filled where you are. */
+.nav-link .nav-glyph--fill, .nav-link.is-active .nav-glyph--line { display: none; }
+.nav-link.is-active .nav-glyph--fill { display: block; }
+/* Dimmed with opacity, not a translucent colour: a translucent stroke paints
+   twice where it crosses itself, and the glyph goes blotchy. */
+.nav-link .icon { opacity: .62; transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1), opacity 200ms ease; }
+.nav-link.is-active .icon, .nav-link:hover .icon, .nav-link[data-nav-focus] .icon { opacity: 1; }
+.nav-link:not(.is-active):hover { background: rgba(255,255,255,.07); }
+/* The page indicator (app.ts `placeNavIndicator`): the current page's plate,
+   lifted out of the link so it can travel. Frosted glass with the iridescent
+   rim of the glass Play button and a little blue light pooled under it. Its
+   geometry is set every frame from app.ts, so it carries no transition of its
+   own beyond fading in. */
 .primary-nav { position: relative; isolation: isolate; }
 .primary-nav > .nav-link { position: relative; z-index: 1; }
 .nav-indicator {
@@ -423,25 +496,38 @@ button { border: 0; cursor: pointer; }
   left: 0;
   width: var(--nav-w, 0);
   height: var(--nav-h, 0);
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.03)), rgba(24,22,26,.46);
-  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 6px 18px rgba(0,0,0,.18);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
-  backdrop-filter: blur(18px) saturate(130%);
+  border-radius: 999px;
+  background: linear-gradient(160deg, rgba(255,255,255,.2), rgba(255,255,255,.05) 55%, rgba(255,255,255,.1));
+  box-shadow: 0 6px 24px rgba(77,99,255,.34), inset 0 1px rgba(255,255,255,.14);
   opacity: 0;
   transform: translate(var(--nav-x, 0), var(--nav-y, 0));
-  transition:
-    transform 520ms cubic-bezier(.3, 1.3, .4, 1),
-    width 520ms cubic-bezier(.3, 1.3, .4, 1),
-    opacity 200ms ease;
+  transition: opacity 200ms ease;
   pointer-events: none;
 }
+.nav-indicator::before {
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #ffe9f7 0%, #a9dcff 35%, #4f7dff 65%, #c6b2ff 100%);
+  content: "";
+  opacity: .9;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.nav-indicator::after {
+  position: absolute;
+  right: 22%;
+  bottom: -7px;
+  left: 22%;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(111,140,255,.75), transparent);
+  content: "";
+  filter: blur(3px);
+}
 .nav-indicator.is-placed { opacity: 1; }
-.nav-indicator.is-instant { transition: none; }
-/* With the plate travelling, the link itself wears none. */
-.primary-nav.has-indicator .nav-link.is-active { border-color: transparent; background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
-.nav-link .icon { transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1); }
 .nav-link:hover .icon { transform: translateY(-1px) scale(1.06); }
 .nav-link.is-arriving .icon { animation: nav-icon-arrive 520ms cubic-bezier(.3, 1.4, .5, 1); }
 @keyframes nav-icon-arrive {
@@ -450,102 +536,56 @@ button { border: 0; cursor: pointer; }
   100% { transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  html:not([data-motion="full"]) .nav-indicator { transition: opacity 200ms ease; }
+  html:not([data-motion="full"]) .nav-link,
+  html:not([data-motion="full"]) .nav-link > span { transition-duration: 0ms; }
   html:not([data-motion="full"]) .nav-link.is-arriving .icon { animation: none; }
 }
-[data-motion="reduced"] .nav-indicator { transition: opacity 200ms ease; }
+[data-motion="reduced"] .nav-link,
+[data-motion="reduced"] .nav-link > span { transition-duration: 0ms; }
 [data-motion="reduced"] .nav-link.is-arriving .icon { animation: none; }
 /* The phone gives every link its own plate; the travelling one stays home. */
 html[data-device="phone"] .nav-indicator { display: none; }
-html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
-  border-color: rgba(255,255,255,.3);
-  background: rgba(255,255,255,.2);
-}
-.nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
-/* Search stays out of the scene's way: at rest it is a magnifier and nothing
-   else. Reaching it — pointer, focus, or a query already typed — opens the
-   glass pill from the magnifier outwards, and the field and its shortcut
-   arrive just behind it. */
+/* Search is a magnifier in the capsule until it is reached — focus, the keys,
+   or a query already typed — and then the field opens out of it, widening the
+   capsule around it. A hover does not open it: the capsule would change width
+   under a pointer that was only passing. */
 .search-control {
   position: relative;
-  isolation: isolate;
-  width: 100%;
-  min-width: 0;
-  height: var(--search-h);
-  gap: 11px;
-  padding: 0 12px 0 16px;
-  justify-content: center;
-  border-radius: var(--search-r);
-  color: rgba(237,230,226,.62);
+  flex: none;
+  width: var(--halo-item);
+  height: var(--halo-item);
+  gap: 10px;
+  padding: 0 0 0 calc((var(--halo-item) - 18px) / 2);
+  border-radius: 999px;
+  color: rgba(244,242,247,.72);
   cursor: text;
-  transition: color 200ms ease;
+  transition: width 460ms cubic-bezier(.2,.9,.25,1), background 200ms ease, color 200ms ease, padding 460ms cubic-bezier(.2,.9,.25,1);
 }
-.search-control::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: inherit;
-  background: rgba(22,20,23,.31);
-  box-shadow: 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
-  -webkit-backdrop-filter: blur(22px) saturate(130%);
-  backdrop-filter: blur(22px) saturate(130%);
-  content: "";
-  opacity: 0;
-  transform: scaleX(.14);
-  transform-origin: 50% 50%;
-  transition: opacity 200ms ease, transform 420ms cubic-bezier(.2,.9,.25,1), border-color 160ms ease, background 160ms ease;
+.search-control:hover { color: #fff; background: rgba(255,255,255,.07); }
+.search-control input { flex: 1 1 0; width: 0; min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 14px; opacity: 0; transition: opacity 220ms ease; }
+.search-shortcut { display: flex; flex: none; gap: 4px; opacity: 0; transition: opacity 220ms ease; }
+.search-control:is(:focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) {
+  width: clamp(230px, 18vw, 300px);
+  padding-right: 8px;
+  color: #fff;
+  background: rgba(255,255,255,.1);
 }
-/* At rest the field and the shortcut take no room, so the magnifier sits in
-   the middle of the bar; opening grows them, which carries the magnifier out
-   to the pill's left edge as the glass widens around it. */
-.search-control input { flex: 0 1 0; width: 0; transition: flex-grow 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
-.search-shortcut { max-width: 0; overflow: hidden; transition: max-width 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
-.search-control > :not(.icon) { opacity: 0; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) input { flex-grow: 1; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) .search-shortcut { max-width: 64px; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) { color: #ede6e2; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)))::before { opacity: 1; transform: none; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; }
-
-.search-control .icon { width: 16px; height: 16px; }
-.search-control input { min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
-.search-control input::placeholder { color: #d1c9c5; opacity: .95; }
-.search-shortcut { display: flex; gap: 4px; }
+.search-control:is(:focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) :is(input, .search-shortcut) { opacity: 1; transition-delay: 120ms; }
+.search-control .icon { flex: none; width: 18px; height: 18px; }
+.search-control input::placeholder { color: rgba(244,242,247,.55); }
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
 
-.profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
-.avatar { width: var(--avatar-size); height: var(--avatar-size); border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
-
-/* The profile menu: the picture is the button, and a small glass card under
-   it holds the two things a player sets — a picture and a name. */
-.profile-control { position: relative; flex: none; display: flex; }
-.profile-button { display: grid; padding: 0; place-items: center; border-radius: 50%; background: none; transition: box-shadow 160ms ease, transform 160ms ease; }
-.profile-button:hover,
-.profile-button[data-nav-focus],
-.profile-button[aria-expanded="true"] { box-shadow: 0 0 0 2px rgba(255,255,255,.28); }
-.profile-button:active { transform: scale(.96); }
-.profile-panel {
-  position: absolute;
-  z-index: 22;
-  top: calc(100% + 11px);
-  right: -4px;
+/* The profile card heads the mark's menu: the picture and the name, the two
+   things a player sets, above the sources. */
+.library-source-menu__profile {
   display: flex;
-  width: 268px;
   align-items: center;
   gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: 16px;
-  color: #f4f2f7;
-  background: rgba(22,20,23,.62);
-  box-shadow: 0 18px 44px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.055);
-  -webkit-backdrop-filter: blur(24px) saturate(130%);
-  backdrop-filter: blur(24px) saturate(130%);
-  animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
+  margin: 2px 0 6px;
+  padding: 8px 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.09);
 }
-.profile-panel[hidden] { display: none; }
 .profile-panel__picture { position: relative; flex: none; width: 52px; height: 52px; overflow: hidden; border-radius: 50%; cursor: pointer; }
 .profile-panel__picture img { width: 100%; height: 100%; object-fit: cover; background: #28242c; }
 /* Hovering the picture says it can be changed. */
@@ -576,8 +616,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .feedback-button {
   display: grid;
   flex: none;
-  width: var(--tap-round);
-  height: var(--tap-round);
+  width: var(--halo-item);
+  height: var(--halo-item);
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
@@ -589,7 +629,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* Bare at rest, like the search beside them: a glyph on the scene. Reaching
    one gives it a faint disc so it reads as pressable. */
 .feedback-button:hover, .feedback-button[data-nav-focus] { background: rgba(255,255,255,.1); color: #fff; }
-.feedback-button svg { width: 18px; height: 18px; }
+.feedback-button svg { width: 19px; height: 19px; }
 /* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
    Sentry DSN would still paint the button. */
 .feedback-button[hidden] { display: none !important; }
@@ -600,8 +640,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .notifications-button {
   position: relative;
   display: grid;
-  width: var(--tap-round);
-  height: var(--tap-round);
+  width: var(--halo-item);
+  height: var(--halo-item);
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
@@ -613,13 +653,14 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .notifications-button:hover,
 .notifications-button[data-nav-focus],
 .notifications-button[aria-expanded="true"] { background: rgba(255,255,255,.1); color: #fff; }
-.notifications-button svg { width: 18px; height: 18px; }
+.notifications-button svg { width: 19px; height: 19px; }
+.notifications-control[hidden] { display: none; }
 /* The dot is the count. A number on a 36px circle is unreadable, and there are
    never enough notices for one to matter. */
 .notifications-button__dot {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: 22%;
+  right: 22%;
   width: 8px;
   height: 8px;
   border: 1.5px solid #17161b;
@@ -2009,8 +2050,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
 [data-motion="reduced"] .launch-splash__progress span { width: 100%; animation: none; opacity: .5; }
 
 @media (max-width: 1180px) {
-  .topbar { grid-template-columns: minmax(0, 1fr) minmax(200px, min(352px, 31vw)) minmax(0, 1fr); }
-  .nav-link { padding: 0 8px; }
   .browse-bar { gap: 20px; }
   .browse-bar__segments { gap: 18px; }
 }
@@ -2023,26 +2062,18 @@ body[data-mood="rage"] { --violet: #f2453c; }
    stops matching. */
 @media (max-width: 860px) and (min-height: 561px) {
   body { overflow: auto; }
-  /* The search drops to its own row below the bar, so the clearance the page
-     hosts owe the topbar grows with it: 18 + 54 + 40 + 12 of breathing room.
-     An iPad held upright keeps its status bar, so the bar starts under it. */
+  /* The capsule fits a narrow window on one row, search included. An iPad
+     held upright keeps its status bar, so the bar starts under it. */
   :root {
     --topbar-inset-top: max(18px, env(safe-area-inset-top));
     --topbar-inset-left: 20px;
     --topbar-inset-right: 20px;
-    --topbar-height: calc(var(--topbar-inset-top) + 106px);
+    --topbar-height: calc(var(--topbar-inset-top) + var(--topbar-bar-h) + 12px);
   }
   /* Keep the narrow-width floor, but never cap the canvas below the viewport:
      the page hosts are inset: 0 of this box, so a fixed height would strand
      the rest of a taller window and shorten every internal scroll container. */
   .selector { min-height: max(760px, 100svh); }
-  .topbar { grid-template-columns: 1fr auto; }
-  /* The navigation stays: with the search on a row of its own, the first row
-     has room for the three pills, and without them an iPad held upright had
-     no way off whichever page it was on. */
-  .profile-cluster { gap: 0; }
-  .library-source-menu { top: calc(100% + 65px); left: -5px; width: min(330px, calc(100vw - 40px)); }
-  .search-control { position: absolute; top: 54px; left: 0; right: 0; }
   .hero-content { top: 205px; right: auto; bottom: auto; left: 40px; width: min(560px, calc(100vw - 80px)); overflow: visible; }
   /* The narrow layout drops the fixed bottom edge, so there is no free space
      for the identity block to absorb. `flex: 1 1 0` would collapse it to
@@ -3723,21 +3754,17 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
   scroll-margin: 24px;
 }
 
-/* The current page's link is already a plate; focus lifts the plate. */
-.nav-link.is-active[data-nav-focus] {
-  border-color: rgba(255,255,255,.2);
-  background: rgba(255,255,255,.13);
+/* Walking the bar, the keys stand on the current page — reaching a link
+   opens it — so focus is a halo of frost around the plate, readable from the
+   far side of a room. */
+.nav-link[data-nav-focus] {
+  box-shadow: 0 0 0 2px rgba(218,216,255,.92), 0 0 24px rgba(170,160,255,.5);
 }
+.feedback-button[data-nav-focus],
+.notifications-button[data-nav-focus] { box-shadow: 0 0 0 2px rgba(218,216,255,.92); }
 
 /* The field is the pill around it, not the bare input. */
-.search-control:has(input[data-nav-focus]) { color: #ede6e2; }
-.search-control:has(input[data-nav-focus]) > :not(.icon) { opacity: 1; transform: none; }
-.search-control:has(input[data-nav-focus])::before {
-  opacity: 1;
-  transform: none;
-  border-color: rgba(255,255,255,.34);
-  background: rgba(22,20,23,.52);
-}
+.search-control:has(input[data-nav-focus]) { box-shadow: 0 0 0 2px rgba(218,216,255,.92), 0 0 24px rgba(170,160,255,.4); }
 
 /* Play is the one control the scene is for: it rises and glows rather than
    brightening by 6%. A greyed Play still says it was reached. */
@@ -3784,7 +3811,11 @@ html[data-form-factor="compact"] {
   --topbar-inset-top: max(8px, env(safe-area-inset-top));
   --topbar-inset-left: max(12px, env(safe-area-inset-left));
   --topbar-inset-right: max(12px, env(safe-area-inset-right));
-  --topbar-bar-h: 44px;
+  /* A short window: the capsule comes down to 48px, inside the same 48px of
+     clearance the bar always had here. The phone block thins it further. */
+  --halo-item: 40px;
+  --halo-pad: 3px;
+  --halo-icon: 19px;
   --topbar-height: calc(var(--topbar-inset-top) + 48px);
   --search-h: 36px;
   --search-r: 18px;
@@ -3826,16 +3857,6 @@ html[data-form-factor="compact"] {
   --fs-bar: 11px;
 }
 
-/* Icons carry the nav: four labelled pills do not fit beside the search field
-   once the bar is 44px tall. The buttons keep their selectors, so gamepad
-   cycling and the shell tests are untouched. */
-html[data-form-factor="compact"] .nav-link {
-  width: var(--tap-min);
-  padding: 0;
-  gap: 0;
-  justify-content: center;
-}
-html[data-form-factor="compact"] .nav-link span { display: none; }
 /* There is no ⌘K on a phone. */
 html[data-form-factor="compact"] .search-shortcut { display: none; }
 /* The Store, the game page and Me scroll here, under a bar that floats over
@@ -3843,8 +3864,6 @@ html[data-form-factor="compact"] .search-shortcut { display: none; }
    (`syncTopbarScrolled` in app.ts), so their copy stops reading through the
    navigation while the art still reaches the top edge at rest. */
 html[data-form-factor="compact"] .topbar--scrolled::before { opacity: 1; }
-html[data-form-factor="compact"] .nav-cluster { gap: 8px; }
-html[data-form-factor="compact"] .profile-cluster { gap: 8px; }
 
 /* The scene. The short-window media queries above write `top` and `bottom` as
    literals, so the tokens alone would never reach the hero — the attribute
@@ -3949,25 +3968,42 @@ html[data-device="phone"] {
   --fs-bar: 10px;
 }
 
-/* The search goes, so the bar is the mark on the left and the bell and the
-   avatar on the right. */
-html[data-device="phone"] .topbar { grid-template-columns: minmax(0, 1fr) auto; }
-html[data-device="phone"] .search-control { display: none; }
+/* No capsule on a phone: the bar is the mark — the player's picture in the
+   ring — on the left and the bell, when there is one, on the right, each a
+   finger's size. The search goes. */
+html[data-device="phone"] {
+  --halo-item: 44px;
+  --halo-pad: 0px;
+  --halo-icon: 20px;
+}
+html[data-device="phone"] .topbar-capsule {
+  width: 100%;
+  gap: 6px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-device="phone"] .notifications-control { margin-left: auto; }
+html[data-device="phone"] .search-control,
+html[data-device="phone"] .topbar-capsule__divider { display: none; }
+/* Icons carry the nav on a phone, a finger's width each. */
+html[data-device="phone"] .nav-link,
+html[data-device="phone"] .nav-link.is-active { width: var(--halo-item); padding: 0; }
+html[data-device="phone"] .nav-link > span { display: none; }
 
 /* Hidden rather than removed: the pills keep their place, so nothing in the
    bar moves when they come out of the mark. `visibility` waits for the fade on
    the way out and goes first on the way in. */
-html[data-device="phone"] .top-divider,
 html[data-device="phone"] .primary-nav {
   transition: opacity 160ms ease, transform 240ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 240ms;
 }
-html[data-device="phone"] .topbar:not(.is-library-menu-open) .top-divider,
 html[data-device="phone"] .topbar:not(.is-library-menu-open) .primary-nav {
   visibility: hidden;
   opacity: 0;
   transform: translateX(-12px);
 }
-html[data-device="phone"] .topbar.is-library-menu-open .top-divider,
 html[data-device="phone"] .topbar.is-library-menu-open .primary-nav { transition-delay: 0s; }
 
 /* Out of the mark the pills are buttons over the artwork, and an icon has no

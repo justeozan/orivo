@@ -35,25 +35,43 @@ test.describe("the library reads as rows: topbar, Play, games, browse bar", () =
     expect(await selectedGame(page)).toBe(before);
   });
 
-  test("the topbar walks sideways between its entries", async ({ page }) => {
+  // A console tab bar: reaching a page's link opens the page, with no second
+  // press, and focus stays in the bar so the next press goes on along it.
+  test("the topbar walks sideways, opening each page as it reaches it", async ({ page }) => {
     await openRoute(page, "#/library", "library");
     await blurEverything(page);
 
     await page.locator("[data-nav-page='library']").focus();
     await page.keyboard.press("ArrowRight");
     await expect(page.locator("[data-nav-page='store']")).toBeFocused();
+    await expect(page).toHaveURL(/#\/store/);
     await page.keyboard.press("ArrowRight");
     await expect(page.locator("[data-nav-page='settings']")).toBeFocused();
+    await expect(page).toHaveURL(/#\/settings/);
     await page.keyboard.press("ArrowRight");
     await expect(page.locator("#topbar-search")).toBeFocused();
-    // An empty field hands left and right straight on.
+    // With no notice there is no bell: the search ends the bar.
+    await expect(page.locator("#notifications-button")).toBeHidden();
     await page.keyboard.press("ArrowRight");
-    await expect(page.locator("#notifications-button")).toBeFocused();
+    await expect(page.locator("#topbar-search")).toBeFocused();
 
     await page.keyboard.press("ArrowLeft");
-    await expect(page.locator("#topbar-search")).toBeFocused();
-    await page.keyboard.press("ArrowLeft");
     await expect(page.locator("[data-nav-page='settings']")).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.locator("[data-nav-page='store']")).toBeFocused();
+    await expect(page).toHaveURL(/#\/store/);
+  });
+
+  test("coming up into the topbar lands on the page on screen", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    await blurEverything(page);
+    // Whatever the keys stood on last, up into the bar lands on the current
+    // page, so entering the bar never changes page.
+    await page.locator("[data-nav-page='store']").focus();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("ArrowUp");
+    await expect(page.locator("[data-nav-page='store']")).toBeFocused();
+    await expect(page).toHaveURL(/#\/store/);
   });
 
   test("down comes back from any topbar entry through Play to the game on screen", async ({ page }) => {
@@ -61,9 +79,9 @@ test.describe("the library reads as rows: topbar, Play, games, browse bar", () =
     await blurEverything(page);
     const before = await selectedGame(page);
 
-    // The bell sits over the far end of the rail, so geometry alone would drop
-    // straight onto whatever card lies under it.
-    await page.locator("#notifications-button").focus();
+    // The search sits over the rail, so geometry alone would drop straight
+    // onto whatever card lies under it.
+    await page.locator("#topbar-search").focus();
     await page.keyboard.press("ArrowDown");
     await expect(page.locator("#play-button")).toBeFocused();
 

@@ -128,6 +128,7 @@ import {
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
 import { HashRouter } from "./router";
+import { barGlyph, navGlyph, navPlateEase } from "./topbar-nav";
 import {
   DEFAULT_PREFERENCES,
   EMPTY_WALLPAPER_CREDENTIALS,
@@ -771,9 +772,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     wallpaperSearchTermBackground: get<HTMLInputElement>("#wallpaper-search-term-background"),
     wallpaperSearchTermLogo: get<HTMLInputElement>("#wallpaper-search-term-logo"),
     notificationsControl: get<HTMLElement>(".notifications-control"),
-    profileControl: get<HTMLElement>(".profile-control"),
-    profileButton: get<HTMLButtonElement>("#profile-button"),
-    profilePanel: get<HTMLElement>("#profile-panel"),
     profileAvatar: get<HTMLImageElement>("#profile-avatar"),
     profilePanelAvatar: get<HTMLImageElement>("#profile-panel-avatar"),
     profileAvatarInput: get<HTMLInputElement>("#profile-avatar-input"),
@@ -5019,6 +5017,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const items = visibleNotifications(record);
     const unread = unreadNotificationCount(record);
     refs.notificationsDot.hidden = unread === 0;
+    // No notice, no bell. The last one dismissed from an open panel takes the
+    // panel with it, and focus that was in there lands on the mark, the next
+    // control along, rather than on a node that just left the page.
+    const empty = items.length === 0;
+    if (empty && !refs.notificationsControl.hidden) {
+      const hadFocus = refs.notificationsControl.contains(document.activeElement);
+      if (state.notifications.open) {
+        state.notifications.open = false;
+        state.notifications.highlighted = [];
+        refs.notificationsPanel.hidden = true;
+        refs.notificationsButton.setAttribute("aria-expanded", "false");
+        refs.topbar.classList.remove("is-notifications-open");
+      }
+      refs.notificationsControl.hidden = true;
+      if (hadFocus) refs.libraryMenuButton.focus();
+    }
+    refs.notificationsControl.hidden = empty;
     // Icon-only controls carry their own name, and this one's name changes.
     refs.notificationsButton.setAttribute(
       "aria-label",
@@ -6624,6 +6639,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   refs.libraryMenu.addEventListener("keydown", (event) => {
     const target = event.target;
+    // The profile card heads the menu but is not one of its items: the shell's
+    // own key handling stands aside for anything inside the menu, so the card
+    // closes on Escape and hands Down to the first source here.
+    if (target instanceof HTMLElement && target.closest(".library-source-menu__profile")) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setLibraryMenuOpen(false, undefined, true);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        event.stopPropagation();
+        focusLibraryMenuItem("first");
+      }
+      return;
+    }
     if (!(target instanceof HTMLButtonElement)) {
       return;
     }
@@ -7109,34 +7139,72 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   /**
    * One plate of glass under the current page's link, slid from link to link
    * rather than switched off on one and on at the next, so changing page reads
-   * as moving along the bar. The first placement (and any after a resize) is
+   * as moving along the bar.
+   *
+   * Driven from here rather than by a CSS transition because its target moves
+   * while it travels: only the current page shows its name, so the link being
+   * reached grows and the one being left shrinks, and every link between them
+   * shifts. Each frame re-reads where the link is now and eases towards that,
+   * so the plate lands on the link's final shape instead of the one it had
+   * when the move began. The first placement, a resize, and reduced motion are
    * instant: a plate gliding in from nowhere on launch would be noise.
    */
-  let navIndicatorPlaced = false;
-  const placeNavIndicator = (): void => {
+  type NavPlate = { x: number; y: number; w: number; h: number };
+  const NAV_PLATE_MS = 560;
+  let navPlate: NavPlate | null = null;
+  let navPlateFrame = 0;
+  const plateOf = (link: HTMLElement): NavPlate => ({
+    x: link.offsetLeft,
+    y: link.offsetTop,
+    w: link.offsetWidth,
+    h: link.offsetHeight,
+  });
+  const paintNavPlate = (plate: NavPlate): void => {
+    navPlate = plate;
+    const indicator = refs.navIndicator;
+    indicator.style.setProperty("--nav-x", `${plate.x}px`);
+    indicator.style.setProperty("--nav-y", `${plate.y}px`);
+    indicator.style.setProperty("--nav-w", `${plate.w}px`);
+    indicator.style.setProperty("--nav-h", `${plate.h}px`);
+  };
+  const placeNavIndicator = (animate = true): void => {
     const active = refs.navLinks.find((link) => link.classList.contains("is-active") && !link.hidden);
     const indicator = refs.navIndicator;
+    window.cancelAnimationFrame(navPlateFrame);
+    navPlateFrame = 0;
     if (!active || active.offsetWidth === 0) {
+      navPlate = null;
       indicator.classList.remove("is-placed");
       refs.primaryNav.classList.remove("has-indicator");
       return;
     }
-    indicator.classList.toggle("is-instant", !navIndicatorPlaced);
-    indicator.style.setProperty("--nav-x", `${active.offsetLeft}px`);
-    indicator.style.setProperty("--nav-y", `${active.offsetTop}px`);
-    indicator.style.setProperty("--nav-w", `${active.offsetWidth}px`);
-    indicator.style.setProperty("--nav-h", `${active.offsetHeight}px`);
+    const from = navPlate;
     indicator.classList.add("is-placed");
     refs.primaryNav.classList.add("has-indicator");
-    if (!navIndicatorPlaced) {
-      navIndicatorPlaced = true;
-      requestAnimationFrame(() => indicator.classList.remove("is-instant"));
+    if (!animate || !from || prefersReducedMotion()) {
+      paintNavPlate(plateOf(active));
+      return;
     }
+    const start = performance.now();
+    const step = (now: number): void => {
+      const t = Math.min(1, (now - start) / NAV_PLATE_MS);
+      const k = t === 1 ? 1 : navPlateEase(t);
+      const to = plateOf(active);
+      paintNavPlate({
+        x: from.x + (to.x - from.x) * k,
+        y: from.y + (to.y - from.y) * k,
+        w: from.w + (to.w - from.w) * k,
+        h: from.h + (to.h - from.h) * k,
+      });
+      navPlateFrame = t < 1 ? window.requestAnimationFrame(step) : 0;
+    };
+    navPlateFrame = window.requestAnimationFrame(step);
   };
   if (typeof ResizeObserver !== "undefined") {
+    // A resize mid-move is the move itself (the names opening and closing),
+    // which the frame loop already follows. Any other one snaps.
     new ResizeObserver(() => {
-      navIndicatorPlaced = false;
-      placeNavIndicator();
+      if (navPlateFrame === 0) placeNavIndicator(false);
     }).observe(refs.primaryNav);
   }
 
@@ -7197,6 +7265,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         link.classList.add("is-arriving");
       }
       link.classList.toggle("is-active", active);
+      // The keys coming up into the bar land on the current page, never on a
+      // link they last stood on: standing on a link opens its page.
+      link.toggleAttribute("data-nav-selected", active);
       // Exactly one navigation link is ever marked as the current page.
       if (active) {
         link.setAttribute("aria-current", "page");
@@ -7450,6 +7521,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   for (const link of refs.navLinks) {
+    // On a console a tab is open the moment it is reached. The keys and the
+    // pad walking the bar change page as they go, with no second press to
+    // confirm; the pointer still clicks.
+    link.addEventListener("focus", () => {
+      const mode = document.body.dataset.inputMode;
+      if ((mode === "keyboard" || mode === "gamepad") && !link.classList.contains("is-active")) link.click();
+    });
     link.addEventListener("click", () => {
       closeLibraryMenu();
       const page = link.dataset.navPage;
@@ -7839,33 +7917,21 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const source = avatarSource(profile);
     refs.profileAvatar.src = source;
     refs.profilePanelAvatar.src = source;
-    refs.profileButton.setAttribute("aria-label", profile.name ? t("app.profile.named", { name: profile.name }) : t("app.profile.label"),
+    refs.libraryMenuButton.setAttribute(
+      "aria-label",
+      profile.name ? t("app.menu.openNamed", { name: profile.name }) : t("app.menu.open"),
     );
-    refs.profileButton.title = profile.name || t("app.profile.label");
     if (document.activeElement !== refs.profileName) refs.profileName.value = profile.name;
     refs.profileAvatarReset.hidden = !profile.avatar;
   };
-  const setProfileOpen = (open: boolean, restoreFocus = false): void => {
-    refs.profilePanel.hidden = !open;
-    refs.profileButton.setAttribute("aria-expanded", String(open));
-    if (open) {
-      if (state.notifications.open) setNotificationsOpen(false);
-      renderProfile();
-      refs.profileName.focus();
-      refs.profileName.select();
-    } else if (restoreFocus) {
-      refs.profileButton.focus();
-    }
-  };
   renderProfile();
-  refs.profileButton.addEventListener("click", () => setProfileOpen(refs.profilePanel.hidden === true));
   refs.profileName.addEventListener("input", () => {
     profile = { ...profile, name: cleanName(refs.profileName.value) };
     saveProfile(profile);
     renderProfile();
   });
   refs.profileName.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") setProfileOpen(false, true);
+    if (event.key === "Enter") setLibraryMenuOpen(false, undefined, true);
   });
   refs.profileAvatarInput.addEventListener("change", () => {
     const file = refs.profileAvatarInput.files?.[0];
@@ -7938,9 +8004,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (state.notifications.open && !refs.notificationsControl.contains(target)) {
       setNotificationsOpen(false);
     }
-    if (!refs.profilePanel.hidden && !refs.profileControl.contains(target)) {
-      setProfileOpen(false);
-    }
     if (
       !refs.playLaunchMenu.hidden &&
       !refs.playLaunchMenu.contains(target) &&
@@ -7978,12 +8041,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (state.notifications.open && event.key === "Escape") {
       event.preventDefault();
       setNotificationsOpen(false, true);
-      return;
-    }
-
-    if (!refs.profilePanel.hidden && event.key === "Escape") {
-      event.preventDefault();
-      setProfileOpen(false, true);
       return;
     }
 
@@ -8806,15 +8863,37 @@ function shell(): string {
            wrapper: a <header> nested in <main> is not a banner, and each page
            owns the only <main> on screen. -->
       <header class="topbar" aria-label="${t("app.nav.primary")}" data-tauri-drag-region data-nav-row>
-        <div class="nav-cluster">
+        <!-- One floating capsule holds the whole bar, so the scene keeps
+             everything around it. Its parts change width — only the current
+             page names itself, the search opens out of its magnifier, the bell
+             is there only with something in it — and the capsule, set on the
+             left edge, grows to the right around whatever it holds. -->
+        <div class="topbar-capsule">
           <div class="library-menu-control">
-            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="${t("app.menu.open")}" aria-haspopup="menu" aria-expanded="false" aria-controls="library-source-menu">
+            <!-- The mark and the player are one control: the picture sits in
+                 the ring, and the menu it opens starts with the profile. -->
+            <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="${t("app.menu.open")}" aria-expanded="false" aria-controls="library-source-menu">
+              <img id="profile-avatar" class="brand-avatar" src="/media/steam-avatar.png" alt="" />
               <img id="brand-mark-ring" class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
               <!-- Rage mode wears the spiral instead of the ring. Both marks
                    live in the markup so the swap is a class, not a fetch. -->
               <img id="brand-mark-spiral" class="brand-mark" src="/media/orivo-spiral-icon.png" alt="" hidden />
             </button>
-            <div id="library-source-menu" class="library-source-menu" role="menu" aria-label="${t("app.menu.sourcesAria")}" hidden>
+            <div id="library-source-menu" class="library-source-menu" hidden>
+              <!-- The player first: the picture on the mark is theirs, so the
+                   card that changes it is the first thing the mark opens. -->
+              <div class="library-source-menu__profile" role="group" aria-label="${t("app.profile.label")}">
+                <label class="profile-panel__picture" title="${t("app.profile.changePicture")}">
+                  <img id="profile-panel-avatar" src="/media/steam-avatar.png" alt="" />
+                  <span class="profile-panel__picture-hint">${icon("cover")}</span>
+                  <input id="profile-avatar-input" type="file" accept="image/*" aria-label="${t("app.profile.changePicture")}" hidden />
+                </label>
+                <div class="profile-panel__fields">
+                  <input id="profile-name" class="profile-panel__name" type="text" maxlength="32" placeholder="${t("app.profile.yourName")}" aria-label="${t("app.profile.yourName")}" autocomplete="off" spellcheck="false" />
+                  <button id="profile-avatar-reset" class="profile-panel__reset" type="button">${t("app.profile.reset")}</button>
+                </div>
+              </div>
+              <div class="library-source-menu__items" role="menu" aria-label="${t("app.menu.sourcesAria")}">
               <p class="library-source-menu__label" id="library-sources-label">${t("app.menu.sources")}</p>
               <!-- The connected sources are rendered on open, so the list always
                    reflects the current library rather than a hardcoded set. -->
@@ -8867,40 +8946,37 @@ function shell(): string {
                 <span class="library-source-action__copy"><strong>${t("app.menu.plugins")}</strong><small>${t("app.menu.pluginsHint")}</small></span>
                 ${icon("chevron-right", "library-source-action__chevron")}
               </button>
+              </div>
             </div>
           </div>
-          <span class="top-divider" aria-hidden="true"></span>
           <nav class="primary-nav" aria-label="${t("app.nav.orivo")}">
             <span class="nav-indicator" aria-hidden="true"></span>
-            <!-- The labels are the accessible name on desktop and are hidden
-                 on a short screen, so each button carries the name itself
-                 rather than losing it along with the text. -->
-            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="${t("app.nav.library")}">${icon("library")}<span>${t("app.nav.library")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="store" aria-label="${t("app.nav.store")}">${icon("store")}<span>${t("app.nav.store")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="me" aria-label="${t("app.nav.me")}">${icon("user")}<span>${t("app.nav.me")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="settings" aria-label="${t("app.nav.settings")}">${icon("settings")}<span>${t("app.nav.settings")}</span></button>
+            <!-- Icons carry the bar; only the current page says its name. Each
+                 button carries the name itself, so the ones that show only a
+                 glyph keep it. The filled glyph is the current page's. -->
+            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="${t("app.nav.library")}" data-nav-selected>${navGlyph("library")}<span>${t("app.nav.library")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="store" aria-label="${t("app.nav.store")}">${navGlyph("store")}<span>${t("app.nav.store")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="me" aria-label="${t("app.nav.me")}">${navGlyph("me")}<span>${t("app.nav.me")}</span></button>
+            <button type="button" class="nav-link" data-nav-page="settings" aria-label="${t("app.nav.settings")}">${navGlyph("settings")}<span>${t("app.nav.settings")}</span></button>
           </nav>
-        </div>
-
-        <label class="search-control" id="topbar-search-control">
-          ${icon("search")}
-          <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="${t("app.search.gamesPlaceholder")}" aria-label="${t("app.search.gamesShort")}" data-nav-reveal />
-          <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
-        </label>
-
-        <div class="profile-cluster">
-          <!-- Reporting a problem sits beside the profile picture rather than
-               buried in Settings: the moment someone wants to complain is the
-               moment they are looking at the thing that went wrong. Hidden
-               until Sentry is configured, so a source build shows no dead
-               control. -->
+          <span class="topbar-capsule__divider" aria-hidden="true"></span>
+          <label class="search-control" id="topbar-search-control">
+            ${barGlyph("search")}
+            <input id="topbar-search" type="search" autocomplete="off" spellcheck="false" placeholder="${t("app.search.gamesPlaceholder")}" aria-label="${t("app.search.gamesShort")}" data-nav-reveal />
+            <span class="search-shortcut" aria-hidden="true"><kbd>⌘</kbd><kbd>K</kbd></span>
+          </label>
+          <!-- Reporting a problem stays in the bar rather than buried in
+               Settings: the moment someone wants to complain is the moment they
+               are looking at the thing that went wrong. Hidden until Sentry is
+               configured, so a source build shows no dead control. -->
           <button id="feedback-button" class="feedback-button" type="button" aria-label="${t("app.feedback.send")}" title="${t("app.feedback.send")}" hidden>${icon("feedback")}</button>
           <!-- The bell. Everything it carries is advice the user can ignore
                forever, so it never interrupts: a notice lands as a dot here and
-               waits to be opened. -->
-          <div class="notifications-control">
+               waits to be opened. With nothing in it there is no bell at all —
+               an empty bell is one more thing on the scene saying nothing. -->
+          <div class="notifications-control" hidden>
             <button id="notifications-button" class="notifications-button" type="button" aria-label="${t("app.notifications.title")}" aria-expanded="false" aria-controls="notifications-panel">
-              ${icon("bell")}
+              ${barGlyph("bell")}
               <span id="notifications-dot" class="notifications-button__dot" aria-hidden="true" hidden></span>
             </button>
             <!-- A disclosure, not a dialog. Nothing in Orivo is modal: the
@@ -8911,24 +8987,6 @@ function shell(): string {
             <div id="notifications-panel" class="notifications-panel" role="group" aria-label="${t("app.notifications.title")}" hidden>
               <p class="notifications-panel__title">${t("app.notifications.title")}</p>
               <div id="notifications-list"></div>
-            </div>
-          </div>
-          <!-- The profile: the picture opens a small menu to rename yourself
-               and change the picture. Nothing else lives here yet. -->
-          <div class="profile-control">
-            <button id="profile-button" class="profile-button" type="button" aria-label="${t("app.profile.label")}" aria-expanded="false" aria-controls="profile-panel">
-              <img id="profile-avatar" class="avatar" src="/media/steam-avatar.png" alt="" />
-            </button>
-            <div id="profile-panel" class="profile-panel" role="group" aria-label="${t("app.profile.label")}" hidden>
-              <label class="profile-panel__picture" title="${t("app.profile.changePicture")}">
-                <img id="profile-panel-avatar" src="/media/steam-avatar.png" alt="" />
-                <span class="profile-panel__picture-hint">${icon("cover")}</span>
-                <input id="profile-avatar-input" type="file" accept="image/*" hidden />
-              </label>
-              <div class="profile-panel__fields">
-                <input id="profile-name" class="profile-panel__name" type="text" maxlength="32" placeholder="${t("app.profile.yourName")}" aria-label="${t("app.profile.yourName")}" autocomplete="off" spellcheck="false" />
-                <button id="profile-avatar-reset" class="profile-panel__reset" type="button">${t("app.profile.reset")}</button>
-              </div>
             </div>
           </div>
         </div>
