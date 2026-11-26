@@ -58,11 +58,14 @@ pub enum StoreRegion {
     Au,
 }
 
+/// Mirrors `DEFAULT_PREFERENCES.motion` in `src/settings-model.ts`: every
+/// animation on until the player asks for less. A file that already names a
+/// motion keeps it; only a missing file or a reset lands here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MotionPreference {
-    #[default]
     System,
+    #[default]
     Full,
     Reduced,
 }
@@ -459,6 +462,18 @@ mod tests {
         let loaded = dirs.service().load().unwrap();
         assert_eq!(loaded.start_page, StartPage::Store);
         assert_eq!(loaded.on_game_start, GameStartAction::StepAside);
+    }
+
+    #[test]
+    fn motion_defaults_to_full_but_a_stored_choice_is_kept() {
+        let dirs = TestDirectories::new("motion-default");
+        assert_eq!(dirs.service().load().unwrap().motion, MotionPreference::Full);
+        fs::write(
+            dirs.data.join(PREFERENCES_FILE),
+            br#"{ "startPage": "library", "storeRegion": "automatic", "motion": "system" }"#,
+        )
+        .unwrap();
+        assert_eq!(dirs.service().load().unwrap().motion, MotionPreference::System);
     }
 
     #[test]

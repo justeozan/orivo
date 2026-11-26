@@ -20,7 +20,9 @@ import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
 import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } from "./profile";
 import { brandIcon, icon, type IconName } from "./icons";
-import { catalogCategories, categoryFilterChips, updateBadge, matchesCatalog, pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
+import { catalogCategories, categoryFilterChips, updateBadge, matchesCatalog, pluginCard, pluginCategory, pluginIcon, pluginMoreMenu, pluginPill, type MoreMenuEntry, type PluginCategory } from "./plugin-cards";
+import { defaultPluginView, managedPluginStatus, nxnativeCardStatus, pluginMetaLine, profileCount, wineCardStatus } from "./plugins-model";
+import { streamingCardStatus } from "./gamestream-setup-model";
 import {
   ALL_GAMES_SEGMENT,
   type BrowseSegment,
@@ -47,8 +49,16 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
-import { prefersReducedMotion, rememberMotionPreference } from "./motion";
-import { LANGUAGE_NAMES, LANGUAGES, rememberLanguagePreference, t, type LanguagePreference } from "./i18n";
+import { prefersReducedMotion, rememberedMotionPreference, rememberMotionPreference } from "./motion";
+import {
+  LANGUAGE_NAMES,
+  LANGUAGES,
+  rememberLanguagePreference,
+  t,
+  type LanguagePreference,
+  type MessageKey,
+} from "./i18n";
+import { segmentChoice, segmentedControl, syncSegmented } from "./settings-segmented";
 import type { BootSplash } from "./boot-splash";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
@@ -109,9 +119,11 @@ import {
   CONNECTED_SOURCES,
   connectedSourceDescriptor,
   defaultSourceAccounts,
+  gameCountLabel,
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
+  sourceGameCount,
   sourceSyncSummary,
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
@@ -179,7 +191,7 @@ import {
   createGameStreamSetup,
   mountGameStreamSetup,
 } from "./gamestream-setup";
-import { mountNxnativePanel } from "./nxnative-panel";
+import { mountNxnativePanel, type NxnativeStatus } from "./nxnative-panel";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
@@ -473,6 +485,16 @@ const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
  */
 const NOTIFICATION_TICK_MS = 30_000;
 /**
+ * Settings › General › Experimental: debug fixtures and unfinished surfaces,
+ * folded behind one row. The row counts them, so the list lives here once.
+ */
+const EXPERIMENTAL_TOGGLES = [
+  ["preference-show-showcase", "app.appearance.demo", "app.appearance.demoHint"],
+  ["preference-beta", "app.appearance.me", "app.appearance.meHint"],
+  ["preference-editorial-games", "app.appearance.editorial", "app.appearance.editorialHint"],
+  ["preference-debug-social", "app.appearance.social", "app.appearance.socialHint"],
+] as const satisfies ReadonlyArray<readonly [string, MessageKey, MessageKey]>;
+/**
  * The artwork the welcome screen stands on. Bundled with the app, and shown as
  * app chrome rather than as a claim about anyone's library — the only screen
  * in Orivo whose backdrop is not a game the user owns.
@@ -648,7 +670,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       pendingDeleteProfileId: "",
     },
     launchFeedback: null,
-    preferences: { ...DEFAULT_PREFERENCES },
+    // Until the host answers, the motion last applied stands, not the default.
+    preferences: {
+      ...DEFAULT_PREFERENCES,
+      motion: rememberedMotionPreference() ?? DEFAULT_PREFERENCES.motion,
+    },
     dataUsage: { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null },
     providerStatuses: defaultProviderStatuses(),
     settingsSearch: "",
@@ -727,11 +753,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
     pluginsCatalogFilters: get<HTMLElement>("#plugins-catalog-filters"),
-    pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     pluginsCatalogGroup: get<HTMLElement>("#plugins-catalog-group"),
     pluginsDetail: get<HTMLElement>("#plugins-detail"),
-    pluginsDetailEmpty: get<HTMLElement>("#plugins-detail-empty"),
     pluginManagedPanel: get<HTMLElement>("#plugin-managed-panel"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
@@ -2332,6 +2356,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryLoaded = true;
     renderSelection();
     releaseBootSplash();
+    // The Accounts cards state how many games each source brought in, so a
+    // sync or a scan that lands while they are on screen updates the number.
+    renderSteamSourceRow();
+    renderSourceAccountsPanel();
+    renderGameFoldersCard();
     // A download started in the Epic launcher is just as real as one started
     // here, so the watch follows the data rather than the click.
     if (state.games.some((game) => game.installState === "installing")) {
@@ -2341,7 +2370,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     // A pending Wine attachment cannot resolve its game until the library has
     // arrived, so the Wine plugin detail re-renders as soon as it does.
-    if (state.pluginView === "wine") {
+    if (currentPluginView() === "wine") {
       renderWineSettingsPanel();
     }
   };
@@ -2495,6 +2524,53 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       gameFolders,
       isTauriRuntime() && platformFeatures.localRunners,
     );
+    renderGameFoldersCard();
+  };
+
+  /**
+   * The games folders as one more card in the Accounts grid: what they
+   * brought in, and the list itself one click away underneath, the way
+   * Steam's sign-in opens under its card. No folder yet: the card adds one.
+   */
+  const renderGameFoldersCard = (): void => {
+    const container = root.querySelector<HTMLElement>("#game-folders-card");
+    const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+    if (!container || !inline) return;
+    const offered = isTauriRuntime() && platformFeatures.localRunners;
+    container.hidden = !offered;
+    if (!offered) {
+      container.replaceChildren();
+      inline.hidden = true;
+      return;
+    }
+    const label = t("app.menu.gamesFolder");
+    const hasFolders = gameFolders.length > 0;
+    const { row, actions } = sourceRowElement("folders", label, icon("folder"), hasFolders);
+    // A card of the grid, not a store: the stores' row selector must not see it.
+    delete row.dataset.sourceRow;
+    row.dataset.folderCard = "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-account-row__account";
+    const name = document.createElement("span");
+    name.className = "source-account-row__account-name";
+    if (hasFolders) {
+      const count = gameCountLabel(sourceGameCount(state.games, ["local"]));
+      button.dataset.gameFolderAction = "manage";
+      button.classList.add("source-account-row__account--count");
+      button.setAttribute("aria-expanded", String(!inline.hidden));
+      button.setAttribute("aria-label", `${label} · ${count} — ${t("app.folder.manage")}`);
+      button.title = t("app.folder.manage");
+      name.classList.add("provider-health", "provider-health--available");
+      name.textContent = count;
+    } else {
+      button.dataset.gameFolderAction = "add";
+      name.textContent = t("app.folder.addShort");
+      button.setAttribute("aria-label", t("app.folder.add"));
+    }
+    button.append(name);
+    actions.append(button);
+    container.replaceChildren(row);
   };
 
   const rescanGameFolder = (folderId: string): void => {
@@ -2781,20 +2857,47 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   let pluginJournalById = new Map<string, PluginJournalEntryView[] | null>();
   let openPluginLogId: string | null = null;
 
-  // "Add an emulator" and the runner profiles inside Plugins & Runners own
+  // "Add an emulator" and the runner profiles inside Settings › Plugins own
   // their whole subtree (`runner-view.ts`): this call is the only thing this
   // file does with them beyond toggling the panel's `hidden` attribute.
   const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
   mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
   // Game streaming has one place: a guided setup behind its plugin's row. It
   // owns its subtree the same way, and this file only opens and closes it.
+  const gameStreamClient = createGameStreamClient();
   const gamestreamSetup = createGameStreamSetup({
     runners: runnerManager,
-    stream: createGameStreamClient(),
+    stream: gameStreamClient,
     showToast,
     openLibrary: () => navigate({ page: "library" }),
   });
-  mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
+  // Its ⋯ menu also carries the plugin's own entries (update, removal, the
+  // version line): there is no other detail above it to hold them.
+  const gamestreamView = mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup, {
+    pluginMenu: () => {
+      const plugin = pluginManager.catalog().installed.find((entry) => entry.id === GAMESTREAM_PLUGIN_ID);
+      return plugin ? pluginMenuEntries(plugin, { withUpdate: true }) : [];
+    },
+  });
+  // Whether Settings is showing the Plugins section. The detail open by
+  // default runs things (the streaming setup asks the PC, Switch reads the
+  // Mac), so nothing is opened by default anywhere else.
+  let pluginsSectionShown = false;
+  /** What Switch's checklist said last; its card shows how it stands. */
+  let nxnativeStatus: NxnativeStatus | null = null;
+  /** The saved gaming PC, for the streaming card before its setup is opened. */
+  let streamingHost = "";
+  // The streaming card counts the games an import brings in as they land.
+  runnerManager.onChange(() => {
+    if (pluginsSectionShown) renderDiscoveredPlugins();
+  });
+  gamestreamSetup.onChange(() => {
+    const view = gamestreamSetup.snapshot();
+    if (view.opened && !view.loading && view.host.saved !== streamingHost) {
+      streamingHost = view.host.saved;
+      renderDiscoveredPlugins();
+    }
+  });
   // Native Switch games (nxnative): a Mac-only built-in, set up and built from
   // its own panel. Its build events are listened to from startup, so a build
   // left running behind another page still lands in the library.
@@ -2810,6 +2913,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         toast: (message) => showToast(message),
         libraryChanged: () => void refreshLibrary(),
         play: (gameId) => void launchGame(gameId),
+        statusChanged: (status) => {
+          nxnativeStatus = status;
+          renderDiscoveredPlugins();
+        },
         removed: () => {
           nxnativeInstalled = false;
           state.pluginView = "list";
@@ -2859,10 +2966,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   /** The registry plugin whose detail is open beside the list, if any. */
   const openManagedPluginId = (): string | null => {
-    if (state.pluginView === "game-streaming") return GAMESTREAM_PLUGIN_ID;
-    return state.pluginView.startsWith(MANAGED_PLUGIN_VIEW)
-      ? state.pluginView.slice(MANAGED_PLUGIN_VIEW.length)
-      : null;
+    const view = currentPluginView();
+    if (view === "game-streaming") return GAMESTREAM_PLUGIN_ID;
+    return view.startsWith(MANAGED_PLUGIN_VIEW) ? view.slice(MANAGED_PLUGIN_VIEW.length) : null;
   };
 
   /**
@@ -2913,7 +3019,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         ? { tone: "warn", label: progress?.message || formatInstallLabel(progress, entry) }
         : null,
       action,
-      selected: installed && state.pluginView === view,
+      selected: installed && currentPluginView() === view,
       progress: busy ? pluginPercent(progress) : null,
     });
     card.classList.add("plugin-card--catalog");
@@ -2924,27 +3030,46 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return card;
   };
 
+  /** Game streaming's card: whether it is set up, then the app and the PC. */
+  const streamingCard = (): ReturnType<typeof streamingCardStatus> => {
+    const runner = runnerManager.runners().find((entry) => entry.id === GAMESTREAM_PLUGIN_ID);
+    return streamingCardStatus({
+      issue: null,
+      profile: runner?.profiles[0] ?? null,
+      savedHost: streamingHost,
+    });
+  };
+
   const renderManagedPluginCard = (plugin: InstalledPluginView): HTMLElement => {
     const trouble = pluginTrouble(plugin);
     const update = pluginManager.progressFor(plugin.id);
     const view = managedPluginView(plugin.id);
+    // What is wrong with the plugin itself comes first; otherwise streaming
+    // says how far its setup got, and any other plugin is simply ready.
+    const streaming = plugin.id === GAMESTREAM_PLUGIN_ID ? streamingCard() : null;
+    const status =
+      streaming && !trouble && !isPluginInstallBusy(update)
+        ? streaming.status
+        : managedPluginStatus({ trouble, updating: isPluginInstallBusy(update) });
     const card = pluginCard({
       id: plugin.id,
       name: plugin.name,
       category: pluginCategory(plugin.id, plugin.name, plugin.extensions),
+      status,
       lines: [
         plugin.updateTo
           ? t("app.plugin.versionAvailable", { version: plugin.updateTo })
-          : t("app.plugin.installed"),
-        plugin.trusted ? t("app.plugins.official") : t("app.plugins.community"),
+          : streaming?.detail ||
+            (plugin.trusted ? t("app.plugins.official") : t("app.plugins.community")),
       ],
       open: { view, label: t("app.plugins.openNamed", { name: plugin.name }) },
-      flag: trouble
-        ? { tone: "warn", label: trouble }
-        : plugin.updateTo
-          ? { tone: "info", label: t("app.plugin.updateTo", { version: plugin.updateTo }) }
-          : null,
-      selected: state.pluginView === view,
+      flag:
+        status.tone === "warn"
+          ? { tone: "warn", label: status.text }
+          : plugin.updateTo
+            ? { tone: "info", label: t("app.plugin.updateTo", { version: plugin.updateTo }) }
+            : null,
+      selected: currentPluginView() === view,
       progress: update?.phase === "downloading" ? pluginPercent(update) : null,
     });
     card.dataset.pluginManaged = plugin.id;
@@ -2972,16 +3097,156 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return card;
   };
 
-  /** A built-in's card: its detail is always one of the panels in the page. */
-  const renderBuiltInCard = (id: PluginId | "winlator", name: string, label: string): HTMLElement =>
-    pluginCard({
-      id,
-      name,
-      category: pluginCategory(id, name),
-      lines: [t("app.plugins.builtIn")],
-      open: { view: id, label },
-      selected: state.pluginView === id,
+  interface BuiltInCard {
+    id: PluginId | "winlator";
+    name: string;
+    label: string;
+    status?: ReturnType<typeof wineCardStatus>;
+    line?: string;
+    /** Why the status is amber, when there is more to say than its words. */
+    reason?: string;
+  }
+
+  /**
+   * The built-ins, in the order their cards are listed. Wine is the
+   * desktop's built-in runner; a phone has Winlator instead, set up where its
+   * games come from, under Libraries.
+   */
+  const builtInCards = (): BuiltInCard[] => {
+    const winlator = isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
+    const cards: BuiltInCard[] = [];
+    if (platformFeatures.localRunners && !winlator) {
+      const wine = state.wineSettings;
+      const profiles = wine.profiles.length;
+      cards.push({
+        id: "wine",
+        name: "Wine",
+        label: t("app.plugins.openWine"),
+        status: wineCardStatus(wine.runner, wine.loading),
+        line: profiles > 0 ? profileCount(profiles) : (wine.runner?.version ?? ""),
+        reason: wine.runner?.message,
+      });
+    }
+    if (nxnativeAvailable && nxnativeInstalled && !winlator) {
+      cards.push({
+        id: "nxnative",
+        name: t("nxnative.name"),
+        label: t("nxnative.open"),
+        status: nxnativeCardStatus(nxnativeStatus),
+        line: nxnativeStatus?.checkout ?? t("app.plugins.builtIn"),
+      });
+    }
+    // Its free sources need no key, so it always works.
+    cards.push({
+      id: "wallpaper-searcher",
+      name: "Wallpaper Searcher",
+      label: t("app.plugins.openWallpaper"),
+      status: { text: t("app.plugins.ready"), tone: "ok" },
+      line: t("app.plugins.builtIn"),
     });
+    if (winlator) {
+      cards.push({ id: "winlator", name: "Winlator", label: t("app.plugins.setupWinlator"), line: t("app.plugins.builtIn") });
+    }
+    return cards;
+  };
+
+  /** A built-in's card: its detail is always one of the panels in the page. */
+  const renderBuiltInCard = (entry: BuiltInCard): HTMLElement =>
+    pluginCard({
+      id: entry.id,
+      name: entry.name,
+      category: pluginCategory(entry.id, entry.name),
+      status: entry.status ?? null,
+      lines: [entry.line ?? ""],
+      open: { view: entry.id, label: entry.label },
+      flag:
+        entry.status?.tone === "warn"
+          ? { tone: "warn", label: entry.reason || entry.status.text }
+          : null,
+      selected: currentPluginView() === entry.id,
+    });
+
+  /** Every card's view, in list order. */
+  const pluginCardViews = (): string[] => [
+    ...builtInCards().map((entry) => entry.id),
+    ...pluginManager.catalog().installed.map((plugin) => managedPluginView(plugin.id)),
+  ];
+
+  /**
+   * The detail open beside the list: the one picked, or the first plugin's
+   * when none was. Only while the Plugins section is on screen; anywhere else
+   * nothing is open.
+   */
+  function currentPluginView(): PluginView {
+    if (!pluginsSectionShown) return state.pluginView;
+    // Winlator's card leads to Libraries; it is never opened by default.
+    return defaultPluginView<string>(state.pluginView, pluginCardViews(), (view) => view === "winlator") as PluginView;
+  }
+
+  /**
+   * A registry plugin's rare actions, for its ⋯ menu: update when the header
+   * does not already offer it, automatic updates, removal, the debug tools
+   * with Beta features on, then the version line.
+   */
+  const pluginMenuEntries = (
+    plugin: InstalledPluginView,
+    options: { withUpdate?: boolean } = {},
+  ): MoreMenuEntry[] => {
+    const debug = state.preferences.betaFeatures;
+    const automatic = pluginManager.updatePolicy().automatic;
+    const entries: MoreMenuEntry[] = [];
+    if (options.withUpdate) {
+      if (plugin.updateTo && !isPluginInstallBusy(pluginManager.progressFor(plugin.id))) {
+        entries.push({
+          kind: "item",
+          label: t("app.plugin.updateTo", { version: plugin.updateTo }),
+          icon: "download",
+          data: { pluginUpdate: plugin.id },
+        });
+      }
+      if (pluginHealthById.get(plugin.id)?.degraded) {
+        entries.push({ kind: "item", label: t("app.plugin.resume"), icon: "refresh", data: { pluginResume: plugin.id } });
+      }
+    }
+    entries.push({
+      kind: "item",
+      label: automatic ? t("app.plugins.turnOffAutoUpdates") : t("app.plugins.turnOnAutoUpdates"),
+      icon: "download",
+      data: { pluginAutoUpdates: automatic ? "off" : "on" },
+    });
+    if (debug && plugin.rollbackTo) {
+      entries.push({
+        kind: "item",
+        // Said in the entry itself, before the click that would act on it: a
+        // rollback may put a development build back in place of a signed one.
+        label:
+          plugin.rollbackTrusted === false
+            ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
+            : t("app.plugin.rollback", { version: plugin.rollbackTo }),
+        icon: "arrow-left",
+        data: { pluginRollback: plugin.id },
+      });
+    }
+    if (debug) {
+      entries.push({
+        kind: "item",
+        label: openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog"),
+        icon: "book",
+        data: { pluginLog: plugin.id },
+      });
+    }
+    entries.push(
+      { kind: "separator" },
+      { kind: "item", label: t("app.plugin.uninstall"), icon: "trash", danger: true, data: { pluginUninstall: plugin.id } },
+      {
+        kind: "meta",
+        text: pluginMetaLine({ version: plugin.version, trusted: plugin.trusted, automatic }),
+      },
+    );
+    return entries;
+  };
+  /** A registry plugin's ⋯ stays open through the repaints its own actions cause. */
+  let managedMenuOpen = false;
 
   /** The header every detail panel opens with: back (narrow only), name, pill. */
   const pluginDetailHeader = (
@@ -3035,9 +3300,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const panel = refs.pluginManagedPanel;
     const id = openManagedPluginId();
     const plugin = id ? pluginManager.catalog().installed.find((entry) => entry.id === id) : undefined;
-    panel.hidden = !plugin;
-    if (!plugin) {
+    // Streaming's own panel is the whole detail (its ⋯ holds the plugin's
+    // entries); only its log, with Beta features on, opens here.
+    const streaming = currentPluginView() === "game-streaming";
+    panel.hidden = !plugin || (streaming && openPluginLogId !== plugin.id);
+    if (!plugin || panel.hidden) {
       panel.replaceChildren();
+      managedMenuOpen = false;
+      return;
+    }
+    if (streaming) {
+      panel.replaceChildren(renderPluginLogPanel(plugin.id));
       return;
     }
     const debug = state.preferences.betaFeatures;
@@ -3064,6 +3337,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         : t("app.plugin.updating");
       headerActions.push(update);
     }
+    headerActions.push(
+      pluginMoreMenu({
+        label: t("app.plugins.more"),
+        entries: pluginMenuEntries(plugin),
+        open: managedMenuOpen,
+        onToggle: (open) => {
+          managedMenuOpen = open;
+        },
+      }),
+    );
     const category = pluginCategory(plugin.id, plugin.name, plugin.extensions);
     const header = pluginDetailHeader(plugin.id, plugin.name, category, headerActions);
 
@@ -3103,39 +3386,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (plugin.extensions.length) facts.append(pluginFact(t("app.plugins.provides"), plugin.extensions.join(", ")));
     }
 
-    const footer = document.createElement("div");
-    footer.className = "plugin-detail__footer";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "plugin-text-button plugin-text-button--danger";
-    remove.dataset.pluginUninstall = plugin.id;
-    remove.setAttribute("aria-label", t("app.plugin.uninstallNamed", { name: plugin.name }));
-    remove.textContent = t("app.plugin.uninstall");
-    footer.append(remove);
-    if (debug && plugin.rollbackTo) {
-      const rollback = document.createElement("button");
-      rollback.type = "button";
-      rollback.className = "plugin-text-button";
-      rollback.dataset.pluginRollback = plugin.id;
-      // Said in the button itself, before the click that would act on it: a
-      // rollback may put a development build back in place of a signed one.
-      rollback.textContent =
-        plugin.rollbackTrusted === false
-          ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
-          : t("app.plugin.rollback", { version: plugin.rollbackTo });
-      footer.append(rollback);
-    }
-    if (debug) {
-      const log = document.createElement("button");
-      log.type = "button";
-      log.className = "plugin-text-button";
-      log.dataset.pluginLog = plugin.id;
-      log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
-      log.textContent = openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog");
-      footer.append(log);
-    }
-
-    panel.replaceChildren(header, facts, footer);
+    panel.replaceChildren(header, facts);
     if (debug && openPluginLogId === plugin.id) panel.append(renderPluginLogPanel(plugin.id));
   };
 
@@ -3282,22 +3533,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // The list beside the detail: the built-ins first, then whatever the
   // registry installed. Re-rendered whole: a card is cheap, and its selected
   // state follows the open view.
-  const renderDiscoveredPlugins = (): void => {
-    const winlator = isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
-    const cards: HTMLElement[] = [];
-    // Wine is the desktop's built-in runner; a phone has Winlator instead.
-    if (platformFeatures.localRunners && !winlator) {
-      cards.push(renderBuiltInCard("wine", "Wine", t("app.plugins.openWine")));
-    }
-    if (nxnativeAvailable && nxnativeInstalled && !winlator) {
-      cards.push(renderBuiltInCard("nxnative", t("nxnative.name"), t("nxnative.open")));
-    }
-    cards.push(renderBuiltInCard("wallpaper-searcher", "Wallpaper Searcher", t("app.plugins.openWallpaper")));
-    // On Android, Winlator is the runner Orivo ships with: it is set up where
-    // its games come from, under Libraries.
-    if (winlator) cards.push(renderBuiltInCard("winlator", "Winlator", t("app.plugins.setupWinlator")));
+  function renderDiscoveredPlugins(): void {
     const installed = pluginManager.catalog().installed;
-    cards.push(...installed.map(renderManagedPluginCard));
+    const cards = [...builtInCards().map(renderBuiltInCard), ...installed.map(renderManagedPluginCard)];
     refs.pluginsInstalledList.replaceChildren(...cards);
     renderManagedPluginDetail();
 
@@ -3305,7 +3543,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (ids.join(",") !== pluginHealthIdsKey) {
       void refreshPluginHealth(ids);
     }
-  };
+  }
 
   /**
    * What Orivo is being built towards, named rather than promised in a
@@ -3432,10 +3670,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     ) {
       state.pluginView = "list";
     }
-    const view = state.pluginView;
+    const view = currentPluginView();
     renderDiscoveredPlugins();
-    refs.pluginsCatalogPanel.toggleAttribute("data-detail-open", view !== "list");
-    refs.pluginsDetailEmpty.hidden = view !== "list";
+    // Only a pick takes the list's place in a narrow window: the one open by
+    // default shows beside the list, or not at all.
+    refs.pluginsCatalogPanel.toggleAttribute("data-detail-open", state.pluginView !== "list");
     refs.wallpaperPluginPanel.hidden = view !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = view !== "wine";
     refs.nxnativePanel.hidden = view !== "nxnative" || !nxnativePanel || !nxnativeInstalled;
@@ -3450,6 +3689,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } else if (!settingUp && gamestreamSetupOpen) {
       gamestreamSetupOpen = false;
       gamestreamSetup.close();
+    } else if (settingUp) {
+      // The plugin's own ⋯ entries (an update, automatic updates) may have changed.
+      gamestreamView.render();
     }
     const managed = installed.find((plugin) => plugin.id === openManagedPluginId());
     const runs = Boolean(managed?.extensions.some((kind) => kind.toLocaleLowerCase().includes("runner")));
@@ -3460,13 +3702,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (view !== shownPluginView) {
       shownPluginView = view;
       playPluginDetailEntrance();
+      // Opened, by a pick or by default: Switch reads the Mac again.
+      if (view === "nxnative") nxnativePanel?.open();
     }
 
     // An iOS build downloads no code and starts no game itself, so what is left
     // of the section there is what is built in and works: the wallpaper search.
     refs.pluginsCatalogGroup.hidden = !platformFeatures.downloadablePlugins;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
-    refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
     const matches = available.filter((entry) => matchesCatalog(entry, term, state.pluginCategoryFilter));
@@ -3486,6 +3729,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       available.length === 0
         ? t("app.plugins.noneToInstall")
         : t("app.plugins.noMatch");
+  };
+
+  /**
+   * What the cards say before their detail is ever opened: the PC streaming
+   * uses, and Switch's checklist. Both are reads; nothing is set up here.
+   */
+  const loadPluginCardFacts = async (signal: AbortSignal): Promise<void> => {
+    const [stream, nxnative] = await Promise.all([
+      gameStreamClient.load(signal).catch(() => null),
+      nxnativeAvailable && nxnativeInstalled
+        ? invoke<NxnativeStatus>("nxnative_status").catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    if (signal.aborted) return;
+    if (stream && !gamestreamSetup.snapshot().opened) streamingHost = stream.host.trim();
+    if (nxnative) nxnativeStatus = nxnative;
+    renderDiscoveredPlugins();
   };
 
   const pluginName = (pluginId: string): string => {
@@ -3523,10 +3783,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   const openPluginDetail = (id: PluginView): void => {
+    // A second press on the open card reads it again; the first is read as it opens.
+    const again = currentPluginView() === id;
     state.pluginView = id;
     renderPluginList();
     renderWineSettingsPanel();
-    if (id === "nxnative") nxnativePanel?.open();
+    if (id === "nxnative" && again) nxnativePanel?.open();
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
@@ -3534,9 +3796,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const renderWineSettingsPanel = (): void => {
     const settings = state.wineSettings;
-    refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    const open = currentPluginView() === "wine";
+    refs.wineSettingsPanel.hidden = !open;
     refs.wineSettingsPanel.setAttribute("aria-busy", String(settings.loading));
-    if (state.pluginView !== "wine") {
+    if (!open) {
       return;
     }
 
@@ -3705,6 +3968,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (render) {
         renderWineSettingsPanel();
       }
+      renderDiscoveredPlugins();
       return;
     }
 
@@ -3725,6 +3989,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (render) {
       renderWineSettingsPanel();
     }
+    // The Wine card says whether the runner is ready.
+    renderDiscoveredPlugins();
   };
 
   const setWineProfileEnabled = async (profileId: string, enabled: boolean): Promise<void> => {
@@ -4111,11 +4377,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     provider: string | null;
     idle: string;
     hover?: string;
+    /**
+     * The signed-in account. A connected card states the games it brought in
+     * rather than who is signed in, so the account is a tooltip away.
+     */
+    account?: string;
   }): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "source-account-row__account";
-    button.setAttribute("aria-label", options.hover ? `${options.idle} — ${options.hover}` : options.idle);
+    const said = options.account ? `${options.account} · ${options.idle}` : options.idle;
+    button.setAttribute("aria-label", options.hover ? `${said} — ${options.hover}` : said);
+    if (options.account) {
+      button.title = options.account;
+      // The count reads as a state, in the green every healthy state wears;
+      // the outline only comes back under the pointer, with "Disconnect".
+      button.classList.add("source-account-row__account--count");
+    }
     if (options.provider) {
       button.dataset.sourceAction = options.action;
       button.dataset.sourceProvider = options.provider;
@@ -4123,7 +4401,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       button.dataset.steamRowAction = options.action;
     }
     const name = document.createElement("span");
-    name.className = "source-account-row__account-name";
+    name.className = options.account
+      ? "source-account-row__account-name provider-health provider-health--available"
+      : "source-account-row__account-name";
     name.textContent = options.idle;
     button.append(name);
     if (options.hover) {
@@ -4177,9 +4457,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         sourceAccountButton({
           action: "disconnect",
           provider: null,
+          idle: gameCountLabel(sourceGameCount(state.games, ["steam"])),
           // The persona name is the account's own name; the id stands in
           // whenever Steam showed no profile to take one from.
-          idle: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
+          account: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
           hover: t("app.common.disconnect"),
         }),
       );
@@ -4366,14 +4647,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       String(state.sourceAccounts.loading || state.sourceAccounts.busy.size > 0),
     );
 
-    if (!isTauriRuntime()) {
-      const hint = document.createElement("p");
-      hint.className = "settings-hint";
-      hint.textContent = t("app.source.desktopOnly");
-      body.append(hint);
-      return;
-    }
-
     if (state.sourceAccounts.notice && state.sourceAccounts.noticeProvider === null) {
       body.append(sourceNoticeElement());
     }
@@ -4490,8 +4763,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           sourceAccountButton({
             action: "disconnect",
             provider: descriptor.provider,
+            // What the store brought in; the paired card counts both stores.
+            idle: gameCountLabel(
+              sourceGameCount(
+                state.games,
+                pairedStore ? [descriptor.provider, pairedStore.provider] : [descriptor.provider],
+              ),
+            ),
             // Who you are signed in as: the account, not a verdict about it.
-            idle: status.accountLabel || t("app.common.connectedState"),
+            account: status.accountLabel || t("app.common.connectedState"),
             hover: t("app.common.disconnect"),
           }),
         );
@@ -5546,22 +5826,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderGameStartPreference = (): void => {
     const row = root.querySelector<HTMLElement>("#preference-game-start-row");
-    const select = root.querySelector<HTMLSelectElement>("#preference-game-start");
     if (row) row.hidden = !platformFeatures.stepsAside;
-    if (select) select.value = state.preferences.onGameStart;
+    syncSegmented(root.querySelector<HTMLElement>("[data-segmented='onGameStart']"), state.preferences.onGameStart);
   };
 
   const renderPreferenceControls = (): void => {
-    const startPage = root.querySelector<HTMLSelectElement>("#preference-start-page");
+    const segmented = (preference: string): HTMLElement | null =>
+      root.querySelector<HTMLElement>(`[data-segmented='${preference}']`);
+    syncSegmented(segmented("startPage"), state.preferences.startPage);
+    syncSegmented(segmented("language"), state.preferences.language);
+    syncSegmented(segmented("motion"), state.preferences.motion);
     const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
-    if (startPage) startPage.value = state.preferences.startPage;
     if (storeRegion) storeRegion.value = state.preferences.storeRegion;
-    const language = root.querySelector<HTMLSelectElement>("#preference-language");
-    if (language) language.value = state.preferences.language;
     renderGameStartPreference();
-    for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
-      input.checked = input.value === state.preferences.motion;
-    }
     const showcase = root.querySelector<HTMLInputElement>("#preference-show-showcase");
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
     const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
@@ -5585,7 +5862,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderProviderStatuses = (): void => {
     const list = root.querySelector<HTMLElement>("#provider-status-list");
-    const group = root.querySelector<HTMLElement>(".source-providers");
+    const soonRow = root.querySelector<HTMLElement>("#provider-soon-row");
     // Steam's row carries its health dot, so it has to be redrawn whenever
     // these statuses land.
     renderSteamSourceRow();
@@ -5597,9 +5874,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (provider) =>
         provider.provider !== "steam" && providerStatusForSource(provider.provider) === null,
     );
-    if (group) group.hidden = remaining.length === 0;
+    // A store whose feed answers is a card beside the others; the ones that
+    // can only say "Soon" share one line of logos under the grid, because a
+    // card each made a roadmap the loudest thing on the page.
+    const live = remaining.filter(
+      (provider) => provider.health === "available" || provider.health === "degraded",
+    );
+    const soon = remaining.filter((provider) => !live.includes(provider));
     const fragment = document.createDocumentFragment();
-    for (const provider of remaining) {
+    for (const provider of live) {
       const row = document.createElement("article");
       row.className = "provider-status-row";
       row.dataset.settingsSearchable = "";
@@ -5619,6 +5902,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       fragment.append(row);
     }
     list.replaceChildren(fragment);
+    if (soonRow) {
+      soonRow.hidden = soon.length === 0;
+      const label = document.createElement("span");
+      label.className = "source-soon__label";
+      label.textContent = providerHealthLabel("not-configured");
+      const items = soon.map((provider) => {
+        const item = document.createElement("span");
+        item.className = "source-soon__item";
+        item.dataset.soonProvider = provider.provider;
+        item.title = provider.message || provider.label;
+        const mark = document.createElement("span");
+        mark.className = "source-soon__mark";
+        mark.setAttribute("aria-hidden", "true");
+        mark.innerHTML = providerLogoMarkup(provider.provider);
+        const name = document.createElement("span");
+        name.textContent = provider.label;
+        item.append(mark, name);
+        return item;
+      });
+      soonRow.replaceChildren(label, ...items);
+    }
     // The connectable rows carry the rest of the health chips, so they have to
     // repaint whenever provider status lands.
     renderSourceAccountsPanel();
@@ -6419,6 +6723,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!storeFoldersPanel || !isTauriRuntime()) return;
     renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
   };
+  root.querySelector<HTMLElement>("#game-folders-card")?.addEventListener("click", (event) => {
+    const action = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]")
+      ?.dataset.gameFolderAction;
+    if (action === "add") {
+      void chooseGameFolder();
+    } else if (action === "manage") {
+      const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+      if (inline) inline.hidden = !inline.hidden;
+      renderGameFoldersCard();
+    }
+  });
   refs.gameFoldersPanel.addEventListener("click", (event) => {
     const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]");
     const action = button?.dataset.gameFolderAction;
@@ -6506,10 +6821,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     if (action === "refresh") {
       void refreshSourceAccounts();
-      return;
-    }
-    if (action === "resync") {
-      void resyncEveryLibrary();
       return;
     }
     const provider = trigger.dataset.sourceProvider ?? "";
@@ -6980,6 +7291,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // Consumed whatever the section was: a request that missed its page is
       // stale, not pending.
       pendingPluginView = null;
+      pluginsSectionShown = route.section === "plugins";
       renderSettingsRoute(route, enteringPage);
       renderPluginList();
       renderWineSettingsPanel();
@@ -6998,6 +7310,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // but its status still has to be read, or the row cannot say whether
         // Steam is connected.
         renderSteamSourceRow();
+        renderGameFoldersCard();
         void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
@@ -7033,6 +7346,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
+      if (route.section === "plugins") void loadPluginCardFacts(activation.signal);
       if (activation.restoreState) refs.settingsPage.scrollTop = activation.restoreState.scrollTop;
     },
     deactivate(): PageRestoreState | null {
@@ -7040,6 +7354,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       settingsRequest += 1;
       const scrollTop = refs.settingsPage.scrollTop;
       state.pluginView = "list";
+      pluginsSectionShown = false;
       state.wineSettings.pendingDeleteProfileId = "";
       renderPluginList();
       renderWineSettingsPanel();
@@ -7258,6 +7573,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void rollbackInstalledPlugin(rollbackId);
       return;
     }
+    const autoUpdates = target?.closest<HTMLButtonElement>("[data-plugin-auto-updates]")?.dataset
+      .pluginAutoUpdates;
+    if (autoUpdates) {
+      // The controller repaints the menu with the host's own value either way;
+      // this only needs to say why it did not stick.
+      void pluginManager.setAutomaticUpdates(autoUpdates === "on").catch((error) => {
+        showToast(pluginErrorMessage(error));
+      });
+      return;
+    }
     const logId = target?.closest<HTMLButtonElement>("[data-plugin-log]")?.dataset.pluginLog;
     if (logId) {
       void togglePluginLog(logId);
@@ -7272,6 +7597,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         section: section as SettingsSection,
         attachGameId: null,
       });
+      return;
+    }
+
+    // A segment already lit is not a change: pressing it again saves nothing
+    // and, for the language, does not reload the page.
+    const segment = segmentChoice(target);
+    if (segment && target?.closest("[aria-pressed='true']") === null) {
+      if (segment.preference === "startPage") {
+        void savePreferences({ startPage: segment.value as StartPage });
+      } else if (segment.preference === "language") {
+        void savePreferences({ language: segment.value as LanguagePreference });
+      } else if (segment.preference === "onGameStart") {
+        void savePreferences({ onGameStart: segment.value as GameStartAction });
+      } else if (segment.preference === "motion") {
+        void savePreferences({ motion: segment.value as MotionPreference });
+      }
       return;
     }
 
@@ -7302,30 +7643,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   refs.settingsPage.addEventListener("change", (event) => {
     const target = event.target;
     if (target instanceof HTMLSelectElement) {
-      if (target.id === "preference-start-page") {
-        void savePreferences({ startPage: target.value as StartPage });
-      } else if (target.id === "preference-store-region") {
+      if (target.id === "preference-store-region") {
         void savePreferences({ storeRegion: target.value as StoreRegion });
-      } else if (target.id === "preference-language") {
-        void savePreferences({ language: target.value as LanguagePreference });
-      } else if (target.id === "preference-game-start") {
-        void savePreferences({ onGameStart: target.value as GameStartAction });
       }
       return;
-    }
-    if (
-      target instanceof HTMLInputElement &&
-      target.name === "motion-preference" &&
-      target.checked
-    ) {
-      void savePreferences({ motion: target.value as MotionPreference });
-    }
-    if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
-      // The controller repaints the checkbox back to the host's own value
-      // either way; this only needs to say why it did not stick.
-      void pluginManager.setAutomaticUpdates(target.checked).catch((error) => {
-        showToast(pluginErrorMessage(error));
-      });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -8803,36 +9124,30 @@ function shell(): string {
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
-              <!-- One list, no cards: the section's rows sit directly on the
-                   page surface, so the only outline on screen is the one
-                   around the settings themselves. -->
-              <div class="settings-card" data-settings-searchable>
+              <!-- Plates of one-line rows: a choice of two or three words is
+                   a segmented pill, on/off is a switch, a longer list is its
+                   value and a chevron. What each does is in the row's title,
+                   not under it. -->
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-start-page">
-                    <strong>${t("settings.startPage.label")}</strong>
-                    <small>${t("settings.startPage.hint")}</small>
-                  </label>
-                  <select id="preference-start-page" class="settings-select">
-                    <option value="library">${t("settings.startPage.library")}</option>
-                    <option value="store">${t("settings.startPage.store")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${t("language.hint")}"><strong id="preference-language-label">${t("language.label")}</strong></span>
+                  ${segmentedControl("language", "preference-language-label", [
+                    { value: "system", label: t("language.system") },
+                    ...LANGUAGES.map((code) => ({ value: code, label: LANGUAGE_NAMES[code], lang: code })),
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-language">
-                    <strong>${t("language.label")}</strong>
-                    <small>${t("language.hint")}</small>
-                  </label>
-                  <select id="preference-language" class="settings-select">
-                    <option value="system">${t("language.system")}</option>
-                    ${LANGUAGES.map((code) => `<option value="${code}" lang="${code}">${LANGUAGE_NAMES[code]}</option>`).join("")}
-                  </select>
+                  <span class="settings-row__copy" title="${t("settings.startPage.hint")}"><strong id="preference-start-page-label">${t("settings.startPage.label")}</strong></span>
+                  ${segmentedControl("startPage", "preference-start-page-label", [
+                    { value: "library", label: t("settings.startPage.library") },
+                    { value: "store", label: t("settings.startPage.store") },
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-store-region">
+                  <label class="settings-row__copy" for="preference-store-region" title="${t("settings.storeRegion.hint")}">
                     <strong>${t("settings.storeRegion.label")}</strong>
-                    <small>${t("settings.storeRegion.hint")}</small>
                   </label>
-                  <select id="preference-store-region" class="settings-select">
+                  <select id="preference-store-region" class="settings-select settings-select--value">
                     <option value="automatic">${t("settings.storeRegion.automatic")}</option>
                     <option value="us">${t("app.region.us")}</option>
                     <option value="ca">${t("app.region.ca")}</option>
@@ -8846,22 +9161,52 @@ function shell(): string {
                 <!-- Desktop only: a phone switches to the game's app by itself, so
                      there is nothing to choose. Shown once the host says it can. -->
                 <div class="settings-row" id="preference-game-start-row" hidden>
-                  <label class="settings-row__copy" for="preference-game-start">
-                    <strong>${t("settings.gameStart.label")}</strong>
-                    <small>${stepAsideCopy().hint}</small>
-                  </label>
-                  <select id="preference-game-start" class="settings-select">
-                    <option value="step-aside">${stepAsideCopy().action}</option>
-                    <option value="stay">${t("settings.gameStart.stay")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${stepAsideCopy().hint}"><strong id="preference-game-start-label">${t("settings.gameStart.label")}</strong></span>
+                  ${segmentedControl("onGameStart", "preference-game-start-label", [
+                    { value: "step-aside", label: stepAsideCopy().action },
+                    { value: "stay", label: t("settings.gameStart.stay") },
+                  ])}
                 </div>
+              </div>
+
+              <p class="settings-group__label settings-group__label--plain">${t("settings.general.display")}</p>
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("settings.reset.label")}</strong>
-                    <small>${t("settings.reset.hint")}</small>
-                  </div>
-                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">${t("settings.reset.label")}</button>
+                  <span class="settings-row__copy"><strong id="motion-preference-title">${t("app.motion.title")}</strong></span>
+                  ${segmentedControl("motion", "motion-preference-title", [
+                    { value: "full", label: t("app.motion.full"), title: t("app.motion.fullHint") },
+                    { value: "system", label: t("app.motion.system"), title: t("app.motion.systemHint") },
+                    { value: "reduced", label: t("app.motion.reduced"), title: t("app.motion.reducedHint") },
+                  ])}
                 </div>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.autoplayHint")}">
+                  <input type="checkbox" id="preference-trailer-autoplay" />
+                  <span><strong>${t("app.appearance.autoplay")}</strong></span>
+                </label>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.soundHint")}">
+                  <input type="checkbox" id="preference-trailer-sound" />
+                  <span><strong>${t("app.appearance.sound")}</strong></span>
+                </label>
+              </div>
+
+              <!-- Debug and unfinished surfaces: one closed row until asked for. -->
+              <details class="settings-card settings-card--plate settings-disclosure" data-settings-searchable>
+                <summary class="settings-row" data-nav-focusable>
+                  <span class="settings-row__copy"><strong>${t("settings.experimental.label")}</strong></span>
+                  <span class="settings-row__value">${t("settings.experimental.count", { count: EXPERIMENTAL_TOGGLES.length })}</span>
+                  ${icon("chevron-right", "settings-disclosure__chevron")}
+                </summary>
+                ${EXPERIMENTAL_TOGGLES.map(
+                  ([id, label, hint]) => `
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t(hint)}">
+                  <input type="checkbox" id="${id}" />
+                  <span><strong>${t(label)}</strong></span>
+                </label>`,
+                ).join("")}
+              </details>
+
+              <div class="settings-card__header settings-card__header--start">
+                <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences" title="${t("settings.reset.hint")}">${t("settings.reset.label")}</button>
               </div>
             </section>
 
@@ -8875,17 +9220,13 @@ function shell(): string {
                    page. Its one extra affordance, signing in, expands under its
                    row. -->
               <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}">
-                <!-- No title, no pitch: the rows below are their own heading. -->
-                <header class="settings-card__header settings-card__header--actions">
-                  <!-- One refresh, not two: re-reading the connected accounts and
-                       re-syncing their libraries are the same wish from where the
-                       user stands, and a second, icon-only button next to this one
-                       only ever asked which of the two they meant. -->
-                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">${t("app.libraries.refreshAll")}</button>
-                </header>
+                <!-- No title, no pitch and no "Refresh all": the cards are their
+                     own heading, and a connected card carries its own sync glyph,
+                     which is the same wish aimed at one store. -->
 
-                <!-- Steam and every other store share one grid of two or three
-                     columns: to the reader they are all the same kind of row. -->
+                <!-- Steam and every other store share one grid of cards: to the
+                     reader they are all the same kind of thing. The games
+                     folders end it, as the one source that is not a store. -->
                 <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
@@ -8895,18 +9236,22 @@ function shell(): string {
                 </div>
 
                 <div id="source-accounts-body" class="source-accounts-body"></div>
+                <div id="provider-status-list" class="provider-status-list"></div>
+                <div id="game-folders-card" class="game-folders-card"></div>
+                <!-- Desktop: the watched games folders (game-folders.ts), opened
+                     from the Folders card. The library's menu keeps one "Games
+                     folders" entry; the list, rescans and removals live here. -->
+                <div id="game-folders-inline" class="steam-inline-panel game-folders-inline" hidden>
+                  <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
                 </div>
-                <div class="source-providers">
-                  <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
+                <!-- The stores with nothing to connect yet: one quiet line of
+                     logos, not a card each. -->
+                <div id="provider-soon-row" class="source-soon" hidden></div>
               </section>
               <!-- Mac App Store edition only (store-folders.ts): the sandbox
                    reads Steam's and Epic's folders once the player allows it. -->
               <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
-              <!-- Desktop: the watched games folders (game-folders.ts). The
-                   library's menu keeps one "Games folders" entry; the list,
-                   rescans and removals live here. -->
-              <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside
@@ -8931,18 +9276,14 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
-              <!-- No card header: the page title already says "Plugins &
-                   Runners". The plugins Orivo has sit on the left and open
-                   their detail on the right; the catalogue runs underneath. -->
+              <!-- No card header: the page title already says "Plugins". The
+                   plugins Orivo has sit on the left and open their detail on
+                   the right (the first one when none was picked); the
+                   catalogue runs underneath. -->
               <section id="plugins-catalog-panel" class="plugins-page" data-settings-searchable>
                 <div class="plugins-split">
                   <div id="plugins-installed-list" class="plugins-mine" aria-label="${t("app.plugin.installed")}"></div>
                   <div id="plugins-detail" class="plugins-detail">
-                    <div id="plugins-detail-empty" class="plugins-detail__empty">
-                      <span class="plugins-detail__empty-mark" aria-hidden="true">${icon("puzzle")}</span>
-                      <span>${t("app.plugins.pickOne")}</span>
-                    </div>
-
                     <section id="wallpaper-plugin-panel" class="plugin-detail" aria-labelledby="wallpaper-plugin-title" hidden>
                       <header class="plugin-detail__header">
                         <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
@@ -9054,77 +9395,20 @@ function shell(): string {
                 <div id="plugins-catalog-group" class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <h2 class="plugins-group__title">${t("app.plugins.catalogue")}</h2>
+                    <label class="plugins-search">
+                      ${icon("search")}
+                      <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
+                    </label>
                     <div class="plugins-group__header-actions">
-                      <label class="plugins-automatic-updates">
-                        <input id="plugins-automatic-updates" type="checkbox" />
-                        <span>${t("app.plugins.autoUpdates")}</span>
-                      </label>
                       <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry title="${t("app.plugins.refresh")}" aria-label="${t("app.plugins.refresh")}">${icon("refresh")}</button>
                       <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file title="${t("app.plugins.installFile")}" aria-label="${t("app.plugins.installFile")}">${icon("folder")}</button>
                     </div>
                   </div>
-                  <label class="plugins-search">
-                    ${icon("search")}
-                    <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
-                  </label>
                   <div id="plugins-catalog-filters" class="plugins-filters" hidden></div>
                   <div id="plugins-catalog-list" class="plugins-catalog"></div>
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>
               </section>
-            </section>
-
-            <section class="settings-panel" role="tabpanel" id="settings-panel-appearance" data-settings-panel="appearance" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
-              <!-- One card, two labelled groups: the choices already say what
-                   they do, so three more headers above them were the same
-                   information set twice. -->
-              <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label" id="motion-preference-title">${t("app.motion.title")}</p>
-                <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="full" />
-                    <span><strong>${t("app.motion.full")}</strong><small>${t("app.motion.fullHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="system" />
-                    <span><strong>${t("app.motion.system")}</strong><small>${t("app.motion.systemHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="reduced" />
-                    <span><strong>${t("app.motion.reduced")}</strong><small>${t("app.motion.reducedHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.gamePages")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-autoplay" />
-                    <span><strong>${t("app.appearance.autoplay")}</strong><small>${t("app.appearance.autoplayHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-sound" />
-                    <span><strong>${t("app.appearance.sound")}</strong><small>${t("app.appearance.soundHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.beta")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-show-showcase" />
-                    <span><strong>${t("app.appearance.demo")}</strong><small>${t("app.appearance.demoHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-beta" />
-                    <span><strong>${t("app.appearance.me")}</strong><small>${t("app.appearance.meHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-editorial-games" />
-                    <span><strong>${t("app.appearance.editorial")}</strong><small>${t("app.appearance.editorialHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-debug-social" />
-                    <span><strong>${t("app.appearance.social")}</strong><small>${t("app.appearance.socialHint")}</small></span>
-                  </label>
-                </div>
-              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
