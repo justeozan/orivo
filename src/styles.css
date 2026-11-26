@@ -2292,7 +2292,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { opacity: 1; transform: none; }
 }
 .settings-layout.is-entering .settings-header h1,
-.settings-layout.is-entering .settings-header p,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .provider-status-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-group__label,
@@ -2318,9 +2317,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
      sticky and short, so its own border would end half way down the panel. */
   border-left: 1px solid rgba(255,255,255,.07);
 }
-.settings-header { margin: 0 0 14px; padding-top: 4px; }
-.settings-header h1 { margin: 0 0 5px; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
-.settings-header p { margin: 0; color: #d0cadf; font-size: 13.5px; line-height: 1.5; }
+.settings-header { margin: 0 0 18px; padding-top: 4px; }
+.settings-header h1 { margin: 0; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
 
 .settings-panel { display: grid; gap: 0; }
 .settings-panel[hidden] { display: none; }
