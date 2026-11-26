@@ -45,6 +45,10 @@ export const NEXT_RELEASE = "next";
 export const RELEASE_HIGHLIGHTS: readonly ReleaseHighlights[] = [
   {
     version: "next",
+    items: [],
+  },
+  {
+    version: "0.4.12",
     items: [
       { icon: "sparkle", tone: "saves", titleKey: "highlights.aboutHighlights.title", lineKey: "highlights.aboutHighlights.line" },
     ],
