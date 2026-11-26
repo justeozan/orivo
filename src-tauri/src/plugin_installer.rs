@@ -1587,6 +1587,84 @@ mod tests {
         }
     }
 
+    const STORE_TAB_COMPONENT: &[u8] = include_bytes!("../fixtures/orivo-store-tab-fixture.wasm");
+    const STORE_TAB_ID: &str = "com.orivo.fixture-store";
+
+    fn store_tab_package(component: &[u8]) -> Vec<u8> {
+        let manifest = format!(
+            r#"{{
+              "id": "{STORE_TAB_ID}",
+              "name": "Fixture Store",
+              "version": "1.0.0",
+              "sdk": "orivo-plugin@1",
+              "minOrivoVersion": "0.3.0",
+              "extensions": ["store_tab"],
+              "capabilities": [],
+              "networkDomains": [],
+              "artifacts": [
+                {{"path":"component.wasm","kind":"component","sha256":"{}","byteSize":{}}}
+              ]
+            }}"#,
+            hex_digest(component),
+            component.len(),
+        );
+        package(&[
+            ("manifest.json", manifest.into_bytes()),
+            ("component.wasm", component.to_vec()),
+        ])
+    }
+
+    /// The issue's own acceptance test, through the installer the Settings
+    /// panel uses: a plugin adds a tab, its games are listed, and uninstalling
+    /// it takes the tab — and the pages its games opened — away.
+    #[test]
+    fn installing_a_store_tab_plugin_adds_its_tab_and_uninstalling_removes_it() {
+        let root = temporary_root("store-tab");
+        let service = service(&root);
+        let tabs = crate::plugin_store_tabs::PluginStoreTabs::new(root.clone(), "0.3.0", true);
+        let runtime = PluginRuntime::new().unwrap();
+        assert!(tabs.tabs(|| Ok(runtime.clone())).is_empty());
+
+        install_package(
+            &service,
+            &store_tab_package(STORE_TAB_COMPONENT),
+            SignaturePolicy::AllowUnsigned,
+            None,
+        )
+        .expect("the Store tab fixture installs");
+        let listed = tabs.tabs(|| Ok(runtime.clone()));
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|tab| tab.plugin_id == STORE_TAB_ID));
+        assert_eq!(listed[0].games[0].title, "Alpha Quest");
+        assert!(tabs.page_url("com.orivo.fixture-store:alpha").is_some());
+
+        service.uninstall(STORE_TAB_ID).expect("uninstalls");
+        assert!(tabs.tabs(|| Ok(runtime.clone())).is_empty());
+        assert_eq!(tabs.page_url("com.orivo.fixture-store:alpha"), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Claiming a Store tab is a contract like claiming a runner: a package
+    /// whose component does not export the Store tab world never installs.
+    #[test]
+    fn a_store_tab_package_that_fails_the_contract_is_refused() {
+        let root = temporary_root("store-tab-contract");
+        let service = service(&root);
+        for component in [EMPTY_COMPONENT, RUNNER_COMPONENT] {
+            assert_eq!(
+                install_package(
+                    &service,
+                    &store_tab_package(component),
+                    SignaturePolicy::AllowUnsigned,
+                    None,
+                ),
+                Err("This plugin does not implement Orivo's Store tab contract.".into())
+            );
+            assert!(!root.join(STORE_TAB_ID).exists());
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
     /// The whole point of the transaction, through the real host: an update
     /// whose component no longer matches its manifest fails the smoke test at
     /// its final path, and the version that worked comes back.

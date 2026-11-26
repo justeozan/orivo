@@ -231,6 +231,74 @@ interface ui-contrib {
   contributions: func() -> result<ui-contributions, plugin-error>;
 }
 
+/// A page of the Store, as data. The plugin names a tab, the colour the page
+/// takes while it is open and the games on its shelf; Orivo renders all of it
+/// with its own components and opens a game's page through its own opener.
+/// Nothing here is HTML, CSS, a route or a script.
+///
+/// Every field is checked again by the host, which drops what it will not show
+/// rather than guessing: a colour that is not `#rrggbb`, a picture or a page
+/// that is not plain `https`, a price in something that is not a currency code.
+/// It refuses the whole answer when the shape is wrong: more than four tabs,
+/// more than 120 games in one, two tabs with one key, two games in a tab with
+/// one id, an id outside its grammar, a label or a title with nothing in it.
+///
+/// The manifest declares this with the `store_tab` extension. `get-identity`
+/// has no `extension-kind` for it, because a new case would break every
+/// component built against v1, so a plugin that only adds a tab reports none.
+interface store-tabs {
+  use types.{plugin-error};
+
+  /// Minor units of an ISO 4217 currency, counted the way Orivo's own offers
+  /// are: 1999 in `EUR` is 19,99 €, and 0 is free.
+  record store-price {
+    currency: string,
+    amount-minor: u32,
+    /// What it cost before this offer. Absent, or not above `amount-minor`,
+    /// shows no discount.
+    regular-amount-minor: option<u32>,
+  }
+
+  record store-tab-game {
+    /// Unique within its tab: ASCII letters, digits, `.`, `_` and `-`, at most
+    /// 64 bytes. Orivo prefixes it with the plugin's id, so it can never name
+    /// a game of the library or of another plugin.
+    id: string,
+    title: string,
+    short-description: option<string>,
+    /// Pictures, `https` only: a portrait cover, a wide hero, a landscape
+    /// capsule and a transparent logo. The WebView's content policy still
+    /// decides which hosts it loads them from.
+    cover-url: option<string>,
+    hero-url: option<string>,
+    landscape-url: option<string>,
+    logo-url: option<string>,
+    /// At most four are shown.
+    genres: list<string>,
+    price: option<store-price>,
+    /// An `https` page the player can open in their browser. Orivo keeps the
+    /// address; the WebView only learns that there is one.
+    page-url: option<string>,
+  }
+
+  record store-tab {
+    /// Tells two tabs of one plugin apart: lowercase letters, digits and `-`,
+    /// at most 32. A plugin with a single tab can leave it out.
+    key: option<string>,
+    /// At most 32 characters are shown.
+    label: string,
+    /// `#rrggbb`. Without one, the tab takes Orivo's own violet.
+    accent: option<string>,
+    /// A tab with no games is not shown.
+    games: list<store-tab-game>,
+  }
+
+  /// Short, and never network-backed: this world imports nothing that could
+  /// fetch. The answer is therefore a function of the component alone, and
+  /// Orivo asks once for each package it has installed, not once per visit.
+  tabs: func() -> result<list<store-tab>, plugin-error>;
+}
+
 world source-plugin {
   export plugin-core;
   export source;
@@ -251,4 +319,13 @@ world metadata-plugin {
 world ui-plugin {
   export plugin-core;
   export ui-contrib;
+}
+
+/// A plugin that adds pages to the Store. A component may also be a runner: it
+/// then targets a world of its own that includes both, and Orivo calls each
+/// half through the world that names it.
+world store-tab-plugin {
+  import host-journal;
+  export plugin-core;
+  export store-tabs;
 }

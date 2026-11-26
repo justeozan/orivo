@@ -44,6 +44,7 @@ pub mod plugin_runtime;
 mod platform;
 mod playport;
 mod plugin_scheduler;
+mod plugin_store_tabs;
 mod plugin_update;
 mod preferences;
 // Quiky is not part of the App Store edition at all: not hidden, not built.
@@ -1105,6 +1106,14 @@ pub fn run() {
                 env!("CARGO_PKG_VERSION"),
             ));
             app.manage(Arc::clone(&plugin_installer));
+            // The Store's plugin tabs. Constructing it reads nothing: the first
+            // listing does, when the WebView asks after its first frame.
+            let store_tabs = Arc::new(plugin_store_tabs::PluginStoreTabs::new(
+                plugin_installer::plugin_root_for(&app_data),
+                env!("CARGO_PKG_VERSION"),
+                platform::CURRENT.downloadable_plugins,
+            ));
+            app.manage(Arc::clone(&store_tabs));
             // The junction between the installer and the permissions given to
             // what it installs. Registered here rather than inside either, so
             // the dependency points one way and neither has to know the other:
@@ -1121,7 +1130,17 @@ pub fn run() {
             // sixth promise, and it is why an uninstall does not delete a
             // library.
             let junction = Arc::clone(&runners);
+            let store_tabs_app = app.handle().clone();
             plugin_installer.observe_identity(Arc::new(move |change| {
+                // A Store tab is what *that* package said. Another package, or
+                // none, has said nothing yet: forget it here so a page it listed
+                // stops opening now, and tell the WebView so the bar asks again.
+                store_tabs.forget(change.plugin_id());
+                let _ = store_tabs_app.emit_to(
+                    MAIN_WINDOW_LABEL,
+                    plugin_store_tabs::PLUGIN_STORE_TABS_EVENT,
+                    change.plugin_id(),
+                );
                 if let Ok(runtime) = plugin_runtime::PluginRuntime::shared() {
                     let detail = match change {
                         plugin_update::IdentityChange::Activated { current, .. } => format!(
@@ -1310,6 +1329,8 @@ pub fn run() {
             plugin_installer::get_plugin_update_policy,
             plugin_installer::set_plugin_update_policy,
             plugin_installer::uninstall_plugin,
+            plugin_store_tabs::list_plugin_store_tabs,
+            plugin_store_tabs::open_plugin_store_page,
             runner_commands::get_installed_runners,
             runner_commands::create_runner_profile,
             runner_commands::rename_runner_profile,

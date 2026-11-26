@@ -31,6 +31,10 @@ pub enum PluginExtension {
     /// Provides a host-executed acquisition catalogue: the plugin supplies the
     /// data, Orivo owns the download, the verification and the extraction.
     Installer,
+    /// Adds pages to the Store through the `store-tabs` interface. Named on
+    /// its own rather than folded into `ui_contribution`, so a package cannot
+    /// gain a Store page by exporting it without showing it at install.
+    StoreTab,
 }
 
 /// A manifest declares what it may ask the user for. A declaration is not a
