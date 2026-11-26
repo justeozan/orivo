@@ -1,0 +1,1704 @@
+{
+  "$comment": [
+    "The Store's exclusives (issue #109). Edit this file, then run `pnpm store:exclusives`;",
+    "src/generated/store-exclusives.ts and src-tauri/resources/store-exclusive*.json are written from it.",
+    "Artwork: `node scripts/fetch-store-exclusives-media.mjs <slug>` downloads `media` into public/media/store/<slug>/.",
+    "The rule, how each fact was checked and when to re-check: docs/store-exclusives.md.",
+    "Every row is sourced. A price is the brand's own French store price on `price.verifiedAt`, or null; never a guess.",
+    "When a game stops meeting the rule (a port ships), delete its row: an unsure game stays out."
+  ],
+  "rule": {
+    "console": "playstation / xbox / nintendo: sold on that maker's consoles and on no other console maker's console. A PC version is allowed.",
+    "pc": "steam / epic: on PC, sold through that storefront and no other PC storefront (GOG, Epic or Steam, Microsoft Store / PC Game Pass, a publisher launcher). A reseller's key for that storefront counts as that storefront. Console versions are allowed.",
+    "one": "A game is exclusive to at most one brand.",
+    "checkedAsOf": "2026-11-26"
+  },
+  "games": [
+    {
+      "slug": "marvels-spider-man-2",
+      "title": "Marvel's Spider-Man 2",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10002456",
+      "platforms": [
+        "playstation",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "PS5 and PC (Steam, Epic) only; no Xbox or Nintendo version.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10002456",
+        "https://www.metacritic.com/game/marvels-spider-man-2/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Peter Parker et Miles Morales doivent se dépasser, avec et sans leur masque, pour sauver la ville, eux-mêmes et ceux qui leur sont chers du monstrueux Venom.",
+      "genres": [
+        "Action",
+        "Aventure",
+        "Monde ouvert"
+      ],
+      "price": {
+        "minor": 3999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10002456"
+      },
+      "criticScore": {
+        "score": 90,
+        "source": "https://www.metacritic.com/game/marvels-spider-man-2/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202306/1219/2028edeaf4c0b60142550a3d6e024b6009853ceb9f51591e.jpg",
+          "crop": "16:9",
+          "anchor": "center"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202306/1219/97e9f5fa6e50c185d249956c6f198a2652a9217e69a59ecd.jpg",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202306/1219/60eca3ac155247e21850c7d075d01ebf0f3f5dbf19ccd2a1.jpg",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202212/0816/SH5KjV5vYiVO2A37EyC6R7Mr.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202308/0718/21b32023d0332afe6f2fa5ae74d66ceea4fa82212922135a.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202308/0718/023d3a703dd14e4b76534132d18e5a648c3bd1b2f3f082ea.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "horizon-forbidden-west",
+      "title": "Horizon Forbidden West",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10000886",
+      "platforms": [
+        "playstation",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "PS4, PS5 and PC (Complete Edition, 2024) only; no Xbox or Nintendo version.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10000886",
+        "https://www.metacritic.com/game/horizon-forbidden-west/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Rejoignez Aloy tandis qu'elle s'aventure dans l'Ouest prohibé, un territoire dangereux qui abrite de mystérieuses nouvelles menaces.",
+      "genres": [
+        "Action",
+        "RPG",
+        "Monde ouvert"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10000886"
+      },
+      "criticScore": {
+        "score": 88,
+        "source": "https://www.metacritic.com/game/horizon-forbidden-west/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202010/2915/X8TO4UqHFGMQbHTDwKNlWU9z.jpg",
+          "crop": "16:9",
+          "anchor": "center"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202010/2915/SqRcyLjZbpK26ej6TnWf43xp.jpg",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202010/2915/f2jH2HOP0yYYQtDPd8LjqErv.jpg",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202006/1220/g2uLVL5nt6DxTTr0EncM1Kub.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202006/1220/XXyStAbP6py7xuUg8G9MF3Cf.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202006/1220/8z5T3wHiZgXpjHQZ2FozJiT5.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "god-of-war-ragnarok",
+      "title": "God of War Ragnarök",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10001850",
+      "platforms": [
+        "playstation",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "PS4, PS5 and PC only; no Xbox or Nintendo version.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10001850",
+        "https://www.metacritic.com/game/god-of-war-ragnarok/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Rejoignez Kratos et Atreus dans leur voyage légendaire en quête de réponses avant le début du Ragnarök, à travers chacun des neuf royaumes.",
+      "genres": [
+        "Action",
+        "Aventure"
+      ],
+      "price": {
+        "minor": 7999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10001850"
+      },
+      "criticScore": {
+        "score": 94,
+        "source": "https://www.metacritic.com/game/god-of-war-ragnarok/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202503/2016/dc09860a1d7b6f7dddc33a33d7a854f154ec8567a1794b22.jpg",
+          "crop": "16:9",
+          "anchor": "center"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202503/2016/1f4bf1ee42276b3841e71ebb812510493ce78bfc307d3296.jpg",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202503/2016/1e48e3b7d11fc2da3de62ad8a2a2d3c2882e1bb4ce6caadb.jpg",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202207/1117/A2klBXeZkBhZ5Kr40Ij8pHAB.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202207/1117/WERD9QwOeuJ257snQnLhOob8.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202207/1117/GTxIpl87L343zDQqFbCcqQMa.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "astro-bot",
+      "title": "Astro Bot",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10002684",
+      "platforms": [
+        "playstation"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "PS5 only.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10002684",
+        "https://www.metacritic.com/game/astro-bot/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Quand l'éternelle némésis d'ASTRO attaque le vaisseau-mère PS5 et éparpille son équipage dans l'espace, seul ASTRO peut arranger les choses.",
+      "genres": [
+        "Plateforme",
+        "Aventure"
+      ],
+      "price": {
+        "minor": 6999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10002684"
+      },
+      "criticScore": {
+        "score": 94,
+        "source": "https://www.metacritic.com/game/astro-bot/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202406/0500/b6e09e3d30e86833cd6a83b55e46ac99d2f7626315faf65f.png",
+          "crop": "16:9",
+          "anchor": "center"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202406/0500/80ecf657918558eeef8da3ee4cef326e4517d34e6c69d950.jpg",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202406/0500/0d05cb43413f28a641ac0c40fc272c70bbe194f6ade4b175.png",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202405/3117/147b69cc7115a326b753b6ddd0002959b9df57f9b65eeb71.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202405/3117/729ca560be7f771bd6f39c0151d49846bf8429ea2526920a.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202405/3117/c2290be6eb386a3e652fdf3882f511b22b097a74121a05f5.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "ghost-of-yotei",
+      "title": "Ghost of Yōtei",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10003923",
+      "platforms": [
+        "playstation"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "PS5 only; Bloomberg reported in March 2026 that the PC port was dropped.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10003923",
+        "https://www.metacritic.com/game/ghost-of-yotei/",
+        "https://www.pushsquare.com/news/2026/03/sony-apparently-pulls-the-plug-on-pc-ports-of-saros-ghost-of-yotei"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Laissez de côté l'ordre de l'époque Edo dans la version définitive de Ghost of Yōtei, avec la nouvelle extension narrative Échos de Sekigahara.",
+      "genres": [
+        "Action",
+        "Aventure",
+        "Monde ouvert"
+      ],
+      "price": {
+        "minor": 7999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10003923"
+      },
+      "criticScore": {
+        "score": 86,
+        "source": "https://www.metacritic.com/game/ghost-of-yotei/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202504/2116/4108445d109d326953311d069669ab3eb05b5e43e783b445.png",
+          "crop": "16:9",
+          "anchor": "top"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202410/2119/b24e2f43d30ad645c9ac50e749bdb839b1942c9a76e68de6.png",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202504/2116/395b45219557497b6580e4ce372f8dea604ee5dd16f45da5.png",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202509/1920/2964a41a4e48ba1bfd659df113203428df322e248087bac1.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202509/1920/0a13f5b0e29f1f8667f2780610a957590e139b7f32125158.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202509/1920/ec476280e9c82fd5589dba11519e0d46a9d2ca6cfd17f5c3.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "marvels-wolverine",
+      "title": "Marvel's Wolverine",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10002861",
+      "platforms": [
+        "playstation"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "PS5 only (released 15 September 2026).",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10002861",
+        "https://www.metacritic.com/game/marvels-wolverine/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Trois ans après avoir quitté son équipe, Logan réintègre la Team X dans ce jeu d'action d'Insomniac Games, les créateurs de Marvel's Spider-Man.",
+      "genres": [
+        "Action",
+        "Aventure"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10002861"
+      },
+      "criticScore": {
+        "score": 75,
+        "source": "https://www.metacritic.com/game/marvels-wolverine/"
+      },
+      "media": {
+        "capsule": "https://image.api.playstation.com/vulcan/ap/rnd/202510/0721/364f86d6cc428edd6becbff005c733c25806ee59bf7928ca.jpg",
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202510/0721/0f8097282863ccd07abf4485a2bc733111127e628552207e.jpg",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202510/0721/ab0526f97f49e5e810c13b4f7367970f95346b2440baf18b.jpg",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202609/1000/b0026f6649e9845df11747b6804548f572ba90a26f63889f.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202609/1000/4e645de64784f14d749215a3c479e31f05ce59b1c5d9f831.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202609/1000/9b387e37047248ce953f92db711dc8badcb838e6cc9f8aca.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "saros",
+      "title": "Saros",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10005069",
+      "platforms": [
+        "playstation"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "PS5 only (released 30 April 2026); Bloomberg reported it will stay off PC.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10005069",
+        "https://www.metacritic.com/game/saros/",
+        "https://www.pushsquare.com/news/2026/03/sony-apparently-pulls-the-plug-on-pc-ports-of-saros-ghost-of-yotei"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Dans l'ombre d'une sinistre éclipse, Arjun Devraj cherche des réponses sur Carcosa, une planète polymorphe aux terribles secrets. Le nouveau Housemarque.",
+      "genres": [
+        "Tir",
+        "Roguelike"
+      ],
+      "price": {
+        "minor": 4959,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10005069"
+      },
+      "criticScore": {
+        "score": 87,
+        "source": "https://www.metacritic.com/game/saros/"
+      },
+      "media": {
+        "capsule": "https://image.api.playstation.com/vulcan/ap/rnd/202509/2318/9a1f8ff17dce5a14454857db15eafa4736e2f5aa246281d4.jpg",
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202509/2318/ca19e7b6909c03a0d64a84981109c0cdaa98e7fdb8820e36.png",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202509/2318/89c3538003fb34870e745493412408eeeed5f02b32c55d23.png",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202510/2111/83bf250b4250dbe3da1946d3a2c67c217e606cec45729c88.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202510/2111/23402078b62d5dbabbc1727cc7e9f010714ecbbcbf4d009e.jpg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202510/2111/62b853939358992a0ec074a10a7550f8d309887074f99e01.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "gran-turismo-7",
+      "title": "Gran Turismo 7",
+      "brand": "playstation",
+      "storeUrl": "https://store.playstation.com/fr-fr/concept/10000956",
+      "platforms": [
+        "playstation"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "PS4 and PS5 only.",
+      "sources": [
+        "https://store.playstation.com/fr-fr/concept/10000956",
+        "https://www.metacritic.com/game/gran-turismo-7/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "La simulation automobile la plus complète : plus de 400 véhicules reproduits avec une fidélité inégalée et plus de 90 circuits en météo dynamique.",
+      "genres": [
+        "Course",
+        "Simulation"
+      ],
+      "price": {
+        "minor": 3999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:39:05Z",
+        "source": "https://store.playstation.com/fr-fr/concept/10000956"
+      },
+      "criticScore": {
+        "score": 87,
+        "source": "https://www.metacritic.com/game/gran-turismo-7/"
+      },
+      "media": {
+        "capsule": {
+          "url": "https://image.api.playstation.com/vulcan/ap/rnd/202202/2806/xreKEb65CYM6LKfzgiNLFKlV.png",
+          "crop": "16:9",
+          "anchor": "center"
+        },
+        "hero": "https://image.api.playstation.com/vulcan/ap/rnd/202109/1321/y7iyxoBE8VKotN89QCFhLgLM.png",
+        "cover": "https://image.api.playstation.com/vulcan/ap/rnd/202202/2806/QDzid2jNv4e44kgumGXDCscF.png",
+        "scenes": [
+          "https://image.api.playstation.com/vulcan/ap/rnd/202109/1322/zRgS2r8KKbbpMpVAwgVIiSGB.jpeg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202109/1322/YJb3HfYIejLj8LHzRDsa0Z4u.jpeg",
+          "https://image.api.playstation.com/vulcan/ap/rnd/202109/1322/12q4Li8WOeubgGLEt7TUwDTL.jpeg"
+        ]
+      }
+    },
+    {
+      "slug": "gears-of-war-e-day",
+      "title": "Gears of War: E-Day",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9N4PT8HGCDHQ?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox Series X|S and PC only (released 6 October 2026); Microsoft calls it an Xbox console exclusive.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/gears-of-war-e-day/9N4PT8HGCDHQ",
+        "https://www.metacritic.com/game/gears-of-war-e-day/",
+        "https://www.gamesradar.com/games/gears-of-war/microsoft-kills-ps5-version-of-gears-of-war-e-day-finally-announces-october-release-date/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Vivez l'horreur du jour de l'Émergence aux côtés de Marcus Fenix et Dominic Santiago, alors que la Horde Locust surgit des profondeurs.",
+      "genres": [
+        "Tir",
+        "Action"
+      ],
+      "price": {
+        "minor": 4899,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9N4PT8HGCDHQ&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 87,
+        "source": "https://www.metacritic.com/game/gears-of-war-e-day/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.7129.13978914104035031.46ab30c4-87b3-48d6-9e4a-ed44b301b17a.c6a61057-524a-4b26-a462-7cb77482c68f",
+        "hero": "https://store-images.s-microsoft.com/image/apps.20048.13978914104035031.46ab30c4-87b3-48d6-9e4a-ed44b301b17a.6e05624f-9f48-4169-ac52-04a7bbe5c7e8",
+        "cover": "https://store-images.s-microsoft.com/image/apps.58579.13978914104035031.46ab30c4-87b3-48d6-9e4a-ed44b301b17a.0c0f53d8-d3af-4c48-a1a6-22b31c4ec463",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.57520.13978914104035031.46ab30c4-87b3-48d6-9e4a-ed44b301b17a.024c7923-ec14-41aa-82ee-d10f33e4886b",
+          "https://store-images.s-microsoft.com/image/apps.27292.13978914104035031.46ab30c4-87b3-48d6-9e4a-ed44b301b17a.f0f0e928-4710-4707-a251-45b1d341d63b",
+          "https://store-images.s-microsoft.com/image/apps.26554.13978914104035031.03c48180-c392-4ebc-a50d-7a3bfb652afb.dbf0817a-0d5b-4273-bbaf-b13234d69804"
+        ]
+      }
+    },
+    {
+      "slug": "halo-infinite",
+      "title": "Halo Infinite",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9PP5G1F0C2B6?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox and PC only; the one Halo on PS5 is Halo: Campaign Evolved, a different game.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/halo-infinite/9PP5G1F0C2B6",
+        "https://www.metacritic.com/game/halo-infinite/",
+        "https://www.pushsquare.com/news/2025/11/halo-infinite-is-in-fact-finite-dev-focusing-on-campaign-evolved-for-ps5"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Issu de l'une des sagas les plus emblématiques du jeu vidéo, Halo est plus grand que jamais avec une expérience multijoueur dynamique et gratuite.",
+      "genres": [
+        "Tir",
+        "Multijoueur"
+      ],
+      "price": {
+        "minor": 0,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9PP5G1F0C2B6&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 87,
+        "source": "https://www.metacritic.com/game/halo-infinite/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.20857.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.8d309ca3-e6ec-47e8-8009-a65f7e2e907b",
+        "hero": "https://store-images.s-microsoft.com/image/apps.47030.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.ce613c75-aac4-4721-9941-6a254d061488",
+        "cover": "https://store-images.s-microsoft.com/image/apps.3823.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.5aada4fa-d850-4eb5-9100-33a81a5cde09",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.61194.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.13428b16-71ac-4539-910c-336cec7eca9b",
+          "https://store-images.s-microsoft.com/image/apps.5568.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.4a76e934-ea2b-4e31-ba81-7b505a818244",
+          "https://store-images.s-microsoft.com/image/apps.43679.14330850369313893.a687698c-b891-44f6-9576-fe28978ce915.3dc9b86b-d9c3-4ebe-86b7-f564a0f4423b"
+        ]
+      }
+    },
+    {
+      "slug": "forza-motorsport",
+      "title": "Forza Motorsport",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9PLKVSWR299F?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox Series X|S and PC only.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/forza-motorsport/9PLKVSWR299F",
+        "https://www.metacritic.com/game/forza-motorsport/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Pilotez plus de 500 voitures réelles, dont plus de 100 inédites, sur 27 circuits dont Brands Hatch, Daytona, la Nordschleife du Nürburgring ou Sebring.",
+      "genres": [
+        "Course",
+        "Simulation"
+      ],
+      "price": {
+        "minor": 3199,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9PLKVSWR299F&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 84,
+        "source": "https://www.metacritic.com/game/forza-motorsport/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.14257.14520062614241202.dce7e4da-1fb9-4f81-b347-74af80631e33.269665d9-b2aa-4846-8170-b56e46536185",
+        "hero": "https://store-images.s-microsoft.com/image/apps.8784.14520062614241202.dce7e4da-1fb9-4f81-b347-74af80631e33.d2658013-30d5-48e7-bf78-02644de6372e",
+        "cover": "https://store-images.s-microsoft.com/image/apps.51644.14520062614241202.dce7e4da-1fb9-4f81-b347-74af80631e33.a1d8bd89-baf5-413b-bf50-f41037beb55e",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.65406.14520062614241202.dce7e4da-1fb9-4f81-b347-74af80631e33.62fcce3b-58e9-4948-88c2-439bfa0b254d",
+          "https://store-images.s-microsoft.com/image/apps.10636.14520062614241202.6b76eb53-736c-4209-a69a-c99a46cfa821.e0235265-d6c7-48f8-9f64-ed5d97df156d",
+          "https://store-images.s-microsoft.com/image/apps.37654.14520062614241202.6b76eb53-736c-4209-a69a-c99a46cfa821.44f582af-81f0-4263-acc7-0b9374a07eb7"
+        ]
+      }
+    },
+    {
+      "slug": "halo-the-master-chief-collection",
+      "title": "Halo: The Master Chief Collection",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9MT8PTGVHX2P?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox and PC only; a PS5 port has been rumoured since 2025 but never announced.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/halo-the-master-chief-collection/9MT8PTGVHX2P",
+        "https://www.metacritic.com/game/the-master-chief-collection/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Six jeux, une saga épique : Halo: Reach, Combat Evolved Anniversary, Halo 2: Anniversary, Halo 3, la campagne ODST et Halo 4, optimisés pour Xbox Series X|S.",
+      "genres": [
+        "Tir",
+        "Action"
+      ],
+      "price": {
+        "minor": 999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9MT8PTGVHX2P&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 85,
+        "source": "https://www.metacritic.com/game/the-master-chief-collection/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.28646.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.bb5e8e02-9f69-4519-b57a-44dd45f5d494",
+        "hero": "https://store-images.s-microsoft.com/image/apps.36764.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.4c14355f-10d9-4fb3-ae20-3ff785cee057",
+        "cover": "https://store-images.s-microsoft.com/image/apps.13367.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.5b67a38e-b742-4dce-a884-4e2878d50c54",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.50497.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.3740ca3a-350d-4c1a-ba93-d65a49d31244",
+          "https://store-images.s-microsoft.com/image/apps.45380.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.4db02ec6-b00a-4283-9f73-77aaf8b75b51",
+          "https://store-images.s-microsoft.com/image/apps.61921.14415742612829493.1297136a-f273-41f1-947f-59044c848c55.4bd370b4-6e96-4fad-876a-861db7f40b8c"
+        ]
+      }
+    },
+    {
+      "slug": "gears-5",
+      "title": "Gears 5",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/C2KDNLT2H7DM?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox and PC only; the one Gears game on PS5 is Gears of War: Reloaded.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/gears-5/C2KDNLT2H7DM",
+        "https://www.metacritic.com/game/gears-5/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Alors que la guerre offre un peu de répit, Kait Diaz cherche ses liens avec l'ennemi et découvre la véritable menace qui pèse sur Sera : elle-même.",
+      "genres": [
+        "Tir",
+        "Action"
+      ],
+      "price": {
+        "minor": 874,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=C2KDNLT2H7DM&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 84,
+        "source": "https://www.metacritic.com/game/gears-5/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.14219.65494054591008504.4eae27ba-1cfe-4af2-950a-4af81f8cd22a.ae105753-7c62-438b-aef3-8602330fb347",
+        "hero": "https://store-images.s-microsoft.com/image/apps.65421.65494054591008504.4eae27ba-1cfe-4af2-950a-4af81f8cd22a.fd4fa6b5-431f-47bc-b9c8-3844383dfb20",
+        "cover": "https://store-images.s-microsoft.com/image/apps.10933.65494054591008504.4eae27ba-1cfe-4af2-950a-4af81f8cd22a.b5b2909d-8884-48d0-b25a-68d6518c9b73",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.65361.65494054591008504.48027ffd-b5a7-4022-b9df-e909e7598c69.eeb165b4-e06c-41ce-9764-dc09f5277aa2",
+          "https://store-images.s-microsoft.com/image/apps.51295.65494054591008504.3eb95796-405c-4def-901b-3b53a1c9e001.7f5d5f1f-ede3-491e-9e4c-3d3d723541ae",
+          "https://store-images.s-microsoft.com/image/apps.21372.65494054591008504.3eb95796-405c-4def-901b-3b53a1c9e001.7ce477d1-54a6-4286-b3e1-f3145baf4ba2"
+        ]
+      }
+    },
+    {
+      "slug": "microsoft-flight-simulator",
+      "title": "Microsoft Flight Simulator (2020)",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9PMQDM08SNK9?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox Series X|S and PC only; only the 2024 edition came to PS5.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/microsoft-flight-simulator/9PMQDM08SNK9",
+        "https://www.metacritic.com/game/microsoft-flight-simulator/",
+        "https://blog.playstation.com/2025/09/24/microsoft-flight-simulator-2024-soars-onto-ps5-dec-8/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Des avions légers aux gros porteurs en passant par les planeurs et les hélicoptères, pilotez des appareils très détaillés partout dans le monde.",
+      "genres": [
+        "Simulation"
+      ],
+      "price": {
+        "minor": 2449,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9PMQDM08SNK9&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 90,
+        "source": "https://www.metacritic.com/game/microsoft-flight-simulator/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.1544.14377492558798445.319163e9-0c55-4be6-a4bb-aa431ab21aa6.b01b2963-d208-4106-bac9-3f46a106af6f",
+        "hero": "https://store-images.s-microsoft.com/image/apps.31431.14377492558798445.319163e9-0c55-4be6-a4bb-aa431ab21aa6.4f0c302a-3990-47af-adbe-0fe3df8726cc",
+        "cover": "https://store-images.s-microsoft.com/image/apps.63538.14377492558798445.319163e9-0c55-4be6-a4bb-aa431ab21aa6.1742ceda-bf09-4f53-8ab5-d4b0cc0431a4",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.57465.14377492558798445.5cd94b20-403d-4278-9689-8c7ab1c5ce05.4df2b130-7e5a-4a4d-8618-a07ddb5a5587",
+          "https://store-images.s-microsoft.com/image/apps.46649.14377492558798445.5cd94b20-403d-4278-9689-8c7ab1c5ce05.45561aed-5999-4f5a-a446-57062dd4117d",
+          "https://store-images.s-microsoft.com/image/apps.17931.14377492558798445.5cd94b20-403d-4278-9689-8c7ab1c5ce05.dad597e3-cf92-4826-a5f8-dd49ec8b11f5"
+        ]
+      }
+    },
+    {
+      "slug": "halo-5-guardians",
+      "title": "Halo 5: Guardians",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/BRRC2BP0G9P0?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Xbox One only (playable on Series X|S); no PC version.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/halo-5-guardians/BRRC2BP0G9P0",
+        "https://www.metacritic.com/game/halo-5-guardians/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Une expérience multijoueur épique, des outils de création de niveaux avancés et l'épisode le plus sombre de la saga Halo.",
+      "genres": [
+        "Tir",
+        "Action"
+      ],
+      "price": {
+        "minor": 499,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=BRRC2BP0G9P0&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 84,
+        "source": "https://www.metacritic.com/game/halo-5-guardians/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.42413.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.4f9649cc-17e3-4bbb-8298-e908f6434534",
+        "hero": "https://store-images.s-microsoft.com/image/apps.50236.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.f0eeb1d4-a30c-4a21-8bcb-46ed84669b5c",
+        "cover": "https://store-images.s-microsoft.com/image/apps.10920.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.537d404f-d551-430c-8000-9a4c657bf354",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.16052.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.63ec6233-66fc-4713-8e43-3ca5a586bade",
+          "https://store-images.s-microsoft.com/image/apps.41513.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.88922278-ddc0-4c62-a959-7406bffadfa2",
+          "https://store-images.s-microsoft.com/image/apps.44328.69279545232152045.f1a4a87c-fcc9-4b7c-a620-f6c56eb2d5ad.df8773e7-6c55-4831-b6fe-ae3f0110f398"
+        ]
+      }
+    },
+    {
+      "slug": "state-of-decay-2",
+      "title": "State of Decay 2",
+      "brand": "xbox",
+      "storeUrl": "https://apps.microsoft.com/detail/9NT4X7P8B9NB?hl=fr-FR&gl=FR",
+      "platforms": [
+        "xbox",
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Xbox and PC only; State of Decay 3 (2027) will be the first of the series on PlayStation.",
+      "sources": [
+        "https://www.xbox.com/fr-FR/games/store/state-of-decay-2/9NT4X7P8B9NB",
+        "https://www.metacritic.com/game/state-of-decay-2/",
+        "https://www.pushsquare.com/news/2026/06/xbox-revives-state-of-decay-3-for-ps5-in-2027"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Le jeu de survie et de zombies, avec la mise à jour Homecoming et une Trumbull Valley entièrement remastérisée en monde ouvert.",
+      "genres": [
+        "Survie",
+        "Action"
+      ],
+      "price": {
+        "minor": 2999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:40:31Z",
+        "source": "https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=9NT4X7P8B9NB&market=FR&languages=fr-fr"
+      },
+      "criticScore": {
+        "score": 66,
+        "source": "https://www.metacritic.com/game/state-of-decay-2/"
+      },
+      "media": {
+        "capsule": "https://store-images.s-microsoft.com/image/apps.28210.14425140369408817.14846606-f5bc-4fb1-b355-26ef6a25e847.77cb0dc0-416b-459b-812e-599029d7c452",
+        "hero": "https://store-images.s-microsoft.com/image/apps.45572.14425140369408817.14846606-f5bc-4fb1-b355-26ef6a25e847.ca79acfc-0a9a-4e61-a626-d7623bb12248",
+        "cover": "https://store-images.s-microsoft.com/image/apps.13904.14425140369408817.14846606-f5bc-4fb1-b355-26ef6a25e847.0e006182-7d29-4776-81c4-0bac08c28f01",
+        "scenes": [
+          "https://store-images.s-microsoft.com/image/apps.45788.14425140369408817.9bd4ebb6-ef1a-4ae3-95e4-8c422883ff63.c1ea217a-2b44-4a19-bf12-7bee390735ff",
+          "https://store-images.s-microsoft.com/image/apps.48378.14425140369408817.9bd4ebb6-ef1a-4ae3-95e4-8c422883ff63.313367be-22f8-4397-81fb-473910843dce",
+          "https://store-images.s-microsoft.com/image/apps.63976.14425140369408817.4cefc2fb-0256-4f36-82e4-971ce6ef387b.c4a4c2f7-f720-41ed-800d-3ff44685d8d4"
+        ]
+      }
+    },
+    {
+      "slug": "mario-kart-world",
+      "title": "Mario Kart World",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch-2/Mario-Kart-World-2790000.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch-2/Mario-Kart-World-2790000.html",
+        "https://www.metacritic.com/game/mario-kart-world/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Allumez les moteurs et faites la course dans un monde ouvert avec Mario Kart World sur Nintendo Switch 2 !",
+      "genres": [
+        "Course",
+        "Party game"
+      ],
+      "price": {
+        "minor": 7999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000096802"
+      },
+      "criticScore": {
+        "score": 86,
+        "source": "https://www.metacritic.com/game/mario-kart-world/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/assets/nintendo_switch_2_games/mariokartworld/16x9_MarioKartWorld_image1600w.png",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000095431/b8ca3bbb06f7a4149bea701e6764ed302b9ec0b41b3d7137d52eddb6ed05d704",
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000095431/9d7ae6016a8ebf66742a83298fe229aaf81784ea6eb05f69625acdbd070b2b8b",
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000095431/bbe82fcb30221d01b574da4526ca167e4a1bb911bf013a813c0f656d087d11f6"
+        ]
+      }
+    },
+    {
+      "slug": "donkey-kong-bananza",
+      "title": "Donkey Kong Bananza",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch-2/Donkey-Kong-Bananza-2785804.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch-2/Donkey-Kong-Bananza-2785804.html",
+        "https://www.metacritic.com/game/donkey-kong-bananza/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Rejoignez Donkey Kong et Pauline pour une aventure souterraine fracassante, exclusivement sur Nintendo Switch 2.",
+      "genres": [
+        "Plateforme",
+        "Action"
+      ],
+      "price": {
+        "minor": 6999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000096810"
+      },
+      "criticScore": {
+        "score": 91,
+        "source": "https://www.metacritic.com/game/donkey-kong-bananza/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/assets/nintendo_switch_2_games/donkey_kong_bananza/16x9_NSwitch2_DonkeyKongBananza_Launch_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000096809/c111819ae2b07f446ab92d64c8d37e9ef8e541e30b687121fa6d5976096b61f9",
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000096809/eedd5cf569384e972df7ee8cebb8a84ec86a7ab7f382f3f34b40e2cc4d22b8e1",
+          "https://assets.nintendo.com/image/upload/store/software/switch2/70010000096809/1db3e042985d95332cb7750d9353a343b33415b12fbb82be6bffbcf0848949c3"
+        ]
+      }
+    },
+    {
+      "slug": "zelda-tears-of-the-kingdom",
+      "title": "The Legend of Zelda: Tears of the Kingdom",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/The-Legend-of-Zelda-Tears-of-the-Kingdom-1576884.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/The-Legend-of-Zelda-Tears-of-the-Kingdom-1576884.html",
+        "https://www.metacritic.com/game/the-legend-of-zelda-tears-of-the-kingdom/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Une aventure épique à travers les terres et les cieux d'Hyrule vous attend dans The Legend of Zelda: Tears of the Kingdom.",
+      "genres": [
+        "Action",
+        "Aventure"
+      ],
+      "price": {
+        "minor": 6999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000063715"
+      },
+      "criticScore": {
+        "score": 96,
+        "source": "https://www.metacritic.com/game/the-legend-of-zelda-tears-of-the-kingdom/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/10_share_images/games_15/nintendo_switch_4/2x1_NSwitch_TloZTearsOfTheKingdom_Gamepage_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000063714/05b3d8e8c74beaa43a7714c275a7ad06018ed069bd6bd3f923442b9ac16fdc49",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000063714/490ccb15d914eabada74b34de895e9061c7917d7f75782bc934a528fb77ea4be",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000063714/ec907a9568fb27177faf87288e98cee15f4fc4f0ff575ab39b150b3c6efe0350"
+        ]
+      }
+    },
+    {
+      "slug": "super-mario-bros-wonder",
+      "title": "Super Mario Bros. Wonder",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Super-Mario-Bros-Wonder-2404150.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Super-Mario-Bros-Wonder-2404150.html",
+        "https://www.metacritic.com/game/super-mario-bros-wonder/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Attendez-vous à l'inattendu dans la nouvelle aventure 2D de Mario !",
+      "genres": [
+        "Plateforme"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000068689"
+      },
+      "criticScore": {
+        "score": 92,
+        "source": "https://www.metacritic.com/game/super-mario-bros-wonder/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/10_share_images/games_15/nintendo_switch_4/2x1_NSwitch_SuperMarioBrosWonder_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000068688/e3024df668cdead60e62865924652c811323b0e7c46f51567fe80907f2637cc4",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000068688/9669405e5f3f899993cddbc02bd570d530eb39410ed3b50e6bd102381fbe6916",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000068688/7f1845a5e8d8ec895ad188a6b0f46b59036a363db1b2d9b79d23b913b0b9ab8a"
+        ]
+      }
+    },
+    {
+      "slug": "metroid-prime-4-beyond",
+      "title": "Metroid Prime 4: Beyond",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Metroid-Prime-4-Beyond-2593922.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Metroid-Prime-4-Beyond-2593922.html",
+        "https://www.metacritic.com/game/metroid-prime-4-beyond/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Maniez de nouvelles capacités psychiques pour vous échapper de la mystérieuse planète Viewros dans Metroid Prime 4: Beyond.",
+      "genres": [
+        "Action",
+        "Tir"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000084767"
+      },
+      "criticScore": {
+        "score": 78,
+        "source": "https://www.metacritic.com/game/metroid-prime-4-beyond/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/assets/nintendo_switch_2_games/metroid_prime_4_nintendo_switch_2_edition/2x1_NSwitch_MetroidPrime4Beyond_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000084766/683e6ccc058af876ca5d57217b9c5eba212923a674b2d89c871b56d18d1cd0a7",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000084766/56b1f27f69345969c13ce33908af1ce7009f6de2963324d7e7894b71402ee095",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000084766/f91f56d916d3749c95ce56ad793bd5014cf44fba79a8ccfc92d967a33fbf5395"
+        ]
+      }
+    },
+    {
+      "slug": "pokemon-legends-z-a",
+      "title": "Légendes Pokémon : Z-A",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Legendes-Pokemon-Z-A-2533423.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Legendes-Pokemon-Z-A-2533423.html",
+        "https://www.metacritic.com/game/pokemon-legends-z-a/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Découvrez une aventure Pokémon urbaine et prenez part à des combats Pokémon dynamiques et en temps réel.",
+      "genres": [
+        "RPG",
+        "Action"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:38Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000094235"
+      },
+      "criticScore": {
+        "score": 78,
+        "source": "https://www.metacritic.com/game/pokemon-legends-z-a/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/assets/nintendo_switch_games/pokemonlegendsza/2x1_NSwitch2_PokemonLegendsZA_KV_FR_fr_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000094234/c88ab513320cbcaf05308f20e8e04f2a08804d332273cab8a6a0947e4b598884",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000094234/aa3589c2cb192381261feee94de689e1547f7a5b126f6a3fd21c5c5eceda4f63",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000094234/6477fb588db11a566bd47b761754e5854db06cf3d617d10e9136c9dc05f3d58a"
+        ]
+      }
+    },
+    {
+      "slug": "animal-crossing-new-horizons",
+      "title": "Animal Crossing: New Horizons",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Animal-Crossing-New-Horizons-1438623.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Animal-Crossing-New-Horizons-1438623.html",
+        "https://www.metacritic.com/game/animal-crossing-new-horizons/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Démarrez votre nouvelle vie avec la formule Évasion Île déserte de Nook Inc. !",
+      "genres": [
+        "Simulation",
+        "Détente"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000027620"
+      },
+      "criticScore": {
+        "score": 90,
+        "source": "https://www.metacritic.com/game/animal-crossing-new-horizons/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/10_share_images/games_15/nintendo_switch_4/H2x1_NSwitch_AnimalCrossingNewHorizons_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000027619/340f6c4bc1d5d62bc1077bd1242c04d8b7be1d225aa23ed5ded865c480ccb07a",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000027619/39be0e9b4315ba4f412924c3ec4021ad918af2b3f702d8cacc13e199bd4627f2",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000027619/0f7818c241ac1eadc1429bde3bf28ca51c91ebec22ac77aace94c27dac1befdb"
+        ]
+      }
+    },
+    {
+      "slug": "super-smash-bros-ultimate",
+      "title": "Super Smash Bros. Ultimate",
+      "brand": "nintendo",
+      "storeUrl": "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Super-Smash-Bros-Ultimate-1395713.html",
+      "platforms": [
+        "switch"
+      ],
+      "supportedPlatforms": [],
+      "exclusivity": "Nintendo Switch / Switch 2 only (published by Nintendo or The Pokémon Company).",
+      "sources": [
+        "https://www.nintendo.com/fr-fr/Jeux/Jeux-Nintendo-Switch/Super-Smash-Bros-Ultimate-1395713.html",
+        "https://www.metacritic.com/game/super-smash-bros-ultimate/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Des mondes et des combattants légendaires se retrouvent pour l'affrontement ultime dans Super Smash Bros. Ultimate !",
+      "genres": [
+        "Combat",
+        "Party game"
+      ],
+      "price": {
+        "minor": 6999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:41:27Z",
+        "source": "https://api.ec.nintendo.com/v1/price?country=FR&lang=fr&ids=70010000012331"
+      },
+      "criticScore": {
+        "score": 93,
+        "source": "https://www.metacritic.com/game/super-smash-bros-ultimate/"
+      },
+      "media": {
+        "capsule": "https://www.nintendo.com/eu/media/images/10_share_images/games_15/nintendo_switch_4/H2x1_NSwitch_SuperSmashBrosUltimate_02_image1600w.jpg",
+        "scenes": [
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000012332/8b42e00012633320624f3894179b5d6bec44c255998a58ceb54e07bd352df171",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000012332/0a381c9a157deda7997e47a40ebedf5d6357daa54eadb8747c85535247b5966a",
+          "https://assets.nintendo.com/image/upload/store/software/switch/70010000012332/245420c78ce40337bdca7ce9c2dd819bd4ae33b022da9b922c0710b8420b59dd"
+        ]
+      }
+    },
+    {
+      "slug": "elden-ring",
+      "title": "Elden Ring",
+      "brand": "steam",
+      "steamAppId": 1245620,
+      "storeUrl": "https://store.steampowered.com/app/1245620/",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "On PC only on Steam; the Microsoft Store sells the Xbox console version only.",
+      "sources": [
+        "https://store.steampowered.com/app/1245620/",
+        "https://www.pcgamingwiki.com/wiki/Elden_Ring#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Le RPG d'action fantastique acclamé par la critique. Levez-vous, Sans-éclat, brandissez la puissance du Cercle d'Elden et devenez Seigneur de l'Entre-terre.",
+      "genres": [
+        "Action",
+        "RPG"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=1245620&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 94,
+        "source": "https://www.metacritic.com/game/elden-ring/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/capsule_616x353.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/ss_943bf6fe62352757d9070c1d33e50b92fe8539f1.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/ss_e0316c76f8197405c1312d072b84331dd735d60b.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/1245620/ss_ef61b771ee6b269b1f0cb484233e07a0bfb5f81b.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "half-life-alyx",
+      "title": "Half-Life: Alyx",
+      "brand": "steam",
+      "steamAppId": 546560,
+      "storeUrl": "https://store.steampowered.com/app/546560/",
+      "platforms": [
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Valve game, sold on Steam only.",
+      "sources": [
+        "https://store.steampowered.com/app/546560/",
+        "https://www.pcgamingwiki.com/wiki/Half-Life:_Alyx#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Le retour de Valve dans l'univers de Half-Life, en VR. Entre Half-Life et Half-Life 2, un combat impossible contre le Cartel.",
+      "genres": [
+        "Action",
+        "Aventure",
+        "VR"
+      ],
+      "price": {
+        "minor": 5799,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=546560&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 93,
+        "source": "https://www.metacritic.com/game/half-life-alyx/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/capsule_616x353.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/ss_d61365e93f20ceb5a94a1e5b2811cf504cbfa303.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/ss_6868ae1644628f857e7df4b72a00fdf506f79c7f.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/546560/ss_5d228b092e93ff148e6a998c33e751fb968cc956.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "monster-hunter-wilds",
+      "title": "Monster Hunter Wilds",
+      "brand": "steam",
+      "steamAppId": 2246340,
+      "storeUrl": "https://store.steampowered.com/app/2246340/",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "On PC only on Steam (Capcom: 'PC via Steam'); the Microsoft Store sells the Xbox version only.",
+      "sources": [
+        "https://store.steampowered.com/app/2246340/",
+        "https://www.pcgamingwiki.com/wiki/Monster_Hunter_Wilds#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Arpentez des terres que la nature déchaînée transforme d'un moment à l'autre, dans une histoire de monstres et d'humains luttant pour vivre en harmonie.",
+      "genres": [
+        "Action",
+        "RPG"
+      ],
+      "price": {
+        "minor": 3999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=2246340&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 88,
+        "source": "https://www.metacritic.com/game/monster-hunter-wilds/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/a1df989a3b439e15171dc7144c1ce13c32abcae6/capsule_616x353_2x.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/6bfeb9022f014b53f7b6107aa6cd5399563cac29/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/e3fc16c6bc498891e952500eda05fe6462ceb9f0/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/ss_31b5597fecf2d9a2904bc9bbf8011aacb18143db.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/ss_9245c1ede8c3fc2cd65e4890a74a01ef50b726da.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/2246340/ss_c722e74607ffda9a1472093ccc934f1bdde10ab8.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "portal-2",
+      "title": "Portal 2",
+      "brand": "steam",
+      "steamAppId": 620,
+      "storeUrl": "https://store.steampowered.com/app/620/",
+      "platforms": [
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows",
+        "linux"
+      ],
+      "exclusivity": "Valve game, sold on Steam only.",
+      "sources": [
+        "https://store.steampowered.com/app/620/",
+        "https://www.pcgamingwiki.com/wiki/Portal_2#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "L'« initiative de tests perpétuels » a été étendue pour vous permettre de concevoir des casse-têtes coopératifs pour vous et vos contacts !",
+      "genres": [
+        "Réflexion",
+        "Coopération"
+      ],
+      "price": {
+        "minor": 969,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=620&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 95,
+        "source": "https://www.metacritic.com/game/portal-2/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/02b755eb0cf5f41c1838a99c9a353ebce32a88cd/capsule_616x353_2x.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/a58588d857b8683f8065e55f97ab82ad8a945c51/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/ss_6a4f5afdaa98402de9cf0b59fed27bab3256a6f4.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/ss_0cdd90fafc160b52d08b303d205f9fd4e83cf164.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/620/ss_3d13161104a04603a0524536770c5f74626db4c0.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "half-life-2",
+      "title": "Half-Life 2",
+      "brand": "steam",
+      "steamAppId": 220,
+      "storeUrl": "https://store.steampowered.com/app/220/",
+      "platforms": [
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows",
+        "linux"
+      ],
+      "exclusivity": "Valve game, sold on Steam only.",
+      "sources": [
+        "https://store.steampowered.com/app/220/",
+        "https://www.pcgamingwiki.com/wiki/Half-Life_2#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Sorti d'un long sommeil cryogénique, Gordon Freeman émerge dans City 17 occupée. Avec Alyx Vance, il mène une résistance désespérée contre l'oppression.",
+      "genres": [
+        "Action",
+        "FPS"
+      ],
+      "price": {
+        "minor": 969,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=220&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 96,
+        "source": "https://www.metacritic.com/game/half-life-2/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/bf3e952145c2c17c239c87e69acdc6d9625138a7/capsule_616x353_2x.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/5925343a8312ea07f234d48170963aafae4158bf/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/ac2f074d790656a06ef8305bd54a6f64e9a70082/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/ss_0e499071a60a20b24149ad65a8edb769250f2921.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/ss_b822a29b3804e05ab9517cac99a5d978d109a32b.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/220/ss_ffb00abd45012680e4f209355ec81f961b6dd1fb.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "sekiro",
+      "title": "Sekiro: Shadows Die Twice",
+      "brand": "steam",
+      "steamAppId": 814380,
+      "storeUrl": "https://store.steampowered.com/app/814380/",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "On PC only on Steam; the Microsoft Store sells the Xbox version only and it is not in PC Game Pass.",
+      "sources": [
+        "https://store.steampowered.com/app/814380/",
+        "https://www.pcgamingwiki.com/wiki/Sekiro:_Shadows_Die_Twice#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Suivez votre chemin vers la vengeance dans l'aventure primée de FromSoftware, les créateurs de Dark Souls. Recouvrez votre honneur. Tuez avec ingéniosité.",
+      "genres": [
+        "Action",
+        "Aventure"
+      ],
+      "price": {
+        "minor": 5999,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=814380&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 88,
+        "source": "https://www.metacritic.com/game/sekiro-shadows-die-twice/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/capsule_616x353.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/library_hero.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/ss_0f7b0f8ed9ffc49aba26f9328caa9a1d59ad60f0.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/ss_15f0e9982621aed44900215ad283811af0779b1d.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/814380/ss_1e6f5540866a5564d65df915c22fe1e57e336a6f.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "left-4-dead-2",
+      "title": "Left 4 Dead 2",
+      "brand": "steam",
+      "steamAppId": 550,
+      "storeUrl": "https://store.steampowered.com/app/550/",
+      "platforms": [
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows",
+        "linux"
+      ],
+      "exclusivity": "Valve game, sold on Steam only.",
+      "sources": [
+        "https://store.steampowered.com/app/550/",
+        "https://www.pcgamingwiki.com/wiki/Left_4_Dead_2#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Dans une apocalypse zombie, un jeu de tir coopératif qui entraîne votre équipe des cimetières aux marécages, de Savannah à La Nouvelle-Orléans.",
+      "genres": [
+        "Action",
+        "Coopération"
+      ],
+      "price": {
+        "minor": 969,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=550&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 89,
+        "source": "https://www.metacritic.com/game/left-4-dead-2/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/capsule_616x353.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/library_hero.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/ss_29b3b4f2a3994c889f6fc12e0781d9d4726ef33f.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/ss_9488e329bb42d792a059fb44cb7135d25b6262f5.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/550/ss_6ec4ee04d4924b099e25ce79f3d6571c3b623b3b.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "counter-strike-2",
+      "title": "Counter-Strike 2",
+      "brand": "steam",
+      "steamAppId": 730,
+      "storeUrl": "https://store.steampowered.com/app/730/",
+      "platforms": [
+        "pc"
+      ],
+      "supportedPlatforms": [
+        "windows",
+        "linux"
+      ],
+      "exclusivity": "Valve game, free to play on Steam only.",
+      "sources": [
+        "https://store.steampowered.com/app/730/",
+        "https://www.pcgamingwiki.com/wiki/Counter-Strike_2#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Counter-Strike, l'expérience compétitive par excellence depuis plus de vingt ans. Faites place au prochain chapitre : Counter-Strike 2.",
+      "genres": [
+        "Action",
+        "FPS",
+        "Gratuit"
+      ],
+      "price": {
+        "minor": 0,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:18Z",
+        "source": "https://store.steampowered.com/api/appdetails?appids=730&cc=fr&l=french"
+      },
+      "criticScore": {
+        "score": 82,
+        "source": "https://www.metacritic.com/game/counter-strike-2/"
+      },
+      "media": {
+        "capsule": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/6328493f4cc4a8fb83e1149be1cac5a7823fe588/capsule_616x353_2x.jpg",
+        "hero": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/library_hero_2x.jpg",
+        "cover": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/library_600x900_2x.jpg",
+        "scenes": [
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/ss_13bb35638c0267759276f511ee97064773b37a51.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/ss_ef82850f036dac5772cb07dbc2d1116ea13eb163.1920x1080.jpg",
+          "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/730/ss_0f8cf82d019c614760fd20801f2bb4001da7ea77.1920x1080.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "alan-wake-2",
+      "title": "Alan Wake 2",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/alan-wake-2",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Published by Epic; on PC only on the Epic Games Store (no Steam, GOG or Microsoft Store PC version).",
+      "sources": [
+        "https://store.epicgames.com/fr/p/alan-wake-2",
+        "https://www.pcgamingwiki.com/wiki/Alan_Wake_II#Availability",
+        "https://www.metacritic.com/game/alan-wake-ii/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Saga Anderson enquête sur une série de meurtres rituels pendant qu'Alan Wake écrit une histoire sombre pour modifier la réalité. Un lien semble les unir.",
+      "genres": [
+        "Horreur",
+        "Aventure"
+      ],
+      "price": null,
+      "criticScore": {
+        "score": 89,
+        "source": "https://www.metacritic.com/game/alan-wake-ii/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/egs-alanwake2-remedyentertainment-s1-2560x1440-309c7412b7bc.jpg",
+        "cover": "https://cdn2.unrealengine.com/egs-alanwake2-remedyentertainment-s2-1200x1600-0ebb9a566b72.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-alanwake2-remedyentertainment-g1a-03-1920x1080-321a6753e674.jpg",
+          "https://cdn2.unrealengine.com/egs-alanwake2-remedyentertainment-g1a-02-1920x1080-cee72a709dc4.jpg",
+          "https://cdn2.unrealengine.com/egs-alanwake2-remedyentertainment-g1a-05-1920x1080-c89a4844a26f.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "rocket-league",
+      "title": "Rocket League",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/rocket-league",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox",
+        "switch"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Free to play on PC through Epic only since 2020; the Steam page sells nothing to new players.",
+      "sources": [
+        "https://store.epicgames.com/fr/p/rocket-league",
+        "https://store.steampowered.com/app/252950/",
+        "https://www.pcgamer.com/rocket-league-going-free-to-play-new-players-will-have-to-get-it-on-the-epic-store/",
+        "https://www.metacritic.com/game/rocket-league/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Un puissant hybride mêlant football d'arcade et carnage à quatre roues, dans d'intenses rencontres à la jouabilité intuitive basée sur la physique.",
+      "genres": [
+        "Sport",
+        "Course",
+        "Gratuit"
+      ],
+      "price": {
+        "minor": 0,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:44Z",
+        "source": "https://store-content-ipv4.ak.epicgames.com/api/fr/content/products/rocket-league"
+      },
+      "criticScore": {
+        "score": 86,
+        "source": "https://www.metacritic.com/game/rocket-league/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/egs-rocketleague-psyonixllc-s1-2560x1440-a4b09c870ec3.jpg",
+        "cover": "https://cdn2.unrealengine.com/egs-rocketleague-psyonixllc-s2-1200x1600-f27cb62efd7e.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-rocketleague-psyonixllc-g1a-02-1920x1080-bba460e79a42.jpg",
+          "https://cdn2.unrealengine.com/egs-rocketleague-psyonixllc-g1a-03-1920x1080-2ed8a1689f61.jpg",
+          "https://cdn2.unrealengine.com/egs-rocketleague-psyonixllc-g1a-05-1920x1080-f1af9498d24b.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "fall-guys",
+      "title": "Fall Guys",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/fall-guys",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox",
+        "switch"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Free to play on PC through Epic only; delisted from Steam in June 2022.",
+      "sources": [
+        "https://store.epicgames.com/fr/p/fall-guys",
+        "https://store.steampowered.com/app/1097150/",
+        "https://www.pcgamer.com/fall-guys-now-free-on-epic-and-de-listed-from-steam/",
+        "https://www.metacritic.com/game/fall-guys/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Un jeu de groupe gratuit et multijoueur : affrontez vos amis dans des courses d'obstacles absurdes ou construisez votre propre manche chaotique.",
+      "genres": [
+        "Party game",
+        "Gratuit"
+      ],
+      "price": {
+        "minor": 0,
+        "currency": "EUR",
+        "verifiedAt": "2026-11-26T13:43:44Z",
+        "source": "https://store-content-ipv4.ak.epicgames.com/api/fr/content/products/fall-guys"
+      },
+      "criticScore": {
+        "score": 80,
+        "source": "https://www.metacritic.com/game/fall-guys/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/fgss04-keyart-storefrontimagelandscape-2560x1440-2560x1440-175537e580a8.jpg",
+        "cover": "https://cdn2.unrealengine.com/fgss04-keyart-storefrontimageportrait-1200x1600-1200x1600-ef38aea922c2.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-fallguys-mediatonic-g1a-01-1920x1080-97cd3dd7370b.jpg",
+          "https://cdn2.unrealengine.com/egs-fallguys-mediatonic-g1a-03-1920x1080-a9a882b3e322.jpg",
+          "https://cdn2.unrealengine.com/egs-fallguys-mediatonic-g1a-04-1920x1080-d6fd01a031c0.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "alan-wake-remastered",
+      "title": "Alan Wake Remastered",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/alan-wake-remastered",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox",
+        "switch"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Published by Epic; on PC only on the Epic Games Store (Steam and GOG sell the 2010 original only).",
+      "sources": [
+        "https://store.epicgames.com/fr/p/alan-wake-remastered",
+        "https://www.pcgamingwiki.com/wiki/Alan_Wake_Remastered#Availability",
+        "https://www.metacritic.com/game/alan-wake-remastered/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "L'écrivain Alan Wake se lance à la recherche de sa femme disparue. Le jeu principal et ses deux extensions, « The Signal » et « The Writer », en 4K.",
+      "genres": [
+        "Horreur",
+        "Action"
+      ],
+      "price": null,
+      "criticScore": {
+        "score": 80,
+        "source": "https://www.metacritic.com/game/alan-wake-remastered/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/en-remedy-deer-s1-2560x1440-2560x1440-fa5adddc1cce.png",
+        "cover": "https://cdn2.unrealengine.com/en-remedy-deer-s2-1200x1600-1200x1600-af2af3a517c5.png",
+        "scenes": [
+          "https://cdn2.unrealengine.com/deer-screenshot-4k-0820-01-3840x2160-273063bcbfd5.png",
+          "https://cdn2.unrealengine.com/awr-012-3840x2160-3198034dfb3e.png",
+          "https://cdn2.unrealengine.com/deer-screenshot-4k-0820-02-3840x2160-22a940eda889.png"
+        ]
+      }
+    },
+    {
+      "slug": "pc-building-simulator-2",
+      "title": "PC Building Simulator 2",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/pc-building-simulator-2",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "Published by Epic; on PC only on the Epic Games Store (the first game is on Steam, this one is not).",
+      "sources": [
+        "https://store.epicgames.com/fr/p/pc-building-simulator-2",
+        "https://www.pcgamingwiki.com/wiki/PC_Building_Simulator_2#Availability",
+        "https://www.metacritic.com/game/pc-building-simulator-2/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Développez votre empire en apprenant à réparer, assembler et personnaliser des PC, avec des pièces réalistes de plus de 40 marques.",
+      "genres": [
+        "Simulation"
+      ],
+      "price": null,
+      "criticScore": {
+        "score": 82,
+        "source": "https://www.metacritic.com/game/pc-building-simulator-2/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/egs-pcbuildingsimulator2-spiralhouseltd-s1-2560x1440-566ef0f5e355.jpg",
+        "cover": "https://cdn2.unrealengine.com/egs-pcbuildingsimulator2-spiralhouseltd-s2-1200x1600-d51a15036b62.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-pcbuildingsimulator2-spiralhouseltd-g1a-01-1920x1080-b9833f4dfedc.jpg",
+          "https://cdn2.unrealengine.com/egs-pcbuildingsimulator2-spiralhouseltd-g1a-04-1920x1080-29f10a720ea9.jpg",
+          "https://cdn2.unrealengine.com/egs-pcbuildingsimulator2-spiralhouseltd-g1a-06-1920x1080-d3def846b9ae.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "kingdom-hearts-melody-of-memory",
+      "title": "Kingdom Hearts Melody of Memory",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/kingdom-hearts-melody-of-memory",
+      "platforms": [
+        "pc",
+        "playstation",
+        "xbox",
+        "switch"
+      ],
+      "supportedPlatforms": [
+        "windows"
+      ],
+      "exclusivity": "On PC only on the Epic Games Store; the 2024 Steam release of the series left it out.",
+      "sources": [
+        "https://store.epicgames.com/fr/p/kingdom-hearts-melody-of-memory",
+        "https://www.pcgamingwiki.com/wiki/Kingdom_Hearts:_Melody_of_Memory#Availability",
+        "https://www.metacritic.com/game/kingdom-hearts-melody-of-memory/"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Un jeu d'action rythmique avec plus de 20 personnages et plus de 140 chansons de la saga Kingdom Hearts, et un mode Versus en ligne.",
+      "genres": [
+        "Rythme",
+        "Action"
+      ],
+      "price": null,
+      "criticScore": {
+        "score": 74,
+        "source": "https://www.metacritic.com/game/kingdom-hearts-melody-of-memory/"
+      },
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/egs-kingdomheartsmelodyofmemory-squareenix-s1-2560x1440-f2a981d40076.jpg",
+        "cover": "https://cdn2.unrealengine.com/egs-kingdomheartsmelodyofmemory-squareenix-s2-1200x1600-5bbedb300349.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-kingdomheartsmelodyofmemory-squareenix-g1a-01-1920x1080-6066342d6d84.jpg",
+          "https://cdn2.unrealengine.com/egs-kingdomheartsmelodyofmemory-squareenix-g1a-03-1920x1080-db877a290cea.jpg",
+          "https://cdn2.unrealengine.com/egs-kingdomheartsmelodyofmemory-squareenix-g1a-05-1920x1080-116d5f5fe71f.jpg"
+        ]
+      }
+    },
+    {
+      "slug": "kid-a-mnesia-exhibition",
+      "title": "Kid A Mnesia Exhibition",
+      "brand": "epic",
+      "storeUrl": "https://store.epicgames.com/fr/p/kid-a-mnesia-exhibition",
+      "platforms": [
+        "pc",
+        "playstation"
+      ],
+      "supportedPlatforms": [
+        "windows",
+        "macos"
+      ],
+      "exclusivity": "Published by Epic; on PC only on the Epic Games Store.",
+      "sources": [
+        "https://store.epicgames.com/fr/p/kid-a-mnesia-exhibition",
+        "https://www.pcgamer.com/radiohead-is-an-epic-games-store-exclusive",
+        "https://www.pcgamingwiki.com/wiki/Kid_A_Mnesia_Exhibition#Availability"
+      ],
+      "verifiedAt": "2026-11-26",
+      "shortDescription": "Un univers digital et analogue sens dessus dessous, créé à partir d'œuvres et d'enregistrements originaux de Kid A et Amnesiac de Radiohead.",
+      "genres": [
+        "Exploration",
+        "Musique"
+      ],
+      "price": null,
+      "criticScore": null,
+      "media": {
+        "capsule": "https://cdn2.unrealengine.com/egs-kidamnesiaexhibition-namethemachinexagp-s1-2560x1440-66a4c81ecd8c.jpg",
+        "cover": "https://cdn2.unrealengine.com/egs-kidamnesiaexhibition-namethemachinexagp-s2-1200x1600-902a8737c4e3.jpg",
+        "scenes": [
+          "https://cdn2.unrealengine.com/egs-kidamnesiaexhibition-namethemachinexarbitrarilygoodproductions-g1a-02-1920x1080-ed2d1c13eed5.jpg",
+          "https://cdn2.unrealengine.com/egs-kidamnesiaexhibition-namethemachinexarbitrarilygoodproductions-g1a-01-1920x1080-029646abf5c6.jpg",
+          "https://cdn2.unrealengine.com/egs-kidamnesiaexhibition-namethemachinexarbitrarilygoodproductions-g1a-06-1920x1080-938ed3d7c21c.jpg"
+        ]
+      }
+    }
+  ]
+}
