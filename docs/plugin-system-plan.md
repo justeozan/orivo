@@ -364,6 +364,58 @@ propres octets comptent. Le verdict d’un profil est lui aussi rattaché au
 composant qui l’a rendu : un paquet qui change sous le même identifiant renvoie
 le profil à « à revalider » au lieu de lancer sur un ancien oui.
 
+Un plugin peut désormais **ajouter une page au Store** (#110). C’est une
+contribution d’interface faite de données, rien d’autre : le monde WIT
+`store-tab-plugin` exporte `store-tabs.tabs`, qui rend au plus quatre onglets —
+un libellé, une couleur d’ambiance `#rrggbb`, au plus 120 jeux (titre, courte
+description, images, genres, prix en unités mineures d’une devise ISO 4217,
+page web facultative). Le manifeste le déclare par l’extension `store_tab`, et
+seulement ainsi : un paquet qui exporte l’interface sans la nommer à
+l’installation n’ajoute rien, et un paquet qui la nomme sans exporter le monde
+est refusé à l’installation comme un runner qui n’en est pas un.
+`get-identity` n’a pas de cas pour elle — ajouter un cas à `extension-kind`
+casserait tout composant v1 —, donc un plugin qui n’ajoute qu’un onglet n’y
+déclare rien. Le reste du contrat est additif, ce que `wit_compatibility.rs`
+vérifie.
+
+Le host revalide tout (`plugin_runtime.rs`, `validate_store_tabs`) et distingue
+deux fautes. Une **forme** fausse — trop d’onglets ou de jeux, une clé ou un id
+hors grammaire, deux identiques, un libellé ou un titre vide une fois nettoyé —
+refuse la réponse entière. Un **champ** qu’il ne montrera pas est retiré et le
+reste tient : une couleur qui n’est pas `#rrggbb`, une adresse qui n’est pas un
+`https` simple sur un nom public (ni identifiants, ni port, ni adresse IP, ni
+`localhost`), une image contenant de quoi fermer un `url(…)` CSS, une devise
+qui n’est pas trois lettres, une « remise » qui augmenterait le prix. Les textes
+perdent leurs caractères de contrôle et de direction et sont coupés aux mêmes
+longueurs que la page. Les ids de jeux reviennent préfixés par l’id du
+manifeste (`<plugin>:<jeu>`), si bien qu’aucun onglet ne peut nommer un jeu de
+la bibliothèque ou d’un autre plugin. L’adresse de la page d’un jeu ne traverse
+jamais l’IPC : la WebView apprend seulement qu’elle existe, et
+`open_plugin_store_page` l’ouvre à partir de l’id, par le même opener que les
+offres du Store. La politique de contenu de la WebView décide toujours des
+hôtes d’images qu’elle charge : une image servie ailleurs qu’aux hôtes déjà
+autorisés ne s’affiche pas, et l’élargir est une décision séparée.
+
+Ce monde n’importe que le journal : ni horloge, ni réseau, ni fichier. La
+réponse d’un composant ne dépend donc que de ses octets, et
+`plugin_store_tabs.rs` la garde contre leur SHA-256 pour la session : la
+première liste compile le composant, sans le cache de compilation — afficher
+une page n’est pas un geste *à propos d’un plugin* —, les suivantes ne lisent
+que les manifestes et les empreintes. Un refus que le paquet répéterait est
+gardé aussi ; un refus dû à la machine (deadline, file pleine) ne l’est pas.
+L’appel passe par le scheduler, sous le budget interactif, et un plugin mis en
+`degraded` n’a plus d’onglet ni de page jusqu’à sa reprise. Désinstaller, mettre à jour ou revenir en arrière
+oublie la réponse au moment même où l’observateur d’identité de l’installateur
+est prévenu, ferme les pages qu’elle permettait d’ouvrir et émet
+`plugin-store-tabs-changed`, sur lequel le front (`src/plugin-store-tabs.ts`)
+se resynchronise. Les builds sans plugins téléchargés — iOS et l’édition Mac
+App Store — ne listent rien et ne démarrent pas le moteur pour le demander.
+Côté front, la liste est demandée une fois le premier rendu passé, puis à
+chaque événement ; la page Store peut appeler `syncPluginStoreTabs()` à son
+activation. Le composant de référence est
+`src-tauri/fixtures/store-tab-fixture`, qui porte exprès un exemple de chaque
+faute de champ.
+
 ## Les promesses à préserver
 
 1. Le shell et la bibliothèque locale apparaissent sans attendre un plugin.
@@ -391,6 +443,7 @@ seule responsabilité principale :
 | `search` | recherche de guides | proposer des résultats structurés | ralentir la recherche locale |
 | `automation` | import/export, sauvegarde | exécuter un job explicite | tourner en boucle sans budget |
 | `ui-contribution` | badge, carte, commande, réglage | fournir des données d'interface validées | injecter HTML, CSS ou JavaScript |
+| `store_tab` | une page de deals, une boutique tierce | ajouter des onglets au Store : libellé, couleur, jeux | ouvrir une adresse sans le host, nommer un jeu hors de son espace |
 
 Une mini-app entièrement libre n'est pas une extension du premier SDK. Elle
 arrive seulement après que les surfaces de données structurées auront prouvé
@@ -543,6 +596,7 @@ source@1.0           discover-page, sync-cursor, normalize records
 runner@1.0           validate-profile, discover-page, prepare-launch
 metadata@1.0         enrich(game references), media candidates
 ui-contrib@1.0       commands, badges, settings schema, cards data
+store-tabs@1.0       onglets du Store : libellé, couleur, jeux (implémenté)
 ```
 
 `discover-page` est paginé et reprend avec un curseur. Les synchronisations sont
