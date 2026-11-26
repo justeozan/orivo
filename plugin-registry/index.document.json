@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "sequence": 2,
+  "expiresAtEpochMs": 1806505200000,
+  "plugins": [
+    {
+      "id": "com.orivo.gamestream",
+      "name": "Moonlight / Sunshine",
+      "version": "0.2.1",
+      "summary": "Streams a local .stream game library through Moonlight / Sunshine.",
+      "url": "https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.2.1/com.orivo.gamestream-0.2.1.orivo-plugin",
+      "sha256": "adb691493f1e024564381b8d3f2ef31575e7d4166bbfab6c4bab850659e85678",
+      "sizeBytes": 15057,
+      "minOrivoVersion": "0.3.7"
+    }
+  ]
+}
