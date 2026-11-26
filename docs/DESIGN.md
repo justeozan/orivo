@@ -330,7 +330,7 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
 - **L'avancé est fermé par défaut.** Les termes de recherche, la version, les journaux et les profils techniques vont dans un `<details class="plugin-more">` fermé, ou derrière Beta features.
 - **Une progression, c'est une barre et une ligne.** La ligne a la forme `Étape 2/7 · Shaders · ~12 min`, avec un seul bouton Arrêter. À la fin, une ligne : le résultat, ou l'erreur telle que l'outil l'a dite.
 - **Les titres de section** (petites capitales `plugin-detail__section`) n'apparaissent que si le panneau a au moins deux sections visibles.
-- **Les étapes guidées numérotées** (`gs-steps`) servent seulement à un parcours qu'on suit dans l'ordre une seule fois, comme l'appairage de Game streaming. Elles ne servent pas pour une liste de prérequis.
+- **Un parcours qu'on suit une seule fois** (l'appairage de Game streaming) pose **une question à la fois** dans le panneau de droite (`gs-flow`) : en grand, un seul bouton principal (`gs-cta`), les choix en tuiles (`gs-tile`, sélection = `plugin-card.is-selected`). Une fois prêt, il ne reste qu'un bouton et un menu ⋯ (`pluginMoreMenu`) pour le reste. Pas pour une liste de prérequis.
 
 #### Les composants à reprendre
 
@@ -343,7 +343,7 @@ Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
 | Ligne | `plugin-fields` / `plugin-field` · `plugin-field__label` · `plugin-field__inputs` |
 | Fiche | `plugin-facts` / `plugin-fact` (libellé · valeur) |
 | État | `ws-pill` · `ws-pill--on` |
-| Avancé | `details.plugin-more` |
+| Avancé | `details.plugin-more` · menu ⋯ `pluginMoreMenu` (`plugin-dots`, `plugin-menu`) |
 | Grille | `plugin-card` · `.source-grid .source-account-row` |
 
 #### Avant / après — Switch (nxnative), 21 novembre 2026
