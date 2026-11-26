@@ -660,24 +660,94 @@ impl ThirdPartyRunnerService {
         self.grant_directory(profile_id, slot, &directory)
     }
 
-    /// Make this stream profile's folder and grant it. Safe to repeat: the
-    /// setup runs it before every import, so a folder someone deleted, or a
-    /// grant that was revoked, is quietly put back.
+    /// Whether `directory` is inside `<app data>/streaming`, the area
+    /// [`Self::grant_managed_directory`] may grant without a picker.
+    fn is_managed_folder(&self, directory: &Path) -> bool {
+        let Some(root) = self.managed_root.as_ref() else {
+            return false;
+        };
+        match (
+            std::fs::canonicalize(root.join(MANAGED_LIBRARY_DIRECTORY)),
+            std::fs::canonicalize(directory),
+        ) {
+            (Ok(allowed), Ok(directory)) => directory.starts_with(allowed),
+            _ => false,
+        }
+    }
+
+    /// Make this stream profile usable again: its folder, the permission to
+    /// read it, and the permission to prepare its launches. Safe to repeat:
+    /// the setup runs it before every import, so a folder someone deleted, or
+    /// a grant that was revoked, is quietly put back.
+    ///
+    /// "Revoked" includes the plugin being reinstalled. [`Self::forget_plugin`]
+    /// takes every permission back when the package changes, and nothing else
+    /// gives `runner_prepare` back to a profile that already exists — only
+    /// creating one does. Refreshing a stream profile is the user asking for
+    /// this one profile to work, the same answer creating it gave, so it is
+    /// asked again here and the plugin is asked about the profile again.
+    /// Without that, a reinstall left the profile refusing every launch with a
+    /// message pointing at settings that could not fix it.
     pub fn prepare_stream_library(
         &self,
         profile_id: &str,
     ) -> Result<RunnerProfileView, RunnerHostError> {
-        let mode = self
-            .store
-            .snapshot()?
+        let catalog = self.store.snapshot()?;
+        let profile = catalog
             .runner_profile(profile_id)
-            .map(|profile| profile.settings.launch_mode)
+            .cloned()
             .ok_or(RunnerHostError::UnknownProfile)?;
-        if mode != RunnerLaunchMode::Stream {
+        if profile.settings.launch_mode != RunnerLaunchMode::Stream {
             return Err(RunnerHostError::LaunchModeMismatch);
         }
-        let directory = self.managed_library_directory(profile_id)?;
-        self.grant_managed_directory(profile_id, None, &directory)
+        match stream_folder_with_games(&catalog, &profile)
+            .filter(|directory| !self.is_managed_folder(directory))
+        {
+            // A profile made before Orivo kept this folder itself streams from
+            // the one the user picked then, and its games were imported from
+            // there. Pointing the slot at the managed folder would strand them,
+            // which whole-catalog validation refuses, so refreshing failed on
+            // every such profile. Their own folder stays the feed instead.
+            Some(directory) => self.grant_directory(profile_id, None, &directory)?,
+            None => {
+                let directory = self.managed_library_directory(profile_id)?;
+                self.grant_managed_directory(profile_id, None, &directory)?
+            }
+        };
+        let package = self.package(&profile.plugin_id)?;
+        let identity = package.identity().clone();
+        let allowed = self
+            .store
+            .snapshot()?
+            .active_plugin_grant(&profile.plugin_id, PluginCapability::RunnerPrepare)
+            .is_some_and(|grant| {
+                grant.applies_to(&identity)
+                    && matches!(&grant.scope,
+                    crate::plugin_manifest::CapabilityScope::RunnerProfiles(ids)
+                        if ids.contains(profile_id))
+            });
+        if !allowed {
+            let granted_at = unix_millis();
+            self.store.commit(|catalog| {
+                catalog.allow_plugin_scope_value(
+                    &profile.plugin_id,
+                    PluginCapability::RunnerPrepare,
+                    profile_id,
+                    &identity,
+                    granted_at,
+                )
+            })?;
+        }
+        let current = self.store.snapshot()?;
+        let verdict_is_current = current.runner_profile(profile_id).is_some_and(|profile| {
+            profile.status == RunnerProfileStatus::Valid
+                && profile.package_fingerprint.as_deref() == Some(identity.fingerprint.as_str())
+        });
+        if verdict_is_current {
+            self.profile_view(profile_id)
+        } else {
+            self.revalidate_profile(&package, profile_id)
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1822,6 +1892,20 @@ fn pick_directory() -> Result<PathBuf, String> {
 #[cfg(mobile)]
 fn pick_directory() -> Result<PathBuf, String> {
     Err("Third-party runners cannot be configured on this device yet.".into())
+}
+
+/// The folder a stream profile's games were imported from, if any. When it is
+/// not one Orivo keeps, the profile was set up before the guided setup and its
+/// feed is a folder the user picked.
+fn stream_folder_with_games(catalog: &Catalog, profile: &RunnerProfile) -> Option<PathBuf> {
+    let directory = profile.granted_directory(DEFAULT_DIRECTORY_SLOT)?;
+    catalog
+        .runner_inventory
+        .iter()
+        .any(|entry| {
+            entry.profile_id == profile.id && entry.directory_grant_id == DEFAULT_DIRECTORY_SLOT
+        })
+        .then(|| directory.path.clone())
 }
 
 #[cfg(test)]
@@ -2975,6 +3059,140 @@ mod tests {
         assert_eq!(managed.label, ACCEPTED_PROFILE_ID);
         // Running it again is harmless: the setup does so before every import.
         harness.service.prepare_stream_library(ACCEPTED_PROFILE_ID).unwrap();
+    }
+
+    /// A stream profile set up before the guided setup streams from a folder
+    /// the user picked, and its games were imported from there. Refreshing it
+    /// used to point the slot at the managed folder, which whole-catalog
+    /// validation refuses while games sit under the old one, so every refresh
+    /// failed. It keeps its own folder now.
+    #[test]
+    fn a_stream_profile_on_the_users_own_folder_refreshes_in_place() {
+        let harness = Harness::new("stream-own-folder", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        let own = harness.root.join("own-streams");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("Modulus.stream"), b"{}").unwrap();
+        harness
+            .service
+            .grant_directory(ACCEPTED_PROFILE_ID, Some(DEFAULT_DIRECTORY_SLOT), &own)
+            .unwrap();
+        plant_entry_in(
+            &harness,
+            "fixture:own",
+            "Modulus.stream",
+            DEFAULT_DIRECTORY_SLOT,
+            &own,
+        );
+
+        let view = harness
+            .service
+            .prepare_stream_library(ACCEPTED_PROFILE_ID)
+            .expect("a refresh keeps the folder the games came from");
+
+        let profile = harness
+            .catalog()
+            .runner_profile(ACCEPTED_PROFILE_ID)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            profile.granted_directory(DEFAULT_DIRECTORY_SLOT).unwrap().path,
+            fs::canonicalize(&own).unwrap()
+        );
+        assert!(view
+            .directories
+            .iter()
+            .any(|directory| directory.id == DEFAULT_DIRECTORY_SLOT && directory.granted));
+        assert!(
+            !harness.root.join("appdata").join("streaming").join(ACCEPTED_PROFILE_ID).exists(),
+            "no managed folder is made for a profile that already has its own"
+        );
+    }
+
+    /// A reinstalled plugin takes every permission with it, and nothing gave
+    /// `runner_prepare` back to a profile that already existed, so a stream
+    /// profile refused every launch for good. Refreshing it is the user asking
+    /// for it to work again: the permissions come back, the plugin is asked
+    /// about the profile again, and the game launches.
+    #[test]
+    fn refreshing_a_stream_profile_after_the_plugin_changed_lets_it_launch() {
+        let harness = Harness::new("stream-after-reinstall", THREE_ROMS);
+        harness.configured_profile();
+        make_stream_profile(&harness);
+        harness
+            .service
+            .prepare_stream_library(ACCEPTED_PROFILE_ID)
+            .unwrap();
+        let managed = harness
+            .root
+            .join("appdata")
+            .join("streaming")
+            .join(ACCEPTED_PROFILE_ID);
+        fs::write(
+            managed.join("Modulus.stream"),
+            r#"{ "host": "astra.local", "client": "moonlight", "app": "Modulus" }"#,
+        )
+        .unwrap();
+        plant_entry_in(
+            &harness,
+            "fixture:stream",
+            "Modulus.stream",
+            DEFAULT_DIRECTORY_SLOT,
+            &managed,
+        );
+        harness.service.forget_plugin(FIXTURE_PLUGIN_ID).unwrap();
+        let package = harness.service.package(FIXTURE_PLUGIN_ID).unwrap();
+        let cancelled = AtomicBool::new(false);
+        assert_eq!(
+            crate::runner_host::prepare_runner_launch(
+                &package,
+                &harness.catalog(),
+                ACCEPTED_PROFILE_ID,
+                "fixture:stream",
+                &cancelled,
+            )
+            .unwrap_err(),
+            RunnerHostError::ProfileNeedsRevalidation
+        );
+
+        let view = harness
+            .service
+            .prepare_stream_library(ACCEPTED_PROFILE_ID)
+            .unwrap();
+
+        assert_eq!(view.status, RunnerProfileStatus::Valid);
+        let prepared = crate::runner_host::prepare_runner_launch(
+            &package,
+            &harness.catalog(),
+            ACCEPTED_PROFILE_ID,
+            "fixture:stream",
+            &cancelled,
+        )
+        .expect("the refreshed profile launches");
+        assert_eq!(
+            prepared
+                .command()
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>(),
+            vec!["stream", "astra.local", "Modulus"]
+        );
+        // Refreshing again asks for nothing new: a permission already in
+        // force is not restated as another row of the ledger.
+        let runner_prepare_rows = |catalog: &Catalog| {
+            catalog
+                .plugin_grants
+                .iter()
+                .filter(|grant| grant.capability == PluginCapability::RunnerPrepare)
+                .count()
+        };
+        let before = runner_prepare_rows(&harness.catalog());
+        harness
+            .service
+            .prepare_stream_library(ACCEPTED_PROFILE_ID)
+            .unwrap();
+        assert_eq!(runner_prepare_rows(&harness.catalog()), before);
     }
 
     #[test]

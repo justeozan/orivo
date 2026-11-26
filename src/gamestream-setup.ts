@@ -399,7 +399,8 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
     try {
       // The folder is Orivo's own, made and allowed here: nobody is asked to
       // pick one. Done before every import so a folder that went missing is
-      // simply made again.
+      // simply made again, and a profile whose permissions went with a
+      // reinstalled plugin gets them back.
       await deps.runners.prepareLibrary(current.id);
       await deps.runners.startImport(current.id);
     } catch (error) {
