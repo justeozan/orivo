@@ -100,7 +100,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   ...(
     [
       ["general", "cog"],
-      ["libraries", "folder"],
+      ["libraries", "users"],
       ["plugins", "puzzle"],
       ["data", "database"],
       ["about", "info"],
