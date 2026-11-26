@@ -282,6 +282,16 @@ export interface GameSummary {
    * checked: an exclusive is a curated, sourced fact, never inferred.
    */
   exclusiveTo?: StoreBrand;
+  /**
+   * Screenshots for the Store's detail view, landscape, best first. Absent
+   * when the catalogue has none; the detail then cycles the art it has.
+   */
+  gallery?: string[];
+  /**
+   * The critics' aggregate (Metacritic or OpenCritic, 0–100), as published.
+   * Absent when there is none: the Store ranks on it and never invents one.
+   */
+  criticScore?: number;
 }
 
 export interface GameDetailView extends GameSummary {
