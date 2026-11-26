@@ -238,6 +238,24 @@ describe("primary action resolution", () => {
     ).toBe(true);
     expect(resolvePrimaryAction(gog, "game_1", null, { playport: true }).disabled).toBe(true);
   });
+
+  it("gives a GOG or Epic game an Install on iOS, where the App Store may sell it", () => {
+    const onIphone = (source: GameDetailViewModel["source"]) =>
+      detailWith({ primaryAction: "unavailable", hostPlatform: "other", launchable: false, source, supportedPlatforms: [] });
+    const ios = { storeChoices: true, appStoreVersions: true };
+    for (const source of ["epic", "gog"] as const) {
+      expect(resolvePrimaryAction(onIphone(source), "game_1", null, ios)).toMatchObject({
+        kind: "store-choices",
+        label: "Install",
+        intent: "store-choices",
+        disabled: false,
+      });
+      // Android installs nothing from the App Store.
+      expect(resolvePrimaryAction(onIphone(source), "game_1", null, { storeChoices: true }).disabled).toBe(true);
+    }
+    // Another store is still a record of what you own.
+    expect(resolvePrimaryAction(onIphone("ubisoft"), "game_1", null, ios).disabled).toBe(true);
+  });
 });
 
 describe("media grouping and preview", () => {

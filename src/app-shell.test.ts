@@ -2423,6 +2423,32 @@ describe("the application shell on iOS", () => {
     expect(commandArgs("open_store_choice")).toEqual([{ gameId: "epic:SuperMeatBoy", choiceId: "playport" }]);
   });
 
+  it("sends an Epic game to its own iPhone app, and says so when there is none", async () => {
+    backend.features = { ...backend.features, appStoreVersions: true };
+    const fortnite = { ...superMeatBoy, id: "epic:Fortnite", title: "Fortnite" };
+    backend.library = [fortnite];
+    backend.choices = [{ id: "app-store", label: "iPhone & iPad version", detail: "App Store · Epic Games Sweden AB" }];
+    mount();
+    await settle();
+
+    // No Playport needed: the App Store may sell the game itself.
+    expect(playButton().textContent).toContain("Install");
+    expect(playButton().hasAttribute("aria-disabled")).toBe(false);
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+    expect(commandArgs("open_store_choice")).toEqual([{ gameId: "epic:Fortnite", choiceId: "app-store" }]);
+
+    // A PC-only game: one plain sentence, never a launcher to install.
+    backend.choices = [];
+    playButton().click();
+    await settle();
+    expect(commandArgs("install_epic_game")).toEqual([]);
+    expect(root.querySelector<HTMLElement>("#toast")!.textContent).toContain(
+      "This game has no version for this device.",
+    );
+  });
+
   it("asks nothing about Playport on a computer", async () => {
     backend.features = undefined;
     backend.library = [superMeatBoy];

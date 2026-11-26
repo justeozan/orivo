@@ -22,6 +22,10 @@ pub struct PlatformFeatures {
     /// than asking a store's client to download it (see `store_choices`). iOS
     /// and Android, where no Steam client is there to take `steam://install`.
     pub store_choices: bool,
+    /// "Install" also looks for a GOG or Epic Games game's own iPhone and iPad
+    /// version on the App Store (Fortnite). iOS only: Android installs nothing
+    /// from the App Store, so there such a game has nowhere to go.
+    pub app_store_versions: bool,
     /// Orivo can get out of a started game's way: hide on macOS, minimise on
     /// Windows and Linux (`step_aside_for_game`). A phone switches to the
     /// game's app by itself, so there it is not a choice to offer.
@@ -56,6 +60,7 @@ pub const fn for_target(ios: bool, mobile: bool, app_store: bool) -> PlatformFea
         downloadable_plugins: !store_reviewed,
         local_runners: !store_reviewed,
         store_choices: mobile,
+        app_store_versions: ios,
         steps_aside: !mobile,
         self_updates: !mobile && !app_store,
         shows_data_folder: !mobile,
@@ -79,6 +84,7 @@ mod tests {
                 downloadable_plugins: false,
                 local_runners: false,
                 store_choices: true,
+                app_store_versions: true,
                 steps_aside: false,
                 self_updates: false,
                 shows_data_folder: false,
@@ -94,6 +100,7 @@ mod tests {
                 downloadable_plugins: true,
                 local_runners: true,
                 store_choices: true,
+                app_store_versions: false,
                 steps_aside: false,
                 self_updates: false,
                 shows_data_folder: false,
@@ -109,6 +116,7 @@ mod tests {
                 downloadable_plugins: true,
                 local_runners: true,
                 store_choices: false,
+                app_store_versions: false,
                 steps_aside: true,
                 self_updates: true,
                 shows_data_folder: true,
@@ -124,6 +132,7 @@ mod tests {
                 downloadable_plugins: false,
                 local_runners: false,
                 store_choices: false,
+                app_store_versions: false,
                 steps_aside: true,
                 self_updates: false,
                 shows_data_folder: true,
@@ -140,6 +149,7 @@ mod tests {
                 "downloadablePlugins": false,
                 "localRunners": false,
                 "storeChoices": true,
+                "appStoreVersions": true,
                 "stepsAside": false,
                 "selfUpdates": false,
                 "showsDataFolder": false,

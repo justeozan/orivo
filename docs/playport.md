@@ -58,10 +58,9 @@ activity types.
 - **It puts one row first in Install's menu**: *PC version*, with Playport's
   verdict underneath — *Runs*, *Reported broken*, or *Not on its
   compatibility list yet*. A Steam game keeps its other answers
-  after it (its iOS version, its Steam page). A GOG or Epic game has no other
-  answer on iOS — neither store publishes a page the catalog can name — so its
-  button is live only while Playport is installed, and the one row opens
-  straight away.
+  after it (its iOS version, its Steam page). A GOG or Epic game keeps its iOS
+  version, when the App Store sells one, after it; neither store publishes a
+  page the catalog can name, so there is no page row.
 - **It opens `playport://`**, a constant, through the same opener the store
   pages use, after checking once more that Playport is still there.
 - **It reads the list** only when a row is about to be offered: at most once

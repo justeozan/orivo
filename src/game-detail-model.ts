@@ -944,6 +944,8 @@ export function resolvePrimaryAction(
     storeChoices?: boolean;
     /** Whether Playport is installed on this device (`playport.ts`). */
     playport?: boolean;
+    /** Whether the App Store may sell a GOG or Epic game's iOS version. */
+    appStoreVersions?: boolean;
   } = {},
 ): PrimaryActionDescriptor {
   const base: PrimaryActionDescriptor = {
@@ -1080,9 +1082,12 @@ export function resolvePrimaryAction(
       };
     }
     case "unavailable":
-      // A GOG or Epic game has nowhere to go on an iPhone — unless Playport is
-      // there to take it, and then the host's menu has that one answer.
-      if (options.storeChoices && options.playport && playportTakes(detail)) {
+      // A GOG or Epic game cannot run on an iPhone, but its iOS version may be
+      // on the App Store (Fortnite) and Playport may take the PC one: the
+      // host's menu says which. Anywhere else it has nowhere to go.
+      const onAppStore =
+        options.appStoreVersions === true && (detail.source === "epic" || detail.source === "gog");
+      if (options.storeChoices && (onAppStore || (options.playport && playportTakes(detail)))) {
         return {
           ...base,
           kind: "store-choices",

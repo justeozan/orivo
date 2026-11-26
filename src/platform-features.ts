@@ -17,6 +17,11 @@ export interface PlatformFeatures {
   /** "Install" asks the host where the game can be got on this device. */
   storeChoices: boolean;
   /**
+   * "Install" also finds a GOG or Epic Games game's own iPhone and iPad version
+   * on the App Store (Fortnite). iOS only.
+   */
+  appStoreVersions: boolean;
+  /**
    * Orivo can get out of a started game's way. A phone switches to the game's
    * app by itself, so there it is neither done nor offered as a setting.
    */
@@ -34,6 +39,7 @@ export const DESKTOP_FEATURES: PlatformFeatures = {
   downloadablePlugins: true,
   localRunners: true,
   storeChoices: false,
+  appStoreVersions: false,
   stepsAside: true,
   selfUpdates: true,
   showsDataFolder: true,
@@ -53,6 +59,7 @@ export function readPlatformFeatures(value: unknown): PlatformFeatures {
     downloadablePlugins: flag("downloadablePlugins"),
     localRunners: flag("localRunners"),
     storeChoices: flag("storeChoices"),
+    appStoreVersions: flag("appStoreVersions"),
     stepsAside: flag("stepsAside"),
     selfUpdates: flag("selfUpdates"),
     showsDataFolder: flag("showsDataFolder"),

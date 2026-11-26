@@ -10,6 +10,14 @@
    --------------------------------------------------------------------------- */
 
 import { invoke } from "./host";
+import { t } from "./i18n";
+
+/** The row's name in the player's language; an id this build does not know keeps the host's. */
+const CHOICE_LABELS: Readonly<Record<string, () => string>> = {
+  "app-store": () => t("app.store.choice.appStore"),
+  playport: () => t("app.store.choice.playport"),
+  "steam-page": () => t("app.store.choice.steamPage"),
+};
 
 export interface StoreChoice {
   id: string;
@@ -63,7 +71,7 @@ export function fillStoreChoiceMenu(
       option.dataset.storeChoice = choice.id;
       const label = document.createElement("span");
       label.className = "play-launch-option__label";
-      label.textContent = choice.label;
+      label.textContent = CHOICE_LABELS[choice.id]?.() ?? choice.label;
       option.append(label);
       if (choice.detail) {
         const detail = document.createElement("small");

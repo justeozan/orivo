@@ -1848,13 +1848,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   /**
    * Whether Install asks the host where this game can be got rather than
    * asking a store's client to download it: on iOS, a Steam game always — its
-   * Steam page is there — and a GOG or Epic game while Playport is installed
-   * to take it.
+   * Steam page is there — and a GOG or Epic game too, since the App Store may
+   * sell its iPhone version (Fortnite) and Playport may take the PC one.
    */
   const hasStoreChoices = (game: LibraryGame): boolean =>
     platformFeatures.storeChoices &&
     !game.launchable &&
-    (game.source === "steam" || (playportInstalled && playportTakes(game)));
+    (game.source === "steam" ||
+      (platformFeatures.appStoreVersions && (game.source === "epic" || game.source === "gog")) ||
+      (playportInstalled && playportTakes(game)));
 
   /**
    * "Install" on a device that installs nothing: the host says where the game
@@ -7523,6 +7525,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // A GOG or Epic game's Install has an answer there only while Playport
         // is installed to take it.
         playportInstalled: () => playportInstalled,
+        appStoreVersions: () => platformFeatures.appStoreVersions,
       });
     });
 
