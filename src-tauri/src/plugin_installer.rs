@@ -29,6 +29,9 @@ use crate::plugin_manifest::{
     HostCompatibility, PackageEntry, PackageInspection, PackageSignatureStatus, PluginManifest,
     ValidatedPluginPackage, validate_plugin_package,
 };
+use crate::plugin_official_releases::{
+    OfficialSource, ReleaseCache, official_sources, refresh_official_releases, with_latest_releases,
+};
 use crate::plugin_registry::{
     PLUGINS_DIRECTORY, PackageRefusal, PluginRegistry, PluginState, VerifyDepth,
 };
@@ -170,6 +173,8 @@ pub struct PluginInstallerService {
     host_version: &'static str,
     store: PluginStore,
     index: IndexCache,
+    /// The latest GitHub release of each official plugin, as last checked.
+    releases: ReleaseCache,
     /// One flag for the one network operation a user can see at a time. It is
     /// cleared when an operation starts, so `cancel_plugin_update` abandons
     /// what is running rather than poisoning what comes next.
@@ -195,6 +200,7 @@ impl PluginInstallerService {
         Self {
             store: PluginStore::new(plugin_root.clone()),
             index: IndexCache::new(&plugin_root),
+            releases: ReleaseCache::new(&plugin_root),
             cancelled: AtomicBool::new(false),
             busy: AtomicBool::new(false),
             plugin_root,
@@ -210,8 +216,9 @@ impl PluginInstallerService {
     }
 
     /// Everything the registry offers this build: the list compiled into the
-    /// binary, overlaid by the cached signed index. No network, ever — this is
-    /// read on a path that renders.
+    /// binary, overlaid by the cached signed index, then — for official plugins
+    /// only — by the latest release last found on GitHub where that is newer.
+    /// No network, ever — this is read on a path that renders.
     fn available_entries(&self) -> Vec<IndexEntry> {
         let mut entries = crate::plugin_index::parse_unsigned_entries(REGISTRY_JSON.as_bytes());
         if let Some(index) = self.index.load() {
@@ -222,6 +229,8 @@ impl PluginInstallerService {
                 }
             }
         }
+        let official = official_plugins();
+        with_latest_releases(&mut entries, &official, &self.releases.load(&official));
         entries.retain(|entry| self.host_can_run(entry));
         entries.sort_by(|left, right| left.id.cmp(&right.id));
         entries
@@ -277,11 +286,13 @@ impl PluginInstallerService {
             .into_iter()
             .map(|entry| AvailablePluginView {
                 installed: installed.iter().any(|plugin| plugin.id == entry.id),
+                // A latest release has no declared size until it is downloaded;
+                // the Store reads 0 as "unknown" and shows none.
+                size_bytes: entry.size_bytes().unwrap_or(0),
                 id: entry.id,
                 name: entry.name,
                 version: entry.version,
                 summary: entry.summary,
-                size_bytes: entry.size_bytes,
                 category: entry.category,
             })
             .collect();
@@ -398,7 +409,7 @@ pub async fn refresh_plugin_registry(
     // truth, and saying so would turn a flaky network into a broken Store.
     // While another operation runs, its cache is as fresh as this would make it.
     if let Some(_slot) = service.begin_operation() {
-        let _ = refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await;
+        refresh_sources(&service).await;
     }
     tauri::async_runtime::spawn_blocking(move || service.catalog())
         .await
@@ -550,6 +561,30 @@ pub fn start_background_maintenance(app: AppHandle, service: Arc<PluginInstaller
     });
 }
 
+/// The official plugins and their repositories, from the registry compiled
+/// into this binary and nowhere else.
+fn official_plugins() -> Vec<OfficialSource> {
+    official_sources(REGISTRY_JSON.as_bytes())
+}
+
+/// Ask both sources what they have, side by side, and say whether either
+/// answered. Either one is enough to act on: the index can be unreachable
+/// while GitHub answers for the official plugins, and that is precisely the
+/// case this second source exists for.
+async fn refresh_sources(service: &PluginInstallerService) -> bool {
+    let official = official_plugins();
+    let index = refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled);
+    let releases = async {
+        // A build that may install nothing has no release to look for.
+        if !crate::platform::CURRENT.downloadable_plugins {
+            return Err(String::new());
+        }
+        refresh_official_releases(&service.releases, &official, INDEX_TTL, &service.cancelled).await
+    };
+    let (index, releases) = futures_util::future::join(index, releases).await;
+    index.is_ok() || releases.is_ok()
+}
+
 /// Which pending releases to install now. Consent is the whole gate: without
 /// it nothing is installed and the user is only told.
 fn releases_to_install(automatic: bool, pending: Vec<IndexEntry>) -> Vec<IndexEntry> {
@@ -569,10 +604,10 @@ async fn maintenance_cycle(app: &AppHandle, service: &Arc<PluginInstallerService
     // lowered when a cycle claims the slot. A busy slot means a user is
     // mid-operation: skip this tick rather than touch their cancel flag.
     let refreshed = match service.begin_operation() {
-        Some(_slot) => refresh_index(&service.index, REGISTRY_INDEX_URL, &service.cancelled).await,
+        Some(_slot) => refresh_sources(service).await,
         None => return,
     };
-    if refreshed.is_err() {
+    if !refreshed {
         return;
     }
     // Reading every installed manifest is disk work, and the command executor
@@ -634,15 +669,11 @@ async fn acquire_and_install(
         return Err("Another plugin operation is running.".to_string());
     };
     publish(app, &entry.id, "downloading", 0, "Downloading…");
-    let size = entry.size_bytes.max(1);
-    let mut on_progress = |read: u64| {
-        publish(
-            app,
-            &entry.id,
-            "downloading",
-            ((read as f64 / size as f64) * 100.0) as u8,
-            "Downloading…",
-        );
+    let mut on_progress = |read: u64, total: Option<u64>| {
+        let percent = total.map_or(0, |total| {
+            ((read as f64 / total.max(1) as f64) * 100.0) as u8
+        });
+        publish(app, &entry.id, "downloading", percent, "Downloading…");
     };
     let bytes = match download_entry(entry, &service.cancelled, &mut on_progress).await {
         Ok(bytes) => bytes,
@@ -655,20 +686,9 @@ async fn acquire_and_install(
     publish(app, &entry.id, "verifying", 100, "Verifying…");
     let service_for_install = Arc::clone(service);
     let expected_id = entry.id.clone();
-    let promise = PackagePromise {
-        id: entry.id.clone(),
-        version: entry.version.clone(),
-    };
+    let downloaded = entry.clone();
     let installed = tauri::async_runtime::spawn_blocking(move || {
-        // The registry is a distribution channel, not a trust decision the
-        // user is asked to make per download: a release signature is required,
-        // and the package has to be the one the entry named.
-        install_package(
-            &service_for_install,
-            &bytes,
-            SignaturePolicy::ReleaseOnly,
-            Some(&promise),
-        )
+        install_downloaded(&service_for_install, &bytes, &downloaded)
     })
     .await
     .map_err(|_| "The installation did not finish.".to_string())?;
@@ -683,6 +703,30 @@ async fn acquire_and_install(
             Err(error)
         }
     }
+}
+
+/// Install what a registry entry's download produced.
+///
+/// The registry is a distribution channel, not a trust decision the user is
+/// asked to make per download: a release signature is required, and the package
+/// has to be the one the entry named. For an entry found as an official
+/// plugin's latest GitHub release that signature is the *only* thing holding
+/// the bytes — no document pinned a digest for them — so the policy here is not
+/// chosen per entry, and must never be.
+fn install_downloaded(
+    service: &PluginInstallerService,
+    bytes: &[u8],
+    entry: &IndexEntry,
+) -> Result<String, String> {
+    install_package(
+        service,
+        bytes,
+        SignaturePolicy::ReleaseOnly,
+        Some(&PackagePromise {
+            id: entry.id.clone(),
+            version: entry.version.clone(),
+        }),
+    )
 }
 
 fn publish(app: &AppHandle, plugin_id: &str, phase: &'static str, percent: u8, message: &str) {
@@ -1120,8 +1164,10 @@ mod tests {
             version: "0.1.0".into(),
             summary: String::new(),
             url: "https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.1.0/x.orivo-plugin".into(),
-            sha256: "0".repeat(64),
-            size_bytes: 1,
+            integrity: crate::plugin_index::PackageIntegrity::Pinned {
+                sha256: "0".repeat(64),
+                size_bytes: 1,
+            },
             min_orivo_version: min_orivo_version.map(str::to_string),
             category: None,
         }
@@ -2045,5 +2091,182 @@ mod tests {
                 .len(),
             "an entry of resources/plugin-registry.json was dropped by validation"
         );
+    }
+
+    const GAMESTREAM: &str = "com.orivo.gamestream";
+    const CATALOG_ASSET: &[u8] = br#"{"version":1,"titles":[]}"#;
+
+    fn official() -> PackageChannel {
+        PackageChannel::Official {
+            signer: ORIVO_RELEASE_SIGNER.into(),
+        }
+    }
+
+    fn versioned_files(id: &str, version: &str, min_orivo: &str) -> Vec<(String, Vec<u8>)> {
+        let manifest = String::from_utf8(manifest_json(id, CATALOG_ASSET))
+            .unwrap()
+            .replace(
+                r#""version": "0.1.0""#,
+                &format!(r#""version": "{version}""#),
+            )
+            .replace(
+                r#""minOrivoVersion": "0.3.0""#,
+                &format!(r#""minOrivoVersion": "{min_orivo}""#),
+            );
+        vec![
+            ("manifest.json".into(), manifest.into_bytes()),
+            ("component.wasm".into(), EMPTY_COMPONENT.to_vec()),
+            ("assets/catalog.json".into(), CATALOG_ASSET.to_vec()),
+        ]
+    }
+
+    fn archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+        package(
+            &files
+                .iter()
+                .map(|(path, contents)| (path.as_str(), contents.clone()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// An official plugin already installed through the registry, as trusted
+    /// as a release-signed install makes it.
+    fn installed_official(service: &PluginInstallerService, version: &str) {
+        let files = read_package(&archive(&versioned_files(GAMESTREAM, version, "0.3.0"))).unwrap();
+        install_verified(service, GAMESTREAM, version, official(), &files, false).unwrap();
+        assert!(service.store.is_trusted(GAMESTREAM));
+    }
+
+    fn latest_release_found(service: &PluginInstallerService, version: &str) {
+        service
+            .releases
+            .store(&std::collections::BTreeMap::from([(
+                GAMESTREAM.to_string(),
+                version.to_string(),
+            )]))
+            .unwrap();
+    }
+
+    /// The bug this exists for: Moonlight's release moved on and the index did
+    /// not, for seven weeks. An official plugin's latest GitHub release is an
+    /// update when it is newer than what is installed, under the same consent
+    /// and trust rules as an index entry — and a "latest" that is older is not
+    /// one, through either door.
+    #[test]
+    fn an_official_latest_release_is_pending_only_when_newer_than_the_installed_one() {
+        let root = temporary_root("official-latest");
+        let service = PluginInstallerService::new(root.clone(), "0.4.4");
+        // Above the compiled-in 0.2.1, so the compiled list alone offers nothing.
+        installed_official(&service, "0.3.0");
+        assert_eq!(pending_automatic_updates(&service), Vec::new());
+
+        latest_release_found(&service, "0.4.0");
+        let pending = pending_automatic_updates(&service);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, GAMESTREAM);
+        assert_eq!(pending[0].version, "0.4.0");
+        assert_eq!(
+            pending[0].integrity,
+            crate::plugin_index::PackageIntegrity::ReleaseSigned
+        );
+        assert_eq!(
+            pending[0].url,
+            "https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.4.0/com.orivo.gamestream-0.4.0.orivo-plugin"
+        );
+        // The Store shows it too, with no size rather than an invented one.
+        let catalog_entry = service
+            .catalog()
+            .available
+            .into_iter()
+            .find(|entry| entry.id == GAMESTREAM)
+            .unwrap();
+        assert_eq!(
+            (catalog_entry.version.as_str(), catalog_entry.size_bytes),
+            ("0.4.0", 0)
+        );
+
+        for older_or_same in ["0.2.9", "0.3.0"] {
+            latest_release_found(&service, older_or_same);
+            assert_eq!(
+                pending_automatic_updates(&service),
+                Vec::new(),
+                "{older_or_same}"
+            );
+            let offered = service
+                .available_entries()
+                .into_iter()
+                .find(|entry| entry.id == GAMESTREAM)
+                .unwrap();
+            assert!(
+                refuse_a_downgrade(
+                    installed_version(&service, GAMESTREAM).as_deref(),
+                    &offered.version
+                )
+                .is_err(),
+                "{older_or_same}"
+            );
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A latest release has no digest to be held to, so the release signature
+    /// is all that stands between GitHub and the plugin folder. An archive
+    /// signed by no one, or by anyone but Orivo, is refused — and the version
+    /// that was installed stays: a refused release is not an upgrade.
+    #[test]
+    fn an_official_latest_release_not_signed_by_orivo_is_refused() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let root = temporary_root("official-unsigned");
+        let service = PluginInstallerService::new(root.clone(), "0.4.4");
+        installed_official(&service, "0.1.0");
+        latest_release_found(&service, "0.4.0");
+        let entry = service
+            .available_entries()
+            .into_iter()
+            .find(|entry| entry.id == GAMESTREAM)
+            .unwrap();
+        assert_eq!(
+            entry.integrity,
+            crate::plugin_index::PackageIntegrity::ReleaseSigned
+        );
+
+        let unsigned = versioned_files(GAMESTREAM, "0.4.0", "0.3.0");
+        let mut foreign = unsigned.clone();
+        let signature = SigningKey::from_bytes(&[9_u8; 32]).sign(&Sha256::digest(&unsigned[0].1));
+        foreign.push(("signature.ed25519".into(), signature.to_bytes().to_vec()));
+
+        for (label, files) in [("unsigned", unsigned), ("foreign key", foreign)] {
+            assert_eq!(
+                install_downloaded(&service, &archive(&files), &entry),
+                Err("This package is not signed by Orivo.".into()),
+                "{label}"
+            );
+            assert_eq!(
+                installed_version(&service, GAMESTREAM).as_deref(),
+                Some("0.1.0"),
+                "{label}"
+            );
+            assert!(service.store.is_trusted(GAMESTREAM), "{label}");
+        }
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A release says nothing about the Orivo it needs until it is downloaded,
+    /// so the gate is the archive's own manifest — after the signature, before
+    /// the plugin it would replace is displaced.
+    #[test]
+    fn a_release_needing_a_newer_orivo_is_refused_from_its_own_manifest() {
+        let root = temporary_root("official-min-version");
+        let service = PluginInstallerService::new(root.clone(), "0.4.4");
+        installed_official(&service, "0.1.0");
+
+        let newer = read_package(&archive(&versioned_files(GAMESTREAM, "0.4.0", "9.0.0"))).unwrap();
+        assert!(install_verified(&service, GAMESTREAM, "0.4.0", official(), &newer, true).is_err());
+        assert_eq!(
+            installed_version(&service, GAMESTREAM).as_deref(),
+            Some("0.1.0")
+        );
+        fs::remove_dir_all(&root).ok();
     }
 }
