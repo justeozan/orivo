@@ -2525,6 +2525,91 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .storage-actions .settings-row__copy small { color: #9b97a3; font-size: 12px; }
 .storage-actions .plugin-install-button { min-width: 0; border-radius: 999px; }
 .storage-safe { margin: 12px 0 0; }
+/* Settings › About: the version in a lit plate with the one action it may
+   need, what is new written large, then the links as rows with chevrons. */
+.settings-panel > .about-hero,
+.settings-panel > .about-news,
+.settings-panel > .about-links,
+.settings-panel > .about-reset { border-top: 0; }
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background:
+    radial-gradient(70% 130% at 0% 0%, rgba(125,84,244,.26), transparent 60%),
+    linear-gradient(170deg, rgba(25,26,35,.7), rgba(16,17,26,.7));
+}
+.about-hero__mark { width: 56px; height: 56px; flex: none; object-fit: contain; }
+.about-hero__copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.about-hero__title { color: #f7f5fa; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+.about-hero__update[hidden] { display: none; }
+.about-hero .update-status__label { color: #9b97a3; font-size: 13px; font-weight: 500; }
+/* The detail is for when something is happening or went wrong; at rest the
+   one line above says it all. */
+.about-hero .update-status__detail { display: none; color: #9b97a3; font-size: 12px; }
+.about-hero .update-status[data-update-status="downloading"] .update-status__detail,
+.about-hero .update-status[data-update-status="error"] .update-status__detail { display: block; }
+.about-hero__action { flex: none; border-radius: 999px; }
+.about-hero__action[hidden] { display: none; }
+.about-hero__action.is-primary {
+  height: 44px;
+  padding: 0 24px;
+  border-color: transparent;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 8px 24px -8px rgba(84,66,160,.8);
+  font-size: 15px;
+}
+.about-hero__action.is-primary:hover:not(:disabled),
+.about-hero__action.is-primary[data-nav-focus] { border-color: transparent; background: linear-gradient(100deg, #d2cafa, #b6a9ea); }
+.about-news { gap: 4px; margin-top: 24px; }
+.about-news__title { margin: 0 0 6px; color: #9b97a3; font-size: 13px; font-weight: 600; }
+.about-news__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.about-news__item { display: flex; align-items: center; gap: 18px; padding: 14px 4px; }
+.about-news__item + .about-news__item { border-top: 1px solid rgba(255,255,255,.07); }
+.about-news__item .plugin-icon .icon { width: 24px; height: 24px; }
+.about-news__copy { display: grid; min-width: 0; gap: 4px; }
+.about-news__copy strong { color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; line-height: 1.25; }
+.about-news__copy small { color: #9b97a3; font-size: 13.5px; line-height: 1.4; }
+.about-links {
+  margin-top: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.about-links > * + * { border-top: 1px solid rgba(255,255,255,.08); }
+.about-link {
+  display: flex;
+  width: 100%;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 0;
+  color: #f4f2f8;
+  background: none;
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  text-align: left;
+  cursor: pointer;
+  list-style: none;
+}
+.about-link::-webkit-details-marker { display: none; }
+.about-link .icon { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.about-link:hover .icon, .about-link[data-nav-focus] .icon { color: #f4f2f8; }
+.about-licences[open] > .about-link .icon { transform: rotate(90deg); }
+.about-licences .settings-attributions { padding: 0 18px 16px 36px; color: #9b97a3; font-size: 12.5px; }
+.about-reset { margin: 16px 0 0; }
+.about-reset__button { color: #f09a9f; }
+.about-reset__button:hover:not(:disabled), .about-reset__button[data-nav-focus]:not(:disabled) { color: #ffb8bc; }
+
 .storage-pill {
   display: inline-block;
   padding: 3px 10px;
@@ -3766,11 +3851,6 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .ws-source--recommended .plugin-field__label::after { content: " ★"; color: #c9b8ff; font-size: 11px; }
 .ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
 .ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
-
-/* An update's highlights: a short, airy list under the version line. */
-.update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
-.update-status__highlights li { position: relative; padding-left: 16px; color: rgba(244,242,248,.82); font-size: 13px; line-height: 1.4; }
-.update-status__highlights li::before { position: absolute; top: .55em; left: 2px; width: 5px; height: 5px; border-radius: 50%; background: #b9a8ff; content: ""; }
 
 /* Each store is a small card read top to bottom: its logo, its name, then
    the one decision (Connect, or the account that turns into Disconnect). The

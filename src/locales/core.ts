@@ -22,7 +22,7 @@ export const en = {
   "settings.data.description": "Cache and data folder",
   "settings.about.label": "About",
   "settings.about.tab": "About",
-  "settings.about.description": "Versions and attributions",
+  "settings.about.description": "Version and what's new",
 
   "settings.startPage.label": "Start page",
   "settings.startPage.hint": "The page Orivo opens on launch.",
@@ -65,7 +65,7 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "settings.data.description": "Cache et dossier des données",
   "settings.about.label": "À propos",
   "settings.about.tab": "À propos",
-  "settings.about.description": "Versions et mentions",
+  "settings.about.description": "Version et nouveautés",
 
   "settings.startPage.label": "Page d'accueil",
   "settings.startPage.hint": "La page qu'Orivo ouvre au lancement.",
