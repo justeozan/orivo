@@ -317,6 +317,28 @@ pub fn clear_derived_cache(app: AppHandle) -> Result<DataUsageDto, String> {
     PreferencesService::from_app(&app)?.clear_derived_cache()
 }
 
+/// Shows Orivo's data folder in the system's file manager. The folder is the
+/// host's own (`app_data_dir`): the WebView names no path, so it can only ever
+/// open this one.
+#[tauri::command]
+pub fn open_data_folder(app: AppHandle) -> Result<(), String> {
+    #[cfg(mobile)]
+    {
+        let _ = app;
+        Err("A phone has no file manager to show Orivo's data folder in.".to_string())
+    }
+    #[cfg(desktop)]
+    {
+        use crate::store::UrlOpener;
+        let directory = app.path().app_data_dir().map_err(preference_error)?;
+        // A first launch that has written nothing yet still has a folder to show.
+        fs::create_dir_all(&directory).map_err(preference_error)?;
+        crate::store::SystemUrlOpener
+            .open(&directory.to_string_lossy())
+            .map_err(|_| "Orivo could not open its data folder.".to_string())
+    }
+}
+
 fn accumulate_usage(path: &Path, usage: &mut DataUsageDto) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,

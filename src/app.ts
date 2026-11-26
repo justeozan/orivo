@@ -129,7 +129,6 @@ import {
   type StoreRegion,
   defaultProviderStatuses,
   formatDataSize,
-  formatFreshness,
   hasWallpaperKey,
   normaliseDataUsage,
   normalisePreferences,
@@ -5668,15 +5667,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const renderDataUsage = (): void => {
     const size = root.querySelector<HTMLElement>("#derived-cache-size");
-    const entries = root.querySelector<HTMLElement>("#derived-cache-entries");
-    const freshness = root.querySelector<HTMLElement>("#derived-cache-freshness");
+    const bar = root.querySelector<HTMLElement>("#derived-cache-bar");
     if (size) size.textContent = formatDataSize(state.dataUsage.derivedCacheBytes);
-    if (entries) {
-      entries.textContent = state.dataUsage.derivedCacheEntries === 1
-          ? t("app.data.entryOne", { count: state.dataUsage.derivedCacheEntries.toLocaleString() })
-          : t("app.data.entryMany", { count: state.dataUsage.derivedCacheEntries.toLocaleString() });
-    }
-    if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
+    // One colour for the one figure the host measures: full when there is a
+    // cache, empty once it has been cleared.
+    if (bar) bar.style.width = state.dataUsage.derivedCacheBytes > 0 ? "100%" : "0%";
   };
 
   const renderUpdatePanel = (): void => {
@@ -6001,17 +5996,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
   };
 
-  const refreshDerivedData = async (): Promise<void> => {
-    const refresh = root.querySelector<HTMLButtonElement>("#refresh-derived-data");
-    if (refresh) refresh.disabled = true;
+  const openDataFolder = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast(t("app.data.folderDesktop"));
+      return;
+    }
     try {
-      if (isTauriRuntime()) await invoke("refresh_store_sources");
-      await Promise.all([loadProviderStatuses(), loadDataUsage()]);
-      showToast(t("app.data.refreshed"));
+      await invoke("open_data_folder");
     } catch (error) {
-      showToast(messageFromError(error, t("app.data.refreshFailed")));
-    } finally {
-      if (refresh) refresh.disabled = false;
+      showToast(messageFromError(error, t("app.data.folderFailed")));
     }
   };
 
@@ -7219,8 +7212,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       .settingsAction;
     if (action === "reset-preferences") {
       void savePreferences({ reset: true });
-    } else if (action === "refresh-derived") {
-      void refreshDerivedData();
+    } else if (action === "open-data-folder" && platformFeatures.showsDataFolder) {
+      void openDataFolder();
     } else if (action === "clear-derived") {
       void clearDerivedData();
     } else if (action === "check-updates" && platformFeatures.selfUpdates) {
@@ -7839,6 +7832,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
+    const dataFolderRow = document.querySelector<HTMLElement>("#data-folder-row");
+    if (dataFolderRow) dataFolderRow.hidden = !features.showsDataFolder;
     if (!features.storeChoices) return;
     // On iOS the Library's button reads both: an Epic game has no launcher to
     // ask there, and a GOG or Epic game goes to Playport if anywhere.
@@ -9061,20 +9056,28 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
-              <div class="settings-card" data-settings-searchable>
+              <!-- The host measures only what it can rebuild (the derived
+                   cache), so the total is that and one bar, not a breakdown. -->
+              <div class="settings-card storage-total" data-settings-searchable>
+                <p class="storage-total__figure"><strong id="derived-cache-size">${formatDataSize(0)}</strong><span>${t("app.data.inCache")}</span></p>
+                <span class="storage-bar" aria-hidden="true"><span id="derived-cache-bar" class="storage-bar__fill"></span></span>
+              </div>
+              <div class="settings-card storage-actions" data-settings-searchable>
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>${t("app.data.cacheTitle")}</strong>
-                    <small><span id="derived-cache-entries">${t("app.data.entryMany", { count: 0 })}</span> · <span id="derived-cache-freshness">${t("app.data.notRefreshed")}</span></small>
+                    <small>${t("app.data.cacheHint")}</small>
                   </div>
-                  <span id="derived-cache-size" class="settings-metric">0 B</span>
+                  <button id="clear-derived-cache" type="button" class="plugin-install-button" data-settings-action="clear-derived">${t("app.data.clear")}</button>
                 </div>
-                <div class="settings-row settings-row--actions">
-                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">${t("app.data.refresh")}</button>
-                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">${t("app.data.clear")}</button>
+                <div id="data-folder-row" class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>${t("app.data.folder")}</strong>
+                  </div>
+                  <button id="open-data-folder" type="button" class="plugin-install-button" data-settings-action="open-data-folder">${t("app.data.open")}</button>
                 </div>
-                <p class="settings-hint">${t("app.data.hint", { device: hostDeviceLabel() })}</p>
               </div>
+              <p class="storage-safe"><span class="storage-pill">${t("app.data.safe")}</span></p>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-about" data-settings-panel="about" aria-labelledby="settings-tab-about" tabindex="0" hidden>

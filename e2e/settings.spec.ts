@@ -336,7 +336,8 @@ test.describe("Settings ships no fake controls", () => {
 
     await openRoute(page, "#/settings/data", "settings");
     await expect(page.locator("#derived-cache-size")).toHaveText("0 B");
-    await expect(page.locator("#derived-cache-freshness")).toHaveText("Not refreshed yet");
+    await expect(page.locator("#clear-derived-cache")).toBeVisible();
+    await expect(page.locator("#open-data-folder")).toBeVisible();
 
     await openRoute(page, "#/settings/about", "settings");
     await expect(page.locator("#about-app-version")).toHaveText("Development build");
