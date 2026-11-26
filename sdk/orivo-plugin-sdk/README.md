@@ -9,7 +9,9 @@ commands, none of which reimplement a rule Orivo already enforces:
   library rather than keeping a second copy that could drift.
 - `check` calls `PluginRuntime::inspect_contract` and
   `PluginRuntime::verify_runner` — the exact pre-install gate the registry
-  runs before offering an installed runner for configuration.
+  runs before offering an installed runner for configuration. A package that
+  declares `store_tab` is held to `PluginRuntime::verify_store_tabs` as well,
+  the check the installer runs on it.
 - `simulate` calls `PluginRuntime::submit` and waits on the returned job, the
   same door every other caller in Orivo uses to run guest code. Grants are
   resolved with `PluginGrants::resolve` against directories you point it at on
@@ -29,7 +31,12 @@ cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- simulate <package-d
 ```
 
 Run `-- --help` for the full option list (`--grant NAME=PATH`, `--request`,
-`--profile-id`, and so on).
+`--profile-id`, and so on). `--request store-tabs` prints a Store tab plugin's
+answer as the Store would receive it, after the host's validation.
+
+`tests/store_tabs.rs` runs the committed Store tab fixture
+(`src-tauri/fixtures/orivo-store-tab-fixture.wasm`) through `check` and
+`simulate`.
 
 ## Why a workspace member, not a script
 
