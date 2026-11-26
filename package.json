@@ -1,6 +1,6 @@
 {
   "name": "orivo",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "license": "SEE LICENSE IN LICENSE",
   "type": "module",
@@ -19,6 +19,8 @@
     "tauri": "tauri",
     "store:refresh": "node scripts/fetch-store-catalog.mjs && node scripts/fetch-store-scenes.mjs && node scripts/build-store-catalog.mjs && node scripts/prune-store-media.mjs --apply && node scripts/compress-media.mjs",
     "store:build": "node scripts/build-store-catalog.mjs",
+    "registry:sign": "node plugin-registry/scripts/sign.mjs",
+    "registry:verify": "node plugin-registry/scripts/verify.mjs",
     "screenshots:app-store": "node scripts/app-store-screenshots.mjs"
   },
   "dependencies": {
