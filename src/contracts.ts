@@ -277,9 +277,12 @@ export interface GameSummary {
   /** Present only for Store games Orivo has written editorial copy for. */
   curation?: StoreCuration;
   /**
-   * The one store this game is sold on, among those the Store has a tab for.
-   * Absent for a game sold in more than one place, and for one nobody has
-   * checked: an exclusive is a curated, sourced fact, never inferred.
+   * The one brand this game is exclusive to. A console brand: sold on that
+   * maker's consoles and no other maker's (a PC version allowed). Steam or
+   * Epic: on PC, sold through that storefront and no other (console versions
+   * allowed). Absent for everything else, and for any game nobody has checked:
+   * an exclusive is a curated, sourced fact, never inferred
+   * (`docs/store-exclusives.md`).
    */
   exclusiveTo?: StoreBrand;
   /**
