@@ -60,47 +60,6 @@ export interface UpdateDescription {
   buttonDisabled: boolean;
 }
 
-/**
- * The bullets of a release body's "Added" and "Changed" sections, in order,
- * as plain text: links reduced to their words, emphasis and code marks gone.
- * What is fixed stays out — a list of repaired bugs is not what is new.
- */
-export function releaseBullets(body: string | null | undefined): string[] {
-  if (!body) return [];
-  const bullets: string[] = [];
-  let section = "";
-  for (const raw of body.split(/\r?\n/)) {
-    const line = raw.trim();
-    const heading = /^#{2,4}\s+(.+)$/.exec(line);
-    if (heading) {
-      section = heading[1].trim().toLowerCase();
-      continue;
-    }
-    if (section !== "added" && section !== "changed") continue;
-    const bullet = /^[-*]\s+(.+)$/.exec(line);
-    if (!bullet) continue;
-    const text = bullet[1]
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-      .replace(/[*_`]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (text) bullets.push(text);
-  }
-  return bullets;
-}
-
-/** The text up to its first full stop, without that stop. */
-export function firstSentence(text: string): string {
-  const sentence = /^(.+?[.!?])(\s|$)/.exec(text)?.[1] ?? text;
-  return sentence.replace(/[.]$/, "");
-}
-
-/** One line at most `max` long, cut at a word when it has to be cut. */
-export function shortenLine(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max).replace(/\s+\S*$/, "")}…`;
-}
-
 export const INITIAL_UPDATE_STATE: UpdateState = {
   status: "idle",
   currentVersion: "",

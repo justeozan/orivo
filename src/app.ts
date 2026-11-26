@@ -160,7 +160,8 @@ import {
   startDownload,
   updateProgressPercent,
 } from "./updater-model";
-import { aboutNews } from "./about-model";
+import { aboutHighlights } from "./about-model";
+import { RELEASE_HIGHLIGHTS } from "./release-highlights";
 import {
   createDefaultPluginManagerClient,
   createPluginManagerController,
@@ -5980,33 +5981,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   /**
-   * "What's new", written large: a pending update's notes when they say
-   * something readable, otherwise the running version's changelog section.
-   * The changelog is fetched only when About is first opened, as its own chunk.
+   * "What's new", written large: the running version's highlights, bundled and
+   * translated (src/release-highlights.ts). The version is the host's once it
+   * has answered, the build's until then.
    */
   const runningVersion = (): string | null =>
     state.update.currentVersion || (typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null);
-  let aboutChangelog: string | null = null;
-  let aboutChangelogRequested = false;
-  const loadAboutChangelog = (): void => {
-    if (aboutChangelogRequested) return;
-    aboutChangelogRequested = true;
-    void import("../CHANGELOG.md?raw")
-      .then((module) => {
-        aboutChangelog = module.default;
-        renderAboutNews();
-      })
-      .catch(() => {
-        // Notes are a nicety: without them the section is simply not drawn.
-      });
-  };
 
   const renderAboutNews = (): void => {
     const section = root.querySelector<HTMLElement>("#about-news");
     const title = root.querySelector<HTMLElement>("#about-news-title");
     const list = root.querySelector<HTMLElement>("#about-news-list");
     if (!section || !title || !list) return;
-    const news = aboutNews(state.update, aboutChangelog, runningVersion());
+    const news = aboutHighlights(RELEASE_HIGHLIGHTS, runningVersion());
     section.hidden = !news;
     if (!news) {
       list.replaceChildren();
@@ -6019,18 +6006,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         row.className = "about-news__item";
         const tile = document.createElement("span");
         tile.className = "plugin-icon";
-        tile.dataset.category = item.category;
+        tile.dataset.category = item.tone;
         tile.innerHTML = icon(item.icon);
         const copy = document.createElement("span");
         copy.className = "about-news__copy";
         const heading = document.createElement("strong");
-        heading.textContent = item.title;
-        copy.append(heading);
-        if (item.detail) {
-          const detail = document.createElement("small");
-          detail.textContent = item.detail;
-          copy.append(detail);
-        }
+        heading.textContent = t(item.titleKey);
+        const line = document.createElement("small");
+        line.textContent = t(item.lineKey);
+        copy.append(heading, line);
         row.append(tile, copy);
         return row;
       }),
@@ -6070,7 +6054,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     detail.className = "update-status__detail";
     detail.textContent = description.detail;
     status.replaceChildren(label, detail);
-    // What is new depends on what is waiting, so it is drawn with the status.
+    // Drawn with the status because the host's version arrives with it.
     renderAboutNews();
 
     const downloading = isTauriRuntime() && state.update.status === "downloading";
@@ -7045,7 +7029,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const loadAboutVersions = async (request = settingsRequest): Promise<void> => {
     const appVersion = root.querySelector<HTMLElement>("#about-app-version");
-    loadAboutChangelog();
     if (!isTauriRuntime()) {
       // The preview names the version of the checkout it was built from,
       // which the markup already carries.

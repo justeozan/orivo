@@ -102,9 +102,33 @@ both secrets.
 ### Before you start
 
 - Everything you want to ship is merged into `main` and CI is green.
-- Nothing else: the release notes are written by `scripts/release-notes.sh`,
-  one line per PR merged since the previous stable tag (`- #N : <PR title>`),
-  then the download notes. PR titles are the changelog, so make them read well.
+- Nothing else: the release notes are written by `scripts/release-notes.sh`:
+  the version's highlights (below), one line per PR merged since the previous
+  stable tag (`- #N : <PR title>`), then the download notes. PR titles are the
+  changelog, so make them read well.
+
+### Highlights
+
+Settings › About shows "What's new in <version>" from
+`src/release-highlights.ts`, not from the release body: PR titles are long and
+English, the About page is short and translated. A PR with something a player
+would notice adds, in the same change:
+
+1. a title and a line to `src/locales/highlights.ts`, English and French
+   (`tu`), a few words each: *Your Switch games, in Orivo* /
+   *New plugin: install, update, add a game*. `src/release-highlights.test.ts`
+   fails past 40 and 56 characters;
+2. an item `{ icon, tone, titleKey, lineKey }` to the `"next"` bucket at the top
+   of `src/release-highlights.ts` (`tone` is a plugin category, the tile's
+   colour). Four per release at most are shown; merge small ones.
+
+A fix, a refactor or CI work adds nothing. **Tag release** runs
+`node scripts/release-highlights.mjs stamp <version>`, which renames `"next"` to
+the new version in the bump commit and opens an empty `"next"`; with nothing
+waiting it changes nothing, and About keeps showing the last release that had
+highlights, under that release's version. `release-notes.sh` puts the English
+ones at the top of the GitHub release. Both need Node 22.18 or newer, which
+loads the TypeScript directly.
 
 ### The normal path (recommended)
 
@@ -123,6 +147,7 @@ To release without a merge (or with an exact version):
    - rewrites the single version literal in `package.json`,
      `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json` and `Cargo.lock`
      (formatting is left untouched);
+   - stamps the waiting highlights with the version (see Highlights above);
    - commits `chore(release): v0.4.0` to `main`;
    - pushes the annotated tag `v0.4.0`;
    - starts **Release** at that tag.

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppRoute } from "./contracts";
 import type { AppPage } from "./page-lifecycle";
 import { mountApp } from "./app";
+import { t } from "./i18n";
+import { RELEASE_HIGHLIGHTS } from "./release-highlights";
 
 /**
  * Settings › About, past the updater (`app-updater.test.ts`): what is new,
@@ -75,14 +77,20 @@ afterEach(() => {
 });
 
 describe("Settings › About", () => {
-  it("names the running version and, with nothing pending, its changelog's news", async () => {
+  it("names the running version and writes its highlights large", async () => {
     await mountOnAbout();
     await vi.waitFor(() => expect(root.querySelector<HTMLElement>("#about-news")?.hidden).toBe(false));
     expect(root.querySelector("#about-app-version")?.textContent).toBe("0.4.4");
-    expect(root.querySelector("#about-news-title")?.textContent).toMatch(/^What's new in \d+\.\d+\.\d+$/);
-    const items = root.querySelectorAll("#about-news-list .about-news__item");
-    expect(items.length).toBeGreaterThan(0);
-    expect(items[0].querySelector(".plugin-icon")?.getAttribute("data-category")).toBeTruthy();
+    expect(root.querySelector("#about-news-title")?.textContent).toBe("What's new in 0.4.4");
+    const items = [...root.querySelectorAll("#about-news-list .about-news__item")];
+    const release = RELEASE_HIGHLIGHTS.find((entry) => entry.version === "0.4.4")!;
+    expect(items.map((item) => item.querySelector("strong")?.textContent)).toEqual(
+      release.items.map((item) => t(item.titleKey)),
+    );
+    expect(items.map((item) => item.querySelector("small")?.textContent)).toEqual(
+      release.items.map((item) => t(item.lineKey)),
+    );
+    expect(items[0].querySelector(".plugin-icon")?.getAttribute("data-category")).toBe(release.items[0].tone);
   });
 
   it("asks the host for a page by name, never by address", async () => {
