@@ -31,6 +31,7 @@ mod plugin_compile_cache;
 mod plugin_health;
 mod plugin_index;
 mod plugin_installer;
+mod plugin_official_releases;
 // `pub`, not `mod`: the developer SDK (`sdk/orivo-plugin-sdk`) links this crate
 // as an rlib so its manifest validator and host simulator call the same
 // policy and invocation code Orivo runs, instead of a second copy that could
