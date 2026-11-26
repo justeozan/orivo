@@ -71,6 +71,7 @@ mod steam_account;
 mod store;
 mod store_choices;
 mod store_media;
+mod stream_session;
 mod wallpaper_credentials;
 mod wallpaper_search;
 mod wine_runner;
@@ -544,6 +545,9 @@ enum LaunchHandoff {
     /// event says when it is on screen, or that the game ended before
     /// (`nxnative_commands::watch_console_start`).
     Window,
+    /// A stream: `stream-session` events say each step, when the picture is
+    /// up and when the stream is over (`stream_session`).
+    Stream,
 }
 
 /// The launch service hands Steam and the connected stores a URI, and starts
@@ -1261,6 +1265,7 @@ pub fn run() {
             console_commands::import_console_roms,
             launch_game,
             step_aside_for_game,
+            stream_session::stream_session_control,
             install_steam_game,
             get_store_choices,
             open_store_choice,
@@ -8565,12 +8570,49 @@ async fn launch_game_inner(
         // Loading and probing the component, asking it to prepare the launch and
         // resolving the game file are all blocking work, and none of it may run
         // on the command executor.
-        let (resolved_title, child) = tauri::async_runtime::spawn_blocking(move || {
-            service.launch_owned(&runner_id, &profile_id, &game_ref)
-        })
-        .await
-        .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
-        .map_err(|error| error.to_string())?;
+        let ids = (runner_id.clone(), profile_id.clone(), game_ref.clone());
+        let (resolved_title, child, stream_quit) =
+            tauri::async_runtime::spawn_blocking(move || {
+                service.launch_owned(&runner_id, &profile_id, &game_ref)
+            })
+            .await
+            .map_err(|_| "This runner launch did not finish. Try again.".to_string())?
+            .map_err(|error| error.to_string())?;
+        // A stream is followed to its picture and its end: Orivo stands in
+        // front of Moonlight's own pages until then, and comes back after.
+        #[cfg(desktop)]
+        if let Some(quit) = stream_quit {
+            let service = Arc::clone(&runners);
+            let relaunch: stream_session::Relaunch = Box::new(move || {
+                let (runner_id, profile_id, game_ref) = &ids;
+                let (_, mut child, quit) = service
+                    .launch_owned(runner_id, profile_id, game_ref)
+                    .map_err(|error| error.to_string())?;
+                match quit {
+                    Some(quit) => Ok((child, quit)),
+                    // The profile stopped streaming in between: this is not
+                    // the launch that was asked for.
+                    None => {
+                        let _ = child.kill();
+                        Err("Game streaming isn't set up properly. Open Settings › Plugins › Game streaming to finish setting it up.".into())
+                    }
+                }
+            });
+            stream_session::watch(
+                app.clone(),
+                game.id.clone(),
+                child,
+                quit,
+                relaunch,
+                record_session,
+            );
+            return Ok(LaunchResult {
+                status: format!("Streaming {resolved_title}"),
+                handoff: Some(LaunchHandoff::Stream),
+            });
+        }
+        #[cfg(mobile)]
+        let _ = (stream_quit, ids);
         // The emulator is Orivo's own child here, so its session is timed.
         watch_game_session(
             app.clone(),
@@ -8929,6 +8971,9 @@ async fn launch_game_inner(
 /// its own, so there is nothing to do.
 #[tauri::command]
 fn step_aside_for_game(app: AppHandle) -> Result<(), String> {
+    // A stream's splash stood above every window until now; stepping aside
+    // ends that, so Orivo comes back as an ordinary window.
+    stream_session::cover(&app, false);
     #[cfg(target_os = "macos")]
     app.hide()
         .map_err(|error| format!("Orivo could not step aside: {error}"))?;

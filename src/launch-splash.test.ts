@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LaunchWeave } from "./launch-weave";
 import {
   LAUNCH_SPLASH_TIMING,
   createLaunchSplash,
   readLaunchHandoff,
+  streamDuration,
   windowForegroundSignals,
   type ForegroundSignal,
   type LaunchSplash,
@@ -357,8 +359,220 @@ describe("starting a game", () => {
   });
 });
 
+/** Strings whose way in and way out the test finishes when it chooses. */
+function fakeWeave() {
+  let endDive = (): void => undefined;
+  let endUnfold = (): void => undefined;
+  const weave = {
+    start: vi.fn(),
+    stage: vi.fn(),
+    dive: vi.fn(() => new Promise<void>((resolve) => (endDive = resolve))),
+    unfold: vi.fn(() => new Promise<void>((resolve) => (endUnfold = resolve))),
+    stop: vi.fn(),
+  } satisfies LaunchWeave;
+  return { weave, endDive: () => endDive(), endUnfold: () => endUnfold() };
+}
+
+describe("streaming a game", () => {
+  let host: HTMLElement;
+  let shell: HTMLElement;
+  let window_: ReturnType<typeof foreground>;
+  let stepAside: ReturnType<typeof vi.fn<() => Promise<void>>>;
+  let streamControl: ReturnType<typeof vi.fn<(gameId: string, action: string) => void>>;
+  let strings: ReturnType<typeof fakeWeave>;
+  let splash: LaunchSplash;
+
+  const mount = (options: Partial<LaunchSplashOptions> = {}): LaunchSplash => {
+    splash = createLaunchSplash({
+      host,
+      covers: [shell],
+      shouldStepAside: () => true,
+      stepAside,
+      signals: window_.signals,
+      reducedMotion: () => false,
+      now: () => Date.now(),
+      streamControl,
+      createWeave: () => strings.weave,
+      ...options,
+    });
+    return splash;
+  };
+  const status = (): string => host.querySelector(".launch-splash__status")?.textContent ?? "";
+  const button = (label: string): HTMLButtonElement =>
+    [...host.querySelectorAll<HTMLButtonElement>(".launch-splash__answer")].find(
+      (candidate) => candidate.textContent === label,
+    )!;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ now: 0 });
+    document.body.replaceChildren();
+    shell = document.createElement("div");
+    host = document.createElement("div");
+    host.hidden = true;
+    document.body.append(shell, host);
+    window_ = foreground();
+    stepAside = vi.fn(() => Promise.resolve());
+    streamControl = vi.fn();
+    strings = fakeWeave();
+  });
+
+  afterEach(() => {
+    splash?.dispose();
+    vi.useRealTimers();
+  });
+
+  it("stands in front of Moonlight until the first picture, saying each step", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    expect(strings.weave.start).toHaveBeenCalledTimes(1);
+    expect(status()).toBe("Reaching your PC");
+
+    // Moonlight taking the foreground and covering Orivo says nothing here.
+    window_.send("blur");
+    window_.send("hidden");
+    await vi.advanceTimersByTimeAsync(deadlineMs * 10);
+    expect(stepAside).not.toHaveBeenCalled();
+    expect(splash.isOpen()).toBe(true);
+
+    splash.stream(hades.id, { stage: "launching", resumed: true });
+    expect(status()).toBe("Resuming on your PC");
+    splash.stream(hades.id, { stage: "handshake" });
+    expect(status()).toBe("Opening the stream");
+    expect(strings.weave.stage).toHaveBeenLastCalledWith("handshake");
+  });
+
+  it("opens onto the stream when its first picture is up, then steps aside", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "visible" });
+
+    expect(strings.weave.dive).toHaveBeenCalledTimes(1);
+    // The seam is still opening: Orivo has not gone, and nothing else starts.
+    expect(stepAside).not.toHaveBeenCalled();
+    expect(splash.isOpen()).toBe(true);
+
+    strings.endDive();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stepAside).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(settleMs);
+    expect(host.hidden).toBe(true);
+    expect(shell.inert).toBe(false);
+  });
+
+  it("lets the stream have the screen when the player asked Orivo to stay", async () => {
+    mount({ shouldStepAside: () => false }).open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "visible" });
+    strings.endDive();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(stepAside).not.toHaveBeenCalled();
+    expect(streamControl).toHaveBeenCalledWith(hades.id, "uncover");
+    expect(host.hidden).toBe(true);
+  });
+
+  it("asks in its own words when the PC is running another game, and closes it on the player's word", () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "host-busy" });
+
+    expect(host.querySelector(".launch-splash__question-text")!.textContent).toBe(
+      "Another game is open on your PC",
+    );
+    expect(document.activeElement).toBe(button("Close it and play"));
+    button("Close it and play").click();
+
+    expect(streamControl).toHaveBeenCalledWith(hades.id, "replace");
+    expect(host.querySelector(".launch-splash__question")).toBeNull();
+    expect(status()).toBe("Closing the other game");
+    expect(splash.isOpen()).toBe(true);
+  });
+
+  it("drops the question when Moonlight moves on by itself", () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "host-busy" });
+    splash.stream(hades.id, { stage: "connecting" });
+
+    expect(host.querySelector(".launch-splash__question")).toBeNull();
+    expect(status()).toBe("Reaching your PC");
+  });
+
+  it("stops the stream and gives the library back on Cancel, or on Escape while it asks", () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "host-busy" });
+    button("Cancel").click();
+    expect(streamControl).toHaveBeenCalledWith(hades.id, "cancel");
+    expect(splash.isOpen()).toBe(false);
+
+    streamControl.mockClear();
+    splash.open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "host-busy" });
+    splash.dismiss();
+    expect(streamControl).toHaveBeenCalledWith(hades.id, "cancel");
+  });
+
+  it("lets Moonlight in front when the player leaves a stream that is only loading", () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.dismiss();
+
+    expect(streamControl).toHaveBeenCalledWith(hades.id, "uncover");
+    expect(splash.isOpen()).toBe(false);
+  });
+
+  it("gets out of Moonlight's way when it stalls, and out of the way of a failure", async () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "stalled" });
+    expect(stepAside).toHaveBeenCalledTimes(1);
+
+    splash.open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream(hades.id, { stage: "failed" });
+    expect(splash.isOpen()).toBe(false);
+    expect(stepAside).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes steps for the stream it started only", () => {
+    mount().open(hades);
+    splash.launched(hades.id, "stream");
+    splash.stream("steam:1", { stage: "visible" });
+
+    expect(strings.weave.dive).not.toHaveBeenCalled();
+  });
+
+  it("comes back from a stream the way it went in, then gives the library back", async () => {
+    mount();
+    splash.welcomeBack(hades, 2_520);
+
+    expect(host.hidden).toBe(false);
+    expect(host.classList.contains("is-return")).toBe(true);
+    expect(host.querySelector(".launch-splash__eyebrow")!.textContent).toBe("Stream ended");
+    expect(status()).toBe("42 min");
+    expect(strings.weave.unfold).toHaveBeenCalledTimes(1);
+    expect(shell.inert).toBe(true);
+
+    strings.endUnfold();
+    await vi.advanceTimersByTimeAsync(900 + fadeMs);
+    expect(host.hidden).toBe(true);
+    expect(shell.inert).toBe(false);
+  });
+});
+
+describe("how long a stream lasted", () => {
+  it("reads in minutes, then in hours and minutes", () => {
+    expect(streamDuration(20)).toBe("1 min");
+    expect(streamDuration(2_520)).toBe("42 min");
+    expect(streamDuration(3_900)).toBe("1 h 05 min");
+  });
+});
+
 describe("the host's launch answer", () => {
   it("reads who puts the game on screen, and assumes Orivo did when it does not say", () => {
+    expect(readLaunchHandoff({ handoff: "stream" })).toBe("stream");
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "client" })).toBe("client");
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "process" })).toBe("process");
     expect(readLaunchHandoff({ status: "Launching Spacewar", handoff: "window" })).toBe("window");

@@ -60,7 +60,12 @@ import {
 } from "./i18n";
 import { segmentChoice, segmentedControl, syncSegmented } from "./settings-segmented";
 import type { BootSplash } from "./boot-splash";
-import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
+import {
+  createLaunchSplash,
+  readLaunchHandoff,
+  type LaunchSplashGame,
+  type StreamStage,
+} from "./launch-splash";
 import {
   gameFolderScanMessage,
   readGameFolderScan,
@@ -435,6 +440,16 @@ interface State {
   wallpaperCredentials: WallpaperCredentials;
   wallpaperCredentialsSaving: boolean;
   update: UpdateState;
+}
+
+/** One step of a stream, as `stream_session.rs` sends it. */
+interface StreamSessionEvent {
+  gameId: string;
+  stage: StreamStage;
+  message?: string;
+  resumed: boolean;
+  seconds?: number;
+  byPlayer: boolean;
 }
 
 export interface MountAppOptions {
@@ -812,6 +827,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     shouldStepAside: () =>
       platformFeatures.stepsAside && state.preferences.onGameStart === "step-aside",
     stepAside: () => invoke("step_aside_for_game").then(() => undefined),
+    streamControl: (gameId, action) => {
+      void invoke("stream_session_control", { gameId, action }).catch(() => undefined);
+    },
   });
 
   let activeHero = 0;
@@ -2948,6 +2966,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       showToast(String(error));
     }
   };
+  // A streamed game: the host reads Moonlight's steps and says each one, then
+  // brings Orivo back when the stream is over (`stream_session.rs`).
+  if (isTauriRuntime()) {
+    void listen<StreamSessionEvent>("stream-session", ({ payload }) => {
+      const game = state.games.find((candidate) => candidate.id === payload.gameId);
+      if (payload.stage === "ended") {
+        if (game) launchSplash.welcomeBack(launchSplashFor(game), payload.seconds ?? null);
+        if (payload.message) showToast(t("misc.splash.stream.failedWith", { message: payload.message }));
+        // The time just played is on the card now.
+        void refreshLibrary();
+        return;
+      }
+      launchSplash.stream(payload.gameId, { stage: payload.stage, resumed: payload.resumed });
+      if (payload.stage === "failed") {
+        showToast(
+          payload.message
+            ? t("misc.splash.stream.failedWith", { message: payload.message })
+            : t("misc.splash.stream.failed", { title: game?.title ?? "" }),
+        );
+      }
+    });
+  }
   // A game whose window the host watches for (a built Switch game): Orivo
   // steps aside when that window is up, and comes back if the game ends first.
   if (isTauriRuntime()) {

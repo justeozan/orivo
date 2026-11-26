@@ -19,9 +19,10 @@ use crate::plugin_manifest::{HostCompatibility, PluginCapability, valid_opaque_i
 use crate::plugin_registry::{PluginRegistry, PluginState};
 use crate::plugin_runtime::PluginRuntime;
 use crate::runner_host::{
-    CatalogStore, RunnerHostError, RunnerImportLimits, RunnerImportProgress, RunnerPackage,
-    apply_profile_validation, directory_grant_is_active, directory_identity, import_runner_games,
-    prepare_runner_launch, resolve_application, unix_millis, validate_profile_with_plugin,
+    CatalogStore, PreparedRunnerLaunch, RunnerHostError, RunnerImportLimits, RunnerImportProgress,
+    RunnerPackage, apply_profile_validation, directory_grant_is_active, directory_identity,
+    import_runner_games, prepare_runner_launch, resolve_application, unix_millis,
+    validate_profile_with_plugin,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -1234,17 +1235,19 @@ impl ThirdPartyRunnerService {
         game_ref: &str,
     ) -> Result<String, RunnerHostError> {
         self.launch_owned(plugin_id, profile_id, game_ref)
-            .map(|(title, _child)| title)
+            .map(|(title, _child, _quit)| title)
     }
 
     /// `launch`, keeping the process: the host owns it, so the caller can tell
-    /// when the session ends.
+    /// when the session ends. A stream also returns the client's `quit` for the
+    /// same machine, which is how the host ends a session the machine is still
+    /// running when the player asks for another game.
     pub fn launch_owned(
         &self,
         plugin_id: &str,
         profile_id: &str,
         game_ref: &str,
-    ) -> Result<(String, std::process::Child), RunnerHostError> {
+    ) -> Result<(String, std::process::Child, Option<PreparedRunnerLaunch>), RunnerHostError> {
         let package = self.package(plugin_id)?;
         let catalog = self.store.snapshot()?;
         let streams = catalog
@@ -1254,7 +1257,9 @@ impl ThirdPartyRunnerService {
         let launched = prepare_runner_launch(&package, &catalog, profile_id, game_ref, &cancelled)
             .and_then(|prepared| prepared.spawn().map(|child| (prepared, child)));
         match launched {
-            Ok((prepared, child)) => Ok((prepared.title().to_owned(), child)),
+            Ok((prepared, child)) => {
+                Ok((prepared.title().to_owned(), child, prepared.stream_quit()))
+            }
             // Someone launching a streamed game never set up an emulator, so
             // the emulator-shaped refusals are said in streaming words instead.
             Err(error) if streams => Err(error.in_streaming_words()),
