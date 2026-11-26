@@ -2401,6 +2401,99 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 .settings-select:hover, .settings-select[data-nav-focus] { border-bottom-color: rgba(255,255,255,.5); }
 
+/* Settings › General: rows on a plate. One line each — the label, then its
+   control — and what a row does lives in its title, not under it. */
+.settings-panel > .settings-card--plate {
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.settings-panel > .settings-card--plate + .settings-card--plate { margin-top: 14px; }
+.settings-card--plate > .settings-row,
+.settings-card--plate > summary.settings-row {
+  min-height: 58px;
+  padding: 9px 18px;
+  gap: 8px 14px;
+}
+/* Too narrow for the label and its pill side by side, the pill takes the
+   next line rather than running off the plate. */
+.settings-card--plate > .settings-row:has(> .settings-segmented) { flex-wrap: wrap; }
+.settings-card--plate > .settings-row > .settings-segmented { margin-left: auto; }
+.settings-card--plate .settings-row__copy { flex: 1 0 auto; max-width: 100%; }
+/* A group's name above its plate: a word, not a heading in capitals. */
+.settings-panel > .settings-group__label--plain {
+  padding: 22px 0 10px;
+  border-top: 0;
+  color: #9b97a3;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.settings-panel > .settings-card__header--start { justify-content: flex-start; padding: 16px 0 0; border-top: 0; }
+
+/* Two or three words in one pill, the chosen one lit. */
+.settings-segmented {
+  display: flex;
+  flex: none;
+  padding: 3px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  background: rgba(6,7,11,.35);
+}
+.settings-segmented__option {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: #c8c5cf;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.settings-segmented__option:hover { color: #f4f2f8; }
+.settings-segmented__option[aria-pressed="true"] {
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  font-weight: 600;
+}
+.settings-segmented__option:focus-visible,
+.settings-segmented__option[data-nav-focus] {
+  outline: 2px solid #c9b6ff;
+  outline-offset: 1px;
+}
+
+/* A list too long for a pill: its value and a chevron, the native menu on
+   press. */
+.settings-select--value {
+  min-width: 0;
+  padding: 0 22px 0 6px;
+  border-bottom: 0;
+  color: #c8c5cf;
+  text-align: right;
+  text-align-last: right;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f4f2f8' stroke-opacity='.4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E");
+  background-size: 16px 16px;
+  background-position: right 0 center;
+  cursor: pointer;
+}
+.settings-select--value:hover { color: #f4f2f8; }
+.settings-select--value[data-nav-focus] { border-radius: 8px; outline: 2px solid #c9b6ff; outline-offset: 2px; }
+
+/* Folded options: one row with their count until it is opened. */
+.settings-disclosure > summary { list-style: none; cursor: pointer; }
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-row__value { color: #c8c5cf; font-size: 13.5px; }
+.settings-disclosure__chevron { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.settings-disclosure[open] .settings-disclosure__chevron { transform: rotate(90deg); }
+.settings-disclosure > summary:focus-visible,
+.settings-disclosure > summary[data-nav-focus] { outline: none; }
+.settings-disclosure > summary:focus-visible strong,
+.settings-disclosure > summary[data-nav-focus] strong { color: #fff; text-decoration: underline; text-underline-offset: 4px; }
+
 /* Buttons are words. No plate, no border, no radius: hover underlines them and
    that is the whole affordance. */
 .settings-button {
