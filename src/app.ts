@@ -163,6 +163,7 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
+import { watchPluginStoreTabs } from "./plugin-store-tabs";
 import {
   createDefaultPluginHealthClient,
   phraseJournalEntry,
@@ -2758,6 +2759,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderPluginList();
   });
   let stopWatchingPluginUpdates = (): void => {};
+  // Plugins' Store tabs: listed once the shell is painted, and again whenever
+  // the host reports a plugin installed, updated, rolled back or removed. The
+  // Store page may also call `syncPluginStoreTabs` when it opens.
+  const stopWatchingPluginStoreTabs = watchPluginStoreTabs(listen);
   if (isTauriRuntime()) {
     // The host announces releases it found but may not install without consent:
     // refresh, then say so once, wherever the user is.
@@ -7910,6 +7915,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     runnerManager.dispose();
     launchSplash.dispose();
     stopWatchingPluginUpdates();
+    stopWatchingPluginStoreTabs();
   };
 }
 

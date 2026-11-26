@@ -1,6 +1,6 @@
 # Plugin host fixtures
 
-Four committed WebAssembly components, and the seams the host exposes for testing
+Five committed WebAssembly components, and the seams the host exposes for testing
 against them. `cargo test` reads the `.wasm` files and checks their SHA-256; it
 never builds them, so a fresh clone needs no WebAssembly target and no component
 tool.
@@ -11,6 +11,7 @@ tool.
 | `wasi-import.wasm` | `wasi-import.wat` (component text) | The smallest package that must be refused: its only import is WASI. |
 | `memory64.wasm` | `memory64.wat` (component text) | A core module with a 64-bit linear memory. The engine turns that feature off, so this must be refused. |
 | `composed-memories.wasm` | `composed-memories.wat` (component text) | Two composed components, each with its own memory, and a string crossing between them. Makes Wasmtime synthesise an adapter module importing both. |
+| `orivo-store-tab-fixture.wasm` | `store-tab-fixture/` (Rust + `wit-bindgen`) | The reference Store tab plugin (`store-tab-plugin`). Its one answer carries one of each field the host must drop; `src/lib.rs` lists them. |
 
 ## Rebuilding
 
@@ -20,7 +21,10 @@ cargo install wasm-tools --locked --version 1.246.2
 src-tauri/fixtures/runner-fixture/build.sh
 ```
 
-The script prints each artefact's digest and size. Paste them into the
+The script prints each artefact's digest and size. The Store tab fixture has its
+own script, `src-tauri/fixtures/store-tab-fixture/build.sh`, so changing it never
+rebuilds the runner fixture; its digest is `STORE_FIXTURE_SHA256` in
+`src-tauri/src/plugin_runtime.rs`. Paste them into the
 `FIXTURE_SHA256`, `WASI_IMPORT_SHA256`, `MEMORY64_SHA256` and
 `COMPOSED_MEMORIES_SHA256` constants in `src-tauri/src/plugin_runtime.rs`; the
 registry tests compute the runner digest themselves. A stale digest fails its own test first, which is

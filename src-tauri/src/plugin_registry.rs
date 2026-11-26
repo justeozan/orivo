@@ -18,7 +18,9 @@ use crate::plugin_manifest::{
     CompatibleVersionInfo, HostCompatibility, PluginExtension, PluginManifest,
     ValidatedPluginManifest,
 };
-use crate::plugin_runtime::{PluginHealth, PluginRuntime, PluginRuntimeError, RunnerCheck};
+use crate::plugin_runtime::{
+    PluginHealth, PluginRuntime, PluginRuntimeError, PreparedComponent, RunnerCheck,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -199,6 +201,26 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// Every installed package that declares a Store tab and is well-formed —
+    /// manifest valid, compatible with this host, component matching its hash —
+    /// without compiling any of them. Bounded like a probing pass, and in the
+    /// same stable order, because each one may go on to run guest code.
+    pub fn store_tab_packages(&self) -> Vec<StoreTabPackage> {
+        self.discover_internal()
+            .into_iter()
+            .filter_map(|(_, plugin)| {
+                if plugin.record.state != PluginState::Ready {
+                    return None;
+                }
+                Some(StoreTabPackage {
+                    manifest: plugin.store_tab_manifest?,
+                    component: plugin.component?,
+                })
+            })
+            .take(MAX_PROBED_PLUGINS)
+            .collect()
+    }
+
     /// Grade one package tree the way discovery grades an installed plugin,
     /// and say so with a sentence instead of a row.
     ///
@@ -325,6 +347,11 @@ impl PluginRegistry {
                     "Ready to configure. Orivo will request permissions before activation.",
                 ),
                 component: Some(component),
+                store_tab_manifest: validated
+                    .manifest()
+                    .extensions
+                    .contains(&PluginExtension::StoreTab)
+                    .then(|| validated.clone()),
                 runner_manifest: validated
                     .manifest()
                     .extensions
@@ -347,6 +374,10 @@ struct DiscoveredPlugin {
     /// Set only for a package that claims the runner extension. The probe needs
     /// the manifest to compare the component's own account of itself against.
     runner_manifest: Option<ValidatedPluginManifest>,
+    /// Set only for a package that claims the `store_tab` extension: its
+    /// component has to export the Store tab world, and may import no more
+    /// than this manifest declares.
+    store_tab_manifest: Option<ValidatedPluginManifest>,
 }
 
 impl DiscoveredPlugin {
@@ -355,6 +386,7 @@ impl DiscoveredPlugin {
             record,
             component: None,
             runner_manifest: None,
+            store_tab_manifest: None,
         }
     }
 
@@ -364,9 +396,8 @@ impl DiscoveredPlugin {
             .map_err(PreflightError::message)
     }
 
-    /// Re-read and re-hash the component immediately before Wasmtime sees its
-    /// bytes. This closes the discovery-to-compile race without exposing a
-    /// plugin path beyond this backend module.
+    /// Compile the component from bytes re-read just now (see
+    /// [`VerifiedComponent::prepare`]) and hold it to every contract it claims.
     ///
     /// The health answer is returned rather than dropped because the installer
     /// acts on it — discovery does not, and both callers reading the same code
@@ -380,21 +411,14 @@ impl DiscoveredPlugin {
             .component
             .as_ref()
             .ok_or(PreflightError::Tree("The plugin component is unavailable."))?;
-        let bytes = read_bounded_file(&component.path, component.byte_size)
-            .map_err(|_| PreflightError::Tree("The plugin component changed before validation."))?;
-        if sha256_bytes(&bytes) != component.sha256 {
-            return Err(PreflightError::Tree(
-                "The plugin component changed before validation.",
-            ));
+        let prepared = component.prepare(runtime)?;
+        if let Some(manifest) = self.store_tab_manifest.as_ref() {
+            check_store_tab_contract(runtime, &prepared, manifest)?;
         }
-        let prepared = runtime
-            .prepare_component(&bytes, &component.sha256)
-            .map_err(|_| {
-                PreflightError::Tree("The plugin component did not pass WebAssembly validation.")
-            })?;
         // Source, metadata and installer packages stay compile-only: this host
-        // slice implements the runner world, and judging a contract Orivo cannot
-        // yet invoke would refuse a package for a reason it cannot be sure of.
+        // implements the runner and Store tab worlds, and judging a contract
+        // Orivo cannot yet invoke would refuse a package for a reason it cannot
+        // be sure of.
         let Some(manifest) = self.runner_manifest.as_ref() else {
             return Ok(None);
         };
@@ -530,6 +554,81 @@ struct VerifiedComponent {
     path: PathBuf,
     sha256: String,
     byte_size: u64,
+}
+
+impl VerifiedComponent {
+    /// Re-read and re-hash the component immediately before Wasmtime sees its
+    /// bytes. This closes the discovery-to-compile race without exposing a
+    /// plugin path beyond this backend module.
+    fn prepare(&self, runtime: &PluginRuntime) -> Result<PreparedComponent, PreflightError> {
+        let bytes = read_bounded_file(&self.path, self.byte_size)
+            .map_err(|_| PreflightError::Tree("The plugin component changed before validation."))?;
+        if sha256_bytes(&bytes) != self.sha256 {
+            return Err(PreflightError::Tree(
+                "The plugin component changed before validation.",
+            ));
+        }
+        runtime
+            .prepare_component(&bytes, &self.sha256)
+            .map_err(|_| {
+                PreflightError::Tree("The plugin component did not pass WebAssembly validation.")
+            })
+    }
+}
+
+/// A package that claims a Store tab has to export the world that serves one.
+/// Reading the component's type runs no guest code, so every such package is
+/// checked: at install, in Settings, and before the Store first asks it.
+fn check_store_tab_contract(
+    runtime: &PluginRuntime,
+    prepared: &PreparedComponent,
+    manifest: &ValidatedPluginManifest,
+) -> Result<(), PreflightError> {
+    runtime
+        .verify_store_tabs(prepared, manifest)
+        .map_err(|error| match error {
+            PluginRuntimeError::MissingWorld => {
+                PreflightError::Tree("This plugin does not implement Orivo's Store tab contract.")
+            }
+            other => PreflightError::Host(other),
+        })
+}
+
+/// An installed package that declares a Store tab, found without compiling
+/// anything. The Store asks for these on every visit, so listing them reads
+/// manifests and hashes and stops there; [`Self::prepare`] is the expensive half,
+/// and the caller decides whether it already holds this package's answer.
+#[derive(Debug, Clone)]
+pub struct StoreTabPackage {
+    manifest: ValidatedPluginManifest,
+    component: VerifiedComponent,
+}
+
+impl StoreTabPackage {
+    pub fn id(&self) -> &str {
+        self.manifest.id()
+    }
+
+    pub fn manifest(&self) -> &ValidatedPluginManifest {
+        &self.manifest
+    }
+
+    /// The digest discovery derived from the bytes on disk — which code this is.
+    pub fn sha256(&self) -> &str {
+        &self.component.sha256
+    }
+
+    /// Compile the component and hold it to the Store tab contract, or say why
+    /// not in a sentence.
+    pub fn prepare(&self, runtime: &PluginRuntime) -> Result<PreparedComponent, &'static str> {
+        let prepared = self
+            .component
+            .prepare(runtime)
+            .map_err(PreflightError::message)?;
+        check_store_tab_contract(runtime, &prepared, &self.manifest)
+            .map_err(PreflightError::message)?;
+        Ok(prepared)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -715,6 +814,7 @@ fn extension_name(extension: &PluginExtension) -> &'static str {
         PluginExtension::Automation => "automation",
         PluginExtension::UiContribution => "ui_contribution",
         PluginExtension::Installer => "installer",
+        PluginExtension::StoreTab => "store_tab",
     }
 }
 
@@ -1083,5 +1183,106 @@ mod tests {
                 .contains("directory-grant-1")
         );
         assert_eq!(grant.len(), 1);
+    }
+
+    const STORE_COMPONENT: &[u8] = include_bytes!("../fixtures/orivo-store-tab-fixture.wasm");
+    const STORE_ID: &str = "com.orivo.fixture-store";
+
+    fn write_store_tab(root: &Path, component: &[u8], extensions: Vec<PluginExtension>) {
+        let directory = root.join(STORE_ID);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("component.wasm"), component).unwrap();
+        let manifest = PluginManifest {
+            id: STORE_ID.into(),
+            name: "Fixture Store".into(),
+            version: "1.0.0".into(),
+            sdk: PLUGIN_SDK_V1.into(),
+            min_orivo_version: Some("0.3.0".into()),
+            extensions,
+            capabilities: Vec::new(),
+            network_domains: Vec::new(),
+            artifacts: vec![ArtifactDescriptor {
+                path: "component.wasm".into(),
+                kind: ArtifactKind::Component,
+                sha256: sha256_of(component),
+                byte_size: component.len() as u64,
+            }],
+        };
+        fs::write(
+            directory.join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// The Store lists these on every visit, so finding them must not compile
+    /// anything — even a component that could not compile is found.
+    #[test]
+    fn store_tab_packages_are_found_without_compiling_them() {
+        let root = temporary_root();
+        write_store_tab(&root, EMPTY_COMPONENT, vec![PluginExtension::StoreTab]);
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+
+        let before = PluginRuntime::compiles_on_this_thread();
+        let packages = registry.store_tab_packages();
+        assert_eq!(PluginRuntime::compiles_on_this_thread(), before);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].id(), STORE_ID);
+        assert_eq!(packages[0].sha256(), sha256_of(EMPTY_COMPONENT));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_package_declaring_a_store_tab_is_a_store_tab_package() {
+        let root = temporary_root();
+        write_store_tab(
+            &root,
+            STORE_COMPONENT,
+            vec![PluginExtension::UiContribution],
+        );
+        write_runner(&root, RUNNER_COMPONENT, sha256_of(RUNNER_COMPONENT));
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+        assert!(registry.store_tab_packages().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A package that claims a Store tab is held to the world that serves one,
+    /// the way a runner is held to the runner world: the Settings listing and
+    /// the installer's verification both read this.
+    #[test]
+    fn a_store_tab_package_is_held_to_the_store_tab_contract() {
+        let runtime = PluginRuntime::new().unwrap();
+
+        let root = temporary_root();
+        write_store_tab(&root, STORE_COMPONENT, vec![PluginExtension::StoreTab]);
+        let plugins = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"))
+            .installed_plugins(&runtime);
+        assert_eq!(plugins[0].state, PluginState::Ready);
+        assert_eq!(plugins[0].extension_names, vec!["store_tab".to_string()]);
+        fs::remove_dir_all(root).unwrap();
+
+        // The runner fixture compiles and keeps *a* contract — not this one.
+        let root = temporary_root();
+        write_store_tab(&root, RUNNER_COMPONENT, vec![PluginExtension::StoreTab]);
+        let registry = PluginRegistry::new(root.clone(), HostCompatibility::v1("0.3.0"));
+        let plugins = registry.installed_plugins(&runtime);
+        assert_eq!(plugins[0].state, PluginState::Invalid);
+        assert!(plugins[0].message.contains("Store tab contract"));
+        assert_eq!(
+            registry.store_tab_packages()[0]
+                .prepare(&runtime)
+                .unwrap_err(),
+            "This plugin does not implement Orivo's Store tab contract."
+        );
+        assert!(matches!(
+            registry.verify_package(
+                &runtime,
+                &root.join(STORE_ID),
+                STORE_ID,
+                VerifyDepth::Contract
+            ),
+            Err(PackageRefusal::Refused(_))
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 }
