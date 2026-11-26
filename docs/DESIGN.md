@@ -83,11 +83,9 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 
 #### Barre supérieure Selector
 
-- Logo Orivo à gauche, 36-42px.
-- Navigation horizontale: Home, Library, Collections, Store, Settings.
-- Etat actif dans une capsule Frosted Rail; aucune sidebar permanente.
-- Search bar centrée, 390-430px x 40px, rayon 22px.
-- Notifications et avatar à droite.
+- Une seule capsule de verre flottante, en haut à gauche: tout le reste de l'écran appartient à l'image. Voir **§4.3 › Global topbar** pour son contenu.
+- Pensée pour la manette et le grand écran: une cible ronde par contrôle, qui grandit avec la fenêtre (`--halo-item`, 40 à 48px).
+- Aucune sidebar permanente, aucun glyphe de bouton (LB, RB, Y) affiché.
 - La barre peut se réduire visuellement pendant une transition de sélection, mais ne doit pas provoquer de reflow du hero.
 
 #### Bloc hero sélectionné
@@ -189,23 +187,28 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 
 #### Global topbar
 
-- The topbar (`header.topbar`) is rendered exactly once by the shell and is identical on every page. Only *what the search searches* changes; the bar itself is never rebuilt, moved or duplicated per page.
-- Contents, left to right: brand mark (opens the library-sources menu), primary navigation (`Library`, `Store`, `Settings`), the contextual search, then notifications and avatar.
-- Exactly one navigation link carries `aria-current="page"` (and the matching active capsule). A game detail page resolves to the entry it was opened from: `?from=store` marks Store, everything else marks Library.
-- The search keeps its grid cell on every route. A page that cannot search hides it with `visibility: hidden` and disables the input, so the topbar never reflows between pages.
-- On a phone — the compact height with only a finger to point (`html[data-device="phone"]`, set by `src/form-factor.ts`) — the bar at rest is the brand mark, the bell and the avatar. The navigation comes out of the mark with its menu and goes back with it: the pills keep their place hidden (`visibility`), so nothing in the bar moves when they appear, and a press on a pill counts as inside the menu, so the finger landing on it never hides it before its click. Icons alone have no text shadow to read by over the artwork, so on a phone every pill and the bell sit on a dark glass plate, the current page's lit. The search is not shown on a phone at all. A desktop window dragged as short is compact but not a phone, and keeps the whole bar.
-- `--topbar-height` (92px, declared on `.selector`) is the single source of truth for the vertical space the topbar occupies.
+- The topbar (`header.topbar`) is rendered exactly once by the shell and is the same on every page. Only *what the search searches* and which page is lit change; the bar itself is never rebuilt, moved or duplicated per page.
+- It is **one floating glass capsule**, on the top-left edge (`.topbar-capsule`). Contents, left to right: the **mark** — the player's picture inside the Orivo ring, one control — then the page links (`Library`, `Store`, `Me` behind Beta, `Settings`), a hairline, the search, the feedback button when Sentry is configured, and the bell **only when it holds a notice**.
+- The mark opens one menu: the profile card (picture, name) on top, then the library sources. There is no separate avatar button.
+- Page links are glyphs (`src/topbar-nav.ts`), all from Phosphor (MIT) so the bar is one family: `squares-four`, `storefront`, `user`, `gear-six`, plus `magnifying-glass` and `bell`. The regular outline elsewhere, Phosphor's fill for the page on screen. Glyphs are picked from that set, not drawn. Only the current page shows its name, opening out of its glyph. Inactive glyphs are dimmed with `opacity`, never with a translucent colour, so crossing strokes do not paint twice.
+- The current page sits on a travelling plate: frosted glass, the iridescent rim of the glass Play button, a little blue light under it. It slides on a damped spring that follows the links as they resize (`placeNavIndicator`, `navPlateEase`).
+- **Reaching a link opens its page.** With the keys or a pad (`body[data-input-mode]` keyboard or gamepad), focus landing on a link navigates at once — no second press. The pointer still clicks. Coming up into the bar always lands on the current page's link (`data-nav-selected`), so entering the bar never changes page. LB / RB still cycle the pages from anywhere.
+- Exactly one navigation link carries `aria-current="page"`. A game detail page resolves to the entry it was opened from: `?from=store` marks Store, everything else marks Library.
+- The search is a magnifier until it is reached (focus, the keys, or a query typed); the field then opens out of it and the capsule widens around it. A hover alone does not open it.
+- The capsule grows to the right only, so a longer page name or an open search never moves the mark; nothing else on the page moves.
+- On a phone — the compact height with only a finger to point (`html[data-device="phone"]`, set by `src/form-factor.ts`) — the capsule loses its glass and the bar at rest is the mark and, when there is a notice, the bell. The navigation comes out of the mark with its menu and goes back with it: the pills keep their place hidden (`visibility`), so nothing in the bar moves when they appear, and a press on a pill counts as inside the menu, so the finger landing on it never hides it before its click. Icons alone have no text shadow to read by over the artwork, so on a phone every pill and the bell sit on a dark glass plate, the current page's lit. The search is not shown on a phone at all. A desktop window dragged as short is compact but not a phone, and keeps the whole bar.
+- `--topbar-height` (76px on desktop, declared on `:root`) is the single source of truth for the vertical space the topbar occupies; the capsule (`--topbar-bar-h`, from `--halo-item` and `--halo-pad`) always fits inside it.
 
 #### Notifications — the one surface that speaks unasked
 
-- The bell sits between the feedback button and the avatar. Everything it carries is optional advice about something optional (an artwork key, a store price feed), so it is the quietest control in the shell: an unread dot, one short shake on arrival, and a card that waits.
+- The bell sits at the right end of the capsule, and only while it holds a notice: the last one dismissed takes the bell with it, and focus that was in its panel lands on the mark. Everything it carries is optional advice about something optional (an artwork key, a store price feed), so it is the quietest control in the shell: an unread dot, one short shake on arrival, and a card that waits.
 - It is a **disclosure, not a dialog**. The shell has no `role="dialog"` anywhere and no focus trap; `aria-expanded` on the bell plus a named `role="group"` panel say everything a dialog role would. Escape closes it and returns focus to the bell.
 - A notice never fires on arrival — each waits out its own delay of app time. It is delivered once, and never again after it is dismissed. It is also re-checked against the app as it stands on every tick: a key added, or a page visited, retires the notice about it before it is ever shown.
 - No counts, no badges with numbers, no toast, no modal, no sound. If something genuinely needs a response, it belongs on the surface it is about, not here.
 
 #### The Library with nothing in it — the welcome screen
 
-- An empty catalogue is an answer, not a gap. It is never filled in with fixtures: the showcase games exist behind a debug toggle in Settings › Appearance and nowhere else.
+- An empty catalogue is an answer, not a gap. It is never filled in with fixtures: the showcase games exist behind a debug toggle in Settings › General › Experimental and nowhere else.
 - The welcome screen stands **inside the Library page host**, in front of the same wallpaper, with the Library's own furniture (hero, rail, browse bar, arrows) taken out of the layout rather than merely covered — so nothing behind it is tabbable. Connecting a store dissolves into the library instead of navigating away from it.
 - Nothing is shown until the first library load has answered. A hero with no game in it, and a welcome screen shown to someone whose library is about to arrive, are both a lie told for one frame.
 - The name in the heading is the **brand wordmark** (`/media/orivo-logo.png`), never type the app sets itself. A logo redrawn in the interface font drifts from the logo everywhere else the moment either one changes. Its `alt` completes the heading, so the accessible name stays "Welcome to Orivo" even if the artwork never decodes, and the intrinsic size on the tag holds the box open until it does.
@@ -219,7 +222,7 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 - It stands until the first library load has answered and the scene's artwork has decoded (that wait is capped at 700 ms), so what it uncovers is the real scene and never the empty backdrop. The arrival holds the screen for 1.4 s from the start of the page, once per session; it never stays longer than 6 s, whatever the library does. Its exit is the void lifting off the scene while the mark comes forward a touch.
 - It never takes input: `pointer-events: none` and `aria-hidden`. A click during the arrival reaches the shell behind it.
 - Every element rests in its arrived state; keyframes only say where it arrives from, filled backwards and never forwards — a forwards fill holds the very values the exit transitions change, and a transition never starts on a value an animation holds.
-- Under reduced motion there is no arrival, no hold and no exit: it is there, then it is not. The Appearance preference is remembered by the WebView itself, so the first frame of the next start already honours it before the host is asked.
+- Under reduced motion there is no arrival, no hold and no exit: it is there, then it is not. The Animations preference (Settings › General) is remembered by the WebView itself, so the first frame of the next start already honours it before the host is asked.
 
 #### Starting a game — the launch splash
 
@@ -259,7 +262,7 @@ Routes live in the hash. The parser is total: every input resolves to an `AppRou
 - `#/library` — the default. `#`, `#/` and an empty hash all resolve here.
 - `#/store` — optional `?store=<all|playstation|xbox|nintendo|steam|epic|plugin:<plugin id>[:<key>]>` and `?q=<text>`. An unknown store falls back to `all` ("Tout"); the filters of the old Store (`category`, `platform`) are dropped. Serialising omits defaults, so the canonical Store URL is bare `#/store`.
 - `#/games/<gameId>?from=library|store` — `from` accepts only those two values, anything else becomes `null`. `gameId` is percent-encoded in the hash.
-- `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `appearance`, `data`, `about`. `#/settings` alone means `general`. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
+- `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `data`, `about`. `#/settings` alone means `general`; `#/settings/appearance`, folded into General, opens General and is rewritten to its address. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
 - Anything else — not-found, carrying the path it could not resolve. The page names that path and offers one way back to the Library.
 
 Ids and trust across the boundary:
@@ -340,7 +343,7 @@ Maquettes : `docs/design/store/`. On doit comprendre au premier coup d'œil que 
 - **L'avancé est fermé par défaut.** Les termes de recherche, la version, les journaux et les profils techniques vont dans un `<details class="plugin-more">` fermé, ou derrière Beta features.
 - **Une progression, c'est une barre et une ligne.** La ligne a la forme `Étape 2/7 · Shaders · ~12 min`, avec un seul bouton Arrêter. À la fin, une ligne : le résultat, ou l'erreur telle que l'outil l'a dite.
 - **Les titres de section** (petites capitales `plugin-detail__section`) n'apparaissent que si le panneau a au moins deux sections visibles.
-- **Les étapes guidées numérotées** (`gs-steps`) servent seulement à un parcours qu'on suit dans l'ordre une seule fois, comme l'appairage de Game streaming. Elles ne servent pas pour une liste de prérequis.
+- **Un parcours qu'on suit une seule fois** (l'appairage de Game streaming) pose **une question à la fois** dans le panneau de droite (`gs-flow`) : en grand, un seul bouton principal (`gs-cta`), les choix en tuiles (`gs-tile`, sélection = `plugin-card.is-selected`). Une fois prêt, il ne reste qu'un bouton et un menu ⋯ (`pluginMoreMenu`) pour le reste. Pas pour une liste de prérequis.
 
 #### Les composants à reprendre
 
@@ -353,7 +356,7 @@ Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
 | Ligne | `plugin-fields` / `plugin-field` · `plugin-field__label` · `plugin-field__inputs` |
 | Fiche | `plugin-facts` / `plugin-fact` (libellé · valeur) |
 | État | `ws-pill` · `ws-pill--on` |
-| Avancé | `details.plugin-more` |
+| Avancé | `details.plugin-more` · menu ⋯ `pluginMoreMenu` (`plugin-dots`, `plugin-menu`) |
 | Grille | `plugin-card` · `.source-grid .source-account-row` |
 
 #### Avant / après — Switch (nxnative), 21 novembre 2026
@@ -483,7 +486,7 @@ Dans le Selector, les cartes d'achievement et de stats sont absentes du premier 
 - **Home / Game Hub desktop large**: conserver sidebar 240px + contenu + widgets droite.
 - **Home / Game Hub desktop étroit**: réduire colonne droite à 260px, compacter gaps à 20px.
 - **Tablet (< 1024px)**: transformer la colonne droite du Home en rail horizontal sous le hero.
-- **Téléphone en paysage** (hauteur ≤ 560px et un doigt pour seul pointeur — `html[data-device="phone"]`): immersif, la scène est l'écran. Sur Android, la barre d'état et les boutons de navigation sont masqués (`MainActivity.kt`); un glissement depuis le bord les montre un instant, par-dessus la scène, sans rien déplacer. La topbar se réduit au logo Orivo, à la cloche et à l'avatar; la navigation sort du logo avec son menu. Ni recherche ni flèches de scène: le doigt parcourt le rail. Titre, wordmark, Play, cartes et mots de la barre de navigation descendent d'une taille — les cartes gardent exactement leur forme (0,672 debout, 2,5:1 sélectionnée, rayon à l'échelle), 100px de haut au plus. Une fenêtre desktop aussi courte garde tout cela.
+- **Téléphone en paysage** (hauteur ≤ 560px et un doigt pour seul pointeur — `html[data-device="phone"]`): immersif, la scène est l'écran. Sur Android, la barre d'état et les boutons de navigation sont masqués (`MainActivity.kt`); un glissement depuis le bord les montre un instant, par-dessus la scène, sans rien déplacer. La topbar se réduit au logo Orivo — l'avatar dans l'anneau — et à la cloche quand elle a quelque chose; la navigation sort du logo avec son menu. Ni recherche ni flèches de scène: le doigt parcourt le rail. Titre, wordmark, Play, cartes et mots de la barre de navigation descendent d'une taille — les cartes gardent exactement leur forme (0,672 debout, 2,5:1 sélectionnée, rayon à l'échelle), 100px de haut au plus. Une fenêtre desktop aussi courte garde tout cela.
 - Mobile (< 768px):
   - sidebar devient bottom nav ou drawer.
   - search bar prend toute la largeur disponible.
@@ -579,7 +582,7 @@ Orivo shows what it actually knows. These are product rules, not copy suggestion
 - **Visible focus, always.** `:focus-visible` draws a 2px `#c3b5ff` outline with offset. Focus styling is never removed; a component that needs a different indicator must provide one of at least equal visibility.
 - **Everything is reachable by keyboard.** Interactive elements are real `button` / `input` elements, icon-only controls carry an `aria-label`, and decorative layers are `aria-hidden`. No click handler on a non-focusable element.
 - **Only the active page is focusable.** Inactive page hosts are `hidden` and `inert`, so Tab never lands in a page the user cannot see.
-- **`prefers-reduced-motion` is honoured, twice.** The system query collapses transitions and animations and forces `scroll-behavior: auto`. The Appearance preference mirrors it with `data-motion="reduced"` and wins over the system setting, so the app can be calmed down without changing macOS.
+- **`prefers-reduced-motion` is honoured, twice.** The system query collapses transitions and animations and forces `scroll-behavior: auto`. The Animations preference (Settings › General, `All` by default) mirrors it with `data-motion="reduced"` and wins over the system setting, so the app can be calmed down without changing macOS.
 - **No autoplaying video, anywhere.** Trailers use `controls` and `preload="metadata"` with autoplay off, and start only on explicit user intent. Motion-only embellishments are attached only when motion is allowed.
 - **Keyboard shortcuts are page-scoped.** The only shortcut shared by every page focuses the contextual search (`⌘K` / `Ctrl+K`, or `/` when not typing). Library shortcuts (arrows, Enter, `i`, `Shift+I`) return early unless Library is the active route, so they can never fire from the Store, a game detail or Settings. Escape belongs to whatever task is open — the Wine wizard first, then the library menu — and otherwise blurs the search field.
 - **Announce what changes on its own.** Regions that update without a direct user action use `role="status"` / `aria-live="polite"`; nothing announces assertively.

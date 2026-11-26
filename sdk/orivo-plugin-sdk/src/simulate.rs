@@ -1,12 +1,13 @@
-//! Runs a packaged runner plugin against the real host: the same
-//! `PluginRuntime`, the same fuel/deadline/memory ceilings, the same grant
-//! resolution Orivo uses. Nothing here reimplements a seam — every call below
-//! is one `orivo_lib::plugin_runtime::PluginRuntime` already exposes publicly.
+//! Runs a packaged plugin against the real host: the same `PluginRuntime`,
+//! the same fuel/deadline/memory ceilings, the same grant resolution Orivo
+//! uses. Nothing here reimplements a seam — every call below is one
+//! `orivo_lib::plugin_runtime::PluginRuntime` already exposes publicly.
 //!
-//! Only `runner-plugin` is invocable, because it is the only world Orivo's
-//! host calls today (`wit/README.md`). `source-plugin`, `metadata-plugin` and
-//! `ui-plugin` stay contract-only until a corresponding host path exists —
-//! simulating them here would be simulating something Orivo cannot run yet.
+//! `runner-plugin` and `store-tab-plugin` are invocable, because they are the
+//! worlds Orivo's host calls today (`wit/README.md`). `source-plugin`,
+//! `metadata-plugin` and `ui-plugin` stay contract-only until a corresponding
+//! host path exists — simulating them here would be simulating something Orivo
+//! cannot run yet.
 
 use crate::manifest_check::{LocatedError, validate_manifest_file};
 use orivo_lib::plugin_manifest::{CapabilityGrant, CapabilityScope, PluginCapability, PluginExtension};
@@ -40,6 +41,20 @@ pub enum SimulatedRequest {
     ValidateProfile { profile_id: String, display_name: String },
     DiscoverPage { profile_id: String, cursor: Option<String>, limit: u32 },
     PrepareLaunch { profile_id: String, game_reference: String },
+    /// `store-tabs.tabs`, answered as the Store would receive it: validated,
+    /// namespaced, with every field the host would not show already dropped.
+    StoreTabs,
+}
+
+impl SimulatedRequest {
+    /// The manifest extension a package needs before Orivo would ever send it
+    /// this request.
+    fn extension(&self) -> PluginExtension {
+        match self {
+            Self::StoreTabs => PluginExtension::StoreTab,
+            _ => PluginExtension::Runner,
+        }
+    }
 }
 
 /// A finished run: the call's own answer, plus the host's account of what it
@@ -72,6 +87,24 @@ pub fn check_contract(dir: &Path) -> Result<ContractCheckReport, Vec<LocatedErro
         .prepare_component(&bytes, &sha256)
         .map_err(|error| single(dir, error.to_string()))?;
 
+    let extensions = &manifest.manifest().extensions;
+    // A Store tab package is held to its world the way the registry holds it:
+    // type and declared capabilities, no guest code.
+    if extensions.contains(&PluginExtension::StoreTab) {
+        runtime
+            .verify_store_tabs(&prepared, &manifest)
+            .map_err(|error| single(dir, format!("store tab contract: {error}")))?;
+        if !extensions.contains(&PluginExtension::Runner) {
+            let contract = runtime
+                .inspect_store_tab_contract(&prepared)
+                .map_err(|error| single(dir, error.to_string()))?;
+            return Ok(ContractCheckReport {
+                contract,
+                health: Ok(None),
+            });
+        }
+    }
+
     let contract = runtime
         .inspect_contract(&prepared)
         .map_err(|error| single(dir, error.to_string()))?;
@@ -96,13 +129,16 @@ pub fn simulate(
     if !manifest
         .manifest()
         .extensions
-        .contains(&PluginExtension::Runner)
+        .contains(&request.extension())
     {
         return Err(single(
             dir,
-            "this manifest does not declare the runner extension; orivo-plugin-sdk can only \
-             simulate runner-plugin today (see wit/README.md)"
-                .to_string(),
+            format!(
+                "this manifest does not declare the {:?} extension this request needs; \
+                 orivo-plugin-sdk can only simulate runner-plugin and store-tab-plugin \
+                 today (see wit/README.md)",
+                request.extension()
+            ),
         ));
     }
     let bytes = read_component(dir, &manifest)?;
@@ -155,6 +191,7 @@ pub fn simulate(
             profile_id,
             game_reference,
         },
+        SimulatedRequest::StoreTabs => PluginRequest::StoreTabs,
     };
 
     let outcome = match runtime.submit(&prepared, manifest.id(), &plugin_grants, plugin_request) {

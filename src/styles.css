@@ -14,11 +14,17 @@
      `--topbar-inset-top` + its 40px height = 65px. `--topbar-height` adds the
      breathing room below it and is the single source of both the page hosts'
      top padding and the height of the topbar scrim. */
-  --topbar-inset-top: 25px;
+  --topbar-inset-top: 16px;
   --topbar-inset-left: 32px;
   --topbar-inset-right: 34px;
   --topbar-height: 76px;
-  --topbar-bar-h: 40px;
+  /* The capsule: every control in it is one round size, which grows with a
+     big screen so the bar still reads from a sofa. 42px on a 1536px window,
+     48 from 1745 up — the capsule is then 60, and 16 + 60 is the 76 above. */
+  --halo-item: clamp(40px, 2.75vw, 48px);
+  --halo-pad: 5px;
+  --halo-icon: clamp(19px, 1.3vw, 22px);
+  --topbar-bar-h: calc(var(--halo-item) + 2 * var(--halo-pad) + 2px);
   --search-h: 40px;
   --search-r: 22px;
   --avatar-size: 40px;
@@ -200,8 +206,6 @@ button { border: 0; cursor: pointer; }
    Every button is named on its own: a form control does not inherit
    `text-shadow` from its container, so listing the container alone silently
    leaves every label in it flat. */
-.topbar--over-art .primary-nav,
-.topbar--over-art .nav-link,
 .hero-content h1,
 .hero-meta,
 .rail-header h2,
@@ -212,24 +216,39 @@ button { border: 0; cursor: pointer; }
   text-shadow: 0 1px 2px rgba(6,6,10,.7), 0 2px 16px rgba(6,6,10,.55);
 }
 
-/* Glyphs and translucent pills cannot take a text shadow, and their surfaces
-   were tuned against the scrims this page no longer has. Over bare artwork they
-   carry a little more of their own. */
-.topbar--over-art .search-control::before { background: rgba(16,15,19,.6); }
-
 .topbar {
   position: absolute;
   z-index: 5;
   top: var(--topbar-inset-top);
   left: var(--topbar-inset-left);
   right: var(--topbar-inset-right);
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, min(352px, 31vw)) minmax(0, 1fr);
+  display: flex;
+  justify-content: flex-start;
   align-items: center;
-  gap: 12px;
   min-height: var(--topbar-bar-h);
   color: var(--text);
 }
+
+/* The whole bar is one floating capsule of glass, on the window's left edge,
+   where the eye starts and where the mark has always been. It is its own
+   ground over any artwork, so nothing in it needs a text shadow, and it grows
+   to the right only: a page whose name is longer, or a search opened, never
+   moves the mark. */
+.topbar-capsule {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: var(--halo-pad);
+  border: 1px solid rgba(255,255,255,.11);
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.015)), rgba(14,13,20,.46);
+  box-shadow: 0 16px 48px rgba(0,0,0,.3), 0 2px 8px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.07);
+  -webkit-backdrop-filter: blur(26px) saturate(160%);
+  backdrop-filter: blur(26px) saturate(160%);
+}
+.topbar-capsule__divider { flex: none; width: 1px; height: calc(var(--halo-item) * .52); margin: 0 5px; background: rgba(255,255,255,.13); }
 .topbar.is-library-menu-open, .topbar.is-notifications-open { z-index: 25; }
 
 /* The scrim stretches from the topbar back out to the viewport edges, so it is
@@ -265,25 +284,59 @@ button { border: 0; cursor: pointer; }
   background: linear-gradient(180deg, rgba(6,6,10,.16) 0%, rgba(6,6,10,.07) 52%, transparent 100%);
 }
 
-.nav-cluster, .profile-cluster, .primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
-
-.nav-cluster { min-width: 0; gap: clamp(12px, 1.45vw, 22px); }
+.primary-nav, .nav-link, .search-control, .hero-actions, .hero-meta, .rail-header, .browse-bar, .browse-bar__mood, .browse-bar__segments, .browse-bar__segment, .browse-bar__mode { display: flex; align-items: center; }
 
 .library-menu-control { position: relative; flex: none; }
+/* The mark and the player in one: the player's picture is set in the ring's
+   hole, the way a stone sits in a setting. The ring's artwork fills only 81%
+   of its file, so the button is drawn that much larger and gives the
+   difference back in negative margins: the ring itself is exactly one control
+   wide and the capsule does not grow. Its hole is not centred in the file —
+   it sits at 51% across and 49% down, 54% of the width — so the picture is
+   placed on those numbers, just under the ring's own dark inner edge. */
 .brand-mark-button {
-  display: grid;
-  width: var(--brand-mark-size);
-  height: var(--brand-mark-size);
-  margin: -5px;
-  padding: 5px;
-  place-items: center;
-  border-radius: 12px;
+  --brand-box: calc(var(--halo-item) / .81);
+  position: relative;
+  display: block;
+  flex: none;
+  width: var(--brand-box);
+  height: var(--brand-box);
+  margin: calc((var(--halo-item) - var(--brand-box)) / 2);
+  padding: 0;
+  border-radius: 50%;
   background: transparent;
-  transition: background 160ms ease, transform 160ms ease;
+  transition: transform 160ms ease, filter 200ms ease;
 }
-.brand-mark-button:hover, .brand-mark-button[data-nav-focus], .brand-mark-button[aria-expanded="true"] { background: rgba(255,255,255,.08); }
-.brand-mark-button:active { transform: scale(.96); }
-.brand-mark { width: 32px; height: 30px; object-fit: contain; }
+.brand-avatar {
+  position: absolute;
+  left: 51%;
+  top: 49%;
+  width: 55%;
+  height: 55%;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #28242c;
+  transform: translate(-50%, -50%);
+}
+.brand-mark {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 6px rgba(110,96,255,.45));
+}
+.brand-mark[hidden] { display: none; }
+.brand-mark-button:hover, .brand-mark-button[aria-expanded="true"] { filter: brightness(1.08); }
+/* Focus rings the ring, not the transparent margin of its file. */
+.brand-mark-button[data-nav-focus]::after {
+  position: absolute;
+  inset: 7%;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(218,216,255,.9), 0 0 22px rgba(160,150,255,.45);
+  content: "";
+}
+.brand-mark-button:active { transform: scale(.95); }
 .brand-mark-button:hover .brand-mark { animation: brand-mark-spin 620ms cubic-bezier(.2,.72,.25,1); }
 /* Wins over the hover spin: switching Rage on while the pointer rests on the
    mark must still play the arrival. */
@@ -295,15 +348,15 @@ button { border: 0; cursor: pointer; }
 .library-source-menu {
   position: absolute;
   z-index: 22;
-  top: calc(100% + 11px);
-  left: -5px;
+  top: calc(100% + var(--halo-pad) + 12px);
+  left: calc(-1 * var(--halo-pad));
   width: min(330px, calc(100vw - 40px));
   overflow: hidden;
   padding: 5px 6px;
   border: 1px solid rgba(255,255,255,.15);
   border-radius: 16px;
   color: #f4f2f7;
-  background: rgba(22,20,23,.48);
+  background: rgba(22,20,23,.66);
   box-shadow: 0 10px 30px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.055);
   -webkit-backdrop-filter: blur(22px) saturate(130%);
   backdrop-filter: blur(22px) saturate(130%);
@@ -390,30 +443,50 @@ button { border: 0; cursor: pointer; }
 /* A connected source listed for information only: same anatomy as an action
    row, but it never lights up as a pressable item. */
 
-.top-divider { width: 1px; height: 22px; background: rgba(255,255,255,.11); }
+.primary-nav { min-width: 0; gap: 2px; white-space: nowrap; }
 
-.primary-nav { min-width: 0; gap: 4px; white-space: nowrap; }
-
+/* A page is its glyph. The current one also says its name, which opens out of
+   the glyph on the same spring the plate travels on, so the plate and the
+   word arrive together. */
 .nav-link {
-  gap: 8px;
-  min-height: var(--tap-min);
-  padding: 0 11px;
-  border-radius: 8px;
-  color: #d5d2d8;
+  height: var(--halo-item);
+  min-width: var(--halo-item);
+  justify-content: center;
+  padding: 0 calc((var(--halo-item) - var(--halo-icon)) / 2);
+  border-radius: 999px;
+  color: #f4f2f7;
   background: transparent;
-  font-size: 13px;
-  font-weight: 450;
-  transition: background 160ms ease, color 160ms ease;
+  font-size: clamp(14px, .92vw, 16px);
+  font-weight: 600;
+  letter-spacing: -.01em;
+  transition: color 200ms ease, background 160ms ease, padding 560ms cubic-bezier(.3, 1.3, .4, 1);
 }
+.nav-link > span {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-width 560ms cubic-bezier(.3, 1.3, .4, 1), margin 560ms cubic-bezier(.3, 1.3, .4, 1), opacity 220ms ease;
+}
+.nav-link.is-active { padding: 0 20px 0 16px; color: #fff; }
+.nav-link.is-active > span { max-width: 180px; margin-left: 9px; opacity: 1; transition-delay: 0ms, 0ms, 90ms; }
 
 /* The shared `display: flex` above outranks the UA `[hidden]` rule, so a nav
    link hidden behind a preference would still paint. */
 .nav-link[hidden] { display: none !important; }
-.nav-link .icon { width: var(--tap-icon); height: var(--tap-icon); }
-.nav-link:hover, .nav-link[data-nav-focus] { color: #fff; background: rgba(255,255,255,.08); }
-/* The page indicator (app.ts `placeNavIndicator`): the active link's plate,
-   lifted out of the link so it can travel. A slight overshoot on the way in
-   is what makes it feel carried rather than teleported. */
+.nav-link .icon { flex: none; width: var(--halo-icon); height: var(--halo-icon); }
+/* Outline elsewhere, filled where you are. */
+.nav-link .nav-glyph--fill, .nav-link.is-active .nav-glyph--line { display: none; }
+.nav-link.is-active .nav-glyph--fill { display: block; }
+/* Dimmed with opacity, not a translucent colour: a translucent stroke paints
+   twice where it crosses itself, and the glyph goes blotchy. */
+.nav-link .icon { opacity: .62; transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1), opacity 200ms ease; }
+.nav-link.is-active .icon, .nav-link:hover .icon, .nav-link[data-nav-focus] .icon { opacity: 1; }
+.nav-link:not(.is-active):hover { background: rgba(255,255,255,.07); }
+/* The page indicator (app.ts `placeNavIndicator`): the current page's plate,
+   lifted out of the link so it can travel. Frosted glass with the iridescent
+   rim of the glass Play button and a little blue light pooled under it. Its
+   geometry is set every frame from app.ts, so it carries no transition of its
+   own beyond fading in. */
 .primary-nav { position: relative; isolation: isolate; }
 .primary-nav > .nav-link { position: relative; z-index: 1; }
 .nav-indicator {
@@ -423,25 +496,38 @@ button { border: 0; cursor: pointer; }
   left: 0;
   width: var(--nav-w, 0);
   height: var(--nav-h, 0);
-  border: 1px solid rgba(255,255,255,.1);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(255,255,255,.1), rgba(255,255,255,.03)), rgba(24,22,26,.46);
-  box-shadow: inset 0 1px rgba(255,255,255,.08), 0 6px 18px rgba(0,0,0,.18);
-  -webkit-backdrop-filter: blur(18px) saturate(130%);
-  backdrop-filter: blur(18px) saturate(130%);
+  border-radius: 999px;
+  background: linear-gradient(160deg, rgba(255,255,255,.2), rgba(255,255,255,.05) 55%, rgba(255,255,255,.1));
+  box-shadow: 0 6px 24px rgba(77,99,255,.34), inset 0 1px rgba(255,255,255,.14);
   opacity: 0;
   transform: translate(var(--nav-x, 0), var(--nav-y, 0));
-  transition:
-    transform 520ms cubic-bezier(.3, 1.3, .4, 1),
-    width 520ms cubic-bezier(.3, 1.3, .4, 1),
-    opacity 200ms ease;
+  transition: opacity 200ms ease;
   pointer-events: none;
 }
+.nav-indicator::before {
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #ffe9f7 0%, #a9dcff 35%, #4f7dff 65%, #c6b2ff 100%);
+  content: "";
+  opacity: .9;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+.nav-indicator::after {
+  position: absolute;
+  right: 22%;
+  bottom: -7px;
+  left: 22%;
+  height: 10px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(111,140,255,.75), transparent);
+  content: "";
+  filter: blur(3px);
+}
 .nav-indicator.is-placed { opacity: 1; }
-.nav-indicator.is-instant { transition: none; }
-/* With the plate travelling, the link itself wears none. */
-.primary-nav.has-indicator .nav-link.is-active { border-color: transparent; background: transparent; box-shadow: none; -webkit-backdrop-filter: none; backdrop-filter: none; }
-.nav-link .icon { transition: transform 260ms cubic-bezier(.3, 1.4, .5, 1); }
 .nav-link:hover .icon { transform: translateY(-1px) scale(1.06); }
 .nav-link.is-arriving .icon { animation: nav-icon-arrive 520ms cubic-bezier(.3, 1.4, .5, 1); }
 @keyframes nav-icon-arrive {
@@ -450,102 +536,56 @@ button { border: 0; cursor: pointer; }
   100% { transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  html:not([data-motion="full"]) .nav-indicator { transition: opacity 200ms ease; }
+  html:not([data-motion="full"]) .nav-link,
+  html:not([data-motion="full"]) .nav-link > span { transition-duration: 0ms; }
   html:not([data-motion="full"]) .nav-link.is-arriving .icon { animation: none; }
 }
-[data-motion="reduced"] .nav-indicator { transition: opacity 200ms ease; }
+[data-motion="reduced"] .nav-link,
+[data-motion="reduced"] .nav-link > span { transition-duration: 0ms; }
 [data-motion="reduced"] .nav-link.is-arriving .icon { animation: none; }
 /* The phone gives every link its own plate; the travelling one stays home. */
 html[data-device="phone"] .nav-indicator { display: none; }
-html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
-  border-color: rgba(255,255,255,.3);
-  background: rgba(255,255,255,.2);
-}
-.nav-link.is-active { color: #f4f2f7; font-weight: 600; background: rgba(24,22,26,.46); border: 1px solid rgba(255,255,255,.09); box-shadow: inset 0 1px rgba(255,255,255,.04); -webkit-backdrop-filter: blur(18px) saturate(130%); backdrop-filter: blur(18px) saturate(130%); }
 
-/* Search stays out of the scene's way: at rest it is a magnifier and nothing
-   else. Reaching it — pointer, focus, or a query already typed — opens the
-   glass pill from the magnifier outwards, and the field and its shortcut
-   arrive just behind it. */
+/* Search is a magnifier in the capsule until it is reached — focus, the keys,
+   or a query already typed — and then the field opens out of it, widening the
+   capsule around it. A hover does not open it: the capsule would change width
+   under a pointer that was only passing. */
 .search-control {
   position: relative;
-  isolation: isolate;
-  width: 100%;
-  min-width: 0;
-  height: var(--search-h);
-  gap: 11px;
-  padding: 0 12px 0 16px;
-  justify-content: center;
-  border-radius: var(--search-r);
-  color: rgba(237,230,226,.62);
+  flex: none;
+  width: var(--halo-item);
+  height: var(--halo-item);
+  gap: 10px;
+  padding: 0 0 0 calc((var(--halo-item) - 18px) / 2);
+  border-radius: 999px;
+  color: rgba(244,242,247,.72);
   cursor: text;
-  transition: color 200ms ease;
+  transition: width 460ms cubic-bezier(.2,.9,.25,1), background 200ms ease, color 200ms ease, padding 460ms cubic-bezier(.2,.9,.25,1);
 }
-.search-control::before {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: inherit;
-  background: rgba(22,20,23,.31);
-  box-shadow: 0 10px 30px rgba(0,0,0,.11), inset 0 1px rgba(255,255,255,.055);
-  -webkit-backdrop-filter: blur(22px) saturate(130%);
-  backdrop-filter: blur(22px) saturate(130%);
-  content: "";
-  opacity: 0;
-  transform: scaleX(.14);
-  transform-origin: 50% 50%;
-  transition: opacity 200ms ease, transform 420ms cubic-bezier(.2,.9,.25,1), border-color 160ms ease, background 160ms ease;
+.search-control:hover { color: #fff; background: rgba(255,255,255,.07); }
+.search-control input { flex: 1 1 0; width: 0; min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 14px; opacity: 0; transition: opacity 220ms ease; }
+.search-shortcut { display: flex; flex: none; gap: 4px; opacity: 0; transition: opacity 220ms ease; }
+.search-control:is(:focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) {
+  width: clamp(230px, 18vw, 300px);
+  padding-right: 8px;
+  color: #fff;
+  background: rgba(255,255,255,.1);
 }
-/* At rest the field and the shortcut take no room, so the magnifier sits in
-   the middle of the bar; opening grows them, which carries the magnifier out
-   to the pill's left edge as the glass widens around it. */
-.search-control input { flex: 0 1 0; width: 0; transition: flex-grow 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
-.search-shortcut { max-width: 0; overflow: hidden; transition: max-width 420ms cubic-bezier(.2,.9,.25,1), opacity 220ms ease; }
-.search-control > :not(.icon) { opacity: 0; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) input { flex-grow: 1; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) .search-shortcut { max-width: 64px; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) { color: #ede6e2; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown)))::before { opacity: 1; transform: none; }
-.search-control:is(:hover, :focus-within, :has(input:not(:placeholder-shown))) > :not(.icon) { opacity: 1; }
-
-.search-control .icon { width: 16px; height: 16px; }
-.search-control input { min-width: 0; border: 0; outline: 0; color: #f4f2f7; background: transparent; font-size: 13px; }
-.search-control input::placeholder { color: #d1c9c5; opacity: .95; }
-.search-shortcut { display: flex; gap: 4px; }
+.search-control:is(:focus-within, :has(input:not(:placeholder-shown)), :has(input[data-nav-focus])) :is(input, .search-shortcut) { opacity: 1; transition-delay: 120ms; }
+.search-control .icon { flex: none; width: 18px; height: 18px; }
+.search-control input::placeholder { color: rgba(244,242,247,.55); }
 .search-shortcut kbd { display: grid; min-width: 21px; height: 24px; padding: 0 5px; place-items: center; border-radius: 6px; color: #f2e7e0; background: rgba(255,255,255,.12); font: 500 12px/1 -apple-system, sans-serif; }
 
-.profile-cluster { min-width: 0; justify-content: flex-end; gap: clamp(12px, 1.3vw, 20px); }
-.avatar { width: var(--avatar-size); height: var(--avatar-size); border: 0; border-radius: 50%; object-fit: cover; background: #28242c; }
-
-/* The profile menu: the picture is the button, and a small glass card under
-   it holds the two things a player sets — a picture and a name. */
-.profile-control { position: relative; flex: none; display: flex; }
-.profile-button { display: grid; padding: 0; place-items: center; border-radius: 50%; background: none; transition: box-shadow 160ms ease, transform 160ms ease; }
-.profile-button:hover,
-.profile-button[data-nav-focus],
-.profile-button[aria-expanded="true"] { box-shadow: 0 0 0 2px rgba(255,255,255,.28); }
-.profile-button:active { transform: scale(.96); }
-.profile-panel {
-  position: absolute;
-  z-index: 22;
-  top: calc(100% + 11px);
-  right: -4px;
+/* The profile card heads the mark's menu: the picture and the name, the two
+   things a player sets, above the sources. */
+.library-source-menu__profile {
   display: flex;
-  width: 268px;
   align-items: center;
   gap: 12px;
-  padding: 12px;
-  border: 1px solid rgba(255,255,255,.15);
-  border-radius: 16px;
-  color: #f4f2f7;
-  background: rgba(22,20,23,.62);
-  box-shadow: 0 18px 44px rgba(0,0,0,.36), inset 0 1px rgba(255,255,255,.055);
-  -webkit-backdrop-filter: blur(24px) saturate(130%);
-  backdrop-filter: blur(24px) saturate(130%);
-  animation: steam-panel-enter 180ms cubic-bezier(.2,.8,.2,1) both;
+  margin: 2px 0 6px;
+  padding: 8px 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,.09);
 }
-.profile-panel[hidden] { display: none; }
 .profile-panel__picture { position: relative; flex: none; width: 52px; height: 52px; overflow: hidden; border-radius: 50%; cursor: pointer; }
 .profile-panel__picture img { width: 100%; height: 100%; object-fit: cover; background: #28242c; }
 /* Hovering the picture says it can be changed. */
@@ -576,8 +616,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .feedback-button {
   display: grid;
   flex: none;
-  width: var(--tap-round);
-  height: var(--tap-round);
+  width: var(--halo-item);
+  height: var(--halo-item);
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
@@ -589,7 +629,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 /* Bare at rest, like the search beside them: a glyph on the scene. Reaching
    one gives it a faint disc so it reads as pressable. */
 .feedback-button:hover, .feedback-button[data-nav-focus] { background: rgba(255,255,255,.1); color: #fff; }
-.feedback-button svg { width: 18px; height: 18px; }
+.feedback-button svg { width: 19px; height: 19px; }
 /* `display: grid` above outranks the UA `[hidden]` rule, so a build without a
    Sentry DSN would still paint the button. */
 .feedback-button[hidden] { display: none !important; }
@@ -600,8 +640,8 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .notifications-button {
   position: relative;
   display: grid;
-  width: var(--tap-round);
-  height: var(--tap-round);
+  width: var(--halo-item);
+  height: var(--halo-item);
   padding: 0;
   place-items: center;
   border: 1px solid transparent;
@@ -613,13 +653,14 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .notifications-button:hover,
 .notifications-button[data-nav-focus],
 .notifications-button[aria-expanded="true"] { background: rgba(255,255,255,.1); color: #fff; }
-.notifications-button svg { width: 18px; height: 18px; }
+.notifications-button svg { width: 19px; height: 19px; }
+.notifications-control[hidden] { display: none; }
 /* The dot is the count. A number on a 36px circle is unreadable, and there are
    never enough notices for one to matter. */
 .notifications-button__dot {
   position: absolute;
-  top: 5px;
-  right: 5px;
+  top: 22%;
+  right: 22%;
   width: 8px;
   height: 8px;
   border: 1.5px solid #17161b;
@@ -1026,32 +1067,9 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 [data-motion="reduced"] .play-button__aura i { animation: none; }
 
 
-/* The Steam account surface is a card inside Settings › Libraries & Sources.
+/* The Steam account surface is a card inside Settings › Accounts.
    It is no longer a floating dialog, so the card chrome comes from
    `.settings-card`. */
-
-/* Every action on this page is a line of text, not a chip: no plate, no
-   border, no radius. Hover marks it with an underline and nothing else. */
-.steam-header-button {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 1px;
-  border: 0;
-  border-radius: 4px;
-  color: #ddd7ec;
-  background: none;
-  font-size: 13px;
-  font-weight: 560;
-  white-space: nowrap;
-  transition: color 140ms ease;
-}
-.steam-header-button:hover:not(:disabled), .steam-header-button[data-nav-focus]:not(:disabled) { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
-.steam-header-button:active:not(:disabled) { opacity: .7; }
-.steam-header-button:disabled { cursor: default; opacity: .45; }
-.steam-header-button .icon { width: 15px; height: 15px; }
-.steam-header-button--label { padding: 2px 1px; font-weight: 560; }
 
 .steam-account-body {
   display: flex;
@@ -1168,7 +1186,7 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 .steam-import-button .icon { width: 15px; height: 15px; }
 
 /* The Wine wizard stays an overlay task; Wine profiles themselves live in
-   Settings › Plugins & Runners. */
+   Settings › Plugins. */
 .wine-panel {
   position: fixed;
   z-index: 21;
@@ -2032,8 +2050,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
 [data-motion="reduced"] .launch-splash__progress span { width: 100%; animation: none; opacity: .5; }
 
 @media (max-width: 1180px) {
-  .topbar { grid-template-columns: minmax(0, 1fr) minmax(200px, min(352px, 31vw)) minmax(0, 1fr); }
-  .nav-link { padding: 0 8px; }
   .browse-bar { gap: 20px; }
   .browse-bar__segments { gap: 18px; }
 }
@@ -2046,26 +2062,18 @@ body[data-mood="rage"] { --violet: #f2453c; }
    stops matching. */
 @media (max-width: 860px) and (min-height: 561px) {
   body { overflow: auto; }
-  /* The search drops to its own row below the bar, so the clearance the page
-     hosts owe the topbar grows with it: 18 + 54 + 40 + 12 of breathing room.
-     An iPad held upright keeps its status bar, so the bar starts under it. */
+  /* The capsule fits a narrow window on one row, search included. An iPad
+     held upright keeps its status bar, so the bar starts under it. */
   :root {
     --topbar-inset-top: max(18px, env(safe-area-inset-top));
     --topbar-inset-left: 20px;
     --topbar-inset-right: 20px;
-    --topbar-height: calc(var(--topbar-inset-top) + 106px);
+    --topbar-height: calc(var(--topbar-inset-top) + var(--topbar-bar-h) + 12px);
   }
   /* Keep the narrow-width floor, but never cap the canvas below the viewport:
      the page hosts are inset: 0 of this box, so a fixed height would strand
      the rest of a taller window and shorten every internal scroll container. */
   .selector { min-height: max(760px, 100svh); }
-  .topbar { grid-template-columns: 1fr auto; }
-  /* The navigation stays: with the search on a row of its own, the first row
-     has room for the three pills, and without them an iPad held upright had
-     no way off whichever page it was on. */
-  .profile-cluster { gap: 0; }
-  .library-source-menu { top: calc(100% + 65px); left: -5px; width: min(330px, calc(100vw - 40px)); }
-  .search-control { position: absolute; top: 54px; left: 0; right: 0; }
   .hero-content { top: 205px; right: auto; bottom: auto; left: 40px; width: min(560px, calc(100vw - 80px)); overflow: visible; }
   /* The narrow layout drops the fixed bottom edge, so there is no free space
      for the identity block to absorb. `flex: 1 1 0` would collapse it to
@@ -2315,7 +2323,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { opacity: 1; transform: none; }
 }
 .settings-layout.is-entering .settings-header h1,
-.settings-layout.is-entering .settings-header p,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .provider-status-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-group__label,
@@ -2341,9 +2348,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
      sticky and short, so its own border would end half way down the panel. */
   border-left: 1px solid rgba(255,255,255,.07);
 }
-.settings-header { margin: 0 0 14px; padding-top: 4px; }
-.settings-header h1 { margin: 0 0 5px; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
-.settings-header p { margin: 0; color: #d0cadf; font-size: 13.5px; line-height: 1.5; }
+.settings-header { margin: 0 0 18px; padding-top: 4px; }
+.settings-header h1 { margin: 0; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
 
 .settings-panel { display: grid; gap: 0; }
 .settings-panel[hidden] { display: none; }
@@ -2371,7 +2377,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 /* A header that is only an action: no title to sit beside it, so it sits at
    the end of the line it belongs to. */
-.settings-card__header--actions { justify-content: flex-end; padding: 14px 0 2px; }
 .settings-card__copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
 .settings-card__copy strong { color: #f7f5fa; font-size: 15px; font-weight: 620; letter-spacing: -.016em; }
 .settings-card__copy small { color: #d0cadf; font-size: 13px; line-height: 1.5; }
@@ -2424,6 +2429,99 @@ body[data-mood="rage"] { --violet: #f2453c; }
   font-size: 13.5px;
 }
 .settings-select:hover, .settings-select[data-nav-focus] { border-bottom-color: rgba(255,255,255,.5); }
+
+/* Settings › General: rows on a plate. One line each — the label, then its
+   control — and what a row does lives in its title, not under it. */
+.settings-panel > .settings-card--plate {
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.settings-panel > .settings-card--plate + .settings-card--plate { margin-top: 14px; }
+.settings-card--plate > .settings-row,
+.settings-card--plate > summary.settings-row {
+  min-height: 58px;
+  padding: 9px 18px;
+  gap: 8px 14px;
+}
+/* Too narrow for the label and its pill side by side, the pill takes the
+   next line rather than running off the plate. */
+.settings-card--plate > .settings-row:has(> .settings-segmented) { flex-wrap: wrap; }
+.settings-card--plate > .settings-row > .settings-segmented { margin-left: auto; }
+.settings-card--plate .settings-row__copy { flex: 1 0 auto; max-width: 100%; }
+/* A group's name above its plate: a word, not a heading in capitals. */
+.settings-panel > .settings-group__label--plain {
+  padding: 22px 0 10px;
+  border-top: 0;
+  color: #9b97a3;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.settings-panel > .settings-card__header--start { justify-content: flex-start; padding: 16px 0 0; border-top: 0; }
+
+/* Two or three words in one pill, the chosen one lit. */
+.settings-segmented {
+  display: flex;
+  flex: none;
+  padding: 3px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  background: rgba(6,7,11,.35);
+}
+.settings-segmented__option {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: #c8c5cf;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.settings-segmented__option:hover { color: #f4f2f8; }
+.settings-segmented__option[aria-pressed="true"] {
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  font-weight: 600;
+}
+.settings-segmented__option:focus-visible,
+.settings-segmented__option[data-nav-focus] {
+  outline: 2px solid #c9b6ff;
+  outline-offset: 1px;
+}
+
+/* A list too long for a pill: its value and a chevron, the native menu on
+   press. */
+.settings-select--value {
+  min-width: 0;
+  padding: 0 22px 0 6px;
+  border-bottom: 0;
+  color: #c8c5cf;
+  text-align: right;
+  text-align-last: right;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f4f2f8' stroke-opacity='.4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E");
+  background-size: 16px 16px;
+  background-position: right 0 center;
+  cursor: pointer;
+}
+.settings-select--value:hover { color: #f4f2f8; }
+.settings-select--value[data-nav-focus] { border-radius: 8px; outline: 2px solid #c9b6ff; outline-offset: 2px; }
+
+/* Folded options: one row with their count until it is opened. */
+.settings-disclosure > summary { list-style: none; cursor: pointer; }
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-row__value { color: #c8c5cf; font-size: 13.5px; }
+.settings-disclosure__chevron { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.settings-disclosure[open] .settings-disclosure__chevron { transform: rotate(90deg); }
+.settings-disclosure > summary:focus-visible,
+.settings-disclosure > summary[data-nav-focus] { outline: none; }
+.settings-disclosure > summary:focus-visible strong,
+.settings-disclosure > summary[data-nav-focus] strong { color: #fff; text-decoration: underline; text-underline-offset: 4px; }
 
 /* Buttons are words. No plate, no border, no radius: hover underlines them and
    that is the whole affordance. */
@@ -2501,6 +2599,126 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { background-position: 40px 0; }
 }
 
+/* Settings › Storage: the one figure the host measures, large, over its bar;
+   then a plate of rows, and the promise as a pill. */
+.settings-panel > .storage-total,
+.settings-panel > .storage-actions,
+.settings-panel > .storage-safe { border-top: 0; }
+.storage-total,
+.storage-actions {
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.storage-total { gap: 14px; padding: 22px; }
+.storage-total__figure { display: flex; align-items: baseline; gap: 10px; margin: 0; }
+.storage-total__figure strong { color: #f7f5fa; font-size: 34px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.storage-total__figure span { color: #9b97a3; font-size: 13.5px; }
+.storage-bar { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.10); }
+.storage-bar__fill { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--violet); transition: width 240ms ease; }
+.storage-actions { margin-top: 14px; padding: 0 18px; }
+.storage-actions .settings-row { min-height: 58px; padding: 10px 0; }
+.storage-actions .settings-row[hidden] { display: none; }
+.storage-actions .settings-row__copy { gap: 2px; }
+.storage-actions .settings-row__copy small { color: #9b97a3; font-size: 12px; }
+.storage-actions .plugin-install-button { min-width: 0; border-radius: 999px; }
+.storage-safe { margin: 12px 0 0; }
+/* Settings › About: the version in a lit plate with the one action it may
+   need, what is new written large, then the links as rows with chevrons. */
+.settings-panel > .about-hero,
+.settings-panel > .about-news,
+.settings-panel > .about-links,
+.settings-panel > .about-reset { border-top: 0; }
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background:
+    radial-gradient(70% 130% at 0% 0%, rgba(125,84,244,.26), transparent 60%),
+    linear-gradient(170deg, rgba(25,26,35,.7), rgba(16,17,26,.7));
+}
+.about-hero__mark { width: 56px; height: 56px; flex: none; object-fit: contain; }
+.about-hero__copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.about-hero__title { color: #f7f5fa; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+.about-hero__update[hidden] { display: none; }
+.about-hero .update-status__label { color: #9b97a3; font-size: 13px; font-weight: 500; }
+/* The detail is for when something is happening or went wrong; at rest the
+   one line above says it all. */
+.about-hero .update-status__detail { display: none; color: #9b97a3; font-size: 12px; }
+.about-hero .update-status[data-update-status="downloading"] .update-status__detail,
+.about-hero .update-status[data-update-status="error"] .update-status__detail { display: block; }
+.about-hero__action { flex: none; border-radius: 999px; }
+.about-hero__action[hidden] { display: none; }
+.about-hero__action.is-primary {
+  height: 44px;
+  padding: 0 24px;
+  border-color: transparent;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 8px 24px -8px rgba(84,66,160,.8);
+  font-size: 15px;
+}
+.about-hero__action.is-primary:hover:not(:disabled),
+.about-hero__action.is-primary[data-nav-focus] { border-color: transparent; background: linear-gradient(100deg, #d2cafa, #b6a9ea); }
+.about-news { gap: 4px; margin-top: 24px; }
+.about-news__title { margin: 0 0 6px; color: #9b97a3; font-size: 13px; font-weight: 600; }
+.about-news__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.about-news__item { display: flex; align-items: center; gap: 18px; padding: 14px 4px; }
+.about-news__item + .about-news__item { border-top: 1px solid rgba(255,255,255,.07); }
+.about-news__item .plugin-icon .icon { width: 24px; height: 24px; }
+.about-news__copy { display: grid; min-width: 0; gap: 4px; }
+.about-news__copy strong { color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; line-height: 1.25; }
+.about-news__copy small { color: #9b97a3; font-size: 13.5px; line-height: 1.4; }
+.about-links {
+  margin-top: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.about-links > * + * { border-top: 1px solid rgba(255,255,255,.08); }
+.about-link {
+  display: flex;
+  width: 100%;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 0;
+  color: #f4f2f8;
+  background: none;
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  text-align: left;
+  cursor: pointer;
+  list-style: none;
+}
+.about-link::-webkit-details-marker { display: none; }
+.about-link .icon { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.about-link:hover .icon, .about-link[data-nav-focus] .icon { color: #f4f2f8; }
+.about-licences[open] > .about-link .icon { transform: rotate(90deg); }
+.about-licences .settings-attributions { padding: 0 18px 16px 36px; color: #9b97a3; font-size: 12.5px; }
+.about-reset { margin: 16px 0 0; }
+.about-reset__button { color: #f09a9f; }
+.about-reset__button:hover:not(:disabled), .about-reset__button[data-nav-focus]:not(:disabled) { color: #ffb8bc; }
+
+.storage-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid rgba(67,214,107,.35);
+  border-radius: 999px;
+  color: #a6e6b8;
+  background: rgba(67,214,107,.10);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
 /* Plugins page. The plugins Orivo has are cards on the left; the one that is
    open shows its detail on the right, so changing plugin never leaves the
    page; the catalogue runs underneath, two cards to a line. */
@@ -2523,17 +2741,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
   padding-left: clamp(20px, 3cqi, 40px);
   border-left: 1px solid rgba(255,255,255,.08);
 }
-.plugins-detail__empty {
-  display: grid;
-  min-height: 240px;
-  place-content: center;
-  justify-items: center;
-  gap: 10px;
-  color: rgba(244,242,248,.42);
-  font-size: 13px;
-}
-.plugins-detail__empty[hidden] { display: none; }
-.plugins-detail__empty-mark .icon { width: 28px; height: 28px; opacity: .6; }
 
 /* One plugin, one card: the coloured icon, the name and its pill, two short
    lines, and a single control or chevron on the right. */
@@ -2598,6 +2805,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   white-space: nowrap;
 }
 .plugin-card__copy small + small { color: rgba(244,242,248,.38); font-size: 11.5px; }
+/* How the plugin stands: green when it works, amber when something is missing. */
+.plugin-card__copy .plugin-card__status { color: rgba(244,242,248,.6); font-size: 12px; }
+.plugin-card__copy .plugin-card__status[data-tone="ok"] { color: #a6e6b8; }
+.plugin-card__copy .plugin-card__status[data-tone="warn"] { color: #f2c46d; }
 .plugin-card__chevron { display: grid; color: rgba(244,242,248,.4); transition: color 160ms ease, transform 180ms cubic-bezier(.2,.8,.2,1); }
 .plugin-card__chevron .icon { width: 16px; height: 16px; }
 .plugin-card.is-openable:hover .plugin-card__chevron { color: #fff; transform: translateX(2px); }
@@ -2666,6 +2877,43 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-pill[data-category="music"] { border-color: rgba(80,220,130,.35); color: #b2f0c7; background: rgba(47,191,98,.14); }
 .plugin-pill[data-category="saves"] { border-color: rgba(170,145,255,.38); color: #d6c9ff; background: rgba(139,108,242,.14); }
 .plugin-pill[data-category="tools"] { border-color: rgba(240,190,90,.35); color: #f6dba4; background: rgba(240,180,41,.12); }
+/* A state rather than a shelf: online, offline. */
+.plugin-pill[data-tone="ok"] { border-color: rgba(67,214,107,.35); color: #a6e6b8; background: rgba(67,214,107,.10); }
+.plugin-pill[data-tone="warn"] { border-color: rgba(242,196,109,.35); color: #f2c46d; background: rgba(242,196,109,.10); }
+
+/* A detail's ⋯: the rare actions, in the glass of Play's launch menu, opening
+   downwards and right-aligned under the button. */
+.plugin-more-menu { position: relative; display: inline-flex; }
+.plugin-dots {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  color: #d5d1dc;
+  background: rgba(255,255,255,.05);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.plugin-dots:hover, .plugin-dots[data-nav-focus], .plugin-dots[aria-expanded="true"] { border-color: rgba(255,255,255,.3); background: rgba(255,255,255,.1); }
+.plugin-dots .icon { width: 17px; height: 17px; }
+.play-launch-menu.plugin-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+  z-index: 30;
+  min-width: 220px;
+  background: rgba(28,28,38,.96);
+  text-align: left;
+}
+.plugin-menu__item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; font-size: 13.5px; color: #d5d1dc; }
+.plugin-menu__item .icon { width: 15px; height: 15px; flex: none; }
+.plugin-menu__item--danger { color: #f09a9f; }
+.plugin-menu__separator { margin: 4px 6px; border: 0; border-top: 1px solid rgba(255,255,255,.08); }
+.plugin-menu__meta { margin: 0; padding: 5px 11px 7px; color: #7d7789; font-size: 11.5px; }
 
 /* The one filled control on a card or a detail header. */
 .plugin-install-button {
@@ -2782,9 +3030,9 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .plugins-detail .wine-directory-empty { padding: 12px 14px; font-size: 12.5px; }
 .plugins-detail .wine-profile-card { padding: 12px 14px; gap: 6px; }
 
-/* Streaming's setup sits under the plugin's own detail, which already has
-   the header. */
-#plugin-managed-panel:not([hidden]) ~ #gamestream-setup-panel > .plugin-detail__header { display: none; }
+/* Streaming's detail is its one question: the card beside it already names
+   the plugin, so the header only comes back with the way back (narrow). */
+#gamestream-setup-panel > .plugin-detail__header { display: none; }
 
 .plugin-facts { display: grid; }
 .plugin-fact {
@@ -2849,15 +3097,17 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 /* The catalogue: a title, its two quiet actions, a hairline search, cards. */
 .plugins-group { display: grid; gap: 12px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,.08); }
 .plugins-group[hidden] { display: none; }
-.plugins-group__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plugins-group__header { display: flex; align-items: center; gap: 12px 30px; }
+.plugins-group__header-actions { margin-left: auto; }
 .plugins-group__title { margin: 0; color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; }
 .plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .plugins-group__action { width: 32px; height: 32px; padding: 0; justify-content: center; }
 .plugins-group__action .icon { width: 15px; height: 15px; }
-.plugins-automatic-updates { display: flex; align-items: center; gap: 7px; margin-right: 6px; color: #b7b2c1; font-size: 12px; }
 .plugins-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 12px; }
 .plugins-search {
   display: flex;
+  min-width: 0;
+  flex: 1;
   height: 34px;
   max-width: 420px;
   align-items: center;
@@ -2876,11 +3126,14 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 @container (max-width: 640px) {
   .plugins-split { grid-template-columns: minmax(0, 1fr); }
   .plugins-detail { position: static; min-height: 0; padding-left: 0; border-left: 0; }
-  .plugins-detail__empty { display: none; }
   .plugins-page[data-detail-open] .plugins-mine,
   .plugins-page[data-detail-open] .plugins-group { display: none; }
   .plugins-page:not([data-detail-open]) .plugins-detail { display: none; }
+  /* The plugin open by default is not shown here, so its card is not lit. */
+  .plugins-page:not([data-detail-open]) .plugin-card.is-selected { border-color: rgba(255,255,255,.09); background: rgba(255,255,255,.028); box-shadow: none; }
+  .plugins-page:not([data-detail-open]) .plugin-card.is-selected .plugin-card__chevron { color: rgba(244,242,248,.4); }
   .plugin-back-button { display: grid; }
+  #gamestream-setup-panel > .plugin-detail__header { display: flex; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2939,57 +3192,130 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .runner-directory-row__revoked { color: #f0a3a3; }
 .runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 
-/* Game streaming setup: four steps, one open at a time. A finished step folds
-   to a line with a tick; the one in front of the person is open; the rest wait,
-   numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
-   so nothing here is a new kind of control. */
+/* Game streaming: one question at a time, centred in the detail column and
+   set large — it is read from a sofa as often as from a desk. Choices are
+   tiles in the plugin-card look; the one main button is the lavender pill. */
 #gamestream-setup-body { padding: 0; }
-.gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
-.gs-step { display: grid; gap: 10px; padding: 14px 0; }
-.gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }
-.gs-step__head { display: flex; align-items: center; gap: 12px; }
-.gs-step__mark {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  flex: none;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.28);
-  border-radius: 50%;
-  color: #cec8dd;
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
+.gs-flow {
+  display: flex;
+  min-height: 330px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
 }
-.gs-step__copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
-.gs-step__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 560; letter-spacing: -.01em; }
-.gs-step__copy small { overflow: hidden; color: rgba(244,242,248,.52); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.gs-step.is-todo .gs-step__copy strong { color: rgba(244,242,248,.55); }
-.gs-step.is-active .gs-step__mark { border-color: rgba(185,168,255,.8); color: #e7dfff; }
-.gs-step.is-done .gs-step__mark {
-  border-color: rgba(114,170,232,.78);
-  color: #dcebfa;
-  background: rgba(76,146,222,.14);
+.gs-flow__q { margin: 0; color: #f7f5fa; font-size: 26px; font-weight: 620; letter-spacing: -.02em; }
+.gs-flow__host { margin: 0; color: #9b97a3; font-size: 14px; }
+.gs-flow__hint { margin: 0; color: #c8c5cf; font-size: 16px; }
+.gs-flow__note { margin: 0; color: #9993a7; font-size: 13px; }
+.gs-flow__error { margin: 0; max-width: 440px; color: #f0a3a3; font-size: 13px; }
+.gs-flow__actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 14px; }
+.gs-flow__mark.plugin-icon { width: 72px; height: 72px; border-radius: 19px; }
+.gs-flow__mark.plugin-icon .icon { width: 36px; height: 36px; }
+.gs-cta {
+  display: inline-flex;
+  height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  border: 0;
+  border-radius: 999px;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 8px 24px -8px rgba(84,66,160,.8);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, transform 140ms cubic-bezier(.2,.8,.2,1);
 }
-.gs-step__body { display: grid; gap: 10px; padding-left: 38px; }
-.gs-step__content { display: grid; gap: 10px; }
-.gs-step__text { margin: 0; color: #d0cadf; font-size: 13px; line-height: 1.55; }
-.gs-step__note, .gs-step__status { margin: 0; color: #9993a7; font-size: 12.5px; line-height: 1.5; }
-.gs-step__error { margin: 0; color: #f0a3a3; font-size: 12.5px; line-height: 1.5; }
-.gs-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
-.gs-step .credentials-form__field { max-width: 420px; }
-/* The primary actions wear the Libraries tab's account button; it is sized for
-   a short label there, so here it only has to fit its own words. */
-.gs-primary.source-account-row__account { width: auto; min-width: 116px; }
-.gs-primary:disabled { cursor: default; opacity: .6; }
+.gs-cta:hover:not(:disabled), .gs-cta[data-nav-focus] { background: linear-gradient(100deg, #ccc3f6, #b3a6e6); }
+.gs-cta:active:not(:disabled) { transform: scale(.97); }
+.gs-cta:disabled { cursor: default; opacity: .6; }
+.gs-cta .icon { width: 16px; height: 16px; }
+.gs-tiles { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+.gs-tile {
+  display: flex;
+  width: 160px;
+  height: 140px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  color: #f6f4fa;
+  background: rgba(255,255,255,.028);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.2,.8,.2,1);
+}
+.gs-tile .icon { width: 34px; height: 34px; color: #c8c5cf; stroke-width: 1.4; }
+.gs-tile:hover:not(:disabled), .gs-tile[data-nav-focus] { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.05); }
+.gs-tile.is-selected {
+  border-color: rgba(185,168,255,.55);
+  background: linear-gradient(120deg, rgba(150,128,255,.16), rgba(255,255,255,.03) 70%);
+  box-shadow: 0 0 0 1px rgba(185,168,255,.18), 0 14px 34px -16px rgba(150,128,255,.9);
+}
+.gs-tile.is-selected .icon { color: #dad8ff; }
+.gs-tile--ghost { border-style: dashed; border-color: rgba(255,255,255,.18); color: #9b97a3; background: none; }
+.gs-tile--ghost .icon { color: #9b97a3; }
+.gs-tile:disabled { cursor: default; opacity: .6; }
+.gs-tile__name { max-width: 100%; overflow: hidden; font-size: 16px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.gs-address {
+  width: min(100%, 360px);
+  height: 46px;
+  padding: 0 16px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 14px;
+  outline: 0;
+  color: #f4f2f8;
+  background: rgba(10,10,16,.35);
+  font: inherit;
+  font-size: 16px;
+  text-align: center;
+}
+.gs-address:focus, .gs-address[data-nav-focus] { border-color: rgba(185,168,255,.7); }
+.gs-address::placeholder { color: rgba(244,242,248,.36); }
 /* The PIN is the one number read off this screen and typed on another machine,
    so it is set at a size that survives that walk. */
 .gs-pin {
-  color: #f2eff7;
-  font-size: 40px;
+  padding-left: .14em;
+  color: #fff;
+  font-size: 96px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  letter-spacing: .24em;
+  letter-spacing: .14em;
+  line-height: 1;
   user-select: all;
+}
+.gs-wait { display: flex; align-items: center; gap: 8px; margin: 0; color: #9b97a3; font-size: 13.5px; }
+.gs-wait__dot { width: 8px; height: 8px; border-radius: 50%; background: #7d54f4; animation: gs-pulse 1.2s ease-in-out infinite; }
+@keyframes gs-pulse { 50% { opacity: .25; } }
+.gs-host {
+  display: flex;
+  width: 100%;
+  max-width: 560px;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  background: rgba(255,255,255,.028);
+  text-align: left;
+}
+.gs-host__mark.plugin-icon { width: 72px; height: 72px; border-radius: 18px; }
+.gs-host__mark.plugin-icon .icon { width: 34px; height: 34px; }
+.gs-host__copy { display: grid; min-width: 0; gap: 8px; }
+.gs-host__name { overflow: hidden; color: #f7f5fa; font-size: 26px; font-weight: 620; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+.gs-host__pills { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .gs-wait__dot { animation: none; } }
+[data-motion="reduced"] .gs-wait__dot { animation: none; }
+@container (max-width: 640px) {
+  .gs-flow { min-height: 0; padding: 18px 0; }
+  .gs-pin { font-size: 72px; }
 }
 
 
@@ -3222,8 +3548,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
    thing it is about to do. Everything that decides lives on this side. The
    corners are barely turned; the label is what varies, and it is measured to
    one width so swapping a persona for a verb never shifts the row. */
-.source-account-row__account,
-.settings-card__header--actions .steam-header-button {
+.source-account-row__account {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
@@ -3267,10 +3592,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
 }
 .source-account-row__account:hover,
 .source-account-row__account:focus-visible,
-.source-account-row__account[data-nav-focus],
-.settings-card__header--actions .steam-header-button:hover:not(:disabled),
-.settings-card__header--actions .steam-header-button:focus-visible:not(:disabled),
-.settings-card__header--actions .steam-header-button[data-nav-focus]:not(:disabled) {
+.source-account-row__account[data-nav-focus] {
   color: #fff;
   border-color: rgba(255,255,255,.72);
   background: rgba(255,255,255,.1);
@@ -3289,8 +3611,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
   border-color: rgba(255,122,132,.92);
   background: rgba(228,74,88,.16);
 }
-.source-account-row__account:active,
-.settings-card__header--actions .steam-header-button:active:not(:disabled) { transform: translateY(0); }
+.source-account-row__account:active { transform: translateY(0); }
 /* At rest the row says who you are; under the pointer it says what you can do
    about it. Only one of the two is ever drawn — and only on the button that has
    both to draw. A button offering to connect has one label and keeps it, rather
@@ -3333,7 +3654,6 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
 .source-account-row__dot--degraded { background: #d8b25c; }
 .source-account-row__dot--unavailable { background: #c9636a; }
 .source-account-row__dot--not-configured { background: #56525e; }
-.source-providers { border-top: 0; }
 /* Aligned with the text column above it, not centred in the panel. */
 .source-account-shared {
   margin: -6px 0 0;
@@ -3434,21 +3754,17 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
   scroll-margin: 24px;
 }
 
-/* The current page's link is already a plate; focus lifts the plate. */
-.nav-link.is-active[data-nav-focus] {
-  border-color: rgba(255,255,255,.2);
-  background: rgba(255,255,255,.13);
+/* Walking the bar, the keys stand on the current page — reaching a link
+   opens it — so focus is a halo of frost around the plate, readable from the
+   far side of a room. */
+.nav-link[data-nav-focus] {
+  box-shadow: 0 0 0 2px rgba(218,216,255,.92), 0 0 24px rgba(170,160,255,.5);
 }
+.feedback-button[data-nav-focus],
+.notifications-button[data-nav-focus] { box-shadow: 0 0 0 2px rgba(218,216,255,.92); }
 
 /* The field is the pill around it, not the bare input. */
-.search-control:has(input[data-nav-focus]) { color: #ede6e2; }
-.search-control:has(input[data-nav-focus]) > :not(.icon) { opacity: 1; transform: none; }
-.search-control:has(input[data-nav-focus])::before {
-  opacity: 1;
-  transform: none;
-  border-color: rgba(255,255,255,.34);
-  background: rgba(22,20,23,.52);
-}
+.search-control:has(input[data-nav-focus]) { box-shadow: 0 0 0 2px rgba(218,216,255,.92), 0 0 24px rgba(170,160,255,.4); }
 
 /* Play is the one control the scene is for: it rises and glows rather than
    brightening by 6%. A greyed Play still says it was reached. */
@@ -3495,7 +3811,11 @@ html[data-form-factor="compact"] {
   --topbar-inset-top: max(8px, env(safe-area-inset-top));
   --topbar-inset-left: max(12px, env(safe-area-inset-left));
   --topbar-inset-right: max(12px, env(safe-area-inset-right));
-  --topbar-bar-h: 44px;
+  /* A short window: the capsule comes down to 48px, inside the same 48px of
+     clearance the bar always had here. The phone block thins it further. */
+  --halo-item: 40px;
+  --halo-pad: 3px;
+  --halo-icon: 19px;
   --topbar-height: calc(var(--topbar-inset-top) + 48px);
   --search-h: 36px;
   --search-r: 18px;
@@ -3537,16 +3857,6 @@ html[data-form-factor="compact"] {
   --fs-bar: 11px;
 }
 
-/* Icons carry the nav: four labelled pills do not fit beside the search field
-   once the bar is 44px tall. The buttons keep their selectors, so gamepad
-   cycling and the shell tests are untouched. */
-html[data-form-factor="compact"] .nav-link {
-  width: var(--tap-min);
-  padding: 0;
-  gap: 0;
-  justify-content: center;
-}
-html[data-form-factor="compact"] .nav-link span { display: none; }
 /* There is no ⌘K on a phone. */
 html[data-form-factor="compact"] .search-shortcut { display: none; }
 /* The Store, the game page and Me scroll here, under a bar that floats over
@@ -3554,8 +3864,6 @@ html[data-form-factor="compact"] .search-shortcut { display: none; }
    (`syncTopbarScrolled` in app.ts), so their copy stops reading through the
    navigation while the art still reaches the top edge at rest. */
 html[data-form-factor="compact"] .topbar--scrolled::before { opacity: 1; }
-html[data-form-factor="compact"] .nav-cluster { gap: 8px; }
-html[data-form-factor="compact"] .profile-cluster { gap: 8px; }
 
 /* The scene. The short-window media queries above write `top` and `bottom` as
    literals, so the tokens alone would never reach the hero — the attribute
@@ -3660,25 +3968,42 @@ html[data-device="phone"] {
   --fs-bar: 10px;
 }
 
-/* The search goes, so the bar is the mark on the left and the bell and the
-   avatar on the right. */
-html[data-device="phone"] .topbar { grid-template-columns: minmax(0, 1fr) auto; }
-html[data-device="phone"] .search-control { display: none; }
+/* No capsule on a phone: the bar is the mark — the player's picture in the
+   ring — on the left and the bell, when there is one, on the right, each a
+   finger's size. The search goes. */
+html[data-device="phone"] {
+  --halo-item: 44px;
+  --halo-pad: 0px;
+  --halo-icon: 20px;
+}
+html[data-device="phone"] .topbar-capsule {
+  width: 100%;
+  gap: 6px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+html[data-device="phone"] .notifications-control { margin-left: auto; }
+html[data-device="phone"] .search-control,
+html[data-device="phone"] .topbar-capsule__divider { display: none; }
+/* Icons carry the nav on a phone, a finger's width each. */
+html[data-device="phone"] .nav-link,
+html[data-device="phone"] .nav-link.is-active { width: var(--halo-item); padding: 0; }
+html[data-device="phone"] .nav-link > span { display: none; }
 
 /* Hidden rather than removed: the pills keep their place, so nothing in the
    bar moves when they come out of the mark. `visibility` waits for the fade on
    the way out and goes first on the way in. */
-html[data-device="phone"] .top-divider,
 html[data-device="phone"] .primary-nav {
   transition: opacity 160ms ease, transform 240ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 240ms;
 }
-html[data-device="phone"] .topbar:not(.is-library-menu-open) .top-divider,
 html[data-device="phone"] .topbar:not(.is-library-menu-open) .primary-nav {
   visibility: hidden;
   opacity: 0;
   transform: translateX(-12px);
 }
-html[data-device="phone"] .topbar.is-library-menu-open .top-divider,
 html[data-device="phone"] .topbar.is-library-menu-open .primary-nav { transition-delay: 0s; }
 
 /* Out of the mark the pills are buttons over the artwork, and an icon has no
@@ -3731,11 +4056,6 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .ws-source--recommended .plugin-field__label::after { content: " ★"; color: #c9b8ff; font-size: 11px; }
 .ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
 .ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
-
-/* An update's highlights: a short, airy list under the version line. */
-.update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
-.update-status__highlights li { position: relative; padding-left: 16px; color: rgba(244,242,248,.82); font-size: 13px; line-height: 1.4; }
-.update-status__highlights li::before { position: absolute; top: .55em; left: 2px; width: 5px; height: 5px; border-radius: 50%; background: #b9a8ff; content: ""; }
 
 /* Each store is a small card read top to bottom: its logo, its name, then
    the one decision (Connect, or the account that turns into Disconnect). The
@@ -3802,6 +4122,37 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .provider-status-row .source-account-row__mark img { width: 34px; height: 34px; margin: 0 auto; }
 .provider-status-row strong { font-size: 13.5px; }
 .provider-status-row .provider-health { margin: auto 0 0; }
+
+/* Accounts: the live price-data stores and the games folders are cells of the
+   same grid as the stores you sign in to, so their wrappers are unwrapped. */
+.source-grid .provider-status-list,
+.source-grid .game-folders-card { display: contents; }
+.source-grid .game-folders-card[hidden] { display: none; }
+.source-grid .game-folders-inline { padding: 0; border-bottom: 0; }
+/* A connected card states what it brought in, in green and without a frame;
+   the frame (and "Disconnect", in red) only arrives under the pointer. */
+.source-account-row__account--count:not(:hover):not(:focus-visible):not([data-nav-focus]):not([aria-expanded="true"]) {
+  border-color: transparent;
+  background: none;
+}
+.source-account-row__account--count .provider-health { font-size: 12.5px; text-transform: none; }
+/* The stores with nothing to connect yet: one quiet line of small logos under
+   a hairline, where a card each used to stand. */
+.source-soon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+.source-soon[hidden] { display: none; }
+.source-soon__label { margin-right: 4px; color: #9b97a3; font-size: 12.5px; font-weight: 600; }
+.source-soon__item { display: inline-flex; align-items: center; gap: 8px; color: #b3aebd; font-size: 13px; }
+.source-soon__mark { display: inline-grid; width: 20px; height: 20px; place-items: center; }
+.source-soon__mark img,
+.source-soon__mark .icon { width: 20px; height: 20px; object-fit: contain; }
 
 .runner-profile-card__mode[hidden] { display: none; }
 

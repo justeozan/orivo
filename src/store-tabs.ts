@@ -15,6 +15,32 @@ import type { GameSummary, StoreBrand, StoreTabId } from "./contracts";
 /** The brands, in the order the bar shows them, after "Tout". */
 export const STORE_BRANDS: readonly StoreBrand[] = ["playstation", "xbox", "nintendo", "steam", "epic"];
 
+/**
+ * What a plugin says one of its games costs, in minor units of an ISO 4217
+ * currency — the way `StoreOffer` counts (`priceMinor` / `currency`). 0 is free.
+ */
+export interface PluginStorePrice {
+  currency: string;
+  amountMinor: number;
+  /** The price before this offer; only ever above `amountMinor`. */
+  regularAmountMinor: number | null;
+}
+
+/**
+ * A game on a plugin's shelf: a `GameSummary`, plus the two things only a
+ * plugin game has. Its `offers` stay empty — a plugin is not one of the
+ * Store's providers — so its price travels here instead.
+ */
+export interface PluginStoreGame extends GameSummary {
+  pluginPrice?: PluginStorePrice;
+  /**
+   * The host holds a web page for this game. Open it with
+   * `openPluginStoreGamePage(game.id)` (`plugin-store-tabs.ts`); the address
+   * itself never reaches the WebView.
+   */
+  hasPluginPage?: boolean;
+}
+
 export interface PluginStoreTab {
   /** The `?store=` value: `plugin:<plugin id>` or `plugin:<plugin id>:<key>`. */
   id: `plugin:${string}`;
@@ -22,7 +48,7 @@ export interface PluginStoreTab {
   label: string;
   /** `#rrggbb`. A plugin that sent nothing usable gets Orivo's violet. */
   accent: string;
-  games: GameSummary[];
+  games: PluginStoreGame[];
 }
 
 export interface StoreTabInput {
@@ -31,12 +57,17 @@ export interface StoreTabInput {
   key?: string;
   label: string;
   accent?: string;
-  games: GameSummary[];
+  games: PluginStoreGame[];
 }
 
 export const DEFAULT_PLUGIN_ACCENT = "#7d54f4";
 const MAX_LABEL = 32;
+// The host's bounds (`plugin_runtime.rs`), so nothing it let by is cut again.
+const MAX_TITLE = 96;
+const MAX_DESCRIPTION = 280;
 const MAX_GAMES = 120;
+const MAX_GALLERY = 12;
+const CURRENCY = /^[A-Z]{3}$/;
 
 // The manifest's grammar (plugin_manifest.rs `valid_plugin_id`): lowercase
 // reverse-DNS, three segments or more. A key is one more such segment.
@@ -64,11 +95,28 @@ export function safeAccent(value: unknown): string | null {
   return typeof value === "string" && ACCENT.test(value.trim()) ? value.trim().toLowerCase() : null;
 }
 
-function safeLabel(value: unknown): string {
+function safeText(value: unknown, max: number): string {
   if (typeof value !== "string") return "";
   // Control and bidi-override characters could reorder what the bar prints.
   const clean = value.replace(/[\u0000-\u001f\u007f-\u009f‪-‮⁦-⁩]/g, "").trim();
-  return clean.length > MAX_LABEL ? `${clean.slice(0, MAX_LABEL - 1).trimEnd()}…` : clean;
+  return clean.length > max ? `${clean.slice(0, max - 1).trimEnd()}…` : clean;
+}
+
+function safeLabel(value: unknown): string {
+  return safeText(value, MAX_LABEL);
+}
+
+function safeMinor(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function safePrice(value: unknown): PluginStorePrice | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Partial<PluginStorePrice>;
+  const amountMinor = safeMinor(raw.amountMinor);
+  if (amountMinor === null || typeof raw.currency !== "string" || !CURRENCY.test(raw.currency)) return undefined;
+  const regular = safeMinor(raw.regularAmountMinor);
+  return { currency: raw.currency, amountMinor, regularAmountMinor: regular !== null && regular > amountMinor ? regular : null };
 }
 
 /** A picture a plugin may show: https, or a path the app serves itself. */
@@ -81,23 +129,40 @@ export function safeImageUrl(value: unknown): string {
   return "";
 }
 
-function safeGame(game: GameSummary, pluginId: string): GameSummary | null {
+function safeStrings(value: unknown, max: number, count: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => safeText(item, max)).filter(Boolean).slice(0, count);
+}
+
+function safeGame(game: PluginStoreGame, pluginId: string): PluginStoreGame | null {
   if (!game || typeof game.id !== "string" || !game.id || typeof game.title !== "string") return null;
-  const title = safeLabel(game.title) || "";
+  // A title is not a tab label: cutting it at the bar's 32 characters turned
+  // most real names into an ellipsis.
+  const title = safeText(game.title, MAX_TITLE);
   if (!title) return null;
+  const gallery = Array.isArray(game.gallery)
+    ? game.gallery.map(safeImageUrl).filter(Boolean).slice(0, MAX_GALLERY)
+    : undefined;
+  const score = game.criticScore;
   return {
     ...game,
     // A plugin's ids live in its own namespace, so one can never stand in for a
     // catalogue game or another plugin's.
     id: game.id.startsWith(`${pluginId}:`) ? game.id : `${pluginId}:${game.id}`,
     title,
+    shortDescription: safeText(game.shortDescription, MAX_DESCRIPTION),
     coverUrl: safeImageUrl(game.coverUrl),
     heroUrl: safeImageUrl(game.heroUrl),
     landscapeUrl: safeImageUrl(game.landscapeUrl),
     logoUrl: safeImageUrl(game.logoUrl) || undefined,
-    genres: Array.isArray(game.genres) ? game.genres.filter((genre) => typeof genre === "string").slice(0, 4) : [],
-    tags: Array.isArray(game.tags) ? game.tags.filter((tag) => typeof tag === "string").slice(0, 8) : [],
+    // Every picture goes through the same door, the screenshots included.
+    gallery: gallery?.length ? gallery : undefined,
+    criticScore: typeof score === "number" && Number.isFinite(score) && score >= 0 && score <= 100 ? score : undefined,
+    genres: safeStrings(game.genres, MAX_LABEL, 4),
+    tags: safeStrings(game.tags, MAX_LABEL, 8),
     offers: Array.isArray(game.offers) ? game.offers : [],
+    pluginPrice: safePrice(game.pluginPrice),
+    hasPluginPage: game.hasPluginPage === true,
     // A plugin tab is the plugin's own shelf; it does not get to call a game
     // a brand's exclusive.
     exclusiveTo: undefined,
@@ -118,7 +183,7 @@ export function registerStoreTab(input: StoreTabInput): PluginStoreTab | null {
   const games = (Array.isArray(input.games) ? input.games : [])
     .slice(0, MAX_GAMES)
     .map((game) => safeGame(game, input.pluginId))
-    .filter((game): game is GameSummary => game !== null);
+    .filter((game): game is PluginStoreGame => game !== null);
   const tab: PluginStoreTab = {
     id,
     pluginId: input.pluginId,

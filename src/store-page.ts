@@ -39,7 +39,14 @@ import {
   type StoreHomeView,
   type StorePageAction,
 } from "./store-model";
-import { listPluginStoreTabs, onStoreTabsChange, pluginStoreTab, type PluginStoreTab } from "./store-tabs";
+import { openPluginStoreGamePage, syncPluginStoreTabs } from "./plugin-store-tabs";
+import {
+  listPluginStoreTabs,
+  onStoreTabsChange,
+  pluginStoreTab,
+  type PluginStoreGame,
+  type PluginStoreTab,
+} from "./store-tabs";
 
 export interface StorePageClient {
   getHome(signal: AbortSignal): Promise<StoreHomeView>;
@@ -239,6 +246,32 @@ function offerCaption(offer: StoreOffer): string {
   if (!isOfferStale(offer)) return `${provider} · ${t("store.offer.verifiedToday")}`;
   const day = offerVerifiedOn(offer);
   return day ? `${provider} · ${t("store.offer.readOn", { day })}` : `${provider} · ${t("store.offer.recheck")}`;
+}
+
+/**
+ * What a card prints as its price. A plugin's game carries its own quote
+ * rather than an offer — a plugin is not one of the Store's shops — and it is
+ * printed by the same rules.
+ */
+function priceLabel(game: GameSummary): string {
+  const quote = (game as PluginStoreGame).pluginPrice;
+  if (quote) return formatPrice(pluginOffer(game.id, quote.amountMinor, quote.currency));
+  return formatPrice(selectBestOffer(game));
+}
+
+function pluginOffer(gameId: string, priceMinor: number, currency: string): StoreOffer {
+  return {
+    id: `plugin_${gameId}`,
+    gameId,
+    provider: "steam",
+    providerLabel: "",
+    priceMinor,
+    currency,
+    region: "",
+    verifiedAt: null,
+    availability: "available",
+    stale: false,
+  };
 }
 
 /**
@@ -1034,7 +1067,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
     // A shop that quoted nothing leaves the slot empty rather than printing a
     // blank price the shopper would read as "free".
-    const price = formatPrice(selectBestOffer(game));
+    const price = priceLabel(game);
     if (price) media.append(element("span", "store-card__price", price));
     open.append(media);
 
@@ -1054,7 +1087,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
       event.stopPropagation();
       void handleWishlist(game);
     });
-    card.append(open, wishlist);
+    // A plugin's game is not in any shop the library can wishlist from.
+    card.append(open);
+    if (!isPluginGame(game)) card.append(wishlist);
 
     const quikyTitle = quikyTitleFor(game);
     if (quikyTitle) {
@@ -1204,6 +1239,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const lead = element("p", "store-detail__lead", game.curation?.tagline || game.shortDescription);
 
     const buy = element("div", "store-detail__buy");
+    if (isPluginGame(game)) {
+      info.replaceChildren(pills, title, lead, buy);
+      renderPluginBuy(game as PluginStoreGame, buy);
+      return;
+    }
     const offer = selectBestOffer(game);
     const price = formatPrice(offer);
     if (offer) {
@@ -1260,6 +1300,38 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
     info.replaceChildren(pills, title, lead, buy);
     renderInstallState();
+  };
+
+  const isPluginGame = (game: GameSummary): boolean => currentPluginTab()?.games.some((entry) => entry.id === game.id) ?? false;
+
+  /**
+   * A plugin's game: its own quote, and its page in the player's browser. The
+   * host resolves the address from the id; the page never holds it.
+   */
+  const renderPluginBuy = (game: PluginStoreGame, buy: HTMLElement): void => {
+    const tab = currentPluginTab();
+    const price = game.pluginPrice ? priceLabel(game) : "";
+    if (price) {
+      const priceBlock = element("div", "store-detail__price");
+      priceBlock.append(element("span", "store-detail__amount", price));
+      if (tab) priceBlock.append(element("span", "store-detail__offer", tab.label));
+      buy.append(priceBlock);
+    }
+    const actions = element("div", "store-detail__actions");
+    if (game.hasPluginPage) {
+      const visit = element("button", "store-detail__action store-detail__action--primary");
+      visit.type = "button";
+      visit.dataset.focusKey = "detail-buy";
+      visit.append(iconElement("link"), element("span", "", t("store.detail.visit")));
+      visit.addEventListener("click", () => {
+        void openPluginStoreGamePage(game.id).catch((error: unknown) => {
+          const message = requestErrorMessage(error);
+          if (message) showTransientStatus(message);
+        });
+      });
+      actions.append(visit);
+    }
+    if (actions.childElementCount) buy.append(actions);
   };
 
   const detailFocusTarget = (): HTMLElement | null =>
@@ -1465,6 +1537,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
       });
       tabsOff?.();
       tabsOff = onStoreTabsChange(onTabsChange);
+      // A plugin installed since the last visit brings its store with it.
+      void syncPluginStoreTabs();
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState(context.restoreState);
       });

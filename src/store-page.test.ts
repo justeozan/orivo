@@ -7,6 +7,17 @@ import { EDITORIAL_GAMES, formatPrice, selectBestOffer } from "./store-model";
 import { createStorePage, DETAIL_SLIDE_MS, detailSlides, type StorePageClient } from "./store-page";
 import { registerStoreTab, resetStoreTabsForTests, unregisterPluginStoreTabs } from "./store-tabs";
 
+// The bridge to the host is mocked at its edge: the page must ask it for the
+// plugins' stores, and open a plugin game's page through it.
+const pluginBridge = vi.hoisted(() => ({
+  sync: vi.fn(async () => {}),
+  open: vi.fn(async (_gameId: string) => {}),
+}));
+vi.mock("./plugin-store-tabs", () => ({
+  syncPluginStoreTabs: pluginBridge.sync,
+  openPluginStoreGamePage: pluginBridge.open,
+}));
+
 const HOUR = 60 * 60 * 1_000;
 
 function offer(overrides: Partial<StoreOffer> = {}): StoreOffer {
@@ -334,6 +345,43 @@ describe("Store plugin tabs", () => {
     unregisterPluginStoreTabs("io.orivo.demo");
     expect(mounted.container.querySelectorAll(".store-card")).toHaveLength(0);
     expect(next(mounted.container).getAttribute("aria-label")).toBe("Next store: All");
+  });
+
+  it("asks the host for the plugins' stores on every visit", async () => {
+    pluginBridge.sync.mockClear();
+    const mounted = mountStore(createFakeClient().client);
+    await mounted.host.activate(storeRoute());
+    await mounted.host.activate(storeRoute({ store: "xbox" }));
+    expect(pluginBridge.sync).toHaveBeenCalledTimes(2);
+  });
+
+  it("prints a plugin game's own price and opens its page through the host", async () => {
+    pluginBridge.open.mockClear();
+    registerStoreTab({
+      pluginId: "io.orivo.demo",
+      label: "Demo deals",
+      games: [
+        {
+          ...game({ id: "deal", title: "Plugin Deal", offers: [] }),
+          pluginPrice: { currency: "EUR", amountMinor: 1_999, regularAmountMinor: null },
+          hasPluginPage: true,
+        },
+      ],
+    });
+    const mounted = mountStore(createFakeClient().client);
+    await mounted.host.activate(storeRoute({ store: "plugin:io.orivo.demo" }));
+    await flush();
+
+    const card = cardFor(mounted.container, "io.orivo.demo:deal");
+    expect(card.querySelector(".store-card__price")?.textContent).toMatch(/19[.,]99/);
+    // Not a shop's game: nothing to wishlist, no Orivo game page.
+    expect(card.querySelector(".store-card__wishlist")).toBeNull();
+
+    byFocusKey(mounted.container, "game-io.orivo.demo:deal").click();
+    expect(detail(mounted.container).querySelector(".store-detail__offer")?.textContent).toBe("Demo deals");
+    expect(mounted.container.querySelector("[data-focus-key='detail-page']")).toBeNull();
+    byFocusKey(mounted.container, "detail-buy").click();
+    expect(pluginBridge.open).toHaveBeenCalledWith("io.orivo.demo:deal");
   });
 
   it("never paints a plugin's colour that is not a plain hex colour", async () => {

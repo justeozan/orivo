@@ -47,7 +47,7 @@ fn print_usage() {
          simulate <package-dir> [options]          Run one call against the real host.\n\
          \n\
          simulate options:\n  \
-         --request identity|health|validate-profile|discover-page|prepare-launch\n  \
+         --request identity|health|validate-profile|discover-page|prepare-launch|store-tabs\n  \
          --grant NAME=PATH        (repeatable) a directory grant, e.g. fixture-games=./games\n  \
          --profile-id ID\n  \
          --display-name NAME       (validate-profile)\n  \
@@ -166,6 +166,7 @@ fn run_simulate(args: Vec<String>) -> Result<(), String> {
             profile_id,
             game_reference,
         },
+        Some("store-tabs") => simulate::SimulatedRequest::StoreTabs,
         Some(other) => return Err(format!("unknown --request `{other}`")),
     };
 

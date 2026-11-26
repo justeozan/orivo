@@ -73,7 +73,10 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = Object.freeze({
   startPage: "library",
   language: "system",
   storeRegion: "automatic",
-  motion: "system",
+  // Every animation on, even where the OS asks for less: Windows turns that
+  // on with "Animation effects", usually for speed, and Orivo's motion is
+  // part of how it reads. "System" and "Reduced" stay one click away.
+  motion: "full",
   onGameStart: "step-aside",
   showShowcaseGames: false,
   debugSampleSocial: false,
@@ -90,16 +93,14 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   /** The sidebar tab: one word, next to the section's glyph. */
   tab: string;
   icon: IconName;
-  description: string;
 }> = [
   // Read through t() at import: the language is settled before this module
   // loads (i18n.ts reads it synchronously), and a change reloads the page.
   ...(
     [
       ["general", "cog"],
-      ["libraries", "folder"],
+      ["libraries", "users"],
       ["plugins", "puzzle"],
-      ["appearance", "palette"],
       ["data", "database"],
       ["about", "info"],
     ] as const
@@ -108,7 +109,6 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
     label: t(`settings.${id}.label`),
     tab: t(`settings.${id}.tab`),
     icon,
-    description: t(`settings.${id}.description`),
   })),
 ] as const;
 

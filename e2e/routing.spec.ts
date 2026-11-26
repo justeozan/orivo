@@ -60,8 +60,15 @@ test.describe("hash router", () => {
     await openRoute(page, "#/settings/nope", "not-found");
     await expect(host(page, "settings")).toBeHidden();
 
+    await openRoute(page, "#/settings/general", "settings");
+    await expect(page.locator("#settings-page-title")).toHaveText("General");
+  });
+
+  test("the folded Appearance section opens General at General's address", async ({ page }) => {
     await openRoute(page, "#/settings/appearance", "settings");
-    await expect(page.locator("#settings-page-title")).toHaveText("Appearance");
+    await expect(page.locator("#settings-page-title")).toHaveText("General");
+    expect(await currentHash(page)).toBe("#/settings/general");
+    await expect(page.locator("[data-segmented='motion']")).toBeVisible();
   });
 
   test("reload preserves the current route", async ({ page }) => {
@@ -252,11 +259,11 @@ test.describe("library keyboard shortcuts are scoped to the Library page", () =>
     await openRoute(page, "#/library", "library");
     const heroBefore = await page.locator("#hero-title").textContent();
 
-    await openRoute(page, "#/settings/appearance", "settings");
+    await openRoute(page, "#/settings/about", "settings");
     await pressLibraryKeys(page);
 
-    expect(await currentHash(page)).toBe("#/settings/appearance");
-    await expect(page.locator("#settings-page-title")).toHaveText("Appearance");
+    expect(await currentHash(page)).toBe("#/settings/about");
+    await expect(page.locator("#settings-page-title")).toHaveText("About");
 
     await page.locator("[data-nav-page='library']").click();
     await waitForPage(page, "library");

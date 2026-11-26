@@ -61,12 +61,26 @@ use wasmtime::{
 pub mod bindings {
     //! Typed bindings generated from `wit/orivo-plugin.wit`.
     //!
-    //! Only `runner-plugin` is generated: it is the one world this host slice
-    //! can serve, and generating a world Orivo cannot invoke would advertise a
-    //! contract that does not exist.
+    //! Only the worlds this host can serve are generated — `runner-plugin` here
+    //! and `store-tab-plugin` beside it. Generating a world Orivo cannot invoke
+    //! would advertise a contract that does not exist.
     wasmtime::component::bindgen!({
         world: "runner-plugin",
         path: "../wit",
+    });
+}
+
+pub mod store_tab_bindings {
+    //! The `store-tab-plugin` world. Its imports are the runner world's own
+    //! modules rather than a second copy, so one `HostState` implementation of
+    //! the journal serves both, and one `plugin-error` converts for both.
+    wasmtime::component::bindgen!({
+        world: "store-tab-plugin",
+        path: "../wit",
+        with: {
+            "orivo:plugin/types": super::bindings::orivo::plugin::types,
+            "orivo:plugin/host-journal": super::bindings::orivo::plugin::host_journal,
+        },
     });
 }
 
@@ -74,6 +88,9 @@ use bindings::{
     RunnerPlugin, RunnerPluginPre,
     exports::orivo::plugin::{plugin_core as wit_core, runner as wit_runner},
     orivo::plugin::{host_files, host_journal, types as wit_types},
+};
+use store_tab_bindings::{
+    StoreTabPlugin, StoreTabPluginPre, exports::orivo::plugin::store_tabs as wit_store_tabs,
 };
 
 pub const PLUGIN_WASM_STACK_BYTES: usize = 2 * 1024 * 1024;
@@ -159,6 +176,21 @@ const TYPES_IMPORT: &str = "orivo:plugin/types@1.0.0";
 const HOST_FILES_IMPORT: &str = "orivo:plugin/host-files@1.0.0";
 const PLUGIN_CORE_EXPORT: &str = "orivo:plugin/plugin-core@1.0.0";
 const RUNNER_EXPORT: &str = "orivo:plugin/runner@1.0.0";
+const STORE_TABS_EXPORT: &str = "orivo:plugin/store-tabs@1.0.0";
+
+/// Store tab bounds. `src/store-tabs.ts` applies the same ones again, so a value
+/// the host let through is never one the page then cuts differently — which is
+/// why text is measured in UTF-16 units, the page's `String.length`.
+pub const MAX_STORE_TABS: usize = 4;
+pub const MAX_STORE_TAB_GAMES: usize = 120;
+const MAX_STORE_TAB_KEY_BYTES: usize = 32;
+const MAX_STORE_TAB_LABEL_UNITS: usize = 32;
+const MAX_STORE_GAME_ID_BYTES: usize = 64;
+const MAX_STORE_GAME_TITLE_UNITS: usize = 96;
+const MAX_STORE_GAME_DESCRIPTION_UNITS: usize = 280;
+const MAX_STORE_GAME_GENRES: usize = 4;
+const MAX_STORE_GAME_GENRE_UNITS: usize = 32;
+const MAX_STORE_URL_BYTES: usize = 2048;
 
 /// How much longer than a probe's own deadline the registry waits for it. The
 /// extra room is queueing, not execution: the component itself is already
@@ -2257,7 +2289,8 @@ pub(crate) fn valid_entry_name(name: &str) -> bool {
 pub enum PluginRuntimeError {
     EngineUnavailable,
     InvalidComponent,
-    /// The component compiled but does not export the world this host serves.
+    /// The component compiled but does not export the world the request needs:
+    /// the runner world for a runner call, the Store tab world for `StoreTabs`.
     MissingWorld,
     /// The component imports something Orivo has no host function for — a WASI
     /// interface, or a future ABI revision. There is nothing to link it to, so
@@ -2332,7 +2365,7 @@ impl std::fmt::Display for PluginRuntimeError {
             ),
             Self::MissingWorld => write!(
                 formatter,
-                "The plugin component does not implement the Orivo runner contract."
+                "The plugin component does not implement the Orivo contract this call needs."
             ),
             Self::UnknownImport => write!(
                 formatter,
@@ -2508,6 +2541,45 @@ impl PluginLaunchIntent {
     }
 }
 
+/// A Store tab as the host accepted it. Every string has been cleaned and
+/// bounded, every address is plain `https`, and the game ids already carry the
+/// plugin's namespace — the plugin's own words are not in here any more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginStoreTab {
+    pub key: Option<String>,
+    pub label: String,
+    /// `#rrggbb`, lowercase. `None` when the plugin sent nothing usable.
+    pub accent: Option<String>,
+    pub games: Vec<PluginStoreGame>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginStoreGame {
+    /// `<plugin id>:<the plugin's id>`.
+    pub id: String,
+    pub title: String,
+    pub short_description: Option<String>,
+    pub cover_url: Option<String>,
+    pub hero_url: Option<String>,
+    pub landscape_url: Option<String>,
+    pub logo_url: Option<String>,
+    pub genres: Vec<String>,
+    pub price: Option<PluginStorePrice>,
+    /// The page Orivo opens on the player's request. It stays in the host: the
+    /// WebView is only told that one exists.
+    pub page_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginStorePrice {
+    /// Three ASCII letters, uppercase: the shape of an ISO 4217 code.
+    pub currency: String,
+    pub amount_minor: u32,
+    /// Only ever above `amount_minor`: a "discount" that raises the price is
+    /// dropped rather than shown.
+    pub regular_amount_minor: Option<u32>,
+}
+
 /// What the host asks a component to do. Each variant names the operation *and*
 /// the arguments the host will check the answer against, so validation cannot
 /// drift from the call.
@@ -2529,6 +2601,8 @@ pub enum PluginRequest {
         profile_id: String,
         game_reference: String,
     },
+    /// `store-tabs.tabs`, through the `store-tab-plugin` world.
+    StoreTabs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2538,17 +2612,39 @@ pub enum PluginResponse {
     ProfileValidation(PluginProfileValidation),
     DiscoveryPage(PluginDiscoveryPage),
     LaunchIntent(PluginLaunchIntent),
+    StoreTabs(Vec<PluginStoreTab>),
+}
+
+/// Which world a request is answered through. A component is instantiated
+/// against the one the request needs, so a runner that also adds a Store tab is
+/// held to each contract only when it is asked about that one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PluginWorld {
+    Runner,
+    StoreTab,
+}
+
+impl PluginWorld {
+    fn export(self) -> &'static str {
+        match self {
+            Self::Runner => RUNNER_EXPORT,
+            Self::StoreTab => STORE_TABS_EXPORT,
+        }
+    }
 }
 
 impl PluginRequest {
     /// Three tiers, from tightest to loosest: a probe answers about itself, an
     /// interactive call answers about one profile or game, and discovery walks a
     /// bounded page. Nothing here is a background process.
+    ///
+    /// Store tabs are interactive: the answer is a few kilobytes of data the
+    /// component already holds, and the Store is waiting for it.
     fn budget(&self, limits: &PluginLimits) -> (u64, Duration) {
         match self {
             Self::Identity | Self::HealthCheck => (limits.probe_fuel, limits.probe_deadline),
             Self::DiscoverPage { .. } => (limits.discovery_fuel, limits.discovery_deadline),
-            Self::ValidateProfile { .. } | Self::PrepareLaunch { .. } => {
+            Self::ValidateProfile { .. } | Self::PrepareLaunch { .. } | Self::StoreTabs => {
                 (limits.interactive_fuel, limits.interactive_deadline)
             }
         }
@@ -2561,6 +2657,14 @@ impl PluginRequest {
             Self::ValidateProfile { .. } => "validate-profile",
             Self::DiscoverPage { .. } => "discover-page",
             Self::PrepareLaunch { .. } => "prepare-launch",
+            Self::StoreTabs => "store-tabs",
+        }
+    }
+
+    fn world(&self) -> PluginWorld {
+        match self {
+            Self::StoreTabs => PluginWorld::StoreTab,
+            _ => PluginWorld::Runner,
         }
     }
 }
@@ -2614,6 +2718,12 @@ pub struct InvocationCost {
 pub struct PluginInvocation {
     pub response: PluginResponse,
     pub cost: InvocationCost,
+}
+
+/// An instance, typed by the world it was instantiated against.
+enum Bound {
+    Runner(RunnerPlugin),
+    StoreTab(StoreTabPlugin),
 }
 
 struct RuntimeInner {
@@ -3096,20 +3206,25 @@ impl PluginRuntime {
         let instance_pre = match linker.instantiate_pre(&prepared.component) {
             Ok(instance_pre) => instance_pre,
             Err(_) => {
-                let error = self.instantiation_refusal(prepared, grants);
+                let error = self.instantiation_refusal(prepared, grants, request.world());
                 return Err(self.finish(&mut store, plugin_id, request, error));
             }
         };
-        let bindings = match RunnerPluginPre::new(instance_pre) {
-            Ok(pre) => match pre.instantiate(&mut store) {
-                Ok(bindings) => bindings,
-                Err(error) => {
-                    let mapped = self.classify(&mut store, error);
-                    return Err(self.finish(&mut store, plugin_id, request, mapped));
-                }
-            },
-            // The component compiled and its imports were satisfiable, but it
-            // does not export the runner world. Nothing here can invoke it.
+        // The component compiled and its imports were satisfiable, but it may
+        // not export the world this request needs. Nothing here can invoke it
+        // then, which is `MissingWorld` rather than a trap.
+        let bound = match request.world() {
+            PluginWorld::Runner => RunnerPluginPre::new(instance_pre)
+                .map(|pre| pre.instantiate(&mut store).map(Bound::Runner)),
+            PluginWorld::StoreTab => StoreTabPluginPre::new(instance_pre)
+                .map(|pre| pre.instantiate(&mut store).map(Bound::StoreTab)),
+        };
+        let bindings = match bound {
+            Ok(Ok(bindings)) => bindings,
+            Ok(Err(error)) => {
+                let mapped = self.classify(&mut store, error);
+                return Err(self.finish(&mut store, plugin_id, request, mapped));
+            }
             Err(_) => {
                 let missing = PluginRuntimeError::MissingWorld;
                 return Err(self.finish(&mut store, plugin_id, request, missing));
@@ -3118,7 +3233,10 @@ impl PluginRuntime {
         let instantiation = started.elapsed();
 
         let called = Instant::now();
-        let outcome = self.call(&mut store, &bindings, request);
+        let outcome = match &bindings {
+            Bound::Runner(bindings) => self.call(&mut store, bindings, request),
+            Bound::StoreTab(bindings) => self.call_store_tabs(&mut store, bindings, request),
+        };
         let call = called.elapsed();
         let fuel_used = fuel.saturating_sub(store.get_fuel().unwrap_or(0));
 
@@ -3188,6 +3306,43 @@ impl PluginRuntime {
         &self,
         prepared: &PreparedComponent,
     ) -> Result<ComponentContract, PluginRuntimeError> {
+        self.inspect_world(prepared, PluginWorld::Runner)
+    }
+
+    /// The same check for the `store-tab-plugin` world: it exports the Store tab
+    /// interface, and imports nothing the host cannot serve.
+    pub fn inspect_store_tab_contract(
+        &self,
+        prepared: &PreparedComponent,
+    ) -> Result<ComponentContract, PluginRuntimeError> {
+        self.inspect_world(prepared, PluginWorld::StoreTab)
+    }
+
+    /// What the registry runs before Orivo asks a package for its Store tabs:
+    /// the contract, and a manifest that declares everything the component's
+    /// imports oblige the host to link. No guest code runs, so it is free to
+    /// run on every package that claims the extension.
+    pub fn verify_store_tabs(
+        &self,
+        prepared: &PreparedComponent,
+        manifest: &ValidatedPluginManifest,
+    ) -> Result<(), PluginRuntimeError> {
+        let contract = self.inspect_store_tab_contract(prepared)?;
+        match contract
+            .required_capabilities
+            .into_iter()
+            .find(|capability| !manifest.declares(*capability))
+        {
+            Some(undeclared) => Err(PluginRuntimeError::CapabilityUndeclared(undeclared)),
+            None => Ok(()),
+        }
+    }
+
+    fn inspect_world(
+        &self,
+        prepared: &PreparedComponent,
+        world: PluginWorld,
+    ) -> Result<ComponentContract, PluginRuntimeError> {
         let component_type = prepared.component.component_type();
         let mut required_capabilities = BTreeSet::new();
         for (name, item) in component_type.imports(&self.inner.engine) {
@@ -3204,7 +3359,7 @@ impl PluginRuntime {
             .exports(&self.inner.engine)
             .map(|(name, _)| name)
             .collect::<BTreeSet<_>>();
-        if !exports.contains(PLUGIN_CORE_EXPORT) || !exports.contains(RUNNER_EXPORT) {
+        if !exports.contains(PLUGIN_CORE_EXPORT) || !exports.contains(world.export()) {
             return Err(PluginRuntimeError::MissingWorld);
         }
         Ok(ComponentContract {
@@ -3229,8 +3384,9 @@ impl PluginRuntime {
         &self,
         prepared: &PreparedComponent,
         grants: &PluginGrants,
+        world: PluginWorld,
     ) -> PluginRuntimeError {
-        match self.inspect_contract(prepared) {
+        match self.inspect_world(prepared, world) {
             Err(error) => error,
             Ok(contract) => contract
                 .required_capabilities
@@ -3303,6 +3459,27 @@ impl PluginRuntime {
                 validate_launch_intent(intent, &store.data().plugin_id, profile_id, game_reference)
                     .map(PluginResponse::LaunchIntent)
             }
+            // `invoke` binds this request to the store-tab world; reaching here
+            // means the two dispatches disagree, which is the host's bug.
+            PluginRequest::StoreTabs => Err(PluginRuntimeError::MissingWorld),
+        }
+    }
+
+    fn call_store_tabs(
+        &self,
+        store: &mut Store<HostState>,
+        bindings: &StoreTabPlugin,
+        request: &PluginRequest,
+    ) -> Result<PluginResponse, PluginRuntimeError> {
+        match request {
+            PluginRequest::StoreTabs => {
+                let tabs = bindings
+                    .orivo_plugin_store_tabs()
+                    .call_tabs(&mut *store)
+                    .map_err(|error| self.classify(store, error))??;
+                validate_store_tabs(&store.data().plugin_id, tabs).map(PluginResponse::StoreTabs)
+            }
+            _ => Err(PluginRuntimeError::MissingWorld),
         }
     }
 
@@ -3553,6 +3730,238 @@ fn validate_launch_intent(
         profile_id: intent.profile_id,
         game_reference: intent.game_reference,
         mode,
+    })
+}
+
+/// A plugin's Store tabs, or a refusal.
+///
+/// Two kinds of fault, two answers. A *shape* the host cannot index — too many
+/// tabs or games, a key or an id outside its grammar, two of them alike, a label
+/// or a title with nothing left in it — refuses the whole answer: the page would
+/// otherwise show something other than what the plugin meant, and a plugin that
+/// gets its own shape wrong is broken in a way the journal should say. A field
+/// the host will not *show* — a colour that is not `#rrggbb`, an address that is
+/// not plain `https`, a price in something that is not a currency code — is
+/// dropped and the rest stands, the way the Store drops a provider's unusable
+/// artwork.
+///
+/// The ids come back namespaced under `plugin_id`, the manifest's id the call
+/// was made for, so no answer can name a library game or another plugin's.
+fn validate_store_tabs(
+    plugin_id: &str,
+    tabs: Vec<wit_store_tabs::StoreTab>,
+) -> Result<Vec<PluginStoreTab>, PluginRuntimeError> {
+    if tabs.len() > MAX_STORE_TABS {
+        return Err(PluginRuntimeError::InvalidResult("too many store tabs"));
+    }
+    let mut keys = BTreeSet::new();
+    let mut accepted = Vec::with_capacity(tabs.len());
+    for tab in tabs {
+        let key = match tab.key {
+            None => None,
+            Some(key) if valid_store_tab_key(&key) => Some(key),
+            Some(_) => return Err(PluginRuntimeError::InvalidResult("store tab key")),
+        };
+        // Two tabs with one key would be one route showing either shelf.
+        if !keys.insert(key.clone()) {
+            return Err(PluginRuntimeError::InvalidResult("duplicate store tab"));
+        }
+        let label = store_text(&tab.label, MAX_STORE_TAB_LABEL_UNITS)
+            .ok_or(PluginRuntimeError::InvalidResult("store tab label"))?;
+        if tab.games.len() > MAX_STORE_TAB_GAMES {
+            return Err(PluginRuntimeError::InvalidResult(
+                "too many store tab games",
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut games = Vec::with_capacity(tab.games.len());
+        for game in tab.games {
+            if !valid_store_game_id(&game.id) {
+                return Err(PluginRuntimeError::InvalidResult("store game id"));
+            }
+            if !ids.insert(game.id.clone()) {
+                return Err(PluginRuntimeError::InvalidResult("duplicate store game"));
+            }
+            let title = store_text(&game.title, MAX_STORE_GAME_TITLE_UNITS)
+                .ok_or(PluginRuntimeError::InvalidResult("store game title"))?;
+            let picture = |url: Option<String>| url.as_deref().and_then(store_picture_url);
+            games.push(PluginStoreGame {
+                id: format!("{plugin_id}:{}", game.id),
+                title,
+                short_description: game
+                    .short_description
+                    .as_deref()
+                    .and_then(|text| store_text(text, MAX_STORE_GAME_DESCRIPTION_UNITS)),
+                cover_url: picture(game.cover_url),
+                hero_url: picture(game.hero_url),
+                landscape_url: picture(game.landscape_url),
+                logo_url: picture(game.logo_url),
+                genres: game
+                    .genres
+                    .iter()
+                    .filter_map(|genre| store_text(genre, MAX_STORE_GAME_GENRE_UNITS))
+                    .take(MAX_STORE_GAME_GENRES)
+                    .collect(),
+                price: game.price.and_then(store_price),
+                page_url: game.page_url.as_deref().and_then(store_page_url),
+            });
+        }
+        // A tab is a shelf; one with nothing on it is a dead end in the bar.
+        if games.is_empty() {
+            continue;
+        }
+        accepted.push(PluginStoreTab {
+            key,
+            label,
+            accent: tab.accent.as_deref().and_then(store_accent),
+            games,
+        });
+    }
+    Ok(accepted)
+}
+
+/// `src/store-tabs.ts`'s `TAB_KEY`: it becomes the last segment of a route.
+fn valid_store_tab_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= MAX_STORE_TAB_KEY_BYTES
+        && key
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// The opaque grammar without `:`, so `<plugin id>:<id>` splits one way only.
+fn valid_store_game_id(id: &str) -> bool {
+    valid_opaque_id(id, MAX_STORE_GAME_ID_BYTES) && !id.contains(':')
+}
+
+/// Characters that reorder the text around them. A label printed in the Store's
+/// bar could otherwise make the next one read backwards.
+fn is_direction_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// One line of plugin text, or nothing: direction controls removed, any run of
+/// control characters and whitespace folded into one space, and cut with an
+/// ellipsis past `max_units`. Counted in UTF-16 units because that is what the
+/// page's own `String.length` counts, so it never cuts again what this let by.
+fn store_text(value: &str, max_units: usize) -> Option<String> {
+    let mut kept = String::new();
+    let mut units = 0;
+    let mut space = false;
+    for character in value.chars() {
+        if is_direction_control(character) {
+            continue;
+        }
+        if character.is_control() || character.is_whitespace() {
+            space = !kept.is_empty();
+            continue;
+        }
+        if space {
+            kept.push(' ');
+            units += 1;
+            space = false;
+        }
+        kept.push(character);
+        units += character.len_utf16();
+        // One past the bound is all it takes to know the text gets cut.
+        if units > max_units {
+            break;
+        }
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    if units <= max_units {
+        return Some(kept);
+    }
+    let mut cut = String::new();
+    let mut cut_units = 0;
+    for character in kept.chars() {
+        if cut_units + character.len_utf16() > max_units - 1 {
+            break;
+        }
+        cut.push(character);
+        cut_units += character.len_utf16();
+    }
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    Some(cut)
+}
+
+/// `#rrggbb` and nothing else — no names, no alpha, no `rgb()` — lowercased.
+fn store_accent(value: &str) -> Option<String> {
+    let hex = value.trim().strip_prefix('#')?;
+    (hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| format!("#{}", hex.to_ascii_lowercase()))
+}
+
+/// Plain `https` on a named host: no credentials, no port, no address literal,
+/// nothing local. The WebView loads a picture without asking the player and the
+/// browser opens a page on their behalf, so neither may point anywhere a
+/// public name does not.
+fn store_url(value: &str) -> Option<String> {
+    let candidate = value.trim();
+    if candidate.is_empty()
+        || candidate.len() > MAX_STORE_URL_BYTES
+        || candidate
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return None;
+    }
+    let parsed = url::Url::parse(candidate).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return None;
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(domain))
+            if domain.contains('.')
+                && !domain.ends_with('.')
+                && !domain.ends_with(".localhost")
+                && !domain.ends_with(".local") => {}
+        _ => return None,
+    }
+    let normalised = parsed.to_string();
+    (normalised.len() <= MAX_STORE_URL_BYTES).then_some(normalised)
+}
+
+/// A picture can end up inside a CSS `url(…)`, so the characters that would
+/// close one are refused as well — the same set `safeImageUrl` refuses.
+fn store_picture_url(value: &str) -> Option<String> {
+    if value.contains(['"', '\'', '(', ')', '\\', '<', '>']) {
+        return None;
+    }
+    store_url(value)
+}
+
+fn store_page_url(value: &str) -> Option<String> {
+    store_url(value)
+}
+
+/// Three letters, uppercased. Whether they name a real currency is the page's
+/// formatter's question; it falls back to the bare amount when it does not.
+fn store_price(price: wit_store_tabs::StorePrice) -> Option<PluginStorePrice> {
+    let currency = price.currency.trim();
+    if currency.len() != 3 || !currency.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(PluginStorePrice {
+        currency: currency.to_ascii_uppercase(),
+        amount_minor: price.amount_minor,
+        regular_amount_minor: price
+            .regular_amount_minor
+            .filter(|regular| *regular > price.amount_minor),
     })
 }
 
@@ -7883,5 +8292,379 @@ mod tests {
         // Preparing ahead of the first call is the whole point: reusing a
         // compiled component must cost far less than compiling it again.
         assert!(compile > prepared_launch.cost.instantiation);
+    }
+
+    // -----------------------------------------------------------------------
+    // Store tabs
+    // -----------------------------------------------------------------------
+
+    /// The reference Store tab component, built by `store-tab-fixture/build.sh`.
+    const STORE_FIXTURE: &[u8] = include_bytes!("../fixtures/orivo-store-tab-fixture.wasm");
+    const STORE_FIXTURE_SHA256: &str =
+        "7c37e1adecf20a14260ec539b4cabbaae118bc96375fce1399bd572029eda073";
+    const STORE_PLUGIN_ID: &str = "com.orivo.fixture-store";
+
+    fn store_tabs_of(
+        runtime: &PluginRuntime,
+        bytes: &[u8],
+        sha256: &str,
+    ) -> Result<Vec<PluginStoreTab>, PluginRuntimeError> {
+        let prepared = runtime.prepare_component(bytes, sha256).unwrap();
+        let invocation = on_a_host_sized_thread(|| {
+            runtime.invoke(
+                &prepared,
+                STORE_PLUGIN_ID,
+                &PluginGrants::none(),
+                next_correlation_id(),
+                &Arc::new(AtomicBool::new(false)),
+                &PluginRequest::StoreTabs,
+            )
+        })?;
+        match invocation.response {
+            PluginResponse::StoreTabs(tabs) => Ok(tabs),
+            other => panic!("expected store tabs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_committed_store_tab_fixture_matches_its_recorded_digest() {
+        let mut digest = Sha256::new();
+        digest.update(STORE_FIXTURE);
+        assert_eq!(format!("{:x}", digest.finalize()), STORE_FIXTURE_SHA256);
+    }
+
+    /// Each world is its own contract: the Store tab fixture is not a runner and
+    /// the runner fixture adds no tab, and the type check says so of both
+    /// without running either.
+    #[test]
+    fn each_world_is_checked_against_its_own_export() {
+        let runtime = PluginRuntime::new().unwrap();
+        let store = runtime
+            .prepare_component(STORE_FIXTURE, STORE_FIXTURE_SHA256)
+            .unwrap();
+        let runner = runtime.prepare_component(FIXTURE, FIXTURE_SHA256).unwrap();
+
+        assert_eq!(
+            runtime.inspect_store_tab_contract(&store).unwrap(),
+            ComponentContract::default()
+        );
+        assert_eq!(
+            runtime.inspect_contract(&store).unwrap_err(),
+            PluginRuntimeError::MissingWorld
+        );
+        assert_eq!(
+            runtime.inspect_store_tab_contract(&runner).unwrap_err(),
+            PluginRuntimeError::MissingWorld
+        );
+        assert_eq!(
+            store_tabs_of(&runtime, FIXTURE, FIXTURE_SHA256).unwrap_err(),
+            PluginRuntimeError::MissingWorld
+        );
+    }
+
+    /// The fixture's one answer carries every field-level fault the host drops.
+    /// What comes back is what the host would show, and nothing the plugin
+    /// should not have said survives into it.
+    #[test]
+    fn a_store_tab_answer_is_validated_field_by_field() {
+        let runtime = PluginRuntime::new().unwrap();
+        let tabs = store_tabs_of(&runtime, STORE_FIXTURE, STORE_FIXTURE_SHA256).unwrap();
+
+        // The keyless tab had no games, so it is not there at all.
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab.key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("deals"), Some("free")]
+        );
+        let (deals, free) = (&tabs[0], &tabs[1]);
+        assert_eq!(deals.label, "Fixture Deals");
+        assert_eq!(deals.accent.as_deref(), Some("#e4572e"));
+        assert_eq!(free.label, "Free this week");
+        assert_eq!(free.accent, None, "a colour name is not #rrggbb");
+
+        let alpha = &deals.games[0];
+        assert_eq!(alpha.id, "com.orivo.fixture-store:alpha");
+        assert_eq!(alpha.title, "Alpha Quest");
+        assert_eq!(
+            alpha.short_description.as_deref(),
+            Some("A short trip through a long level.")
+        );
+        assert_eq!(
+            alpha.cover_url.as_deref(),
+            Some("https://cdn.cloudflare.steamstatic.com/steam/apps/620/library_600x900.jpg")
+        );
+        assert!(alpha.hero_url.is_some() && alpha.landscape_url.is_some());
+        assert_eq!(
+            alpha.genres,
+            vec!["Puzzle".to_string(), "Co-op".to_string()]
+        );
+        let price = alpha.price.as_ref().unwrap();
+        assert_eq!(
+            (
+                price.currency.as_str(),
+                price.amount_minor,
+                price.regular_amount_minor
+            ),
+            ("EUR", 499, Some(1999))
+        );
+        assert_eq!(
+            alpha.page_url.as_deref(),
+            Some("https://store.example.com/games/alpha")
+        );
+
+        let beta = &deals.games[1];
+        assert_eq!(beta.id, "com.orivo.fixture-store:beta");
+        assert_eq!(
+            beta.title, "Beta Run",
+            "direction override and bell removed"
+        );
+        assert_eq!(beta.cover_url, None, "http");
+        assert_eq!(beta.hero_url, None, "credentials");
+        assert_eq!(beta.landscape_url, None, "an address literal");
+        assert_eq!(beta.logo_url, None, "would close a CSS url()");
+        assert_eq!(beta.page_url, None, "javascript:");
+        let price = beta.price.as_ref().unwrap();
+        assert_eq!(
+            (
+                price.currency.as_str(),
+                price.amount_minor,
+                price.regular_amount_minor
+            ),
+            ("EUR", 500, None),
+            "a regular price below the offer is no discount"
+        );
+
+        let gamma = &deals.games[2];
+        assert_eq!((&gamma.price, gamma.page_url.as_deref()), (&None, None));
+
+        assert_eq!(free.games[0].price.as_ref().unwrap().amount_minor, 0);
+    }
+
+    fn tab(
+        key: Option<&str>,
+        label: &str,
+        games: Vec<wit_store_tabs::StoreTabGame>,
+    ) -> wit_store_tabs::StoreTab {
+        wit_store_tabs::StoreTab {
+            key: key.map(str::to_owned),
+            label: label.into(),
+            accent: None,
+            games,
+        }
+    }
+
+    fn game(id: &str, title: &str) -> wit_store_tabs::StoreTabGame {
+        wit_store_tabs::StoreTabGame {
+            id: id.into(),
+            title: title.into(),
+            short_description: None,
+            cover_url: None,
+            hero_url: None,
+            landscape_url: None,
+            logo_url: None,
+            genres: Vec::new(),
+            price: None,
+            page_url: None,
+        }
+    }
+
+    fn refusal(tabs: Vec<wit_store_tabs::StoreTab>) -> &'static str {
+        match validate_store_tabs(STORE_PLUGIN_ID, tabs) {
+            Err(PluginRuntimeError::InvalidResult(reason)) => reason,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// A shape the host cannot index refuses the whole answer, not one row of it.
+    #[test]
+    fn a_store_tab_answer_with_the_wrong_shape_is_refused_whole() {
+        let one = || vec![game("one", "One")];
+        assert_eq!(
+            refusal(
+                (0..=MAX_STORE_TABS)
+                    .map(|index| tab(Some(&format!("t{index}")), "Tab", one()))
+                    .collect()
+            ),
+            "too many store tabs"
+        );
+        assert_eq!(
+            refusal(vec![
+                tab(Some("same"), "A", one()),
+                tab(Some("same"), "B", one())
+            ]),
+            "duplicate store tab"
+        );
+        assert_eq!(
+            refusal(vec![tab(None, "A", one()), tab(None, "B", one())]),
+            "duplicate store tab"
+        );
+        for key in [
+            "Deals",
+            "-deals",
+            "deals/1",
+            "",
+            &"k".repeat(MAX_STORE_TAB_KEY_BYTES + 1),
+        ] {
+            assert_eq!(
+                refusal(vec![tab(Some(key), "A", one())]),
+                "store tab key",
+                "{key:?}"
+            );
+        }
+        assert_eq!(
+            refusal(vec![tab(None, " \u{202E}\u{7} ", one())]),
+            "store tab label"
+        );
+        assert_eq!(
+            refusal(vec![tab(
+                None,
+                "A",
+                (0..=MAX_STORE_TAB_GAMES)
+                    .map(|index| game(&format!("g{index}"), "G"))
+                    .collect()
+            )]),
+            "too many store tab games"
+        );
+        // `:` would let an id reach into another namespace; a path is a path.
+        for id in [
+            "com.other.plugin:game",
+            "../etc",
+            "a b",
+            "",
+            &"g".repeat(MAX_STORE_GAME_ID_BYTES + 1),
+        ] {
+            assert_eq!(
+                refusal(vec![tab(None, "A", vec![game(id, "G")])]),
+                "store game id",
+                "{id:?}"
+            );
+        }
+        assert_eq!(
+            refusal(vec![tab(
+                None,
+                "A",
+                vec![game("one", "One"), game("one", "Again")]
+            )]),
+            "duplicate store game"
+        );
+        assert_eq!(
+            refusal(vec![tab(None, "A", vec![game("one", "\u{0}\u{2066}")])]),
+            "store game title"
+        );
+
+        // The same id in two tabs is the same game, not a collision.
+        let shared = validate_store_tabs(
+            STORE_PLUGIN_ID,
+            vec![tab(Some("a"), "A", one()), tab(Some("b"), "B", one())],
+        )
+        .unwrap();
+        assert_eq!(shared.len(), 2);
+    }
+
+    #[test]
+    fn store_text_is_one_clean_line_cut_where_the_page_cuts() {
+        assert_eq!(
+            store_text("  Deals\n\tof\u{7}the week ", 32).as_deref(),
+            Some("Deals of the week")
+        );
+        assert_eq!(
+            store_text("\u{202E}reversed\u{202C}", 32).as_deref(),
+            Some("reversed")
+        );
+        assert_eq!(store_text("\u{200F}\u{061C}", 32), None);
+        let long = "x".repeat(40);
+        let cut = store_text(&long, 32).unwrap();
+        assert_eq!(cut.encode_utf16().count(), 32);
+        assert!(cut.ends_with('…'));
+        // Counted as the page counts: an emoji is two units of `String.length`.
+        let emoji = "🎮".repeat(20);
+        let cut = store_text(&emoji, 32).unwrap();
+        assert!(cut.encode_utf16().count() <= 32, "{cut}");
+        assert_eq!(store_text(&"y".repeat(32), 32).unwrap(), "y".repeat(32));
+    }
+
+    #[test]
+    fn a_store_accent_is_hex_rgb_and_nothing_else() {
+        assert_eq!(store_accent("#E4572E").as_deref(), Some("#e4572e"));
+        assert_eq!(store_accent(" #00ff7f ").as_deref(), Some("#00ff7f"));
+        for refused in [
+            "orange",
+            "#fff",
+            "#e4572e80",
+            "e4572e",
+            "#e4572g",
+            "rgb(1,2,3)",
+            "#e4572e;x",
+            "",
+        ] {
+            assert_eq!(store_accent(refused), None, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_store_address_is_plain_https_on_a_public_name() {
+        assert_eq!(
+            store_page_url("https://store.example.com/g?id=1#top").as_deref(),
+            Some("https://store.example.com/g?id=1#top")
+        );
+        assert_eq!(
+            store_page_url("HTTPS://Store.Example.com/a").as_deref(),
+            Some("https://store.example.com/a")
+        );
+        for refused in [
+            "http://store.example.com/a",
+            "javascript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "file:///etc/passwd",
+            "https://user:pw@store.example.com/a",
+            "https://store.example.com:8443/a",
+            "https://127.0.0.1/a",
+            "https://[::1]/a",
+            "https://localhost/a",
+            "https://printer.local/a",
+            "https://intranet/a",
+            "https://store.example.com/a b",
+            "https://store.example.com/\u{7}",
+            "//store.example.com/a",
+            "/media/cover.jpg",
+        ] {
+            assert_eq!(store_page_url(refused), None, "{refused:?}");
+        }
+        let too_long = format!(
+            "https://store.example.com/{}",
+            "a".repeat(MAX_STORE_URL_BYTES)
+        );
+        assert_eq!(store_page_url(&too_long), None);
+
+        // A picture can land in CSS, so what closes a `url(…)` is refused there
+        // and nowhere else.
+        let parenthesised = "https://store.example.com/game_(2024).jpg";
+        assert_eq!(store_picture_url(parenthesised), None);
+        assert!(store_page_url(parenthesised).is_some());
+        assert!(store_picture_url("https://store.example.com/it's.jpg").is_none());
+    }
+
+    #[test]
+    fn a_store_price_needs_a_currency_code() {
+        let price = |currency: &str, amount, regular| wit_store_tabs::StorePrice {
+            currency: currency.into(),
+            amount_minor: amount,
+            regular_amount_minor: regular,
+        };
+        let kept = store_price(price("usd", 999, Some(1999))).unwrap();
+        assert_eq!(
+            (kept.currency.as_str(), kept.regular_amount_minor),
+            ("USD", Some(1999))
+        );
+        assert_eq!(
+            store_price(price("EUR", 999, Some(999)))
+                .unwrap()
+                .regular_amount_minor,
+            None
+        );
+        for refused in ["€", "EURO", "E1R", "", "ÉUR"] {
+            assert_eq!(store_price(price(refused, 1, None)), None, "{refused:?}");
+        }
     }
 }

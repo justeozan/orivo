@@ -178,6 +178,68 @@ describe("application shell", () => {
     expect(currentNavLabels(root)).toEqual(["Library"]);
   });
 
+  // On a console a tab is open the moment it is reached: walking the bar with
+  // the keys or the pad changes page with no second press. The pointer still
+  // has to click.
+  it("opens a page as soon as the keys reach its link, and not for a pointer", async () => {
+    const store = root.querySelector<HTMLButtonElement>("[data-nav-page='store']")!;
+    const settings = root.querySelector<HTMLButtonElement>("[data-nav-page='settings']")!;
+
+    document.body.dataset.inputMode = "pointer";
+    store.focus();
+    await settle();
+    expect(window.location.hash).toBe("");
+
+    document.body.dataset.inputMode = "keyboard";
+    settings.focus();
+    await settle();
+    expect(window.location.hash).toBe("#/settings/general");
+    expect(currentNavLabels(root)).toEqual(["Settings"]);
+
+    document.body.dataset.inputMode = "gamepad";
+    store.focus();
+    await settle();
+    expect(window.location.hash.startsWith("#/store")).toBe(true);
+    expect(currentNavLabels(root)).toEqual(["Store"]);
+  });
+
+  // Coming up into the bar lands on the page on screen, never on a link the
+  // keys last stood on — standing on a link opens it.
+  it("marks the current page's link as where the keys land", async () => {
+    const selected = (): string[] =>
+      Array.from(root.querySelectorAll<HTMLElement>(".primary-nav [data-nav-selected]")).map(
+        (link) => link.dataset.navPage ?? "",
+      );
+    expect(selected()).toEqual(["library"]);
+    await goto("#/store");
+    expect(selected()).toEqual(["store"]);
+  });
+
+  // One control for the mark and the player: the picture sits in the ring,
+  // and the menu the mark opens starts with the profile.
+  it("puts the player's picture in the mark and the profile at the top of its menu", async () => {
+    expect(root.querySelector("#profile-button")).toBeNull();
+    const mark = root.querySelector<HTMLButtonElement>("#library-menu-button")!;
+    expect(mark.querySelector("#profile-avatar")).not.toBeNull();
+
+    mark.click();
+    const menu = root.querySelector<HTMLElement>("#library-source-menu")!;
+    const name = menu.querySelector<HTMLInputElement>("#profile-name")!;
+    expect(menu.hidden).toBe(false);
+    expect(name).not.toBeNull();
+    expect(menu.firstElementChild?.contains(name)).toBe(true);
+
+    name.value = "Sam";
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(mark.getAttribute("aria-label")).toBe("Sam · profile and library sources");
+
+    // Escape from the name closes the menu and gives focus back to the mark.
+    name.focus();
+    name.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(menu.hidden).toBe(true);
+    expect(document.activeElement).toBe(mark);
+  });
+
   it("hands the game route to the detail page and deactivates the origin", async () => {
     await goto("#/games/steam%3A42?from=library");
     expect(detail.routes.at(-1)).toEqual({
@@ -631,17 +693,18 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     expect(setup.hidden).toBe(false);
-    // The setup opens beside the list, under the plugin's own detail, and the
-    // plugin's card says it is the one open.
+    // The setup is the whole detail beside the list (the plugin's own entries
+    // wait in its ⋯), and the plugin's card says it is the one open.
     const page = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
     expect(page.hasAttribute("data-detail-open")).toBe(true);
-    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(true);
     expect(
       root.querySelector("[data-plugin-card='com.orivo.gamestream']")?.classList.contains("is-selected"),
     ).toBe(true);
-    // Nothing found on this machine, so the first step is the active one.
-    expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
-    expect(setup.textContent).toContain("Install Moonlight");
+    // Nothing found on this machine, so that is the one question asked.
+    expect(setup.querySelector<HTMLElement>(".gs-flow")?.dataset.gsScreen).toBe("missing");
+    expect(setup.textContent).toContain("Moonlight is missing");
+    expect(setup.querySelector("[data-gs-action='install-moonlight']")?.textContent).toBe("Install");
     expect(setup.textContent).not.toMatch(/emulator|runner profile|granted folder|stream cards|placeholder/i);
 
     setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
@@ -671,9 +734,10 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     const card = root.querySelector<HTMLElement>("[data-plugin-card='dev.example.saves']")!;
-    // Its shelf, who made it, and the mark that says there is an update.
+    // Its shelf, how it stands, and the mark that says there is an update.
     expect(card.querySelector(".plugin-pill")?.textContent).toBe("Saves");
-    expect(card.textContent).toContain("Community");
+    expect(card.querySelector(".plugin-card__status")?.textContent).toBe("Ready");
+    expect(card.textContent).toContain("v1.1.0 available");
     expect(card.querySelector(".plugin-card__flag--info")).not.toBeNull();
 
     card.querySelector<HTMLButtonElement>(".plugin-card__open")!.click();
@@ -682,12 +746,46 @@ describe("application shell against the desktop backend", () => {
     const detail = root.querySelector<HTMLElement>("#plugin-managed-panel")!;
     expect(detail.hidden).toBe(false);
     expect(detail.querySelector("[data-plugin-update='dev.example.saves']")).not.toBeNull();
-    expect(detail.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
     expect(detail.textContent).toContain("v1.0.0 → v1.1.0");
+    // Removal and automatic updates wait in the ⋯ menu, with the version line.
+    const menu = detail.querySelector<HTMLElement>(".plugin-menu")!;
+    expect(menu.hidden).toBe(true);
+    expect(menu.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
+    expect(menu.querySelector(".plugin-menu__meta")?.textContent).toBe("v1.0.0 · Community · Manual updates");
+    expect(root.querySelector("#plugins-automatic-updates")).toBeNull();
+    detail.querySelector<HTMLButtonElement>(".plugin-dots")!.click();
+    expect(menu.hidden).toBe(false);
+    menu.querySelector<HTMLButtonElement>("[data-plugin-auto-updates='on']")!.click();
+    await settleAll();
+    expect(tauri.invoke.mock.calls.some(([command, args]) =>
+      command === "set_plugin_update_policy" && (args as { automatic?: boolean })?.automatic === true,
+    )).toBe(true);
     // The list and the catalogue stay where they are.
     expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
     expect(root.querySelector("[data-plugin-card='dev.example.saves']")?.classList.contains("is-selected")).toBe(true);
-    expect(root.querySelector<HTMLElement>("#plugins-detail-empty")!.hidden).toBe(true);
+  });
+
+  it("opens the first plugin beside the list when none was picked, and says how each one stands", async () => {
+    mount();
+    await goto("#/settings/plugins");
+    await settleAll();
+
+    // No "pick a plugin": Wine, first in the list, is open.
+    expect(root.querySelector("#plugins-detail-empty")).toBeNull();
+    expect(root.querySelector<HTMLElement>("#wine-settings-panel")!.hidden).toBe(false);
+    const wine = root.querySelector<HTMLElement>("[data-plugin-card='wine']")!;
+    expect(wine.classList.contains("is-selected")).toBe(true);
+    // Opened by default, not picked: a narrow window still shows the list first.
+    expect(root.querySelector("#plugins-catalog-panel")!.hasAttribute("data-detail-open")).toBe(false);
+    // Its state, not "Built in", under the name.
+    const status = wine.querySelector<HTMLElement>(".plugin-card__status")!;
+    expect(status.textContent).toBe("Ready");
+    expect(status.dataset.tone).toBe("ok");
+
+    // Leaving the section opens nothing behind it.
+    await goto("#/settings/general");
+    await settleAll();
+    expect(root.querySelector<HTMLElement>("#wine-settings-panel")!.hidden).toBe(true);
   });
 
   it("shows how a finished game streaming setup stands instead of the wizard", async () => {
@@ -702,12 +800,17 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
-    expect(
-      [...setup.querySelectorAll(".gs-step")].map((step) => step.classList.contains("is-done")),
-    ).toEqual([true, true, true, true]);
-    expect(setup.textContent).toContain("Moonlight found (Moonlight)");
-    expect(setup.textContent).toContain("12 games added to your Library");
-    expect(setup.textContent).toContain("Open Library");
+    expect(setup.querySelector<HTMLElement>(".gs-flow")?.dataset.gsScreen).toBe("host");
+    expect(setup.querySelector(".gs-host__name")?.textContent).toBe("my-pc.local");
+    expect(setup.textContent).toContain("Online");
+    expect(setup.textContent).toContain("12 games");
+    expect(setup.querySelector("[data-gs-action='open-library']")?.textContent).toBe("See my games");
+    // The plugin's removal is in the setup's own ⋯ menu.
+    expect(setup.querySelector(".plugin-menu [data-plugin-uninstall='com.orivo.gamestream']")).not.toBeNull();
+    // Its card says it is ready, and with which app and PC.
+    const card = root.querySelector<HTMLElement>("[data-plugin-card='com.orivo.gamestream']")!;
+    expect(card.querySelector(".plugin-card__status")?.textContent).toBe("Ready · 12 games");
+    expect(card.textContent).toContain("Moonlight · my-pc.local");
     // The PC was asked about on arrival rather than trusted from last time.
     expect(
       tauri.invoke.mock.calls.filter(([command]) => command === "probe_gamestream_host"),
@@ -1077,21 +1180,130 @@ describe("application shell against the desktop backend", () => {
     const dot = gogRow?.querySelector(".source-account-row__dot");
     expect(dot?.classList.contains("source-account-row__dot--available")).toBe(true);
     expect(dot?.getAttribute("aria-label")).toBe("Store data: available");
-    // …and is not repeated in the store-data-only list below it.
-    const remaining = Array.from(
-      root.querySelectorAll<HTMLElement>("#provider-status-list .provider-status-row strong"),
+    // …and is not repeated among the store-data-only stores below it.
+    const soon = Array.from(
+      root.querySelectorAll<HTMLElement>("#provider-soon-row [data-soon-provider]"),
+    ).map((entry) => entry.dataset.soonProvider);
+    expect(soon).toEqual(["humble"]);
+    expect(root.querySelector("#source-accounts-panel #provider-soon-row")).not.toBeNull();
+  });
+
+  it("gathers the stores that are not ready yet into one line, and keeps live ones as cards", async () => {
+    backend.providers = [
+      { provider: "apple", label: "Apple App Store", health: "available", message: "", refreshedAt: null },
+      { provider: "humble", label: "Humble Store", health: "not-configured", message: "", refreshedAt: null },
+      { provider: "playstation", label: "PlayStation Store", health: "unavailable", message: "", refreshedAt: null },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    const cards = Array.from(
+      root.querySelectorAll<HTMLElement>(".source-grid .provider-status-row strong"),
     ).map((entry) => entry.textContent);
-    expect(remaining).toEqual(["Humble"]);
-    // One card now, not two.
-    expect(root.querySelectorAll("#provider-status-list")).toHaveLength(1);
-    expect(root.querySelector("#source-accounts-panel #provider-status-list")).not.toBeNull();
+    expect(cards).toEqual(["Apple App Store"]);
+    const soonRow = root.querySelector<HTMLElement>("#provider-soon-row");
+    expect(soonRow?.hidden).toBe(false);
+    expect(
+      Array.from(soonRow!.querySelectorAll<HTMLElement>("[data-soon-provider]")).map(
+        (entry) => entry.textContent,
+      ),
+    ).toEqual(["Humble Store", "PlayStation Store"]);
+    // One line, no card each, and no "Refresh all" above the grid.
+    expect(soonRow?.querySelector(".provider-status-row")).toBeNull();
+    expect(root.querySelector("[data-source-action='resync']")).toBeNull();
+  });
+
+  it("states the games each connected store brought in, and syncs that store alone", async () => {
+    backend.library = [
+      { ...alpha, id: "gog:1", source: "gog" },
+      { ...alpha, id: "gog:2", source: "gog" },
+      { ...alpha, id: "epic:1", source: "epic" },
+    ];
+    backend.sources = [
+      { provider: "gog", label: "GOG", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    backend.sourceSync = { provider: "gog", label: "GOG", totalGames: 2, importedGames: 0, updatedGames: 0, skippedGames: 0 };
+    mount();
+    await settle();
+    await goto("#/settings/libraries");
+
+    const gog = root.querySelector<HTMLElement>("[data-source-row='gog']");
+    const state = gog?.querySelector<HTMLElement>("[data-source-action='disconnect']");
+    expect(state?.querySelector(".source-account-row__account-name")?.textContent).toBe("2 games");
+    expect(state?.querySelector(".provider-health--available")).not.toBeNull();
+    // The account is still named, a pointer away.
+    expect(state?.title).toBe("player-one");
+    // A store not signed in to offers to connect instead of a count.
+    expect(
+      root.querySelector("[data-source-row='epic'] [data-source-action='connect']")?.textContent,
+    ).toBe("Connect");
+
+    const before = tauri.invoke.mock.calls.length;
+    gog?.querySelector<HTMLButtonElement>("[data-source-action='sync']")!.click();
+    await settle();
+    expect(
+      tauri.invoke.mock.calls
+        .slice(before)
+        .filter(([command]) => command === "sync_source_library"),
+    ).toEqual([["sync_source_library", { provider: "gog" }]]);
+  });
+
+  describe("the games folders card", () => {
+    let folders: Record<string, unknown>[] = [];
+    beforeEach(() => {
+      folders = [];
+      const base = tauri.invoke.getMockImplementation()!;
+      tauri.invoke.mockImplementation(async (command, args) => {
+        if (command === "list_game_folders") return folders;
+        if (command === "choose_game_folder") return null;
+        return base(command, args);
+      });
+      backend.library = [
+        { ...alpha, id: "local:1", source: "local" },
+        { ...alpha, id: "local:2", source: "local" },
+      ];
+    });
+    const card = (): HTMLElement | null => root.querySelector("#game-folders-card [data-folder-card]");
+
+    it("adds a folder when there is none", async () => {
+      mount();
+      await settle();
+      await goto("#/settings/libraries");
+
+      card()!.querySelector<HTMLButtonElement>("[data-game-folder-action='add']")!.click();
+      await settle();
+      expect(tauri.invoke.mock.calls.some(([command]) => command === "choose_game_folder")).toBe(true);
+    });
+
+    it("states what the folders brought in and opens their list under the grid", async () => {
+      folders = [{ id: "f1", label: "Games", available: true }];
+      mount();
+      await settle();
+      await goto("#/settings/libraries");
+
+      const manage = card()!.querySelector<HTMLButtonElement>("[data-game-folder-action='manage']")!;
+      expect(manage.textContent).toBe("2 games");
+      const inline = root.querySelector<HTMLElement>("#game-folders-inline")!;
+      expect(inline.hidden).toBe(true);
+
+      manage.click();
+      await settle();
+      expect(inline.hidden).toBe(false);
+      // The list is the same one as before: a row per folder, with its actions.
+      expect(inline.querySelector("[data-game-folder-action='rescan'][data-folder-id='f1']")).not.toBeNull();
+      expect(
+        card()!.querySelector("[data-game-folder-action='manage']")?.getAttribute("aria-expanded"),
+      ).toBe("true");
+    });
   });
 
   it("names the Steam account by its persona, and falls back to its id", async () => {
+    // The card states the games Steam brought in; the account it is signed in
+    // as stays one pointer away, on the same button.
     const accountName = (): string | null =>
       root.querySelector<HTMLElement>(
-        "[data-source-row='steam'] .source-account-row__account-name",
-      )?.textContent ?? null;
+        "[data-source-row='steam'] [data-steam-row-action='disconnect']",
+      )?.title ?? null;
 
     backend.steamStatus = {
       connected: true,
@@ -1935,16 +2147,17 @@ describe("application shell notifications", () => {
     tauri.invoke.mockResolvedValue(undefined);
   });
 
-  it("stays quiet with nothing to say", async () => {
+  const bellControl = (): HTMLElement => root.querySelector<HTMLElement>(".notifications-control")!;
+
+  // With nothing in it there is no bell at all: an empty bell is one more
+  // thing on the scene saying nothing.
+  it("shows no bell with nothing to say", async () => {
     mount();
     await settle();
 
+    expect(bellControl().hidden).toBe(true);
     expect(dot().hidden).toBe(true);
-    expect(bell().getAttribute("aria-label")).toBe("Notifications");
-
-    bell().click();
-    expect(panel().hidden).toBe(false);
-    expect(panel().textContent).toContain("Nothing to report");
+    expect(panel().hidden).toBe(true);
   });
 
   it("carries a delivered notice, clears its dot when read, and forgets it when dismissed", async () => {
@@ -1955,6 +2168,7 @@ describe("application shell notifications", () => {
     mount();
     await settle();
 
+    expect(bellControl().hidden).toBe(false);
     expect(dot().hidden).toBe(false);
     expect(bell().getAttribute("aria-label")).toBe("Notifications, 1 unread");
 
@@ -1967,8 +2181,16 @@ describe("application shell notifications", () => {
     );
     expect(panel().textContent).toContain("Sharper artwork");
 
-    panel().querySelector<HTMLButtonElement>("[data-notification-action='dismiss']")!.click();
+    const dismiss = panel().querySelector<HTMLButtonElement>("[data-notification-action='dismiss']")!;
+    dismiss.focus();
+    dismiss.click();
     expect(panel().querySelector(".notification-card")).toBeNull();
+    // The last notice takes the panel and the bell with it, and focus lands
+    // on the mark rather than on a control that just left the page.
+    expect(bellControl().hidden).toBe(true);
+    expect(panel().hidden).toBe(true);
+    expect(bell().getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(root.querySelector("#library-menu-button"));
 
     // Dismissal is final, and it survives a restart.
     document.body.replaceChildren();
@@ -1976,6 +2198,7 @@ describe("application shell notifications", () => {
     await settle();
     expect(root.querySelector(".notification-card")).toBeNull();
     expect(dot().hidden).toBe(true);
+    expect(bellControl().hidden).toBe(true);
   });
 
   it("takes the artwork notice straight to the keys it is about", async () => {
@@ -2259,13 +2482,18 @@ describe("starting a game from the shell", () => {
     backend.features = undefined;
     (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
     tauri.invoke.mockReset();
-    tauri.invoke.mockImplementation(async (command) => {
+    tauri.invoke.mockImplementation(async (command, args) => {
       switch (command) {
         case "get_library":
           return [alpha];
         case "get_preferences":
           return backend.preferences;
         case "update_preferences":
+          // The host answers with the preferences as saved.
+          backend.preferences = {
+            ...backend.preferences,
+            ...(args as { update: Record<string, unknown> }).update,
+          };
           return backend.preferences;
         case "get_platform_features":
           return backend.features;
@@ -2396,15 +2624,64 @@ describe("starting a game from the shell", () => {
     await goto("#/settings/general");
 
     const row = root.querySelector<HTMLElement>("#preference-game-start-row")!;
-    const select = root.querySelector<HTMLSelectElement>("#preference-game-start")!;
+    const option = (value: string): HTMLButtonElement =>
+      row.querySelector<HTMLButtonElement>(`[data-segment-value='${value}']`)!;
     expect(row.hidden).toBe(false);
-    expect(select.value).toBe("step-aside");
+    expect(option("step-aside").getAttribute("aria-pressed")).toBe("true");
 
-    select.value = "stay";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
+    // The lit choice is no change, and saves nothing.
+    option("step-aside").click();
+    await settle();
+    expect(calls("update_preferences")).toEqual([]);
+
+    option("stay").click();
     await settle();
 
     expect(calls("update_preferences")).toEqual([{ update: { onGameStart: "stay" } }]);
+    expect(option("stay").getAttribute("aria-pressed")).toBe("true");
+    expect(option("step-aside").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps the motion last applied until the host answers, not the default", async () => {
+    window.localStorage.setItem("orivo.motion", "reduced");
+    const answer = tauri.invoke.getMockImplementation()!;
+    let hostAnswers: () => void = () => {};
+    const held = new Promise<void>((resolve) => (hostAnswers = resolve));
+    tauri.invoke.mockImplementation(async (command, args) => {
+      if (command === "get_preferences") await held;
+      return answer(command, args);
+    });
+    try {
+      mount();
+      await settle();
+      expect(document.documentElement.dataset.motion).toBe("reduced");
+
+      // The host's answer still wins once it lands: nothing stored is "full".
+      hostAnswers();
+      await settle();
+      expect(document.documentElement.dataset.motion).toBe("full");
+    } finally {
+      window.localStorage.removeItem("orivo.motion");
+    }
+  });
+
+  it("keeps the animations choice in General, and opens the old Appearance address there", async () => {
+    mount();
+    await settle();
+    await goto("#/settings/appearance");
+
+    expect(window.location.hash).toBe("#/settings/general");
+    const general = root.querySelector<HTMLElement>("[data-settings-panel='general']")!;
+    expect(general.hidden).toBe(false);
+    expect(root.querySelector("[data-settings-panel='appearance']")).toBeNull();
+    expect(root.querySelector("[data-settings-section='appearance']")).toBeNull();
+
+    const motion = general.querySelector<HTMLElement>("[data-segmented='motion']")!;
+    motion.querySelector<HTMLButtonElement>("[data-segment-value='reduced']")!.click();
+    await settle();
+
+    expect(calls("update_preferences")).toEqual([{ update: { motion: "reduced" } }]);
+    expect(document.documentElement.dataset.motion).toBe("reduced");
   });
 
   it("does not ask where there is nothing to choose", async () => {

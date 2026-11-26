@@ -1,24 +1,41 @@
 /* ---------------------------------------------------------------------------
-   Settings › Plugins › Game streaming: one guided setup.
+   Settings › Plugins › Game streaming: one question at a time.
 
-   Playing a game from another machine takes four things, in this order, and
-   the setup walks them one at a time instead of spreading them over three
-   cards and a "Launches" menu:
+   Playing a game from another machine takes four things, in this order:
 
      1. Moonlight on this computer      (found on its own, or installed)
-     2. the gaming PC                   (one field, checked before it is kept)
+     2. the gaming PC                   (picked, or typed and checked)
      3. pairing                         (Orivo shows the PIN and watches for it)
      4. the games                       (listed and added to the Library)
 
-   Every step is decided by five facts, and `setupStage` is the one place that
-   decides — pure, so the order is stated once and tested without a screen.
-   The controller below owns the flow (probing, polling, importing) and the
-   view renders whatever it says; neither knows a path, a credential or a
-   process (`runner_commands.rs`, `gamestream.rs`).
+   The detail panel asks only the question in front of the person, large, with
+   one main button; once everything works it shows the PC and "See my games",
+   and the rest (another PC, resync, the app, removal) waits in a ⋯ menu.
+   Which question that is gets decided in `gamestream-setup-model.ts` — pure,
+   so the order is stated once and tested without a screen. The controller
+   below owns the flow (probing, polling, importing) and the view renders
+   whatever it says; neither knows a path, a credential or a process
+   (`runner_commands.rs`, `gamestream.rs`).
    --------------------------------------------------------------------------- */
 
+import {
+  appName,
+  flowScreen,
+  type FlowScreen,
+  gameCount,
+  hostPills,
+  setupStage,
+  setupStepStatuses,
+  tidyHostInput,
+  type SetupFacts,
+  type SetupStage,
+  type SetupStepId,
+  type StepStatus,
+} from "./gamestream-setup-model";
 import { gameStreamErrorMessage, type GameStreamClient } from "./gamestream-settings";
 import { t } from "./i18n";
+import { icon, type IconName } from "./icons";
+import { pluginMoreMenu, type MoreMenuEntry } from "./plugin-cards";
 import {
   GAMESTREAM_PLUGIN_ID,
   runnerErrorMessage,
@@ -30,87 +47,18 @@ import {
 /** The plugin the setup is for. Its row in Settings › Plugins opens this view. */
 export { GAMESTREAM_PLUGIN_ID };
 
-/* ---------------------------------------------------------------------------
-   Which step is the current one
-   --------------------------------------------------------------------------- */
-
-export type SetupStepId = "client" | "host" | "pair" | "games";
-export type SetupStage = SetupStepId | "done";
-export type StepStatus = "done" | "active" | "todo";
-
-export const SETUP_STEPS: readonly SetupStepId[] = ["client", "host", "pair", "games"];
-
-/** Everything the order of the steps depends on. */
-export interface SetupFacts {
-  /** A streaming client Orivo can start: detected, or chosen by hand. */
-  clientFound: boolean;
-  /** An address for the gaming PC is saved. */
-  hostSaved: boolean;
-  /** The PC answered when it was last asked. */
-  hostReachable: boolean;
-  /** The PC accepts this client. */
-  paired: boolean;
-  /** The Library holds games from the PC. */
-  gamesImported: boolean;
-}
-
-/**
- * The step the person is on.
- *
- * A step is only done when every step before it is, so a fact that is true out
- * of order — a saved address while Moonlight has been uninstalled — sends them
- * back to the earlier step instead of leaving a gap. Being paired proves the PC
- * answered, so it counts for the "reachable" half of step 2 too: nobody is
- * asked to reconnect to a PC that is already working.
- */
-export function setupStage(facts: SetupFacts): SetupStage {
-  if (!facts.clientFound) return "client";
-  if (!facts.hostSaved || !(facts.hostReachable || facts.paired)) return "host";
-  if (!facts.paired) return "pair";
-  if (!facts.gamesImported) return "games";
-  return "done";
-}
-
-/** Each step's state: done before the current one, active on it, todo after. */
-export function setupStepStatuses(facts: SetupFacts): Record<SetupStepId, StepStatus> {
-  const stage = setupStage(facts);
-  const current = stage === "done" ? SETUP_STEPS.length : SETUP_STEPS.indexOf(stage);
-  const statuses = {} as Record<SetupStepId, StepStatus>;
-  SETUP_STEPS.forEach((step, index) => {
-    statuses[step] = index < current ? "done" : index === current ? "active" : "todo";
-  });
-  return statuses;
-}
-
-/* ---------------------------------------------------------------------------
-   What was typed
-   --------------------------------------------------------------------------- */
-
-/**
- * Reduce a pasted address to the machine: no scheme, no path, no credentials,
- * no port. People copy Sunshine's web address out of their browser's bar
- * (`https://my-pc.local:47990/pin`); asking them to take it apart would be
- * asking them to do this function's work. The host applies the same rules
- * (`gamestream.rs`), so what is shown here is what will be saved.
- */
-export function tidyHostInput(input: string): string {
-  let text = input.trim();
-  text = text.replace(/^https?:\/\//i, "");
-  const cut = text.search(/[/?#]/);
-  if (cut >= 0) text = text.slice(0, cut);
-  const at = text.lastIndexOf("@");
-  if (at >= 0) text = text.slice(at + 1);
-  // A port after a bracketed IPv6 literal, or after a name with exactly one
-  // colon. A bare IPv6 address has several and is left for the host to refuse.
-  const bracketed = /^(\[[^\]]*\]):\d+$/.exec(text);
-  if (bracketed) return bracketed[1] ?? text;
-  if ((text.match(/:/g) ?? []).length === 1) text = text.slice(0, text.indexOf(":"));
-  return text.trim();
-}
-
-function gameCount(count: number): string {
-  return count === 1 ? t("runners.setup.gameOne") : t("runners.setup.gameMany", { count });
-}
+export {
+  SETUP_STEPS,
+  flowScreen,
+  setupStage,
+  setupStepStatuses,
+  tidyHostInput,
+  type FlowScreen,
+  type SetupFacts,
+  type SetupStage,
+  type SetupStepId,
+  type StepStatus,
+} from "./gamestream-setup-model";
 
 /** "this Mac", "this PC": what the person is sitting at. */
 export function thisComputerName(userAgent: string): string {
@@ -134,6 +82,13 @@ export const SETUP_COPY = {
   noGames: t("runners.setup.noGames"),
   stillNotFound: t("runners.setup.stillNotFound"),
 } as const;
+
+/**
+ * The program on the PC the PIN is typed into. Orivo cannot ask which one runs
+ * there (Apollo is a fork that keeps the same PIN page), and the page it opens
+ * for the PIN is Sunshine's (`open_gamestream_link`), so that is the name.
+ */
+const HOST_APP = "Sunshine";
 
 /** The picker's refusal when the user simply closed it. Not worth a message. */
 const PICKER_CANCELLED = "No app was chosen.";
@@ -164,6 +119,8 @@ export interface SetupSnapshot {
   facts: SetupFacts;
   stage: SetupStage;
   statuses: Record<SetupStepId, StepStatus>;
+  /** The one question the panel asks now (`flowScreen`). */
+  screen: FlowScreen;
   /** A step the person reopened to change it, or null. */
   editing: SetupStepId | null;
   client: {
@@ -182,6 +139,8 @@ export interface SetupSnapshot {
     error: string | null;
     notice: string | null;
     canSaveAnyway: boolean;
+    /** "Other" was picked over the PC Orivo knows: the address field is open. */
+    adding: boolean;
   };
   pairing: {
     phase: PairingPhase;
@@ -230,6 +189,12 @@ export interface GameStreamSetup {
   installMoonlight(): Promise<void>;
   setHostInput(value: string): void;
   connect(): Promise<void>;
+  /** Connect to a PC by name: the one Orivo knows, picked from its tile. */
+  connectTo(host: string): Promise<void>;
+  /** Open the address field for a PC Orivo does not know yet. */
+  addHost(): void;
+  /** Close it again, back to the PC Orivo knows. */
+  cancelAddHost(): void;
   saveAnyway(): Promise<void>;
   startPairing(): Promise<void>;
   openPinPage(): Promise<void>;
@@ -279,6 +244,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
   let hostError: string | null = null;
   let hostNotice: string | null = null;
   let canSaveAnyway = false;
+  let addingHost = false;
   let hostReachable = false;
   let paired = false;
   let editing: SetupStepId | null = null;
@@ -306,7 +272,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
   const clientLabel = (): string => {
     const current = profile();
     if (current?.applicationAvailable && !clientDirty) {
-      return current.applicationLabel.replace(/\.app$/i, "") || "Moonlight";
+      return appName(current.applicationLabel);
     }
     return selectedClient()?.label ?? "Moonlight";
   };
@@ -352,6 +318,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
   const snapshot = (): SetupSnapshot => {
     const current = facts();
     const entry = runner();
+    const stage = setupStage(current);
     return {
       opened: isOpen,
       loading,
@@ -362,8 +329,16 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
       profile: profile(),
       computerName,
       facts: current,
-      stage: setupStage(current),
+      stage,
       statuses: setupStepStatuses(current),
+      screen: flowScreen({
+        loading,
+        stage,
+        editing,
+        pairingPhase,
+        savedHost,
+        addingHost,
+      }),
       editing,
       client: {
         clients,
@@ -380,6 +355,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
         error: hostError,
         notice: hostNotice,
         canSaveAnyway,
+        adding: addingHost,
       },
       pairing: {
         phase: pairingPhase,
@@ -423,7 +399,8 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
     try {
       // The folder is Orivo's own, made and allowed here: nobody is asked to
       // pick one. Done before every import so a folder that went missing is
-      // simply made again.
+      // simply made again, and a profile whose permissions went with a
+      // reinstalled plugin gets them back.
       await deps.runners.prepareLibrary(current.id);
       await deps.runners.startImport(current.id);
     } catch (error) {
@@ -599,6 +576,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
         // Kept only now that the PC has answered for it.
         if (await saveHost(hostInput)) {
           editing = null;
+          addingHost = false;
           if (answer === "paired") {
             pairingPhase = "paired";
             await advanceToGames();
@@ -635,6 +613,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
       hostReachable = false;
       paired = false;
       canSaveAnyway = false;
+      addingHost = false;
       hostNotice = SETUP_COPY.savedAnyway;
     }
     notify();
@@ -693,6 +672,7 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
       hostError = null;
       hostNotice = null;
       canSaveAnyway = false;
+      addingHost = false;
       editing = null;
       gamesRequested = false;
       gamesError = null;
@@ -788,6 +768,30 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
     },
 
     connect,
+
+    async connectTo(host) {
+      hostInput = host;
+      addingHost = false;
+      await connect();
+    },
+
+    addHost() {
+      addingHost = true;
+      hostInput = "";
+      hostError = null;
+      hostNotice = null;
+      canSaveAnyway = false;
+      notify();
+    },
+
+    cancelAddHost() {
+      addingHost = false;
+      hostInput = savedHost;
+      hostError = null;
+      canSaveAnyway = false;
+      notify();
+    },
+
     saveAnyway,
     startPairing,
 
@@ -808,11 +812,20 @@ export function createGameStreamSetup(deps: SetupDeps): GameStreamSetup {
 
     edit(step) {
       editing = step;
+      addingHost = false;
+      hostError = null;
+      hostNotice = null;
+      canSaveAnyway = false;
+      if (step === "host") hostInput = savedHost;
       notify();
     },
 
     stopEditing() {
       editing = null;
+      addingHost = false;
+      hostError = null;
+      canSaveAnyway = false;
+      hostInput = savedHost;
       notify();
     },
   };
@@ -833,15 +846,20 @@ function element<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/** A word-sized button; `primary` wears the Settings account-button look. */
-function action(label: string, name: string, kind: "primary" | "quiet" = "quiet"): HTMLButtonElement {
+/** The one main button of a screen (lavender pill), or a quiet word beside it. */
+function action(
+  label: string,
+  name: string,
+  kind: "primary" | "quiet" = "quiet",
+  glyph: IconName | null = null,
+): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
   button.dataset.gsAction = name;
   if (kind === "primary") {
-    button.className = "source-account-row__account gs-primary";
-    const word = element("span", "source-account-row__account-name", label);
-    button.append(word);
+    button.className = "gs-cta";
+    if (glyph) button.insertAdjacentHTML("beforeend", icon(glyph));
+    button.append(element("span", "", label));
   } else {
     button.className = "settings-button settings-button--quiet";
     button.textContent = label;
@@ -849,106 +867,181 @@ function action(label: string, name: string, kind: "primary" | "quiet" = "quiet"
   return button;
 }
 
+/** A big choice: a PC or an app, as a card the size of a thumb. */
+function tile(
+  name: string,
+  glyph: IconName,
+  actionName: string,
+  options: { selected?: boolean; ghost?: boolean; pill?: HTMLElement | null; disabled?: boolean } = {},
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "gs-tile";
+  button.dataset.gsAction = actionName;
+  button.classList.toggle("is-selected", Boolean(options.selected));
+  button.classList.toggle("gs-tile--ghost", Boolean(options.ghost));
+  if (options.selected) button.setAttribute("aria-pressed", "true");
+  button.disabled = Boolean(options.disabled);
+  button.insertAdjacentHTML("beforeend", icon(glyph));
+  button.append(element("strong", "gs-tile__name", name));
+  if (options.pill) button.append(options.pill);
+  return button;
+}
+
+function pill(text: string, tone: string): HTMLElement {
+  const node = element("span", "plugin-pill gs-pill", text);
+  node.dataset.tone = tone;
+  return node;
+}
+
+function waiting(text: string): HTMLElement {
+  const line = element("p", "gs-wait");
+  line.setAttribute("role", "status");
+  const dot = element("span", "gs-wait__dot");
+  dot.setAttribute("aria-hidden", "true");
+  line.append(dot, element("span", "", text));
+  return line;
+}
+
+function alertLine(text: string): HTMLElement {
+  const line = element("p", "gs-flow__error", text);
+  line.setAttribute("role", "alert");
+  return line;
+}
+
+export interface GameStreamViewOptions {
+  /**
+   * The plugin's own entries for the ⋯ menu — update, automatic updates,
+   * removal, the version line — which only the plugin list knows about.
+   */
+  pluginMenu?: () => MoreMenuEntry[];
+}
+
 /**
- * Render the setup as a stepper and keep it in step with the controller.
+ * Render the setup as one question at a time and keep it in step with the
+ * controller.
  *
- * Re-rendering replaces the subtree, so the one thing that must survive it is
- * the address box: its focus and cursor are put back, otherwise a repaint in
- * the middle of typing would drop the cursor.
+ * Re-rendering replaces the subtree, so what must survive it is put back: the
+ * address box (focus and cursor) and an open ⋯ menu.
  */
 export function mountGameStreamSetup(
   root: HTMLElement,
   setup: GameStreamSetup,
+  options: GameStreamViewOptions = {},
 ): { render: () => void } {
-  const STEP_TITLES: Record<SetupStepId, (computer: string) => string> = {
-    client: (computer) => t("runners.setup.stepClient", { computer }),
-    host: () => t("runners.setup.stepHost"),
-    pair: () => t("runners.setup.stepPair"),
-    games: () => t("runners.setup.stepGames"),
-  };
+  let menuOpen = false;
 
-  function statusLine(step: SetupStepId, view: SetupSnapshot): string {
-    const status = view.statuses[step];
-    switch (step) {
-      case "client":
-        return status === "done"
-          ? t("runners.setup.clientFoundStatus", { label: view.client.label })
-          : t("runners.setup.clientMissingStatus");
-      case "host":
-        if (view.host.checking) return t("runners.setup.checkingPc");
-        return status === "done" ? view.host.saved : t("runners.setup.whereIsIt");
-      case "pair":
-        return status === "done" ? t("runners.setup.paired") : t("runners.setup.pairHint");
-      case "games":
-        if (view.games.phase === "ready") return gameCount(view.games.count);
-        return status === "done" ? gameCount(view.games.count) : t("runners.setup.addedToLibraryHint");
-    }
+  function question(text: string): HTMLElement {
+    return element("h3", "gs-flow__q", text);
   }
 
-  function clientBody(view: SetupSnapshot): HTMLElement {
-    const body = element("div", "gs-step__content");
-    const found = view.client.clients.length > 0 || view.facts.clientFound;
-    if (found) {
-      body.append(element("p", "gs-step__text", t("runners.setup.clientFound", { label: view.client.label })));
-      if (view.client.clients.length > 1) {
-        const select = element("select", "settings-select");
-        select.id = "gs-client-select";
-        select.setAttribute("aria-label", t("runners.setup.streamingApp"));
-        for (const client of view.client.clients) {
-          const option = element("option", "", client.label);
-          option.value = client.id;
-          select.append(option);
-        }
-        select.value = view.client.selectedId ?? "";
-        select.addEventListener("change", () => setup.selectClient(select.value));
-        body.append(select);
-      }
-    } else {
-      body.append(
-        element(
-          "p",
-          "gs-step__text",
-          t("runners.setup.clientIntro", { computer: view.computerName }),
-        ),
-      );
-      if (view.client.stillMissing) {
-        body.append(element("p", "gs-step__note", SETUP_COPY.stillNotFound));
-      }
-    }
-    const actions = element("div", "gs-step__actions");
-    if (!found) {
-      const install = action(t("runners.setup.installMoonlight"), "install-moonlight", "primary");
-      install.addEventListener("click", () => void setup.installMoonlight());
-      actions.append(install);
-      const again = action(t("runners.setup.checkAgain"), "check-again");
-      again.disabled = view.client.busy;
-      again.addEventListener("click", () => void setup.checkAgain());
-      actions.append(again);
-    }
+  function row(...children: HTMLElement[]): HTMLElement {
+    const node = element("div", "gs-flow__actions");
+    node.append(...children);
+    return node;
+  }
+
+  /** The streaming app is not on this computer: one Install. */
+  function missingScreen(view: SetupSnapshot): HTMLElement[] {
+    const mark = element("span", "plugin-icon gs-flow__mark");
+    mark.dataset.category = "streaming";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = icon("cast");
+    const install = action(t("runners.flow.install"), "install-moonlight", "primary", "download");
+    install.addEventListener("click", () => void setup.installMoonlight());
+    const again = action(t("runners.setup.checkAgain"), "check-again");
+    again.disabled = view.client.busy;
+    again.addEventListener("click", () => void setup.checkAgain());
     const choose = action(t("runners.setup.chooseApp"), "choose-client");
     choose.disabled = view.client.busy;
     choose.addEventListener("click", () => void setup.chooseClientByHand());
-    actions.append(choose);
-    if (found && view.editing === "client") {
-      const done = action(t("runners.setup.done"), "done-editing");
-      done.addEventListener("click", () => setup.stopEditing());
-      actions.append(done);
-    }
-    body.append(actions);
-    return body;
+    const nodes: HTMLElement[] = [
+      mark,
+      question(t("runners.flow.missingApp", { app: view.client.label })),
+      install,
+      row(again, choose),
+    ];
+    if (view.client.stillMissing) nodes.push(element("p", "gs-flow__note", SETUP_COPY.stillNotFound));
+    return nodes;
   }
 
-  function hostBody(view: SetupSnapshot): HTMLElement {
-    const body = element("div", "gs-step__content");
-    const field = element("div", "credentials-form__field");
-    const label = element("label", "", t("runners.setup.hostLabel"));
-    label.htmlFor = "gs-host";
-    const input = element("input", "credentials-form__input");
+  /** Which streaming app: the ones Orivo found, or another picked by hand. */
+  function appScreen(view: SetupSnapshot): HTMLElement[] {
+    const tiles = element("div", "gs-tiles");
+    for (const client of view.client.clients) {
+      const choice = tile(client.label, "cast", "select-client", {
+        selected: client.id === view.client.selectedId,
+      });
+      choice.dataset.gsClient = client.id;
+      choice.addEventListener("click", () => setup.selectClient(client.id));
+      tiles.append(choice);
+    }
+    const other = tile(t("runners.flow.other"), "plus", "choose-client", {
+      ghost: true,
+      disabled: view.client.busy,
+    });
+    other.addEventListener("click", () => void setup.chooseClientByHand());
+    tiles.append(other);
+    const done = action(t("runners.setup.done"), "done-editing", "primary");
+    done.addEventListener("click", () => setup.stopEditing());
+    return [question(t("runners.flow.whichApp")), tiles, done];
+  }
+
+  /** Which PC: the one Orivo knows, or another. */
+  function pickScreen(view: SetupSnapshot): HTMLElement[] {
+    const tiles = element("div", "gs-tiles");
+    const [state] = hostPills({
+      checking: view.host.checking || view.host.busy,
+      reachable: view.facts.hostReachable,
+      paired: view.facts.paired,
+      gameCount: 0,
+    });
+    const known = tile(view.host.saved, "monitor", "connect-saved", {
+      selected: true,
+      pill: state ? pill(state.text, state.tone) : null,
+      disabled: view.host.busy,
+    });
+    known.addEventListener("click", () => void setup.connectTo(view.host.saved));
+    const other = tile(t("runners.flow.other"), "plus", "add-host", { ghost: true, disabled: view.host.busy });
+    other.addEventListener("click", () => setup.addHost());
+    tiles.append(known, other);
+    const nodes: HTMLElement[] = [question(t("runners.flow.whichPc")), tiles];
+    nodes.push(...hostMessages(view));
+    if (view.editing === "host" && view.stage !== "host") {
+      const cancel = action(t("runners.setup.cancel"), "done-editing");
+      cancel.addEventListener("click", () => setup.stopEditing());
+      nodes.push(row(cancel));
+    }
+    return nodes;
+  }
+
+  function hostMessages(view: SetupSnapshot): HTMLElement[] {
+    const nodes: HTMLElement[] = [];
+    if (view.host.error) nodes.push(alertLine(view.host.error));
+    if (view.host.canSaveAnyway) {
+      const anyway = action(t("runners.setup.saveAnyway"), "save-anyway");
+      anyway.disabled = view.host.busy;
+      anyway.addEventListener("click", () => void setup.saveAnyway());
+      nodes.push(row(anyway));
+    }
+    if (view.host.notice) {
+      const notice = element("p", "gs-flow__note", view.host.notice);
+      notice.setAttribute("role", "status");
+      nodes.push(notice);
+    }
+    return nodes;
+  }
+
+  /** Another PC: its name or address, checked before it is kept. */
+  function addressScreen(view: SetupSnapshot): HTMLElement[] {
+    const input = element("input", "gs-address");
     input.id = "gs-host";
     input.type = "text";
     input.autocomplete = "off";
     input.spellcheck = false;
     input.placeholder = t("runners.setup.hostPlaceholder");
+    input.title = t("runners.setup.hostHint");
+    input.setAttribute("aria-label", t("runners.setup.hostLabel"));
     input.value = view.host.input;
     input.disabled = view.host.busy;
     input.addEventListener("input", () => setup.setHostInput(input.value));
@@ -967,207 +1060,184 @@ export function mountGameStreamSetup(
         void setup.connect();
       }
     });
-    const hint = element(
-      "small",
-      "",
-      t("runners.setup.hostHint"),
+    const connect = action(
+      view.host.busy ? t("runners.setup.connecting") : t("runners.setup.connect"),
+      "connect",
+      "primary",
     );
-    field.append(label, input, hint);
-    body.append(field);
-
-    const actions = element("div", "gs-step__actions");
-    const connect = action(view.host.busy ? t("runners.setup.connecting") : t("runners.setup.connect"), "connect", "primary");
     connect.disabled = view.host.busy;
     connect.addEventListener("click", () => void setup.connect());
-    actions.append(connect);
-    if (view.host.canSaveAnyway) {
-      const anyway = action(t("runners.setup.saveAnyway"), "save-anyway");
-      anyway.disabled = view.host.busy;
-      anyway.addEventListener("click", () => void setup.saveAnyway());
-      actions.append(anyway);
+    const nodes: HTMLElement[] = [question(t("runners.flow.whichPc")), input, connect];
+    nodes.push(...hostMessages(view));
+    // Back to the PC Orivo knows, or out of a change asked for from the menu.
+    if (view.host.saved) {
+      const cancel = action(t("runners.setup.cancel"), "cancel-add-host");
+      cancel.addEventListener("click", () =>
+        view.host.adding ? setup.cancelAddHost() : setup.stopEditing(),
+      );
+      nodes.push(row(cancel));
     }
-    if (view.editing === "host" && view.facts.hostSaved) {
-      const cancel = action(t("runners.setup.cancel"), "done-editing");
-      cancel.addEventListener("click", () => setup.stopEditing());
-      actions.append(cancel);
-    }
-    body.append(actions);
-    if (view.host.error) {
-      const error = element("p", "gs-step__error", view.host.error);
-      error.setAttribute("role", "alert");
-      body.append(error);
-    }
-    if (view.host.notice) {
-      const notice = element("p", "gs-step__note", view.host.notice);
-      notice.setAttribute("role", "status");
-      body.append(notice);
-    }
-    return body;
+    return nodes;
   }
 
-  function pairBody(view: SetupSnapshot): HTMLElement {
-    const body = element("div", "gs-step__content");
+  /** The PC answered and does not know this computer yet. */
+  function pairScreen(view: SetupSnapshot): HTMLElement[] {
     const { pairing } = view;
-    if (pairing.phase === "waiting") {
-      body.append(element("div", "gs-pin", pairing.pin));
-      body.append(
-        element(
-          "p",
-          "gs-step__text",
-          t("runners.setup.pinInstructions", { pin: pairing.pin }),
-        ),
-      );
-      const actions = element("div", "gs-step__actions");
-      const open = action(t("runners.setup.openPinPage"), "open-pin-page", "primary");
-      open.addEventListener("click", () => void setup.openPinPage());
-      actions.append(open);
-      body.append(actions, element("p", "gs-step__note", SETUP_COPY.certificate));
-      const waiting = element("p", "gs-step__status", t("runners.setup.waitingPc"));
-      waiting.setAttribute("role", "status");
-      body.append(waiting);
-      if (pairing.lostContact) {
-        body.append(element("p", "gs-step__error", SETUP_COPY.pairingLostContact));
-      }
-      return body;
-    }
+    const nodes: HTMLElement[] = [
+      element("p", "gs-flow__host", pairing.host || view.host.saved),
+      question(t("runners.flow.pairQuestion")),
+    ];
     if (pairing.phase === "starting") {
-      const status = element("p", "gs-step__status", t("runners.setup.gettingPin"));
-      status.setAttribute("role", "status");
-      body.append(status);
-      return body;
+      nodes.push(waiting(t("runners.setup.gettingPin")));
+      return nodes;
     }
-    body.append(
-      element(
-        "p",
-        "gs-step__text",
-        pairing.phase === "idle"
-          ? t("runners.setup.pairIntro", { computer: view.computerName })
-          : (pairing.message ?? SETUP_COPY.pairingFailed),
-      ),
-    );
-    const actions = element("div", "gs-step__actions");
+    if (pairing.phase !== "idle" && pairing.phase !== "paired") {
+      nodes.push(alertLine(pairing.message ?? SETUP_COPY.pairingFailed));
+    }
     const start = action(
-      pairing.phase === "idle" ? t("runners.setup.pairWithPc") : t("runners.setup.tryAgain"),
+      pairing.phase === "idle" || pairing.phase === "paired"
+        ? t("runners.flow.pair")
+        : t("runners.setup.tryAgain"),
       "start-pairing",
       "primary",
     );
     start.addEventListener("click", () => void setup.startPairing());
-    actions.append(start);
+    nodes.push(start);
     if (pairing.phase === "clientMissing") {
       const choose = action(t("runners.setup.chooseApp"), "choose-client");
       choose.addEventListener("click", () => void setup.chooseClientByHand());
-      actions.append(choose);
+      nodes.push(row(choose));
     }
-    body.append(actions);
-    return body;
+    return nodes;
   }
 
-  function gamesBody(view: SetupSnapshot): HTMLElement {
-    const body = element("div", "gs-step__content");
+  /** The PIN, large enough to read from the other machine's keyboard. */
+  function pinScreen(view: SetupSnapshot): HTMLElement[] {
+    const { pairing } = view;
+    const pin = element("div", "gs-pin", pairing.pin);
+    pin.setAttribute("aria-label", t("runners.flow.pinAria", { pin: pairing.pin }));
+    const open = action(t("runners.flow.openPinPage"), "open-pin-page");
+    // The browser warns about Sunshine's own certificate: said where the click
+    // that leads to it is, not as a paragraph under it.
+    open.title = SETUP_COPY.certificate;
+    open.addEventListener("click", () => void setup.openPinPage());
+    const nodes: HTMLElement[] = [
+      element("p", "gs-flow__host", pairing.host || view.host.saved),
+      pin,
+      element("p", "gs-flow__hint", t("runners.flow.typePin", { app: HOST_APP })),
+      waiting(t("runners.flow.waiting")),
+    ];
+    if (pairing.lostContact) nodes.push(alertLine(SETUP_COPY.pairingLostContact));
+    nodes.push(row(open));
+    return nodes;
+  }
+
+  /** The ⋯ menu beside the main button once the PC is known. */
+  function hostMenu(view: SetupSnapshot): HTMLElement {
+    const busy = view.games.phase === "preparing" || view.games.phase === "importing";
+    const entries: MoreMenuEntry[] = [
+      {
+        kind: "item",
+        label: t("runners.flow.changePc"),
+        icon: "monitor",
+        data: { gsAction: "edit-host" },
+        run: () => setup.edit("host"),
+      },
+      {
+        kind: "item",
+        label: t("runners.flow.resync"),
+        icon: "sync",
+        disabled: busy,
+        data: { gsAction: "refresh-games" },
+        run: () => void setup.getGames(),
+      },
+      {
+        kind: "item",
+        label: t("runners.flow.streamingApp"),
+        icon: "cast",
+        data: { gsAction: "edit-client" },
+        run: () => setup.edit("client"),
+      },
+      ...(options.pluginMenu?.() ?? []),
+    ];
+    return pluginMoreMenu({
+      label: t("runners.flow.more"),
+      entries,
+      open: menuOpen,
+      onToggle: (open) => {
+        menuOpen = open;
+      },
+    });
+  }
+
+  /** The PC, once it is paired: its state, then "See my games". */
+  function hostScreen(view: SetupSnapshot): HTMLElement[] {
     const { games } = view;
-    const actions = element("div", "gs-step__actions");
-    const refresh = (label: string): HTMLButtonElement => {
-      const button = action(label, "refresh-games");
-      button.addEventListener("click", () => void setup.getGames());
-      return button;
-    };
+    const card = element("div", "gs-host");
+    const mark = element("span", "plugin-icon gs-host__mark");
+    mark.dataset.category = "streaming";
+    mark.setAttribute("aria-hidden", "true");
+    mark.innerHTML = icon("monitor");
+    const copy = element("div", "gs-host__copy");
+    const pills = element("div", "gs-host__pills");
+    for (const entry of hostPills({
+      checking: view.host.checking,
+      reachable: view.facts.hostReachable,
+      paired: view.facts.paired,
+      gameCount: games.phase === "importing" ? 0 : games.count,
+    })) {
+      pills.append(pill(entry.text, entry.tone));
+    }
+    copy.append(element("strong", "gs-host__name", view.host.saved), pills);
+    card.append(mark, copy);
+
+    const nodes: HTMLElement[] = [card];
+    const main = element("div", "gs-flow__actions gs-flow__actions--main");
     switch (games.phase) {
       case "preparing":
       case "importing": {
-        const text =
-          games.phase === "importing" && games.found > 0
-            ? t("runners.setup.foundGames", { games: gameCount(games.found) })
-            : t("runners.setup.lookingForGames");
-        const status = element("p", "gs-step__status", text);
-        status.setAttribute("role", "status");
-        body.append(status);
+        nodes.push(
+          waiting(
+            games.phase === "importing" && games.found > 0
+              ? t("runners.setup.foundGames", { games: gameCount(games.found) })
+              : t("runners.setup.lookingForGames"),
+          ),
+        );
         break;
       }
       case "ready": {
-        body.append(element("p", "gs-step__text", t("runners.setup.addedToLibrary", { games: gameCount(games.count) })));
-        if (games.findingArtwork) {
-          body.append(element("p", "gs-step__note", t("runners.setup.findingArtwork")));
-        }
-        const library = action(t("runners.setup.openLibrary"), "open-library", "primary");
+        const library = action(t("runners.flow.seeGames"), "open-library", "primary");
         library.addEventListener("click", () => setup.openLibrary());
-        actions.append(library, refresh(t("runners.setup.refreshGames")));
+        main.append(library);
         break;
       }
-      case "empty":
-        body.append(element("p", "gs-step__text", SETUP_COPY.noGames));
-        actions.append(refresh(t("runners.setup.refreshGames")));
+      case "empty": {
+        nodes.push(element("p", "gs-flow__note", SETUP_COPY.noGames));
+        const again = action(t("runners.setup.refreshGames"), "refresh-games", "primary");
+        again.addEventListener("click", () => void setup.getGames());
+        main.append(again);
         break;
+      }
       case "failed": {
-        const error = element("p", "gs-step__error", games.message ?? "");
-        error.setAttribute("role", "alert");
-        body.append(error);
+        nodes.push(alertLine(games.message ?? ""));
         const retry = action(t("runners.setup.tryAgain"), "refresh-games", "primary");
         retry.addEventListener("click", () => void setup.getGames());
         const check = action(t("runners.setup.checkMyPc"), "recheck");
         check.addEventListener("click", () => void setup.recheck());
-        actions.append(retry, check);
+        main.append(retry, check);
         break;
       }
       case "idle": {
-        body.append(
-          element(
-            "p",
-            "gs-step__text",
-            t("runners.setup.gamesIntro"),
-          ),
-        );
         const get = action(t("runners.setup.getGames"), "refresh-games", "primary");
         get.addEventListener("click", () => void setup.getGames());
-        actions.append(get);
+        main.append(get);
         break;
       }
     }
-    body.append(actions);
-    return body;
-  }
-
-  function renderStep(step: SetupStepId, index: number, view: SetupSnapshot): HTMLElement {
-    const status = view.statuses[step];
-    // The active step is open; a finished one folds to a line the person can
-    // reopen; the games step stays open once everything is done, because that
-    // is where "Open Library" lives.
-    const expanded =
-      status === "active" ||
-      view.editing === step ||
-      (step === "games" && view.stage === "done");
-    const item = element("li", `gs-step is-${status}`);
-    item.dataset.gsStep = step;
-    if (status === "active") item.setAttribute("aria-current", "step");
-
-    const head = element("div", "gs-step__head");
-    const mark = element("span", "gs-step__mark", status === "done" ? "✓" : String(index + 1));
-    mark.setAttribute("aria-hidden", "true");
-    const copy = element("div", "gs-step__copy");
-    copy.append(
-      element("strong", "", STEP_TITLES[step](view.computerName)),
-      element("small", "", statusLine(step, view)),
-    );
-    head.append(mark, copy);
-    if (status === "done" && view.editing !== step && step !== "games" && step !== "pair") {
-      const change = action(t("runners.setup.change"), `edit-${step}`);
-      change.addEventListener("click", () => setup.edit(step));
-      head.append(change);
-    }
-    item.append(head);
-
-    if (expanded) {
-      const body =
-        step === "client"
-          ? clientBody(view)
-          : step === "host"
-            ? hostBody(view)
-            : step === "pair"
-              ? pairBody(view)
-              : gamesBody(view);
-      body.classList.add("gs-step__body");
-      item.append(body);
-    }
-    return item;
+    main.append(hostMenu(view));
+    nodes.push(main);
+    if (games.findingArtwork) nodes.push(waiting(t("runners.setup.findingArtwork")));
+    return nodes;
   }
 
   function render(): void {
@@ -1184,22 +1254,37 @@ export function mountGameStreamSetup(
         ? { start: active.selectionStart, end: active.selectionEnd }
         : null;
 
-    if (view.loading) {
-      const loading = element("p", "settings-hint", t("runners.setup.loading"));
-      loading.setAttribute("role", "status");
-      root.replaceChildren(loading);
-      return;
+    const flow = element("div", "gs-flow");
+    flow.dataset.gsScreen = view.screen;
+    if (view.pluginIssue) flow.append(alertLine(view.pluginIssue));
+    if (view.screen !== "host") menuOpen = false;
+    switch (view.screen) {
+      case "loading":
+        flow.append(waiting(t("runners.setup.loading")));
+        break;
+      case "missing":
+        flow.append(...missingScreen(view));
+        break;
+      case "app":
+        flow.append(...appScreen(view));
+        break;
+      case "pick":
+        flow.append(...pickScreen(view));
+        break;
+      case "address":
+        flow.append(...addressScreen(view));
+        break;
+      case "pair":
+        flow.append(...pairScreen(view));
+        break;
+      case "pin":
+        flow.append(...pinScreen(view));
+        break;
+      case "host":
+        flow.append(...hostScreen(view));
+        break;
     }
-    const children: HTMLElement[] = [];
-    if (view.pluginIssue) {
-      const issue = element("p", "gs-step__error", view.pluginIssue);
-      issue.setAttribute("role", "alert");
-      children.push(issue);
-    }
-    const steps = element("ol", "gs-steps");
-    SETUP_STEPS.forEach((step, index) => steps.append(renderStep(step, index, view)));
-    children.push(steps);
-    root.replaceChildren(...children);
+    root.replaceChildren(flow);
 
     if (focusId) {
       const restored = root.querySelector<HTMLInputElement>(`#${focusId}`);

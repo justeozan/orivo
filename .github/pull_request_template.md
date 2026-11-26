@@ -2,6 +2,12 @@
 
 <!-- Changement en une ou deux phrases. -->
 
+## Nouveautés (si un joueur le voit)
+
+- [ ] Titre + ligne courts dans `src/locales/highlights.ts` (EN + FR, « tu »), item dans le bucket `"next"` de `src/release-highlights.ts`
+
+Voir `docs/RELEASING.md` › Highlights. Un correctif ou du CI n'en ajoute pas.
+
 ## Plugin du registre (si applicable)
 
 - [ ] `id`, `name`, `version`, `summary`

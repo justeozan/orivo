@@ -26,10 +26,18 @@ import {
 /** How much room a page may spend under the topbar before content starts. */
 const GUTTER_BUDGET = 24;
 
-/** `--topbar-height` on a normal window. The bar's real bottom edge is 65px. */
+/** `--topbar-height` on a normal window. */
 const TOPBAR_HEIGHT = 76;
-/** …and below 860px, where the search drops to a row of its own. */
-const NARROW_TOPBAR_HEIGHT = 124;
+/** …and below 860px: 18px from the top, the 52px capsule, 12 of air. */
+const NARROW_TOPBAR_HEIGHT = 82;
+
+/**
+ * Where the capsule's bottom edge falls on a desktop window: 16px from the
+ * top, then its round controls (2.75vw, from 40 to 48px), 5px of padding on
+ * each side and a 1px rim.
+ */
+const capsuleBottom = (width: number): number =>
+  16 + Math.min(48, Math.max(40, width * 0.0275)) + 12;
 /** Pixel slack for every geometry assertion, so the suite is not brittle. */
 const TOL = 3;
 
@@ -143,9 +151,9 @@ test.describe("shell / page padding integration", () => {
     expect(probe.contentTop).toBeGreaterThanOrEqual(topbar.y + topbar.height);
   });
 
-  test("below 860px the topbar grows and the Store hero still clears it", async ({ page }) => {
-    // The search control leaves the bar and takes a row of its own, so the
-    // hosts owe the bar more room. `--topbar-height` is the single source of
+  test("below 860px the topbar keeps to one row and the Store hero still clears it", async ({ page }) => {
+    // The capsule holds the search on its own row, so a narrow window only
+    // moves the bar down a little. `--topbar-height` is the single source of
     // both; the Store no longer clears it with host padding (see the
     // full-bleed-hero test above), so the invariant that survives is that the
     // hero copy's own top position tracks the bar's real bottom edge.
@@ -277,11 +285,11 @@ test.describe("Store card grid at the acceptance sizes", () => {
     const box = await topbarBox(page);
 
     expect(declared).toBeCloseTo(TOPBAR_HEIGHT, 0);
-    // The bar is inset inside its 76px band; its real bottom edge is 65px.
+    // The capsule floats inside its 76px band, and grows with the window.
     expect(box.y + box.height, "the bar must stay inside the band it declares").toBeLessThanOrEqual(
       declared,
     );
-    expect(box.y + box.height).toBeCloseTo(65, 0);
+    expect(box.y + box.height).toBeCloseTo(capsuleBottom(page.viewportSize()!.width), 0);
   });
 });
 

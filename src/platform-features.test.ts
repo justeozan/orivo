@@ -21,6 +21,7 @@ describe("platform features", () => {
         storeChoices: true,
         stepsAside: false,
         selfUpdates: false,
+        showsDataFolder: false,
       }),
     ).toEqual({
       downloadablePlugins: false,
@@ -28,6 +29,7 @@ describe("platform features", () => {
       storeChoices: true,
       stepsAside: false,
       selfUpdates: false,
+      showsDataFolder: false,
     });
   });
 
@@ -40,6 +42,11 @@ describe("platform features", () => {
   it("updates itself unless the host says a store does it", () => {
     expect(readPlatformFeatures({ storeChoices: false }).selfUpdates).toBe(true);
     expect(readPlatformFeatures({ selfUpdates: false }).selfUpdates).toBe(false);
+  });
+
+  it("shows the data folder unless the host says it has no file manager", () => {
+    expect(readPlatformFeatures({ storeChoices: true }).showsDataFolder).toBe(true);
+    expect(readPlatformFeatures({ showsDataFolder: false }).showsDataFolder).toBe(false);
   });
 
   it("keeps the desktop answer for any flag the host did not send as a boolean", () => {

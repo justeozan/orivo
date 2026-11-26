@@ -1,0 +1,24 @@
+# Its own workspace, like `runner-fixture`: this crate is built for
+# wasm32-unknown-unknown by `build.sh` when the fixture changes, never by
+# `cargo test`, so a fresh clone needs no wasm target and no component tool.
+[workspace]
+
+[package]
+name = "orivo-store-tab-fixture"
+version = "1.0.0"
+edition = "2024"
+publish = false
+license-file = "../../../LICENSE"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = { version = "0.62.0", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

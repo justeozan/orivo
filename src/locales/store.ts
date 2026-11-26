@@ -32,6 +32,7 @@ export const en = {
   "store.detail.score": "Critics {score}",
   "store.detail.buy": "Buy on {provider}",
   "store.detail.open": "Game page",
+  "store.detail.visit": "See the offer",
   "store.detail.close": "Close",
   "store.detail.slide": "Image {index} of {count}",
   "store.error.unreachable":
@@ -127,6 +128,7 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "store.detail.score": "Presse {score}",
   "store.detail.buy": "Acheter sur {provider}",
   "store.detail.open": "Fiche du jeu",
+  "store.detail.visit": "Voir l'offre",
   "store.detail.close": "Fermer",
   "store.detail.slide": "Image {index} sur {count}",
   "store.error.unreachable":

@@ -195,12 +195,14 @@ describe("About panel updater wiring", () => {
     updater.check.mockResolvedValue(download.handle);
 
     await press();
-    expect(statusLabel()).toBe("Version 0.4.0 is available");
+    expect(statusLabel()).toBe("0.4.0 available");
     expect(statusDetail()).toBe("Orivo installs it and restarts once to finish.");
-    expect(
-      [...root.querySelectorAll(".update-status__highlights li")].map((item) => item.textContent),
-    ).toEqual(["Faster store browsing"]);
-    expect(button().textContent).toBe("Download and install");
+    // Highlights ship inside a release, so a pending one has none to show yet:
+    // "What's new" stays about the copy running (0.3.0, which has none).
+    expect(root.querySelector("#about-news-title")?.textContent).not.toContain("0.4.0");
+    expect(root.querySelector<HTMLElement>("#about-news")?.hidden).toBe(true);
+    expect(button().textContent).toBe("Update");
+    expect(button().classList.contains("is-primary")).toBe(true);
 
     await press();
     expect(button().disabled).toBe(true);
