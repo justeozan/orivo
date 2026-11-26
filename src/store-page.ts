@@ -1,14 +1,9 @@
 import "./store-page.css";
-import { invoke } from "./host";
-import type {
-  AppRoute,
-  GameSummary,
-  PageRestoreState,
-  StoreHighlight,
-  StorePlatform,
-} from "./contracts";
+import { invoke } from "@tauri-apps/api/core";
+import type { AppRoute, GameSummary, PageRestoreState, StoreOffer, StoreTabId } from "./contracts";
 import { t } from "./i18n";
 import { icon, type IconName } from "./icons";
+import { prefersReducedMotion } from "./motion";
 import type { AppPage, PageActivation } from "./page-lifecycle";
 import {
   createDefaultQuikyClient,
@@ -22,32 +17,36 @@ import {
   type QuikyController,
   type QuikyTitle,
 } from "./quiky-install";
+import { exclusiveLabel, STORE_TAB_LOOKS, storeTabLook } from "./store-brands";
 import {
+  adjacentStore,
   createInitialStoreState,
-  EDITORIAL_STORE_HOME,
-  fitStats,
+  editorialStoreHome,
   formatPrice,
   genreLabel,
+  hasExclusives,
   isOfferStale,
-  modeLabel,
+  matchesQuery,
   offerVerifiedOn,
-  matchesStoreFilters,
   ownershipKey,
-  providersForPlatforms,
   reduceStorePageState,
   selectBestOffer,
-  selectHeroCopy,
   selectStoreGames,
-  sessionLabel,
-  STORE_CATEGORIES,
-  STORE_PLATFORMS,
-  storeCategoryLabel,
-  taglineLabel,
+  selectStoreSections,
+  criticScoreOf,
   type StoreBrowsePage,
   type StoreBrowseRequest,
   type StoreHomeView,
   type StorePageAction,
 } from "./store-model";
+import { openPluginStoreGamePage, syncPluginStoreTabs } from "./plugin-store-tabs";
+import {
+  listPluginStoreTabs,
+  onStoreTabsChange,
+  pluginStoreTab,
+  type PluginStoreGame,
+  type PluginStoreTab,
+} from "./store-tabs";
 
 export interface StorePageClient {
   getHome(signal: AbortSignal): Promise<StoreHomeView>;
@@ -61,8 +60,8 @@ export interface StorePageClient {
 
 export interface StorePageOptions {
   /**
-   * Route changes stay owned by the application shell. A card passes a game
-   * route with `from: "store"`; filter changes pass a Store route.
+   * Route changes stay owned by the application shell. The detail's "game
+   * page" passes a game route with `from: "store"`; a tab passes a Store route.
    */
   navigate(route: AppRoute): void;
   client?: StorePageClient;
@@ -100,6 +99,7 @@ function cloneGame(game: GameSummary): GameSummary {
     supportedPlatforms: [...game.supportedPlatforms],
     recommendationReasons: [...game.recommendationReasons],
     offers: game.offers.map((offer) => ({ ...offer })),
+    gallery: game.gallery ? [...game.gallery] : undefined,
     curation: game.curation
       ? {
           ...game.curation,
@@ -114,11 +114,8 @@ function cloneGame(game: GameSummary): GameSummary {
 }
 
 function cloneEditorialHome(): StoreHomeView {
-  return {
-    ...EDITORIAL_STORE_HOME,
-    games: EDITORIAL_STORE_HOME.games.map(cloneGame),
-    providerStatuses: EDITORIAL_STORE_HOME.providerStatuses.map((status) => ({ ...status })),
-  };
+  const home = editorialStoreHome();
+  return { ...home, games: home.games.map(cloneGame) };
 }
 
 export function createDefaultStorePageClient(): StorePageClient {
@@ -130,12 +127,11 @@ export function createDefaultStorePageClient(): StorePageClient {
     async browse(request, signal) {
       if (!isTauriRuntime()) {
         // Outside the desktop shell the bundled catalog is the catalog, so the
-        // browse endpoint pages through it rather than pretending to fail. It
-        // has to apply the filters itself: a browse page is read as already
-        // filtered, and here there is no host to have done it.
-        const catalog = cloneEditorialHome().games.filter((game) =>
-          matchesStoreFilters(game, request),
-        );
+        // search pages through it rather than pretending to fail. It has to
+        // match the query itself: a browse page is read as already searched,
+        // and here there is no host to have done it.
+        const home = cloneEditorialHome();
+        const catalog = home.games.filter((game) => matchesQuery(game, request.query));
         const offset = request.cursor?.startsWith("store_")
           ? Number.parseInt(request.cursor.slice("store_".length), 10)
           : 0;
@@ -145,18 +141,12 @@ export function createDefaultStorePageClient(): StorePageClient {
         return {
           games,
           nextCursor: nextOffset < catalog.length ? `store_${nextOffset}` : null,
-          providerStatuses: EDITORIAL_STORE_HOME.providerStatuses.map((status) => ({ ...status })),
+          providerStatuses: home.providerStatuses,
         };
       }
       return invokeWhileActive<StoreBrowsePage>(
         "browse_store_games",
-        {
-          request: {
-            ...request,
-            // The host still filters on shops; the page filters on machines.
-            providers: providersForPlatforms(request.platforms),
-          },
-        },
+        { request: { ...request, providers: [] } },
         signal,
       );
     },
@@ -198,7 +188,7 @@ interface FocusSnapshot {
 }
 
 /**
- * The three nodes an install owns on a card. They are held rather than queried
+ * The nodes an install owns on a card. They are held rather than queried
  * because a download ticks several times a second and a shelf that rebuilds a
  * card per tick would drop the pointer, the focus and the artwork's fade.
  */
@@ -210,6 +200,14 @@ interface InstallNodes {
   glyphName: IconName;
   meter: HTMLElement;
   fill: HTMLElement;
+}
+
+/** The detail that is open, and where it came from so closing can go back there. */
+interface OpenDetail {
+  game: GameSummary;
+  slides: string[];
+  slide: number;
+  originKey: string | null;
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -230,137 +228,6 @@ function iconElement(name: IconName, className = ""): HTMLElement {
   return wrapper;
 }
 
-const HIGHLIGHT_ICONS: Readonly<Record<string, IconName>> = {
-  brain: "brain",
-  clock: "clock",
-  book: "book",
-  leaf: "leaf",
-  compass: "compass",
-  sparkle: "sparkle",
-  heart: "heart",
-  puzzle: "puzzle",
-  moon: "moon",
-  palette: "palette",
-};
-
-function highlightIcon(name: string): IconName {
-  return HIGHLIGHT_ICONS[name] ?? "sparkle";
-}
-
-const PLATFORM_ICONS: Readonly<Record<StorePlatform, IconName>> = {
-  pc: "windows",
-  playstation: "playstation",
-  xbox: "xbox",
-  switch: "switch",
-  emulators: "emulator",
-};
-
-/**
- * The tone a capsule is carried by, for the block of facts printed under it.
- *
- * Three numbers, and each is there for a reason:
- *
- * - **Hue**, not the average colour — averaging a picture returns mud, and a
- *   grey sky over half the frame would outvote the one thing in it that has a
- *   colour. The pixels go into coarse buckets, each weighed by how much of the
- *   picture it is *and* how colourful it is.
- * - **Saturation**, dropped almost to nothing for artwork that has no colour of
- *   its own. A black-and-white cover given the panel's blue-grey reads cold
- *   against a warm page, which is a card that does not belong to itself.
- * - **Lightness**, read off the foot of the picture — the part the block is
- *   printed directly under. A near-white cover over a dark block is a hole cut
- *   in the card; following the artwork is what keeps the two one object. The
- *   range is narrow on purpose: the facts are printed on this.
- *
- * Costs one small readback per distinct capsule, on the image's own load event,
- * and is remembered for the rest of the session.
- */
-interface CapsuleTone {
-  hue: number;
-  saturation: number;
-  lightness: number;
-}
-
-const TONE_CACHE = new Map<string, CapsuleTone>();
-
-function capsuleTone(image: HTMLImageElement): CapsuleTone | null {
-  const cached = TONE_CACHE.get(image.src);
-  if (cached !== undefined) return cached;
-  if (!image.naturalWidth) return null;
-
-  const width = 48;
-  const height = Math.max(1, Math.round((width * image.naturalHeight) / image.naturalWidth));
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) return null;
-
-  let pixels: Uint8ClampedArray;
-  try {
-    context.drawImage(image, 0, 0, width, height);
-    pixels = context.getImageData(0, 0, width, height).data;
-  }
-  catch {
-    // A capsule served from a store's CDN taints the canvas. The card keeps the
-    // panel's own blue-grey, which is what it looked like before any of this.
-    return null;
-  }
-
-  const buckets = new Map<number, { r: number; g: number; b: number; n: number; weight: number }>();
-  for (let index = 0; index < pixels.length; index += 4) {
-    const r = pixels[index];
-    const g = pixels[index + 1];
-    const b = pixels[index + 2];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const light = (max + min) / 510;
-    if (light < 0.08 || light > 0.94) continue;
-    const saturation = max === min ? 0 : (max - min) / (255 - Math.abs(max + min - 255));
-    const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
-    const bucket = buckets.get(key) ?? { r: 0, g: 0, b: 0, n: 0, weight: 0 };
-    bucket.r += r;
-    bucket.g += g;
-    bucket.b += b;
-    bucket.n += 1;
-    bucket.weight += 0.25 + saturation * saturation;
-    buckets.set(key, bucket);
-  }
-
-  let best: { r: number; g: number; b: number; n: number; weight: number } | null = null;
-  for (const bucket of buckets.values()) if (!best || bucket.weight > best.weight) best = bucket;
-  if (!best) return null;
-
-  const r = best.r / best.n;
-  const g = best.g / best.n;
-  const b = best.b / best.n;
-  const max = Math.max(r, g, b);
-  const delta = max - Math.min(r, g, b);
-
-  let hue = 211;
-  if (max === r) hue = ((g - b) / delta) % 6;
-  else if (max === g) hue = (b - r) / delta + 2;
-  else hue = (r - g) / delta + 4;
-  hue = delta < 6 ? 211 : Math.round(((hue * 60) % 360 + 360) % 360);
-  // Artwork with no colour of its own gets a pane with none either.
-  const saturation = delta < 14 ? 5 : 21;
-
-  // The foot of the picture: the eighth of it the block is printed under.
-  const from = Math.floor(height * 0.82) * width * 4;
-  let sum = 0;
-  let count = 0;
-  for (let index = from; index < pixels.length; index += 4) {
-    sum += (0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2]) / 255;
-    count += 1;
-  }
-  const foot = count ? sum / count : 0.3;
-  const lightness = Math.round(Math.min(34, Math.max(16, 16 + foot * 22)));
-
-  const tone = { hue, saturation, lightness };
-  TONE_CACHE.set(image.src, tone);
-  return tone;
-}
-
 function requestErrorMessage(error: unknown): string {
   if (error instanceof Error && error.name === "AbortError") return "";
   if (typeof error === "string" && error.trim()) return error;
@@ -369,28 +236,63 @@ function requestErrorMessage(error: unknown): string {
 }
 
 /**
- * The cheapest verified offer, shown while a card is previewed. A price older
- * than a day is still shown — with the day it was read, so the shopper knows
- * how fresh it is instead of being told a number Orivo cannot vouch for today.
+ * Under the price: the shop, and how fresh the reading is. A price older than
+ * a day is still shown — with the day it was read, so the shopper knows how
+ * fresh it is instead of being told a number Orivo cannot vouch for today.
  */
-function offerLine(game: GameSummary): string {
-  const offer = selectBestOffer(game);
-  if (!offer) return "";
-  const price = formatPrice(offer);
+function offerCaption(offer: StoreOffer): string {
   const provider = offer.providerLabel;
-  if (!price) return t("store.offer.unverified", { provider });
-  if (offer.priceMinor === 0) return t("store.offer.free", { provider });
-  const line = t("store.offer.from", { price, provider });
-  if (!isOfferStale(offer)) return `${line} · ${t("store.offer.verifiedToday")}`;
+  if (offer.priceMinor === null) return t("store.offer.unverified", { provider });
+  if (!isOfferStale(offer)) return `${provider} · ${t("store.offer.verifiedToday")}`;
   const day = offerVerifiedOn(offer);
-  return day
-    ? `${line} · ${t("store.offer.readOn", { day })}`
-    : `${line} · ${t("store.offer.recheck")}`;
+  return day ? `${provider} · ${t("store.offer.readOn", { day })}` : `${provider} · ${t("store.offer.recheck")}`;
 }
 
 /**
- * Creates the Store page ("Découvrir"). The shell injects navigation and
- * imports `store-page.css`; the page owns no topbar and no global styles.
+ * What a card prints as its price. A plugin's game carries its own quote
+ * rather than an offer — a plugin is not one of the Store's shops — and it is
+ * printed by the same rules.
+ */
+function priceLabel(game: GameSummary): string {
+  const quote = (game as PluginStoreGame).pluginPrice;
+  if (quote) return formatPrice(pluginOffer(game.id, quote.amountMinor, quote.currency));
+  return formatPrice(selectBestOffer(game));
+}
+
+function pluginOffer(gameId: string, priceMinor: number, currency: string): StoreOffer {
+  return {
+    id: `plugin_${gameId}`,
+    gameId,
+    provider: "steam",
+    providerLabel: "",
+    priceMinor,
+    currency,
+    region: "",
+    verifiedAt: null,
+    availability: "available",
+    stale: false,
+  };
+}
+
+/**
+ * The pictures the detail cycles through: the wide art first, then the
+ * screenshots, then the card's own art. A portrait cover is only used when
+ * nothing else exists, because a landscape stage would crop it to a strip.
+ */
+export function detailSlides(game: GameSummary): string[] {
+  const wide = [game.heroUrl, ...(game.gallery ?? []), game.landscapeUrl].filter(Boolean);
+  const slides = wide.length ? wide : [game.coverUrl].filter(Boolean);
+  return [...new Set(slides)];
+}
+
+/** How long one picture stays up in the detail before the next one fades in. */
+export const DETAIL_SLIDE_MS = 4_200;
+
+const STORE_QUERY_LIMIT = 48;
+
+/**
+ * Creates the Store page. The shell injects navigation and imports
+ * `store-page.css`; the page owns no topbar and no global styles.
  */
 export function createStorePage(options: StorePageOptions): AppPage {
   const client = options.client ?? createDefaultStorePageClient();
@@ -400,16 +302,15 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let pageRoot: HTMLElement | null = null;
   let activation: PageActivation | null = null;
   let requestSequence = 0;
-  let queryTimer: ReturnType<typeof setTimeout> | null = null;
   let statusTimer: ReturnType<typeof setTimeout> | null = null;
-  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  let slideTimer: ReturnType<typeof setInterval> | null = null;
   let transientStatus = "";
-  let morePlatformsOpen = false;
-  let whyOpen = false;
-  /** Which of the two stacked backdrop layers is currently showing. */
-  let backdropFront = 0;
-  let backdropUrl = "";
-  let renderedGameIds = "";
+  /** When the host last answered for the home shelf, so a tab switch need not ask again. */
+  let homeLoadedAt = 0;
+  let detail: OpenDetail | null = null;
+  let renderedMast = "";
+  let renderedShelf = "";
+  let tabsOff: (() => void) | null = null;
   // One controller per activation: it owns the event subscription and dies with
   // the page's teardown path, so a re-entry starts from a fresh status.
   let quiky: QuikyController | null = null;
@@ -422,27 +323,27 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let renderedQuikySearch = "";
 
   // Long-lived nodes. The page paints once and then updates in place: a full
-  // rebuild would drop the rail's scroll position and restart the backdrop
-  // crossfade on every hover.
+  // rebuild on every change would drop focus, scroll and every image's fade.
   const nodes = {
-    backdropLayers: [] as HTMLImageElement[],
-    heroEyebrow: null as HTMLElement | null,
-    heroTitle: null as HTMLElement | null,
-    heroAction: null as HTMLButtonElement | null,
-    heroOffer: null as HTMLElement | null,
-    highlightList: null as HTMLElement | null,
-    railTrack: null as HTMLElement | null,
-    arrowPrevious: null as HTMLButtonElement | null,
-    arrowNext: null as HTMLButtonElement | null,
-    categoryBar: null as HTMLElement | null,
-    platformBar: null as HTMLElement | null,
-    morePanel: null as HTMLElement | null,
-    status: null as HTMLElement | null,
-    whyPanel: null as HTMLElement | null,
+    body: null as HTMLElement | null,
+    previousStore: null as HTMLButtonElement | null,
+    nextStore: null as HTMLButtonElement | null,
+    mastLogo: null as HTMLElement | null,
+    mastName: null as HTMLElement | null,
+    mastShop: null as HTMLElement | null,
+    mastLockup: null as HTMLImageElement | null,
+    consoles: null as HTMLElement | null,
+    shelf: null as HTMLElement | null,
     emptyState: null as HTMLElement | null,
+    status: null as HTMLElement | null,
     quikyPanel: null as HTMLElement | null,
     quikyHeading: null as HTMLElement | null,
     quikyList: null as HTMLElement | null,
+    detail: null as HTMLElement | null,
+    detailPanel: null as HTMLElement | null,
+    detailStage: null as HTMLElement | null,
+    detailDots: null as HTMLElement | null,
+    detailInfo: null as HTMLElement | null,
   };
 
   const dispatch = (action: StorePageAction, shouldRender = true): void => {
@@ -453,14 +354,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
   const isActive = (context = activation): context is PageActivation =>
     Boolean(context && context.isCurrent() && !context.signal.aborted);
 
-  const currentStoreRoute = (): AppRoute => ({
-    page: "store",
-    category: state.category,
-    platforms: [...state.platforms],
-    query: state.query.trim(),
-  });
-
-  const navigateWithCurrentFilters = (): void => options.navigate(currentStoreRoute());
+  const currentPluginTab = (): PluginStoreTab | null =>
+    state.store.startsWith("plugin:") ? pluginStoreTab(state.store) : null;
 
   const showTransientStatus = (message: string): void => {
     transientStatus = message;
@@ -486,6 +381,17 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
   };
 
+  const failRequest = (requestId: number, error: unknown): void => {
+    const message = requestErrorMessage(error);
+    if (!message) return;
+    dispatch({
+      type: "request-failed",
+      requestId,
+      message,
+      offline: typeof navigator !== "undefined" && !navigator.onLine,
+    });
+  };
+
   const loadHome = async (context: PageActivation): Promise<void> => {
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId, refresh: state.home.games.length > 0 });
@@ -493,21 +399,15 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const home = await client.getHome(context.signal);
       if (!isActive(context)) return;
       dispatch({ type: "home-loaded", requestId, home });
+      homeLoadedAt = Date.now();
       if (typeof navigator === "undefined" || navigator.onLine) void refreshSources(context);
     } catch (error) {
       if (!isActive(context)) return;
-      const message = requestErrorMessage(error);
-      if (!message) return;
-      dispatch({
-        type: "request-failed",
-        requestId,
-        message,
-        offline: typeof navigator !== "undefined" && !navigator.onLine,
-      });
+      failRequest(requestId, error);
     }
   };
 
-  const refreshSources = async (context: PageActivation, announce = false): Promise<void> => {
+  const refreshSources = async (context: PageActivation): Promise<void> => {
     if (!isActive(context)) return;
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId, refresh: true });
@@ -516,51 +416,28 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const home = await client.getHome(context.signal);
       if (!isActive(context)) return;
       dispatch({ type: "home-loaded", requestId, home });
-      if (announce) showTransientStatus(t("store.status.refreshed"));
+      homeLoadedAt = Date.now();
     } catch (error) {
       if (!isActive(context)) return;
-      const message = requestErrorMessage(error);
-      if (!message) return;
-      dispatch({
-        type: "request-failed",
-        requestId,
-        message,
-        offline: typeof navigator !== "undefined" && !navigator.onLine,
-      });
+      failRequest(requestId, error);
     }
   };
 
-  const browse = async (
-    context: PageActivation,
-    cursor: string | null,
-    append: boolean,
-  ): Promise<void> => {
-    if (!isActive(context)) return;
+  /** A search on "Tout" asks the host, which can reach games the shelf does not carry. */
+  const search = async (context: PageActivation, cursor: string | null, append: boolean): Promise<void> => {
+    if (!isActive(context) || !state.query.trim() || state.store !== "all") return;
     const requestId = ++requestSequence;
     dispatch({ type: "request-started", requestId, refresh: true });
     try {
       const page = await client.browse(
-        {
-          category: state.category,
-          platforms: [...state.platforms],
-          query: state.query.trim(),
-          cursor,
-          limit: 30,
-        },
+        { category: "all-games", platforms: [], query: state.query.trim(), cursor, limit: STORE_QUERY_LIMIT },
         context.signal,
       );
       if (!isActive(context)) return;
       dispatch({ type: "browse-loaded", requestId, page, append });
     } catch (error) {
       if (!isActive(context)) return;
-      const message = requestErrorMessage(error);
-      if (!message) return;
-      dispatch({
-        type: "request-failed",
-        requestId,
-        message,
-        offline: typeof navigator !== "undefined" && !navigator.onLine,
-      });
+      failRequest(requestId, error);
     }
   };
 
@@ -583,6 +460,26 @@ export function createStorePage(options: StorePageOptions): AppPage {
       dispatch({ type: "wishlist-changed", gameId: game.id, wishlisted: !wishlisted });
       showTransientStatus(requestErrorMessage(error) || t("store.wishlist.cancelled"));
     }
+  };
+
+  const handleBuy = async (offer: StoreOffer): Promise<void> => {
+    const context = activation;
+    if (!isActive(context)) return;
+    try {
+      await client.openOffer(offer.id, context.signal);
+    } catch (error) {
+      if (!isActive(context)) return;
+      const message = requestErrorMessage(error);
+      if (message) showTransientStatus(message);
+    }
+  };
+
+  const selectStore = (store: StoreTabId): void => {
+    if (state.store === store) return;
+    closeDetail(false);
+    dispatch({ type: "store-changed", store });
+    options.navigate({ page: "store", store, query: state.query.trim() });
+    container?.scrollTo?.({ top: 0 });
   };
 
   // ---------------------------------------------------------------------------
@@ -619,9 +516,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
 
   const quikyResultMeta = (title: QuikyTitle): string => {
     if (title.installed) return t("store.quiky.installed");
-    return title.source === "fitgirl"
-      ? t("store.quiky.fitgirl")
-      : t("store.quiky.windowsInstaller");
+    return title.source === "fitgirl" ? t("store.quiky.fitgirl") : t("store.quiky.windowsInstaller");
   };
 
   const buildQuikyResult = (title: QuikyTitle): HTMLElement => {
@@ -661,9 +556,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       return;
     }
 
-    const signature = `${quikySearchPhase}|${query}|${quikySearchResults
-      .map((title) => title.slug)
-      .join(",")}`;
+    const signature = `${quikySearchPhase}|${query}|${quikySearchResults.map((title) => title.slug).join(",")}`;
     if (signature !== renderedQuikySearch) {
       renderedQuikySearch = signature;
       for (const key of [...installNodes.keys()]) {
@@ -730,262 +623,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     renderQuikySearch();
   };
 
-  // ---------------------------------------------------------------------------
-  // Skeleton
-  // ---------------------------------------------------------------------------
-
-  const buildBackdrop = (): HTMLElement => {
-    const backdrop = element("div", "store-backdrop");
-    backdrop.setAttribute("aria-hidden", "true");
-    for (let index = 0; index < 2; index += 1) {
-      const layer = element("img", "store-backdrop__layer");
-      layer.alt = "";
-      layer.decoding = "async";
-      backdrop.append(layer);
-      nodes.backdropLayers.push(layer);
-    }
-    backdrop.append(
-      element("div", "store-backdrop__scrim store-backdrop__scrim--left"),
-      element("div", "store-backdrop__scrim store-backdrop__scrim--bottom"),
-      element("div", "store-backdrop__scrim store-backdrop__scrim--top"),
-    );
-    return backdrop;
-  };
-
-  const buildHero = (): HTMLElement => {
-    const hero = element("section", "store-hero");
-    const copy = element("div", "store-hero__copy");
-    nodes.heroEyebrow = element("p", "store-hero__eyebrow");
-    nodes.heroTitle = element("h1", "store-hero__title");
-    nodes.heroAction = element("button", "store-hero__action");
-    nodes.heroAction.type = "button";
-    nodes.heroAction.dataset.focusKey = "hero-action";
-    nodes.heroAction.addEventListener("click", () => {
-      const heroCopy = selectHeroCopy(state, visibleGames());
-      if (heroCopy.gameId) {
-        options.navigate({ page: "game", gameId: heroCopy.gameId, from: "store" });
-        return;
-      }
-      whyOpen = !whyOpen;
-      renderWhyPanel();
-    });
-    nodes.heroOffer = element("p", "store-hero__offer");
-    copy.append(nodes.heroEyebrow, nodes.heroTitle, nodes.heroAction, nodes.heroOffer);
-
-    const highlights = element("aside", "store-highlights");
-    highlights.setAttribute("aria-label", t("store.highlights.label"));
-    nodes.highlightList = element("ul", "store-highlights__list");
-    highlights.append(nodes.highlightList);
-
-    nodes.whyPanel = element("div", "store-why");
-    nodes.whyPanel.hidden = true;
-
-    hero.append(copy, highlights, nodes.whyPanel);
-    return hero;
-  };
-
-  const buildShelf = (): HTMLElement => {
-    const shelf = element("section", "store-shelf");
-    const rail = element("div", "store-rail");
-    nodes.railTrack = element("div", "store-rail__track");
-    nodes.railTrack.setAttribute("role", "list");
-    // Left and right are the keys that change the game on this page: they walk
-    // this rail rather than whatever control happens to be nearest, and up or
-    // down come back to the featured card.
-    nodes.railTrack.setAttribute("data-nav-rail", "");
-    nodes.railTrack.addEventListener("scroll", () => syncArrows(), { passive: true });
-
-    // The arrows scroll the shelf for the pointer. The keys scroll it by
-    // walking the cards, so they pass these by.
-    nodes.arrowPrevious = element("button", "store-rail__arrow store-rail__arrow--previous");
-    nodes.arrowPrevious.type = "button";
-    nodes.arrowPrevious.dataset.focusKey = "rail-previous";
-    nodes.arrowPrevious.dataset.navSkip = "";
-    nodes.arrowPrevious.setAttribute("aria-label", t("store.rail.previous"));
-    nodes.arrowPrevious.append(iconElement("arrow-left"));
-    nodes.arrowPrevious.addEventListener("click", () => scrollRail(-1));
-
-    nodes.arrowNext = element("button", "store-rail__arrow store-rail__arrow--next");
-    nodes.arrowNext.type = "button";
-    nodes.arrowNext.dataset.focusKey = "rail-next";
-    nodes.arrowNext.dataset.navSkip = "";
-    nodes.arrowNext.setAttribute("aria-label", t("store.rail.next"));
-    nodes.arrowNext.append(iconElement("arrow-right"));
-    nodes.arrowNext.addEventListener("click", () => scrollRail(1));
-
-    nodes.emptyState = element("div", "store-empty");
-    nodes.emptyState.hidden = true;
-
-    rail.append(nodes.railTrack, nodes.arrowPrevious, nodes.arrowNext);
-    shelf.append(rail, nodes.emptyState);
-    return shelf;
-  };
-
-  const buildFilters = (): HTMLElement => {
-    const filters = element("section", "store-filters");
-    filters.setAttribute("aria-label", t("store.filters.label"));
-
-    nodes.categoryBar = element("nav", "store-chipbar store-chipbar--categories");
-    nodes.categoryBar.setAttribute("aria-label", t("store.filters.categories"));
-    // A strip of chips is a row: left and right walk it, on into the platform
-    // chips beside it, and up or down come back to the chip last left.
-    nodes.categoryBar.setAttribute("data-nav-row", "");
-    for (const option of STORE_CATEGORIES) {
-      const chip = element("button", "store-chip", option.label);
-      chip.type = "button";
-      chip.dataset.focusKey = `category-${option.id}`;
-      chip.dataset.category = option.id;
-      chip.addEventListener("click", () => {
-        // The shelf already shown: nothing to change, nothing to ask for.
-        if (state.category === option.id) return;
-        dispatch({ type: "category-changed", category: option.id });
-        navigateWithCurrentFilters();
-        if (activation) void browse(activation, null, false);
-      });
-      nodes.categoryBar.append(chip);
-    }
-
-    const platformGroup = element("div", "store-platform-group");
-    nodes.platformBar = element("nav", "store-chipbar store-chipbar--platforms");
-    nodes.platformBar.setAttribute("aria-label", t("store.filters.platforms"));
-    nodes.platformBar.setAttribute("data-nav-row", "");
-    for (const option of STORE_PLATFORMS) {
-      const chip = element("button", "store-chip store-chip--platform");
-      chip.type = "button";
-      chip.dataset.focusKey = `platform-${option.id}`;
-      chip.dataset.platform = option.id;
-      chip.append(
-        iconElement(PLATFORM_ICONS[option.id], "store-chip__icon"),
-        element("span", "store-chip__label", option.label),
-      );
-      chip.addEventListener("click", () => {
-        const selected = state.platforms.includes(option.id);
-        const platforms = selected
-          ? state.platforms.filter((platform) => platform !== option.id)
-          : [...state.platforms, option.id];
-        dispatch({ type: "platforms-changed", platforms });
-        navigateWithCurrentFilters();
-        if (activation) void browse(activation, null, false);
-      });
-      nodes.platformBar.append(chip);
-    }
-
-    const more = element("button", "store-chip store-chip--more");
-    more.type = "button";
-    more.dataset.focusKey = "platform-more";
-    more.setAttribute("aria-haspopup", "true");
-    more.append(element("span", "store-chip__label", t("store.filters.more")), iconElement("chevron-down", "store-chip__caret"));
-    more.addEventListener("click", () => {
-      morePlatformsOpen = !morePlatformsOpen;
-      renderMorePanel();
-    });
-    nodes.platformBar.append(more);
-
-    nodes.morePanel = element("div", "store-more-panel");
-    nodes.morePanel.hidden = true;
-    platformGroup.append(nodes.platformBar, nodes.morePanel);
-
-    filters.append(nodes.categoryBar, platformGroup);
-    return filters;
-  };
-
-  /**
-   * Search results live beside the editorial shelf, not inside it: a FitGirl
-   * repack has no Store artwork, price or offer, and pretending it is a Store
-   * card would make the page promise things it cannot show. The panel appears
-   * only while the Store search has a query and the plugin declares a source.
-   */
-  const buildQuikySearch = (): HTMLElement => {
-    const panel = element("section", "quiky-results");
-    panel.hidden = true;
-    panel.setAttribute("aria-label", t("store.quiky.resultsLabel"));
-    const head = element("div", "quiky-results__head");
-    nodes.quikyHeading = element("p", "quiky-results__title");
-    head.append(
-      nodes.quikyHeading,
-      element("span", "quiky-results__badge", "FitGirl"),
-    );
-    nodes.quikyList = element("div", "quiky-results__list");
-    panel.append(head, nodes.quikyList);
-    nodes.quikyPanel = panel;
-    return panel;
-  };
-
-  const buildSkeleton = (): void => {
-    if (!pageRoot) return;
-    const body = element("div", "store-page__body");
-    nodes.status = element("div", "store-status");
-    nodes.status.setAttribute("aria-live", "polite");
-    nodes.status.hidden = true;
-    body.append(buildHero(), buildShelf(), buildFilters(), buildQuikySearch());
-    pageRoot.replaceChildren(buildBackdrop(), body, nodes.status);
-  };
-
-  // ---------------------------------------------------------------------------
-  // Rendering
-  // ---------------------------------------------------------------------------
-
-  const visibleGames = (): GameSummary[] => selectStoreGames(state);
-
-  const setBackdrop = (url: string): void => {
-    if (!url || url === backdropUrl || nodes.backdropLayers.length < 2) return;
-    backdropUrl = url;
-    const next = nodes.backdropLayers[1 - backdropFront];
-    const current = nodes.backdropLayers[backdropFront];
-    next.src = url;
-    const reveal = (): void => {
-      next.classList.add("is-active");
-      current.classList.remove("is-active");
-      backdropFront = 1 - backdropFront;
-    };
-    if (next.complete && next.naturalWidth > 0) reveal();
-    else next.addEventListener("load", reveal, { once: true });
-  };
-
-  const renderHighlights = (highlights: StoreHighlight[]): void => {
-    if (!nodes.highlightList) return;
-    const list = document.createDocumentFragment();
-    for (const highlight of highlights.slice(0, 3)) {
-      const item = element("li", "store-highlight");
-      const copy = element("div", "store-highlight__copy");
-      copy.append(
-        element("h2", "store-highlight__title", highlight.title),
-        element("p", "store-highlight__text", highlight.text),
-      );
-      item.append(iconElement(highlightIcon(highlight.icon), "store-highlight__icon"), copy);
-      list.append(item);
-    }
-    nodes.highlightList.replaceChildren(list);
-  };
-
-  const renderHero = (games: GameSummary[]): void => {
-    const heroCopy = selectHeroCopy(state, games);
-    if (nodes.heroEyebrow) nodes.heroEyebrow.textContent = heroCopy.eyebrow;
-    if (nodes.heroTitle) nodes.heroTitle.textContent = heroCopy.title;
-    if (nodes.heroAction) nodes.heroAction.textContent = heroCopy.actionLabel;
-    if (nodes.heroOffer) {
-      const previewed = heroCopy.gameId
-        ? games.find((game) => game.id === heroCopy.gameId) ?? null
-        : null;
-      const line = previewed ? offerLine(previewed) : "";
-      nodes.heroOffer.textContent = line;
-      nodes.heroOffer.hidden = !line;
-    }
-    renderHighlights(heroCopy.highlights);
-    setBackdrop(heroCopy.backgroundUrl);
-  };
-
-  const previewGame = (gameId: string | null): void => {
-    if (state.previewGameId === gameId) return;
-    if (previewTimer) clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => {
-      previewTimer = null;
-      state = reduceStorePageState(state, { type: "preview-changed", gameId });
-      renderHero(visibleGames());
-      syncFeatured();
-    }, gameId ? 60 : 220);
-  };
-
   /**
    * The install control and its bar. The button joins the card's floating
    * controls, under the wishlist so neither has to move when both are there;
@@ -1005,7 +642,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const label = element("span", "store-card__install-label", t("store.install.label"));
     button.append(glyph, label);
     button.addEventListener("click", (event) => {
-      // The card is one big link to the game page; installing is not going.
+      // The card opens the detail; installing is not opening.
       event.stopPropagation();
       void handleInstall(title.slug, gameId);
     });
@@ -1023,15 +660,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     fill.style.width = "0%";
     meter.append(fill);
 
-    installNodes.set(key, {
-      title,
-      button,
-      label,
-      glyph,
-      glyphName: "download",
-      meter,
-      fill,
-    });
+    installNodes.set(key, { title, button, label, glyph, glyphName: "download", meter, fill });
     return { button, meter };
   };
 
@@ -1089,8 +718,312 @@ export function createStorePage(options: StorePageOptions): AppPage {
     }
   };
 
-  const buildCard = (game: GameSummary, index: number): HTMLElement => {
-    const card = element("article", "store-card");
+  // ---------------------------------------------------------------------------
+  // Skeleton
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The brand's light: a wash, two sweeps and a horizon. All of it is drawn
+   * from the page's accent token, so changing tab is one variable changing.
+   */
+  const buildAmbient = (): HTMLElement => {
+    const ambient = element("div", "store-ambient");
+    ambient.setAttribute("aria-hidden", "true");
+    ambient.append(
+      element("span", "store-ambient__wash"),
+      element("span", "store-ambient__sweep store-ambient__sweep--high"),
+      element("span", "store-ambient__sweep store-ambient__sweep--low"),
+    );
+    return ambient;
+  };
+
+  const buildMasthead = (): HTMLElement => {
+    const mast = element("header", "store-mast");
+    const brand = element("div", "store-mast__brand");
+    nodes.mastLogo = element("span", "store-mast__logo");
+    nodes.mastLogo.setAttribute("aria-hidden", "true");
+    const heading = element("h1", "store-mast__title");
+    nodes.mastName = element("span", "store-mast__name");
+    nodes.mastShop = element("span", "store-mast__shop");
+    nodes.mastLockup = element("img", "store-mast__lockup");
+    nodes.mastLockup.hidden = true;
+    nodes.mastLockup.addEventListener("error", () => {
+      if (!nodes.mastLockup || !nodes.mastName || !nodes.mastShop) return;
+      nodes.mastLockup.hidden = true;
+      nodes.mastName.hidden = false;
+      nodes.mastShop.hidden = false;
+    });
+    heading.append(nodes.mastLockup, nodes.mastName, nodes.mastShop);
+    brand.append(nodes.mastLogo, heading);
+    nodes.consoles = element("div", "store-mast__consoles");
+    nodes.consoles.setAttribute("aria-hidden", "true");
+    nodes.previousStore = switchButton(-1);
+    nodes.nextStore = switchButton(1);
+    mast.append(nodes.previousStore, brand, nodes.consoles, element("span", "store-mast__horizon"), nodes.nextStore);
+    return mast;
+  };
+
+  /**
+   * The way between stores: one chevron on each side of the page, walking the
+   * stores in a loop. The store on screen is the masthead; there is no bar of
+   * names to read.
+   */
+  const switchButton = (step: 1 | -1): HTMLButtonElement => {
+    const button = element("button", `store-switch store-switch--${step < 0 ? "previous" : "next"}`);
+    button.type = "button";
+    button.dataset.focusKey = step < 0 ? "store-previous" : "store-next";
+    button.append(iconElement(step < 0 ? "chevron-left" : "chevron-right"));
+    button.addEventListener("click", () => selectStore(adjacentStore(storeOrder(), state.store, step)));
+    return button;
+  };
+
+  /** Every store, in the order the chevrons walk them: Tout, the brands, then plugins. */
+  const storeOrder = (): StoreTabId[] => [
+    ...STORE_TAB_LOOKS.map((look) => look.id),
+    ...listPluginStoreTabs().map((tab) => tab.id),
+  ];
+
+  const storeLabel = (id: StoreTabId): string =>
+    storeTabLook(id)?.label() ?? pluginStoreTab(id)?.label ?? id;
+
+  /**
+   * Search results live beside the shelf, not inside it: a FitGirl repack has
+   * no Store artwork, price or offer, and pretending it is a Store card would
+   * make the page promise things it cannot show. The panel appears only while
+   * the Store search has a query and the plugin declares a source.
+   */
+  const buildQuikySearch = (): HTMLElement => {
+    const panel = element("section", "quiky-results");
+    panel.hidden = true;
+    panel.setAttribute("aria-label", t("store.quiky.resultsLabel"));
+    const head = element("div", "quiky-results__head");
+    nodes.quikyHeading = element("p", "quiky-results__title");
+    head.append(nodes.quikyHeading, element("span", "quiky-results__badge", "FitGirl"));
+    nodes.quikyList = element("div", "quiky-results__list");
+    panel.append(head, nodes.quikyList);
+    nodes.quikyPanel = panel;
+    return panel;
+  };
+
+  /**
+   * The detail is a sibling of the page body, never inside it: opening it
+   * makes the body `inert`, and an inert ancestor would take the dialog with
+   * it. Nothing between it and the viewport is transformed or filtered, so its
+   * `position: fixed` really is the window.
+   */
+  const buildDetail = (): HTMLElement => {
+    const root = element("div", "store-detail");
+    root.hidden = true;
+    root.setAttribute("role", "dialog");
+    root.setAttribute("aria-modal", "true");
+    root.setAttribute("aria-labelledby", "store-detail-title");
+    const scrim = element("div", "store-detail__scrim");
+    scrim.addEventListener("click", () => closeDetail());
+    const panel = element("article", "store-detail__panel");
+    const stage = element("div", "store-detail__stage");
+    const dots = element("div", "store-detail__dots");
+    const info = element("div", "store-detail__info");
+    const close = element("button", "store-detail__close");
+    close.type = "button";
+    close.dataset.focusKey = "detail-close";
+    close.setAttribute("aria-label", t("store.detail.close"));
+    close.append(iconElement("close"));
+    close.addEventListener("click", () => closeDetail());
+    panel.append(stage, dots, info, close);
+    root.append(scrim, panel);
+    root.addEventListener("keydown", trapTab);
+    nodes.detail = root;
+    nodes.detailPanel = panel;
+    nodes.detailStage = stage;
+    nodes.detailDots = dots;
+    nodes.detailInfo = info;
+    return root;
+  };
+
+  const buildSkeleton = (): void => {
+    if (!pageRoot) return;
+    const body = element("div", "store-page__body");
+    nodes.body = body;
+    nodes.shelf = element("div", "store-shelf");
+    nodes.emptyState = element("div", "store-empty");
+    nodes.emptyState.hidden = true;
+    body.append(buildMasthead(), nodes.shelf, nodes.emptyState, buildQuikySearch());
+    nodes.status = element("div", "store-status");
+    nodes.status.setAttribute("aria-live", "polite");
+    nodes.status.hidden = true;
+    const topfade = element("div", "store-topfade");
+    topfade.setAttribute("aria-hidden", "true");
+    pageRoot.replaceChildren(buildAmbient(), topfade, body, nodes.status, buildDetail());
+  };
+
+  // ---------------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------------
+
+  const visibleGames = (): GameSummary[] => selectStoreGames(state, currentPluginTab()?.games ?? null);
+
+  /**
+   * The page's colour. A brand's is a token in the stylesheet; a plugin's is
+   * the one it declared, already checked to be a plain `#rrggbb`.
+   */
+  const renderTheme = (): void => {
+    if (!pageRoot) return;
+    const plugin = currentPluginTab();
+    pageRoot.dataset.store = plugin ? "plugin" : state.store;
+    if (plugin) pageRoot.style.setProperty("--store-accent", plugin.accent);
+    else pageRoot.style.removeProperty("--store-accent");
+  };
+
+  /** The chevrons name the store each one leads to. */
+  const renderSwitches = (): void => {
+    const order = storeOrder();
+    const entries: Array<[HTMLButtonElement | null, 1 | -1]> = [
+      [nodes.previousStore, -1],
+      [nodes.nextStore, 1],
+    ];
+    for (const [button, step] of entries) {
+      if (!button) continue;
+      const target = storeLabel(adjacentStore(order, state.store, step));
+      const label = t(step < 0 ? "store.switch.previous" : "store.switch.next", { store: target });
+      button.setAttribute("aria-label", label);
+      button.title = target;
+    }
+  };
+
+  const renderMasthead = (): void => {
+    if (!nodes.mastLogo || !nodes.mastName || !nodes.mastShop || !nodes.mastLockup || !nodes.consoles) return;
+    const look = storeTabLook(state.store);
+    const plugin = currentPluginTab();
+    const signature = `${state.store}|${plugin?.label ?? ""}`;
+    if (signature === renderedMast) return;
+    renderedMast = signature;
+    const lockup = nodes.mastLockup;
+    lockup.hidden = !look?.lockupUrl;
+    nodes.mastLogo.hidden = Boolean(look?.lockupUrl);
+    nodes.mastName.hidden = Boolean(look?.lockupUrl);
+    nodes.mastShop.hidden = Boolean(look?.lockupUrl);
+    if (look?.lockupUrl) {
+      // The store's own logo already says its name; the text stays as the
+      // picture's alternative, and comes back if the picture does not.
+      lockup.src = look.lockupUrl;
+      lockup.alt = `${look.name} ${look.shop()}`;
+      nodes.mastName.textContent = look.name;
+      nodes.mastShop.textContent = look.shop();
+    } else if (look) {
+      const mark = element("img", "store-mast__image");
+      mark.src = look.markUrl ?? "";
+      mark.alt = "";
+      mark.addEventListener("error", () => { if (nodes.mastLogo) nodes.mastLogo.innerHTML = icon(look.icon); }, { once: true });
+      nodes.mastLogo.replaceChildren(mark);
+      nodes.mastName.textContent = look.name;
+      nodes.mastShop.textContent = look.shop();
+    } else {
+      // A plugin's store, or one whose plugin has not answered yet: its name
+      // in the masthead, and no machines it never declared.
+      nodes.mastLogo.replaceChildren(element("span", "store-mast__dot"));
+      nodes.mastName.textContent = plugin?.label ?? "";
+      nodes.mastShop.textContent = "";
+    }
+    nodes.consoles.replaceChildren(
+      ...(look?.machines ?? []).map((machine) => {
+        const figure = element("span", `store-console store-console--${machine.place}`);
+        const picture = element("img", "store-console__art");
+        picture.src = machine.src;
+        picture.alt = "";
+        picture.decoding = "async";
+        picture.addEventListener("error", () => figure.remove(), { once: true });
+        figure.append(picture);
+        return figure;
+      }),
+    );
+    // The masthead rises in again on every change of store, from a class the
+    // stylesheet animates only when motion is allowed.
+    const mast = nodes.consoles.parentElement;
+    mast?.classList.remove("store-mast--enter");
+    void mast?.offsetWidth;
+    mast?.classList.add("store-mast--enter");
+  };
+
+  const restSectionTitle = (): string => {
+    if (state.store.startsWith("plugin:")) return t("store.section.allGames");
+    if (state.store === "all") {
+      return hasExclusives(state.home.games) ? t("store.section.allExclusives") : t("store.section.allGames");
+    }
+    return t("store.section.moreExclusives");
+  };
+
+  const buildSection = (
+    key: string,
+    title: string,
+    cards: HTMLElement[],
+    variant: "row" | "grid",
+  ): HTMLElement => {
+    const section = element("section", `store-section store-section--${key}`);
+    const heading = element("h2", "store-section__title", title);
+    heading.id = `store-section-${key}`;
+    section.setAttribute("aria-labelledby", heading.id);
+    const grid = element("div", `store-grid store-grid--${variant}`);
+    grid.setAttribute("role", "list");
+    // A row of three is one band for the keys; the long grid is walked by
+    // position, so down goes to the card below rather than out of the grid.
+    if (variant === "row") grid.setAttribute("data-nav-row", "");
+    grid.append(...cards);
+    section.append(heading, grid);
+    return section;
+  };
+
+  /**
+   * The card set, not the state inside a card. A download stepping from 41% to
+   * 42% must never land here. The Quiky slug is part of it because a plugin
+   * that finishes loading after the first paint adds a control to cards that
+   * already exist.
+   */
+  const shelfSignature = (games: GameSummary[]): string =>
+    `${state.store}|${state.query.trim()}|${games
+      .map((game) => `${game.id}:${game.wishlisted ? 1 : 0}:${quikyTitleFor(game)?.slug ?? ""}`)
+      .join("|")}`;
+
+  const renderShelf = (games: GameSummary[]): void => {
+    const shelf = nodes.shelf;
+    const empty = nodes.emptyState;
+    if (!shelf || !empty) return;
+    const signature = shelfSignature(games);
+    if (signature !== renderedShelf) {
+      renderedShelf = signature;
+      for (const key of [...installNodes.keys()]) {
+        if (!key.startsWith("quiky:") && !key.startsWith("detail:")) installNodes.delete(key);
+      }
+      let index = 0;
+      const card = (game: GameSummary, rank?: number): HTMLElement => buildCard(game, index++, rank);
+      const sections: HTMLElement[] = [];
+      if (state.query.trim()) {
+        if (games.length) sections.push(buildSection("results", t("store.section.results"), games.map((game) => card(game)), "grid"));
+      } else {
+        const { featured, topRated, rest } = selectStoreSections(games);
+        if (featured.length) sections.push(buildSection("featured", t("store.recommended"), featured.map((game) => card(game)), "row"));
+        if (topRated.length) {
+          sections.push(
+            buildSection("top-rated", t("store.section.topRated"), topRated.map((entry) => card(entry.game, entry.rank)), "row"),
+          );
+        }
+        if (rest.length) sections.push(buildSection("rest", restSectionTitle(), rest.map((game) => card(game)), "grid"));
+      }
+      shelf.replaceChildren(...sections);
+    }
+    shelf.hidden = games.length === 0;
+    empty.hidden = games.length > 0;
+    if (games.length === 0) {
+      const brandEmpty = !state.query.trim() && state.store !== "all";
+      empty.replaceChildren(
+        iconElement(brandEmpty ? "sparkle" : "search"),
+        element("h2", "store-empty__title", brandEmpty ? t("store.empty.brand") : t("store.empty.title")),
+      );
+    }
+    renderInstallState();
+  };
+
+  const buildCard = (game: GameSummary, index: number, rank?: number): HTMLElement => {
+    const card = element("article", `store-card${rank ? " store-card--ranked" : ""}`);
     card.dataset.gameId = game.id;
     card.setAttribute("role", "listitem");
 
@@ -1098,120 +1031,50 @@ export function createStorePage(options: StorePageOptions): AppPage {
     open.type = "button";
     open.dataset.focusKey = `game-${game.id}`;
     open.dataset.navOpen = game.id;
-    // An entry of the shelf's rail: left and right step between the cards.
-    open.dataset.navItem = "";
-    open.setAttribute("aria-label", t("store.card.open", { title: game.title }));
-    open.addEventListener("click", () =>
-      options.navigate({ page: "game", gameId: game.id, from: "store" }),
+    open.setAttribute(
+      "aria-label",
+      rank ? t("store.card.ranked", { rank, title: game.title }) : t("store.card.open", { title: game.title }),
     );
-    open.addEventListener("focus", () => previewGame(game.id));
+    open.addEventListener("click", () => openDetail(game, `game-${game.id}`));
 
     const media = element("span", "store-card__media");
     const art = element("img", "store-card__art");
-    // The card wants key art composed for a small landscape frame, which is the
-    // capsule; the wide `heroUrl` banner is the page backdrop's job and crops to
-    // an unreadable sliver at this size. Each fallback is tried once.
-    const artSources = [game.landscapeUrl, game.coverUrl, game.heroUrl].filter(Boolean);
+    // The card is the key art the game is sold with — its capsule — which
+    // carries the wordmark. The wide banner is the detail's job. Each fallback
+    // is tried once.
+    const artSources = [game.landscapeUrl, game.heroUrl, game.coverUrl].filter(Boolean);
     let artIndex = 0;
-    // The block under the picture carries on with the picture, so the card
-    // needs the same file twice. It is one request: the second use is served
-    // out of the browser's cache, and a source that fails takes both with it.
-    const wearTone = (image: HTMLImageElement): void => {
-      const tone = capsuleTone(image);
-      if (!tone) return;
-      card.style.setProperty("--card-hue", `${tone.hue}`);
-      card.style.setProperty("--card-sat", `${tone.saturation}%`);
-      card.style.setProperty("--card-lum", `${tone.lightness}%`);
-    };
-
-    const takeTone = (): void => {
-      if (!art.src) return;
-      const sameOrigin = new URL(art.src, location.href).origin === location.origin;
-      if (sameOrigin) {
-        wearTone(art);
-        return;
-      }
-      // A shop's own art is another origin, and a canvas will not give up a
-      // pixel of it unless the image was asked for in CORS mode. Reading it
-      // through a second request rather than putting `crossOrigin` on the card
-      // itself keeps the two failures apart: a host that declines costs the
-      // block its colour, never the card its picture.
-      const probe = new Image();
-      probe.crossOrigin = "anonymous";
-      probe.decoding = "async";
-      probe.addEventListener("load", () => wearTone(probe), { once: true });
-      probe.src = art.src;
-    };
-    const showArt = (url: string): void => {
-      art.src = url;
-      if (url) card.style.setProperty("--card-art", `url("${url}")`);
-      else card.style.removeProperty("--card-art");
-      card.style.removeProperty("--card-hue");
-      card.style.removeProperty("--card-sat");
-      card.style.removeProperty("--card-lum");
-      if (art.complete) takeTone();
-    };
-    art.addEventListener("load", takeTone);
-    showArt(artSources[0] ?? "");
+    art.src = artSources[0] ?? "";
     art.alt = "";
     art.loading = index < 6 ? "eager" : "lazy";
     art.decoding = "async";
     art.addEventListener("error", () => {
       artIndex += 1;
-      if (artIndex < artSources.length) showArt(artSources[artIndex]);
-      else {
-        card.style.removeProperty("--card-art");
-        media.classList.add("store-card__media--missing");
-      }
+      if (artIndex < artSources.length) art.src = artSources[artIndex];
+      else media.classList.add("store-card__media--missing");
     });
+    media.append(art, element("span", "store-card__veil"));
     // Store art carries the game's name — that is what it is for. The shelf's
     // own files are `capsule.jpg`; a game that arrives live from Steam brings
-    // `capsule_616x353.jpg`, or `header.jpg` when it is too new to have a
-    // capsule. Printing a title over any of them shows the name twice.
-    const artHasWordmark = /\/(capsule[^/]*|header)\.jpg(\?|$)/.test(art.src || "");
-    media.append(art, element("span", "store-card__veil"));
+    // `capsule_616x353.jpg`, or `header.jpg`. Printing a title over any of them
+    // shows the name twice.
+    const artHasWordmark = /\/(capsule[^/]*|header)\.jpg(\?|$)/.test(artSources[0] ?? "");
+    if (!artHasWordmark) media.append(element("span", "store-card__title", game.title));
+    if (rank) {
+      const numeral = element("span", "store-card__rank", String(rank));
+      numeral.setAttribute("aria-hidden", "true");
+      media.append(numeral);
+    }
     // A shop that quoted nothing leaves the slot empty rather than printing a
-    // blank price frame the shopper would read as "free".
-    const price = formatPrice(selectBestOffer(game));
+    // blank price the shopper would read as "free".
+    const price = priceLabel(game);
     if (price) media.append(element("span", "store-card__price", price));
-    if (!artHasWordmark) {
-      const cardTitle = element("span", "store-card__title", game.title);
-      // A long name is set tighter rather than ellipsised: a shelf is for
-      // discovering games, and "THE CASE OF THE GOLDEN…" discovers nothing.
-      cardTitle.classList.toggle("store-card__title--long", game.title.length > 21);
-      media.append(cardTitle);
-    }
-    else media.classList.add("store-card__media--wordmark");
-
-    const body = element("span", "store-card__body");
-    body.append(element("span", "store-card__genres", genreLabel(game)));
-    const chips = element("span", "store-card__chips");
-    chips.append(
-      element("span", "store-card__chip", sessionLabel(game)),
-      element("span", "store-card__chip", modeLabel(game)),
-    );
-    body.append(chips);
-
-    const stats = element("span", "store-card__stats");
-    for (const stat of fitStats(game)) {
-      const row = element("span", "store-card__stat");
-      const dots = element("span", "store-card__dots");
-      dots.setAttribute("role", "img");
-      dots.setAttribute("aria-label", t("store.card.score", { value: stat.value }));
-      for (let dot = 0; dot < 5; dot += 1) {
-        dots.append(element("i", `store-card__dot${dot < stat.value ? " store-card__dot--on" : ""}`));
-      }
-      row.append(element("span", "store-card__stat-label", stat.label), dots);
-      stats.append(row);
-    }
-    const tagline = element("span", "store-card__tagline", taglineLabel(game));
-    tagline.classList.toggle("store-card__tagline--long", taglineLabel(game).length > 38);
-    body.append(stats, tagline);
-    open.append(media, body);
+    open.append(media);
 
     const wishlist = element("button", "store-card__wishlist");
     wishlist.type = "button";
     wishlist.dataset.focusKey = `wishlist-${game.id}`;
+    wishlist.dataset.navSkip = "";
     wishlist.setAttribute("aria-pressed", String(game.wishlisted));
     wishlist.setAttribute(
       "aria-label",
@@ -1224,8 +1087,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
       event.stopPropagation();
       void handleWishlist(game);
     });
-
-    card.append(open, wishlist);
+    // A plugin's game is not in any shop the library can wishlist from.
+    card.append(open);
+    if (!isPluginGame(game)) card.append(wishlist);
 
     const quikyTitle = quikyTitleFor(game);
     if (quikyTitle) {
@@ -1233,76 +1097,19 @@ export function createStorePage(options: StorePageOptions): AppPage {
       media.append(install.meter);
       card.append(install.button);
     }
-
-    // Pointing at a card previews it; taking the pointer away does not undo
-    // that. Reverting on `pointerleave` threw the scene back to the editorial
-    // default the instant the mouse moved, so the game you were looking at was
-    // gone before you could read it.
-    card.addEventListener("pointerenter", () => previewGame(game.id));
     return card;
   };
 
-  const syncFeatured = (): void => {
-    if (!nodes.railTrack) return;
-    const previewId = state.previewGameId;
-    pageRoot?.classList.toggle("store-page--previewing", Boolean(previewId));
-    const cards = [...nodes.railTrack.querySelectorAll<HTMLElement>(".store-card")];
-    cards.forEach((card, index) => {
-      const featured = previewId ? card.dataset.gameId === previewId : index === 0;
-      card.classList.toggle("store-card--featured", featured);
-      card.classList.toggle("store-card--previewing", Boolean(previewId) && featured);
-      // The featured card is where the keys come back to on the shelf.
-      card.querySelector(".store-card__open")?.toggleAttribute("data-nav-selected", featured);
-    });
-  };
-
   /**
-   * The card set, not the state inside a card. A download stepping from 41% to
-   * 42% must never land here. The Quiky slug is part of it because a plugin
-   * that finishes loading after the first paint adds a control to cards that
-   * already exist — and because a status of "unavailable" leaves every entry
-   * empty, which is the same string the Store had before the installer existed.
-   */
-  const cardSignature = (games: GameSummary[]): string =>
-    games
-      .map((game) => `${game.id}:${game.wishlisted ? 1 : 0}:${quikyTitleFor(game)?.slug ?? ""}`)
-      .join("|");
-
-  const renderCards = (games: GameSummary[]): void => {
-    if (!nodes.railTrack || !nodes.emptyState) return;
-    const signature = cardSignature(games);
-    if (signature !== renderedGameIds) {
-      renderedGameIds = signature;
-      installNodes.clear();
-      const fragment = document.createDocumentFragment();
-      games.forEach((game, index) => fragment.append(buildCard(game, index)));
-      nodes.railTrack.replaceChildren(fragment);
-      nodes.railTrack.scrollLeft = 0;
-    }
-    nodes.railTrack.hidden = games.length === 0;
-    nodes.emptyState.hidden = games.length > 0;
-    if (games.length === 0) {
-      nodes.emptyState.replaceChildren(
-        iconElement("search"),
-        element("h2", "store-empty__title", t("store.empty.title")),
-        element("p", "store-empty__copy", t("store.empty.copy")),
-      );
-    }
-    renderInstallState();
-    syncFeatured();
-    syncArrows();
-  };
-
-  /**
-   * Every change the installer reports. A phase tick repaints the two nodes it
+   * Every change the installer reports. A phase tick repaints the nodes it
    * owns; only a change to the card set itself — a plugin that just became
    * available, a title that just started matching — rebuilds the shelf.
    */
   const onQuikyChange = (): void => {
-    if (!nodes.railTrack) return;
+    if (!nodes.shelf) return;
     const games = visibleGames();
-    if (cardSignature(games) === renderedGameIds) renderInstallState();
-    else renderCards(games);
+    if (shelfSignature(games) === renderedShelf) renderInstallState();
+    else renderShelf(games);
     renderQuikySearch();
   };
 
@@ -1312,65 +1119,6 @@ export function createStorePage(options: StorePageOptions): AppPage {
     quiky?.dispose();
     quiky = null;
     installNodes.clear();
-  };
-
-  const renderFilters = (): void => {
-    for (const chip of nodes.categoryBar?.querySelectorAll<HTMLElement>(".store-chip") ?? []) {
-      const active = chip.dataset.category === state.category;
-      chip.classList.toggle("store-chip--active", active);
-      chip.setAttribute("aria-pressed", String(active));
-    }
-    for (const chip of nodes.platformBar?.querySelectorAll<HTMLElement>("[data-platform]") ?? []) {
-      const active = state.platforms.includes(chip.dataset.platform as StorePlatform);
-      chip.classList.toggle("store-chip--active", active);
-      chip.setAttribute("aria-pressed", String(active));
-    }
-  };
-
-  const renderMorePanel = (): void => {
-    if (!nodes.morePanel) return;
-    nodes.morePanel.hidden = !morePlatformsOpen;
-    if (!morePlatformsOpen) return;
-    const list = element("ul", "store-more-panel__list");
-    for (const status of state.home.providerStatuses) {
-      const item = element("li", "store-more-panel__item");
-      item.dataset.provider = status.provider;
-      item.dataset.health = status.health;
-      // The dot says the state; the sentence behind it is a hover away rather
-      // than a paragraph per shop.
-      item.title = status.message;
-      item.append(
-        element("span", "store-more-panel__dot"),
-        element("span", "store-more-panel__name", status.label),
-      );
-      list.append(item);
-    }
-    nodes.morePanel.replaceChildren(
-      element("p", "store-more-panel__title", t("store.sources.title")),
-      list,
-    );
-  };
-
-  const renderWhyPanel = (): void => {
-    if (!nodes.whyPanel) return;
-    nodes.whyPanel.hidden = !whyOpen;
-    if (!whyOpen) return;
-    const close = element("button", "store-why__close");
-    close.type = "button";
-    close.setAttribute("aria-label", t("store.why.close"));
-    close.append(iconElement("close"));
-    close.addEventListener("click", () => {
-      whyOpen = false;
-      renderWhyPanel();
-      nodes.heroAction?.focus();
-    });
-    nodes.whyPanel.replaceChildren(
-      close,
-      element("h2", "store-why__title", t("store.why.title")),
-      element("p", "store-why__text", t("store.why.p1")),
-      element("p", "store-why__text", t("store.why.p2")),
-      element("p", "store-why__text", t("store.why.p3")),
-    );
   };
 
   const renderStatus = (): void => {
@@ -1394,58 +1142,293 @@ export function createStorePage(options: StorePageOptions): AppPage {
     if (!pageRoot) return;
     const focusSnapshot = captureFocus();
     const games = visibleGames();
-    renderCards(games);
-    renderHero(games);
-    renderFilters();
-    renderMorePanel();
-    renderWhyPanel();
+    renderTheme();
+    renderSwitches();
+    renderMasthead();
+    renderShelf(games);
+    renderDetailFacts();
     renderStatus();
     renderQuikySearch();
     restoreFocus(focusSnapshot);
   };
 
   // ---------------------------------------------------------------------------
-  // Rail
+  // Detail
   // ---------------------------------------------------------------------------
 
-  const railStep = (): number => {
-    const track = nodes.railTrack;
-    if (!track) return 0;
-    const card = track.querySelector<HTMLElement>(".store-card");
-    if (!card) return track.clientWidth;
-    const gap = Number.parseFloat(getComputedStyle(track).columnGap || "18") || 18;
-    const perView = Math.max(1, Math.floor((track.clientWidth + gap) / (card.offsetWidth + gap)));
-    return (card.offsetWidth + gap) * perView;
+  const stopSlides = (): void => {
+    if (slideTimer) clearInterval(slideTimer);
+    slideTimer = null;
   };
+
+  const showSlide = (index: number): void => {
+    if (!detail || !nodes.detailStage || !nodes.detailDots) return;
+    const count = detail.slides.length;
+    if (count === 0) return;
+    detail.slide = ((index % count) + count) % count;
+    nodes.detailStage.querySelectorAll<HTMLElement>(".store-detail__slide").forEach((slide, position) => {
+      slide.classList.toggle("is-active", position === detail?.slide);
+    });
+    nodes.detailDots.querySelectorAll<HTMLElement>(".store-detail__dot").forEach((dot, position) => {
+      dot.setAttribute("aria-current", String(position === detail?.slide));
+    });
+  };
+
+  /** The pictures cycle on their own, and never under reduced motion. */
+  const startSlides = (): void => {
+    stopSlides();
+    if (!detail || detail.slides.length < 2 || prefersReducedMotion()) return;
+    slideTimer = setInterval(() => showSlide((detail?.slide ?? 0) + 1), DETAIL_SLIDE_MS);
+  };
+
+  const buildDetailStage = (current: OpenDetail): void => {
+    const stage = nodes.detailStage;
+    const dots = nodes.detailDots;
+    if (!stage || !dots) return;
+    stage.replaceChildren(
+      ...current.slides.map((url, index) => {
+        const slide = element("img", `store-detail__slide${index === 0 ? " is-active" : ""}`);
+        slide.src = url;
+        slide.alt = "";
+        slide.decoding = "async";
+        slide.loading = index < 2 ? "eager" : "lazy";
+        slide.addEventListener("error", () => slide.remove(), { once: true });
+        return slide;
+      }),
+    );
+    dots.hidden = current.slides.length < 2;
+    dots.replaceChildren(
+      ...current.slides.map((_, index) => {
+        const dot = element("button", "store-detail__dot");
+        dot.type = "button";
+        dot.dataset.navSkip = "";
+        dot.setAttribute("aria-label", t("store.detail.slide", { index: index + 1, count: current.slides.length }));
+        dot.setAttribute("aria-current", String(index === 0));
+        dot.addEventListener("click", () => {
+          showSlide(index);
+          startSlides();
+        });
+        return dot;
+      }),
+    );
+  };
+
+  /** Title, pills, price and verbs. Rebuilt on every render: the wishlist can change under it. */
+  const renderDetailFacts = (): void => {
+    const info = nodes.detailInfo;
+    if (!detail || !info) return;
+    const game = visibleGames().find((entry) => entry.id === detail?.game.id)
+      ?? state.home.games.find((entry) => entry.id === detail?.game.id)
+      ?? detail.game;
+    detail.game = game;
+
+    const pills = element("div", "store-detail__pills");
+    if (game.exclusiveTo) {
+      const exclusive = element("span", "store-pill store-pill--brand", exclusiveLabel(game.exclusiveTo));
+      exclusive.dataset.brand = game.exclusiveTo;
+      pills.append(exclusive);
+    }
+    const genres = genreLabel(game);
+    if (game.genres.length || game.curation?.genres.length) pills.append(element("span", "store-pill", genres));
+    if (game.curation?.duration) pills.append(element("span", "store-pill", game.curation.duration));
+    const score = criticScoreOf(game);
+    if (score !== null) pills.append(element("span", "store-pill", t("store.detail.score", { score })));
+
+    const title = element("h2", "store-detail__title", game.title);
+    title.id = "store-detail-title";
+    const lead = element("p", "store-detail__lead", game.curation?.tagline || game.shortDescription);
+
+    const buy = element("div", "store-detail__buy");
+    if (isPluginGame(game)) {
+      info.replaceChildren(pills, title, lead, buy);
+      renderPluginBuy(game as PluginStoreGame, buy);
+      return;
+    }
+    const offer = selectBestOffer(game);
+    const price = formatPrice(offer);
+    if (offer) {
+      const priceBlock = element("div", "store-detail__price");
+      if (price) priceBlock.append(element("span", "store-detail__amount", price));
+      priceBlock.append(element("span", "store-detail__offer", offerCaption(offer)));
+      buy.append(priceBlock);
+    }
+
+    const actions = element("div", "store-detail__actions");
+    if (offer && offer.availability !== "unavailable") {
+      const purchase = element("button", "store-detail__action store-detail__action--primary");
+      purchase.type = "button";
+      purchase.dataset.focusKey = "detail-buy";
+      purchase.append(iconElement("link"), element("span", "", t("store.detail.buy", { provider: offer.providerLabel })));
+      purchase.addEventListener("click", () => void handleBuy(offer));
+      actions.append(purchase);
+    }
+    if (!game.id.startsWith("plugin:") && !currentPluginTab()) {
+      const page = element("button", "store-detail__action");
+      page.type = "button";
+      page.dataset.focusKey = "detail-page";
+      page.append(element("span", "", t("store.detail.open")));
+      page.addEventListener("click", () => {
+        const gameId = game.id;
+        // Focus goes back to the card first, so coming back to the Store
+        // lands on the game that was left.
+        closeDetail();
+        options.navigate({ page: "game", gameId, from: "store" });
+      });
+      actions.append(page);
+    }
+    const wishlist = element("button", "store-detail__action store-detail__action--icon");
+    wishlist.type = "button";
+    wishlist.dataset.focusKey = "detail-wishlist";
+    wishlist.setAttribute("aria-pressed", String(game.wishlisted));
+    wishlist.setAttribute(
+      "aria-label",
+      game.wishlisted
+        ? t("store.wishlist.removeLabel", { title: game.title })
+        : t("store.wishlist.addLabel", { title: game.title }),
+    );
+    wishlist.append(iconElement(game.wishlisted ? "heart-filled" : "heart"));
+    wishlist.addEventListener("click", () => void handleWishlist(game));
+    actions.append(wishlist);
+    for (const key of [...installNodes.keys()]) if (key.startsWith("detail:")) installNodes.delete(key);
+    const quikyTitle = quikyTitleFor(game);
+    if (quikyTitle) {
+      const install = buildInstall(`detail:${game.id}`, quikyTitle, game.id);
+      install.button.classList.add("store-detail__install");
+      actions.append(install.button);
+    }
+    buy.append(actions);
+
+    info.replaceChildren(pills, title, lead, buy);
+    renderInstallState();
+  };
+
+  const isPluginGame = (game: GameSummary): boolean => currentPluginTab()?.games.some((entry) => entry.id === game.id) ?? false;
 
   /**
-   * The arrows walk the whole category, not just what is already loaded: when
-   * the track runs out of cards and the catalog has more, the next page is
-   * fetched and appended before the scroll continues.
+   * A plugin's game: its own quote, and its page in the player's browser. The
+   * host resolves the address from the id; the page never holds it.
    */
-  const scrollRail = (direction: 1 | -1): void => {
-    const track = nodes.railTrack;
-    if (!track) return;
-    const step = railStep();
-    const maximum = track.scrollWidth - track.clientWidth;
-    const target = Math.max(0, Math.min(maximum, track.scrollLeft + direction * step));
-    track.scrollTo({ left: target, behavior: "smooth" });
-    if (direction === 1 && maximum - target < step * 1.5 && state.nextCursor && activation) {
-      void browse(activation, state.nextCursor, true);
+  const renderPluginBuy = (game: PluginStoreGame, buy: HTMLElement): void => {
+    const tab = currentPluginTab();
+    const price = game.pluginPrice ? priceLabel(game) : "";
+    if (price) {
+      const priceBlock = element("div", "store-detail__price");
+      priceBlock.append(element("span", "store-detail__amount", price));
+      if (tab) priceBlock.append(element("span", "store-detail__offer", tab.label));
+      buy.append(priceBlock);
     }
-    // `scrollTo` is async; the arrows are re-evaluated once it settles.
-    window.setTimeout(syncArrows, 420);
+    const actions = element("div", "store-detail__actions");
+    if (game.hasPluginPage) {
+      const visit = element("button", "store-detail__action store-detail__action--primary");
+      visit.type = "button";
+      visit.dataset.focusKey = "detail-buy";
+      visit.append(iconElement("link"), element("span", "", t("store.detail.visit")));
+      visit.addEventListener("click", () => {
+        void openPluginStoreGamePage(game.id).catch((error: unknown) => {
+          const message = requestErrorMessage(error);
+          if (message) showTransientStatus(message);
+        });
+      });
+      actions.append(visit);
+    }
+    if (actions.childElementCount) buy.append(actions);
   };
 
-  const syncArrows = (): void => {
-    const track = nodes.railTrack;
-    if (!track || !nodes.arrowPrevious || !nodes.arrowNext) return;
-    const maximum = track.scrollWidth - track.clientWidth;
-    const atStart = track.scrollLeft <= 2;
-    const atEnd = track.scrollLeft >= maximum - 2;
-    nodes.arrowPrevious.hidden = atStart;
-    nodes.arrowNext.hidden = (atEnd && !state.nextCursor) || maximum <= 2;
+  const detailFocusTarget = (): HTMLElement | null =>
+    nodes.detail?.querySelector<HTMLElement>("[data-focus-key='detail-buy'], [data-focus-key='detail-page'], [data-focus-key='detail-close']") ?? null;
+
+  /**
+   * The detail grows out of the card it was opened from: the stage starts on
+   * the card's own rectangle and settles into place, the facts rise in after
+   * it. Under reduced motion it simply appears.
+   */
+  const animateOpen = (originKey: string | null): void => {
+    const stage = nodes.detailStage;
+    const panel = nodes.detailPanel;
+    if (!stage || !panel || prefersReducedMotion() || typeof panel.animate !== "function") return;
+    const origin = originKey ? focusTargetFor(originKey)?.querySelector<HTMLElement>(".store-card__media") : null;
+    const from = origin?.getBoundingClientRect();
+    const to = stage.getBoundingClientRect();
+    const box = panel.getBoundingClientRect();
+    if (from && from.width > 0 && to.width > 0) {
+      // The whole panel moves, scaled about the stage's centre, so the picture
+      // keeps its proportions all the way from the card and nothing clips it.
+      const originX = to.left + to.width / 2 - box.left;
+      const originY = to.top + to.height / 2 - box.top;
+      const dx = from.left + from.width / 2 - (to.left + to.width / 2);
+      const dy = from.top + from.height / 2 - (to.top + to.height / 2);
+      const scale = from.width / to.width;
+      panel.style.transformOrigin = `${originX}px ${originY}px`;
+      panel.animate(
+        [
+          { transform: `translate(${dx}px, ${dy}px) scale(${scale})`, opacity: 0.4 },
+          { transform: "none", opacity: 1 },
+        ],
+        { duration: 480, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" },
+      );
+    }
+    nodes.detailInfo?.animate(
+      [{ opacity: 0, transform: "translateY(18px)" }, { opacity: 1, transform: "none" }],
+      { duration: 380, delay: 200, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)", fill: "backwards" },
+    );
+    nodes.detail?.querySelector<HTMLElement>(".store-detail__scrim")?.animate(
+      [{ opacity: 0 }, { opacity: 1 }],
+      { duration: 320, easing: "ease-out" },
+    );
   };
+
+  const openDetail = (game: GameSummary, originKey: string | null): void => {
+    const root = nodes.detail;
+    if (!root || !nodes.body) return;
+    detail = { game, slides: detailSlides(game), slide: 0, originKey };
+    root.dataset.gameId = game.id;
+    buildDetailStage(detail);
+    renderDetailFacts();
+    root.hidden = false;
+    // Everything behind the dialog leaves the keyboard and the screen reader,
+    // so Tab and the controller stay inside it.
+    nodes.body.inert = true;
+    pageRoot?.classList.add("store-page--detail");
+    animateOpen(originKey);
+    detailFocusTarget()?.focus({ preventScroll: true });
+    startSlides();
+  };
+
+  /** Closes the detail; `returnFocus` puts focus back on the card it came from. */
+  const closeDetail = (returnFocus = true): void => {
+    const root = nodes.detail;
+    if (!detail || !root) return;
+    const originKey = detail.originKey;
+    stopSlides();
+    for (const key of [...installNodes.keys()]) if (key.startsWith("detail:")) installNodes.delete(key);
+    detail = null;
+    root.hidden = true;
+    delete root.dataset.gameId;
+    nodes.detailStage?.replaceChildren();
+    nodes.detailInfo?.replaceChildren();
+    if (nodes.body) nodes.body.inert = false;
+    pageRoot?.classList.remove("store-page--detail");
+    if (returnFocus && originKey) focusTargetFor(originKey)?.focus({ preventScroll: true });
+  };
+
+  /** Tab and Shift+Tab go round the dialog's own controls and never out of it. */
+  function trapTab(event: KeyboardEvent): void {
+    if (event.key !== "Tab" || !nodes.detail) return;
+    const stops = [...nodes.detail.querySelectorAll<HTMLElement>("button, [href], [tabindex]:not([tabindex='-1'])")].filter(
+      (node) => !node.hidden && !node.closest("[hidden]") && !(node as HTMLButtonElement).disabled,
+    );
+    if (stops.length === 0) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const active = document.activeElement;
+    if (event.shiftKey && (active === first || !nodes.detail.contains(active))) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && (active === last || !nodes.detail.contains(active))) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Focus and lifecycle
@@ -1498,18 +1481,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
     // The shell keeps every page mounted and hides the inactive ones, so a
     // window-level listener would otherwise fire while the Store is off-screen.
     if (!pageRoot?.isConnected || pageRoot.closest("[hidden]")) return;
-    if (event.key !== "Escape") return;
-    // A panel that closed used the key: a controller's B stops here instead of
-    // also leaving the Store.
-    if (whyOpen || morePlatformsOpen) event.preventDefault();
-    if (whyOpen) {
-      whyOpen = false;
-      renderWhyPanel();
-    }
-    if (morePlatformsOpen) {
-      morePlatformsOpen = false;
-      renderMorePanel();
-    }
+    if (event.key !== "Escape" || !detail) return;
+    // The detail used the key: a controller's B stops here instead of also
+    // leaving the Store.
+    event.preventDefault();
+    closeDetail();
   };
 
   const onOnline = (): void => {
@@ -1517,6 +1493,11 @@ export function createStorePage(options: StorePageOptions): AppPage {
     if (activation) void refreshSources(activation);
   };
   const onOffline = (): void => dispatch({ type: "connectivity-changed", online: false });
+
+  /** A plugin tab added, changed or removed while the Store is open. */
+  const onTabsChange = (): void => {
+    render();
+  };
 
   return {
     mount(host) {
@@ -1526,12 +1507,19 @@ export function createStorePage(options: StorePageOptions): AppPage {
       pageRoot = element("main", "store-page");
       pageRoot.tabIndex = -1;
       pageRoot.setAttribute("aria-label", t("store.page"));
+      const root = pageRoot;
+      // The host scrolls, as every page host does; the band under the topbar
+      // follows it.
+      host.addEventListener(
+        "scroll",
+        () => root.classList.toggle("store-page--scrolled", host.scrollTop > 8),
+        { passive: true },
+      );
       container.replaceChildren(pageRoot);
       buildSkeleton();
       window.addEventListener("online", onOnline);
       window.addEventListener("offline", onOffline);
       window.addEventListener("keydown", onKeyDown);
-      window.addEventListener("resize", syncArrows);
       render();
     },
     activate(context) {
@@ -1540,13 +1528,17 @@ export function createStorePage(options: StorePageOptions): AppPage {
       // Store fields readable inside the async continuation below.
       const route = context.route;
       if (route.page !== "store") return;
+      closeDetail(false);
       dispatch({
         type: "activate",
-        category: route.category,
-        platforms: route.platforms,
+        store: route.store,
         query: route.query,
         online: typeof navigator === "undefined" || navigator.onLine,
       });
+      tabsOff?.();
+      tabsOff = onStoreTabsChange(onTabsChange);
+      // A plugin installed since the last visit brings its store with it.
+      void syncPluginStoreTabs();
       requestAnimationFrame(() => {
         if (isActive(context)) restorePageState(context.restoreState);
       });
@@ -1561,25 +1553,21 @@ export function createStorePage(options: StorePageOptions): AppPage {
         void searchQuiky(context, route.query);
       });
       void loadOwned(context);
-      void loadHome(context).then(() => {
-        if (
-          isActive(context) &&
-          (route.category !== "for-you" || route.platforms.length > 0 || Boolean(route.query.trim()))
-        ) {
-          void browse(context, null, false);
-        }
+      // A change of tab is a re-activation too. The shelf it filters is the
+      // one already loaded, so the host is only asked again once it is stale.
+      const fresh = homeLoadedAt > 0 && Date.now() - homeLoadedAt < 5 * 60_000;
+      const home = fresh ? Promise.resolve() : loadHome(context);
+      void home.then(() => {
+        if (isActive(context) && route.query.trim()) void search(context, null, false);
       });
     },
     deactivate() {
-      for (const timer of [queryTimer, statusTimer, previewTimer]) {
-        if (timer) clearTimeout(timer);
-      }
-      queryTimer = null;
+      if (statusTimer) clearTimeout(statusTimer);
       statusTimer = null;
-      previewTimer = null;
       transientStatus = "";
-      morePlatformsOpen = false;
-      whyOpen = false;
+      closeDetail(false);
+      tabsOff?.();
+      tabsOff = null;
       quikySearchSequence += 1;
       quikySearchPhase = "idle";
       quikySearchMessage = "";
@@ -1591,12 +1579,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
         scrollTop: readScrollTop(),
         focusKey,
         query: state.query,
-        filters: [state.category, ...state.platforms],
+        filters: [state.store],
       };
       activation = null;
       return restoreState;
     },
   };
 }
-
-export { storeCategoryLabel };

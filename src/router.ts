@@ -1,22 +1,5 @@
-import type {
-  AppRoute,
-  GameId,
-  SettingsSection,
-  StoreCategory,
-  StorePlatform,
-} from "./contracts";
-
-const storeCategories = new Set<StoreCategory>([
-  "for-you",
-  "all-games",
-]);
-const storePlatforms = new Set<StorePlatform>([
-  "pc",
-  "playstation",
-  "xbox",
-  "switch",
-  "emulators",
-]);
+import type { AppRoute, GameId, SettingsSection } from "./contracts";
+import { isStoreTabId } from "./store-tabs";
 const settingsSections = new Set<SettingsSection>([
   "general",
   "libraries",
@@ -56,17 +39,12 @@ export function parseAppRoute(hash: string): AppRoute {
   }
 
   if (path === "/store") {
-    const requestedCategory = query.get("category") as StoreCategory | null;
-    const category = requestedCategory && storeCategories.has(requestedCategory)
-      ? requestedCategory
-      : "for-you";
-    const platforms = query
-      .getAll("platform")
-      .filter((platform): platform is StorePlatform => storePlatforms.has(platform as StorePlatform));
+    // The filters the Store had before its tabs (`category`, `platform`) are
+    // dropped rather than translated: an old link opens on "Tout".
+    const requested = query.get("store") ?? "";
     return {
       page: "store",
-      category,
-      platforms: [...new Set(platforms)],
+      store: isStoreTabId(requested) ? requested : "all",
       query: query.get("q")?.trim() ?? "",
     };
   }
@@ -115,8 +93,7 @@ export function appRouteToHash(route: AppRoute): string {
   }
   if (route.page === "store") {
     const query = new URLSearchParams();
-    if (route.category !== "for-you") query.set("category", route.category);
-    for (const platform of route.platforms) query.append("platform", platform);
+    if (route.store !== "all") query.set("store", route.store);
     if (route.query.trim()) query.set("q", route.query.trim());
     const suffix = query.size ? `?${query.toString()}` : "";
     return `#/store${suffix}`;

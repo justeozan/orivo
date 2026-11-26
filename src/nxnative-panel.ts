@@ -298,6 +298,8 @@ export interface NxnativePanelDeps {
   removed: () => void;
   /** Games folders were added or looked in: the library may have changed. */
   foldersChanged?: () => void;
+  /** The checklist was read again: the plugin's card says how it stands. */
+  statusChanged?: (status: NxnativeStatus | null) => void;
 }
 
 export interface NxnativePanel {
@@ -340,6 +342,7 @@ export function mountNxnativePanel(root: HTMLElement, deps: NxnativePanelDeps): 
     } finally {
       loading = false;
       render();
+      deps.statusChanged?.(status);
     }
     // No folder yet: Orivo makes one, as the Download button would have.
     if (shouldAutoClone(status, logs, autoCloneTried)) {

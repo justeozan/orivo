@@ -31,6 +31,9 @@ pub struct PlatformFeatures {
     /// version comes from the store, and an App Store app may not offer to
     /// update itself any other way.
     pub self_updates: bool,
+    /// Orivo can show its own data folder in the system's file manager. A
+    /// phone has no file manager an app can hand a folder to.
+    pub shows_data_folder: bool,
 }
 
 pub const CURRENT: PlatformFeatures = for_target(
@@ -55,6 +58,7 @@ pub const fn for_target(ios: bool, mobile: bool, app_store: bool) -> PlatformFea
         store_choices: mobile,
         steps_aside: !mobile,
         self_updates: !mobile && !app_store,
+        shows_data_folder: !mobile,
     }
 }
 
@@ -77,6 +81,7 @@ mod tests {
                 store_choices: true,
                 steps_aside: false,
                 self_updates: false,
+                shows_data_folder: false,
             }
         );
     }
@@ -91,6 +96,7 @@ mod tests {
                 store_choices: true,
                 steps_aside: false,
                 self_updates: false,
+                shows_data_folder: false,
             }
         );
     }
@@ -105,6 +111,7 @@ mod tests {
                 store_choices: false,
                 steps_aside: true,
                 self_updates: true,
+                shows_data_folder: true,
             }
         );
     }
@@ -119,6 +126,7 @@ mod tests {
                 store_choices: false,
                 steps_aside: true,
                 self_updates: false,
+                shows_data_folder: true,
             }
         );
     }
@@ -134,6 +142,7 @@ mod tests {
                 "storeChoices": true,
                 "stepsAside": false,
                 "selfUpdates": false,
+                "showsDataFolder": false,
             })
         );
     }

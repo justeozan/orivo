@@ -473,12 +473,7 @@ function createFakeStoreClient(games: GameSummary[]): StorePageClient {
   };
 }
 
-const storeRoute = (): AppRoute => ({
-  page: "store",
-  category: "for-you",
-  platforms: [],
-  query: "",
-});
+const storeRoute = (): AppRoute => ({ page: "store", store: "all", query: "" });
 
 let host: PageLifecycleHost | null = null;
 let container: HTMLElement | null = null;
@@ -502,7 +497,7 @@ function mountStore(
 }
 
 const railHtml = (root: HTMLElement): string => {
-  const track = root.querySelector<HTMLElement>(".store-rail__track");
+  const track = root.querySelector<HTMLElement>(".store-shelf");
   if (!track) throw new Error("The shelf did not mount.");
   return track.innerHTML;
 };

@@ -15,39 +15,6 @@ const selectedGame = (page: Page): Promise<string | null> =>
 const focusIsOnBody = (page: Page): Promise<boolean> =>
   page.evaluate(() => document.activeElement === document.body);
 
-/** How much of the focused card the Store's shelf is showing, right now, in percent. */
-const shownOfFocusedCard = (page: Page): Promise<number> =>
-  page.evaluate(() => {
-    const track = document.querySelector<HTMLElement>(".store-rail__track")!;
-    const card = document.activeElement as HTMLElement | null;
-    if (!card || !track.contains(card)) return -1;
-    const view = track.getBoundingClientRect();
-    const box = card.getBoundingClientRect();
-    const visible = Math.min(box.right, view.right) - Math.max(box.left, view.left);
-    return Math.round((Math.max(0, visible) / box.width) * 100);
-  });
-
-/**
- * Holds right on the Store's shelf: fourteen presses, a key repeat apart, and
- * the least of the focused card the shelf showed along the way.
- *
- * A held key repeats about every 45ms, faster than one eased scroll can run.
- * Restarting that ease on every press left the shelf crawling a few pixels a
- * frame while the focus ran thousands of pixels ahead of it — so what matters
- * is where the shelf is *during* the burst, not where it catches up to once the
- * key is let go.
- */
-async function holdRightOnTheShelf(page: Page): Promise<number> {
-  await page.locator(".store-rail .store-card__open").first().focus();
-  let leastShown = 100;
-  for (let press = 0; press < 14; press += 1) {
-    await page.keyboard.press("ArrowRight");
-    await page.waitForTimeout(45);
-    leastShown = Math.min(leastShown, await shownOfFocusedCard(page));
-  }
-  return leastShown;
-}
-
 test.describe("the library reads as rows: topbar, Play, games, browse bar", () => {
   test("up climbs from the game to Play, then to the topbar's Library link", async ({ page }) => {
     await openRoute(page, "#/library", "library");
@@ -295,65 +262,61 @@ test.describe("the library reads as rows: topbar, Play, games, browse bar", () =
 });
 
 test.describe("the store and settings read the same way", () => {
-  test("the store climbs from the featured card through the hero's action to the topbar", async ({ page }) => {
+  test("the store climbs from a card to the topbar, and the chevrons are on the way", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await blurEverything(page);
 
-    await page.keyboard.press("ArrowUp");
-    await expect(page.locator(".store-hero__action")).toBeFocused();
-    await page.keyboard.press("ArrowUp");
-    await expect(page.locator("[data-nav-page='store']")).toBeFocused();
+    const featured = page.locator(".store-section--featured .store-card__open");
+    await featured.first().focus();
+    let climbed = false;
+    for (let press = 0; press < 3 && !climbed; press += 1) {
+      await page.keyboard.press("ArrowUp");
+      climbed = await page.locator("[data-nav-page='store']").evaluate((node) => node === document.activeElement);
+    }
+    expect(climbed, "up reaches the topbar's Store link").toBe(true);
 
-    await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("ArrowDown");
-    await expect(page.locator(".store-rail .store-card__open").first()).toBeFocused();
-
-    // Below the shelf, the chips: the one that is on.
-    await page.keyboard.press("ArrowDown");
-    await expect(page.locator(".store-chipbar--categories .store-chip[aria-pressed='true']")).toBeFocused();
+    await page.locator("[data-focus-key='store-next']").focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => currentHash(page)).toBe("#/store?store=playstation");
   });
 
-  test("a key held down never leaves the rail behind", async ({ page }) => {
+  test("a row of three walks sideways and stops at its ends, and down goes to the next row", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await blurEverything(page);
 
-    const leastShown = await holdRightOnTheShelf(page);
-    expect(leastShown, "the focused card never ran off the shelf").toBeGreaterThan(50);
-
-    // And once the key is let go, it sits fully in view.
-    await expect.poll(() => shownOfFocusedCard(page), { timeout: 4_000 }).toBe(100);
-  });
-
-  test("a key held down keeps the rail up when frames come slowly", async ({ page }) => {
-    // A busy compositor — a CI runner's virtual Mac, a modest phone — hands out
-    // a frame every hundred milliseconds or more. The shelf's camera moves on
-    // frames, so this is where a held key used to outrun it: the shelf fell a
-    // card further behind with every press. Slow every frame down to 120ms.
-    await page.addInitScript(() => {
-      const raf = window.requestAnimationFrame.bind(window);
-      window.requestAnimationFrame = (callback) => window.setTimeout(() => raf(callback), 120);
-      window.cancelAnimationFrame = (handle) => window.clearTimeout(handle);
-    });
-    await openRoute(page, "#/store", "store");
-    await blurEverything(page);
-
-    const leastShown = await holdRightOnTheShelf(page);
-    expect(leastShown, "the focused card never ran off the shelf").toBeGreaterThan(50);
-    await expect.poll(() => shownOfFocusedCard(page), { timeout: 6_000 }).toBe(100);
-  });
-
-  test("the store rail walks sideways and wraps", async ({ page }) => {
-    await openRoute(page, "#/store", "store");
-    await blurEverything(page);
-
-    const cards = page.locator(".store-rail .store-card__open");
-    await cards.first().focus();
+    const featured = page.locator(".store-section--featured .store-card__open");
+    await featured.first().focus();
     await page.keyboard.press("ArrowRight");
-    await expect(cards.nth(1)).toBeFocused();
+    await expect(featured.nth(1)).toBeFocused();
+    await page.keyboard.press("ArrowLeft");
+    await page.keyboard.press("ArrowLeft");
+    await expect(featured.first()).toBeFocused();
 
-    await page.keyboard.press("ArrowLeft");
-    await page.keyboard.press("ArrowLeft");
-    await expect(cards.last()).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator(".store-section--top-rated .store-card__open").first()).toBeFocused();
+  });
+
+  test("the detail keeps the keys inside it until it is closed", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    await blurEverything(page);
+
+    const first = page.locator(".store-section--featured .store-card__open").first();
+    await first.focus();
+    await page.keyboard.press("Enter");
+    const dialog = page.locator("#app-page-store .store-detail");
+    await expect(dialog).toBeVisible();
+
+    for (const key of ["ArrowUp", "ArrowLeft", "ArrowDown", "ArrowRight", "Tab"]) {
+      await page.keyboard.press(key);
+      const inside = await page.evaluate(
+        () => document.querySelector("#app-page-store .store-detail")?.contains(document.activeElement) ?? false,
+      );
+      expect(inside, `${key} must not leave the detail`).toBe(true);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(first).toBeFocused();
   });
 
   test("the settings column walks with up and down, takes the section with it, and climbs to the topbar", async ({

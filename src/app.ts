@@ -1,4 +1,4 @@
-import { getTauriVersion, getVersion } from "@tauri-apps/api/app";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "./host";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -20,7 +20,9 @@ import { hostDeviceLabel, stepAsideCopy } from "./host-device";
 import { applyLogoFit, prepareLogo, type PreparedLogo } from "./logo-fit";
 import { avatarFromFile, avatarSource, cleanName, loadProfile, saveProfile } from "./profile";
 import { brandIcon, icon, type IconName } from "./icons";
-import { catalogCategories, categoryFilterChips, updateBadge, matchesCatalog, pluginCard, pluginCategory, pluginIcon, pluginPill, type PluginCategory } from "./plugin-cards";
+import { catalogCategories, categoryFilterChips, updateBadge, matchesCatalog, pluginCard, pluginCategory, pluginIcon, pluginMoreMenu, pluginPill, type MoreMenuEntry, type PluginCategory } from "./plugin-cards";
+import { defaultPluginView, managedPluginStatus, nxnativeCardStatus, pluginMetaLine, profileCount, wineCardStatus } from "./plugins-model";
+import { streamingCardStatus } from "./gamestream-setup-model";
 import {
   ALL_GAMES_SEGMENT,
   type BrowseSegment,
@@ -140,7 +142,6 @@ import {
   type StoreRegion,
   defaultProviderStatuses,
   formatDataSize,
-  formatFreshness,
   hasWallpaperKey,
   normaliseDataUsage,
   normalisePreferences,
@@ -160,6 +161,8 @@ import {
   startDownload,
   updateProgressPercent,
 } from "./updater-model";
+import { aboutHighlights } from "./about-model";
+import { RELEASE_HIGHLIGHTS } from "./release-highlights";
 import {
   createDefaultPluginManagerClient,
   createPluginManagerController,
@@ -174,6 +177,7 @@ import {
   type AvailablePluginView,
   type InstalledPluginView,
 } from "./plugin-manager";
+import { watchPluginStoreTabs } from "./plugin-store-tabs";
 import {
   createDefaultPluginHealthClient,
   phraseJournalEntry,
@@ -190,7 +194,7 @@ import {
   createGameStreamSetup,
   mountGameStreamSetup,
 } from "./gamestream-setup";
-import { mountNxnativePanel } from "./nxnative-panel";
+import { mountNxnativePanel, type NxnativeStatus } from "./nxnative-panel";
 import { createDefaultQuikyClient } from "./quiky-install";
 import { grantStoreFolder, loadStoreFolderAccess, renderStoreFolders } from "./store-folders";
 import { DESKTOP_FEATURES, loadPlatformFeatures, type PlatformFeatures } from "./platform-features";
@@ -752,11 +756,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     pluginsCatalogList: get<HTMLElement>("#plugins-catalog-list"),
     pluginsCatalogSearch: get<HTMLInputElement>("#plugins-catalog-search"),
     pluginsCatalogFilters: get<HTMLElement>("#plugins-catalog-filters"),
-    pluginsAutomaticUpdates: get<HTMLInputElement>("#plugins-automatic-updates"),
     pluginsCatalogEmpty: get<HTMLElement>("#plugins-catalog-empty"),
     pluginsCatalogGroup: get<HTMLElement>("#plugins-catalog-group"),
     pluginsDetail: get<HTMLElement>("#plugins-detail"),
-    pluginsDetailEmpty: get<HTMLElement>("#plugins-detail-empty"),
     pluginManagedPanel: get<HTMLElement>("#plugin-managed-panel"),
     wallpaperPluginPanel: get<HTMLElement>("#wallpaper-plugin-panel"),
     wallpaperCredentialsSave: get<HTMLButtonElement>("#wallpaper-credentials-save"),
@@ -789,7 +791,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     notFoundPage: get<HTMLElement>("#app-page-not-found"),
     notFoundDetail: get<HTMLElement>("#not-found-detail"),
     settingsTitle: get<HTMLElement>("#settings-page-title"),
-    settingsDescription: get<HTMLElement>("#settings-page-description"),
     settingsLayout: get<HTMLElement>(".settings-layout"),
     settingsSidebar: get<HTMLElement>(".settings-sidebar"),
     settingsPanels: Array.from(root.querySelectorAll<HTMLElement>("[data-settings-panel]")),
@@ -2368,7 +2369,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     // A pending Wine attachment cannot resolve its game until the library has
     // arrived, so the Wine plugin detail re-renders as soon as it does.
-    if (state.pluginView === "wine") {
+    if (currentPluginView() === "wine") {
       renderWineSettingsPanel();
     }
   };
@@ -2832,6 +2833,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderPluginList();
   });
   let stopWatchingPluginUpdates = (): void => {};
+  // Plugins' Store tabs: listed once the shell is painted, and again whenever
+  // the host reports a plugin installed, updated, rolled back or removed. The
+  // Store page may also call `syncPluginStoreTabs` when it opens.
+  const stopWatchingPluginStoreTabs = watchPluginStoreTabs(listen);
   if (isTauriRuntime()) {
     // The host announces releases it found but may not install without consent:
     // refresh, then say so once, wherever the user is.
@@ -2855,20 +2860,47 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   let pluginJournalById = new Map<string, PluginJournalEntryView[] | null>();
   let openPluginLogId: string | null = null;
 
-  // "Add an emulator" and the runner profiles inside Plugins & Runners own
+  // "Add an emulator" and the runner profiles inside Settings › Plugins own
   // their whole subtree (`runner-view.ts`): this call is the only thing this
   // file does with them beyond toggling the panel's `hidden` attribute.
   const runnerManager = createRunnerManagerController(createDefaultRunnerManagerClient());
   mountRunnerPanel(refs.runnersPanelBody, runnerManager, { showToast });
   // Game streaming has one place: a guided setup behind its plugin's row. It
   // owns its subtree the same way, and this file only opens and closes it.
+  const gameStreamClient = createGameStreamClient();
   const gamestreamSetup = createGameStreamSetup({
     runners: runnerManager,
-    stream: createGameStreamClient(),
+    stream: gameStreamClient,
     showToast,
     openLibrary: () => navigate({ page: "library" }),
   });
-  mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup);
+  // Its ⋯ menu also carries the plugin's own entries (update, removal, the
+  // version line): there is no other detail above it to hold them.
+  const gamestreamView = mountGameStreamSetup(refs.gamestreamSetupBody, gamestreamSetup, {
+    pluginMenu: () => {
+      const plugin = pluginManager.catalog().installed.find((entry) => entry.id === GAMESTREAM_PLUGIN_ID);
+      return plugin ? pluginMenuEntries(plugin, { withUpdate: true }) : [];
+    },
+  });
+  // Whether Settings is showing the Plugins section. The detail open by
+  // default runs things (the streaming setup asks the PC, Switch reads the
+  // Mac), so nothing is opened by default anywhere else.
+  let pluginsSectionShown = false;
+  /** What Switch's checklist said last; its card shows how it stands. */
+  let nxnativeStatus: NxnativeStatus | null = null;
+  /** The saved gaming PC, for the streaming card before its setup is opened. */
+  let streamingHost = "";
+  // The streaming card counts the games an import brings in as they land.
+  runnerManager.onChange(() => {
+    if (pluginsSectionShown) renderDiscoveredPlugins();
+  });
+  gamestreamSetup.onChange(() => {
+    const view = gamestreamSetup.snapshot();
+    if (view.opened && !view.loading && view.host.saved !== streamingHost) {
+      streamingHost = view.host.saved;
+      renderDiscoveredPlugins();
+    }
+  });
   // Native Switch games (nxnative): a Mac-only built-in, set up and built from
   // its own panel. Its build events are listened to from startup, so a build
   // left running behind another page still lands in the library.
@@ -2884,6 +2916,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         toast: (message) => showToast(message),
         libraryChanged: () => void refreshLibrary(),
         play: (gameId) => void launchGame(gameId),
+        statusChanged: (status) => {
+          nxnativeStatus = status;
+          renderDiscoveredPlugins();
+        },
         removed: () => {
           nxnativeInstalled = false;
           state.pluginView = "list";
@@ -2933,10 +2969,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   /** The registry plugin whose detail is open beside the list, if any. */
   const openManagedPluginId = (): string | null => {
-    if (state.pluginView === "game-streaming") return GAMESTREAM_PLUGIN_ID;
-    return state.pluginView.startsWith(MANAGED_PLUGIN_VIEW)
-      ? state.pluginView.slice(MANAGED_PLUGIN_VIEW.length)
-      : null;
+    const view = currentPluginView();
+    if (view === "game-streaming") return GAMESTREAM_PLUGIN_ID;
+    return view.startsWith(MANAGED_PLUGIN_VIEW) ? view.slice(MANAGED_PLUGIN_VIEW.length) : null;
   };
 
   /**
@@ -2987,7 +3022,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         ? { tone: "warn", label: progress?.message || formatInstallLabel(progress, entry) }
         : null,
       action,
-      selected: installed && state.pluginView === view,
+      selected: installed && currentPluginView() === view,
       progress: busy ? pluginPercent(progress) : null,
     });
     card.classList.add("plugin-card--catalog");
@@ -2998,27 +3033,46 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return card;
   };
 
+  /** Game streaming's card: whether it is set up, then the app and the PC. */
+  const streamingCard = (): ReturnType<typeof streamingCardStatus> => {
+    const runner = runnerManager.runners().find((entry) => entry.id === GAMESTREAM_PLUGIN_ID);
+    return streamingCardStatus({
+      issue: null,
+      profile: runner?.profiles[0] ?? null,
+      savedHost: streamingHost,
+    });
+  };
+
   const renderManagedPluginCard = (plugin: InstalledPluginView): HTMLElement => {
     const trouble = pluginTrouble(plugin);
     const update = pluginManager.progressFor(plugin.id);
     const view = managedPluginView(plugin.id);
+    // What is wrong with the plugin itself comes first; otherwise streaming
+    // says how far its setup got, and any other plugin is simply ready.
+    const streaming = plugin.id === GAMESTREAM_PLUGIN_ID ? streamingCard() : null;
+    const status =
+      streaming && !trouble && !isPluginInstallBusy(update)
+        ? streaming.status
+        : managedPluginStatus({ trouble, updating: isPluginInstallBusy(update) });
     const card = pluginCard({
       id: plugin.id,
       name: plugin.name,
       category: pluginCategory(plugin.id, plugin.name, plugin.extensions),
+      status,
       lines: [
         plugin.updateTo
           ? t("app.plugin.versionAvailable", { version: plugin.updateTo })
-          : t("app.plugin.installed"),
-        plugin.trusted ? t("app.plugins.official") : t("app.plugins.community"),
+          : streaming?.detail ||
+            (plugin.trusted ? t("app.plugins.official") : t("app.plugins.community")),
       ],
       open: { view, label: t("app.plugins.openNamed", { name: plugin.name }) },
-      flag: trouble
-        ? { tone: "warn", label: trouble }
-        : plugin.updateTo
-          ? { tone: "info", label: t("app.plugin.updateTo", { version: plugin.updateTo }) }
-          : null,
-      selected: state.pluginView === view,
+      flag:
+        status.tone === "warn"
+          ? { tone: "warn", label: status.text }
+          : plugin.updateTo
+            ? { tone: "info", label: t("app.plugin.updateTo", { version: plugin.updateTo }) }
+            : null,
+      selected: currentPluginView() === view,
       progress: update?.phase === "downloading" ? pluginPercent(update) : null,
     });
     card.dataset.pluginManaged = plugin.id;
@@ -3046,16 +3100,156 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     return card;
   };
 
-  /** A built-in's card: its detail is always one of the panels in the page. */
-  const renderBuiltInCard = (id: PluginId | "winlator", name: string, label: string): HTMLElement =>
-    pluginCard({
-      id,
-      name,
-      category: pluginCategory(id, name),
-      lines: [t("app.plugins.builtIn")],
-      open: { view: id, label },
-      selected: state.pluginView === id,
+  interface BuiltInCard {
+    id: PluginId | "winlator";
+    name: string;
+    label: string;
+    status?: ReturnType<typeof wineCardStatus>;
+    line?: string;
+    /** Why the status is amber, when there is more to say than its words. */
+    reason?: string;
+  }
+
+  /**
+   * The built-ins, in the order their cards are listed. Wine is the
+   * desktop's built-in runner; a phone has Winlator instead, set up where its
+   * games come from, under Libraries.
+   */
+  const builtInCards = (): BuiltInCard[] => {
+    const winlator = isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
+    const cards: BuiltInCard[] = [];
+    if (platformFeatures.localRunners && !winlator) {
+      const wine = state.wineSettings;
+      const profiles = wine.profiles.length;
+      cards.push({
+        id: "wine",
+        name: "Wine",
+        label: t("app.plugins.openWine"),
+        status: wineCardStatus(wine.runner, wine.loading),
+        line: profiles > 0 ? profileCount(profiles) : (wine.runner?.version ?? ""),
+        reason: wine.runner?.message,
+      });
+    }
+    if (nxnativeAvailable && nxnativeInstalled && !winlator) {
+      cards.push({
+        id: "nxnative",
+        name: t("nxnative.name"),
+        label: t("nxnative.open"),
+        status: nxnativeCardStatus(nxnativeStatus),
+        line: nxnativeStatus?.checkout ?? t("app.plugins.builtIn"),
+      });
+    }
+    // Its free sources need no key, so it always works.
+    cards.push({
+      id: "wallpaper-searcher",
+      name: "Wallpaper Searcher",
+      label: t("app.plugins.openWallpaper"),
+      status: { text: t("app.plugins.ready"), tone: "ok" },
+      line: t("app.plugins.builtIn"),
     });
+    if (winlator) {
+      cards.push({ id: "winlator", name: "Winlator", label: t("app.plugins.setupWinlator"), line: t("app.plugins.builtIn") });
+    }
+    return cards;
+  };
+
+  /** A built-in's card: its detail is always one of the panels in the page. */
+  const renderBuiltInCard = (entry: BuiltInCard): HTMLElement =>
+    pluginCard({
+      id: entry.id,
+      name: entry.name,
+      category: pluginCategory(entry.id, entry.name),
+      status: entry.status ?? null,
+      lines: [entry.line ?? ""],
+      open: { view: entry.id, label: entry.label },
+      flag:
+        entry.status?.tone === "warn"
+          ? { tone: "warn", label: entry.reason || entry.status.text }
+          : null,
+      selected: currentPluginView() === entry.id,
+    });
+
+  /** Every card's view, in list order. */
+  const pluginCardViews = (): string[] => [
+    ...builtInCards().map((entry) => entry.id),
+    ...pluginManager.catalog().installed.map((plugin) => managedPluginView(plugin.id)),
+  ];
+
+  /**
+   * The detail open beside the list: the one picked, or the first plugin's
+   * when none was. Only while the Plugins section is on screen; anywhere else
+   * nothing is open.
+   */
+  function currentPluginView(): PluginView {
+    if (!pluginsSectionShown) return state.pluginView;
+    // Winlator's card leads to Libraries; it is never opened by default.
+    return defaultPluginView<string>(state.pluginView, pluginCardViews(), (view) => view === "winlator") as PluginView;
+  }
+
+  /**
+   * A registry plugin's rare actions, for its ⋯ menu: update when the header
+   * does not already offer it, automatic updates, removal, the debug tools
+   * with Beta features on, then the version line.
+   */
+  const pluginMenuEntries = (
+    plugin: InstalledPluginView,
+    options: { withUpdate?: boolean } = {},
+  ): MoreMenuEntry[] => {
+    const debug = state.preferences.betaFeatures;
+    const automatic = pluginManager.updatePolicy().automatic;
+    const entries: MoreMenuEntry[] = [];
+    if (options.withUpdate) {
+      if (plugin.updateTo && !isPluginInstallBusy(pluginManager.progressFor(plugin.id))) {
+        entries.push({
+          kind: "item",
+          label: t("app.plugin.updateTo", { version: plugin.updateTo }),
+          icon: "download",
+          data: { pluginUpdate: plugin.id },
+        });
+      }
+      if (pluginHealthById.get(plugin.id)?.degraded) {
+        entries.push({ kind: "item", label: t("app.plugin.resume"), icon: "refresh", data: { pluginResume: plugin.id } });
+      }
+    }
+    entries.push({
+      kind: "item",
+      label: automatic ? t("app.plugins.turnOffAutoUpdates") : t("app.plugins.turnOnAutoUpdates"),
+      icon: "download",
+      data: { pluginAutoUpdates: automatic ? "off" : "on" },
+    });
+    if (debug && plugin.rollbackTo) {
+      entries.push({
+        kind: "item",
+        // Said in the entry itself, before the click that would act on it: a
+        // rollback may put a development build back in place of a signed one.
+        label:
+          plugin.rollbackTrusted === false
+            ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
+            : t("app.plugin.rollback", { version: plugin.rollbackTo }),
+        icon: "arrow-left",
+        data: { pluginRollback: plugin.id },
+      });
+    }
+    if (debug) {
+      entries.push({
+        kind: "item",
+        label: openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog"),
+        icon: "book",
+        data: { pluginLog: plugin.id },
+      });
+    }
+    entries.push(
+      { kind: "separator" },
+      { kind: "item", label: t("app.plugin.uninstall"), icon: "trash", danger: true, data: { pluginUninstall: plugin.id } },
+      {
+        kind: "meta",
+        text: pluginMetaLine({ version: plugin.version, trusted: plugin.trusted, automatic }),
+      },
+    );
+    return entries;
+  };
+  /** A registry plugin's ⋯ stays open through the repaints its own actions cause. */
+  let managedMenuOpen = false;
 
   /** The header every detail panel opens with: back (narrow only), name, pill. */
   const pluginDetailHeader = (
@@ -3109,9 +3303,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const panel = refs.pluginManagedPanel;
     const id = openManagedPluginId();
     const plugin = id ? pluginManager.catalog().installed.find((entry) => entry.id === id) : undefined;
-    panel.hidden = !plugin;
-    if (!plugin) {
+    // Streaming's own panel is the whole detail (its ⋯ holds the plugin's
+    // entries); only its log, with Beta features on, opens here.
+    const streaming = currentPluginView() === "game-streaming";
+    panel.hidden = !plugin || (streaming && openPluginLogId !== plugin.id);
+    if (!plugin || panel.hidden) {
       panel.replaceChildren();
+      managedMenuOpen = false;
+      return;
+    }
+    if (streaming) {
+      panel.replaceChildren(renderPluginLogPanel(plugin.id));
       return;
     }
     const debug = state.preferences.betaFeatures;
@@ -3138,6 +3340,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         : t("app.plugin.updating");
       headerActions.push(update);
     }
+    headerActions.push(
+      pluginMoreMenu({
+        label: t("app.plugins.more"),
+        entries: pluginMenuEntries(plugin),
+        open: managedMenuOpen,
+        onToggle: (open) => {
+          managedMenuOpen = open;
+        },
+      }),
+    );
     const category = pluginCategory(plugin.id, plugin.name, plugin.extensions);
     const header = pluginDetailHeader(plugin.id, plugin.name, category, headerActions);
 
@@ -3177,39 +3389,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (plugin.extensions.length) facts.append(pluginFact(t("app.plugins.provides"), plugin.extensions.join(", ")));
     }
 
-    const footer = document.createElement("div");
-    footer.className = "plugin-detail__footer";
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "plugin-text-button plugin-text-button--danger";
-    remove.dataset.pluginUninstall = plugin.id;
-    remove.setAttribute("aria-label", t("app.plugin.uninstallNamed", { name: plugin.name }));
-    remove.textContent = t("app.plugin.uninstall");
-    footer.append(remove);
-    if (debug && plugin.rollbackTo) {
-      const rollback = document.createElement("button");
-      rollback.type = "button";
-      rollback.className = "plugin-text-button";
-      rollback.dataset.pluginRollback = plugin.id;
-      // Said in the button itself, before the click that would act on it: a
-      // rollback may put a development build back in place of a signed one.
-      rollback.textContent =
-        plugin.rollbackTrusted === false
-          ? t("app.plugin.rollbackUnsigned", { version: plugin.rollbackTo })
-          : t("app.plugin.rollback", { version: plugin.rollbackTo });
-      footer.append(rollback);
-    }
-    if (debug) {
-      const log = document.createElement("button");
-      log.type = "button";
-      log.className = "plugin-text-button";
-      log.dataset.pluginLog = plugin.id;
-      log.setAttribute("aria-expanded", String(openPluginLogId === plugin.id));
-      log.textContent = openPluginLogId === plugin.id ? t("app.plugin.hideLog") : t("app.plugin.viewLog");
-      footer.append(log);
-    }
-
-    panel.replaceChildren(header, facts, footer);
+    panel.replaceChildren(header, facts);
     if (debug && openPluginLogId === plugin.id) panel.append(renderPluginLogPanel(plugin.id));
   };
 
@@ -3356,22 +3536,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   // The list beside the detail: the built-ins first, then whatever the
   // registry installed. Re-rendered whole: a card is cheap, and its selected
   // state follows the open view.
-  const renderDiscoveredPlugins = (): void => {
-    const winlator = isWinlatorHost(typeof navigator === "undefined" ? "" : navigator.userAgent);
-    const cards: HTMLElement[] = [];
-    // Wine is the desktop's built-in runner; a phone has Winlator instead.
-    if (platformFeatures.localRunners && !winlator) {
-      cards.push(renderBuiltInCard("wine", "Wine", t("app.plugins.openWine")));
-    }
-    if (nxnativeAvailable && nxnativeInstalled && !winlator) {
-      cards.push(renderBuiltInCard("nxnative", t("nxnative.name"), t("nxnative.open")));
-    }
-    cards.push(renderBuiltInCard("wallpaper-searcher", "Wallpaper Searcher", t("app.plugins.openWallpaper")));
-    // On Android, Winlator is the runner Orivo ships with: it is set up where
-    // its games come from, under Libraries.
-    if (winlator) cards.push(renderBuiltInCard("winlator", "Winlator", t("app.plugins.setupWinlator")));
+  function renderDiscoveredPlugins(): void {
     const installed = pluginManager.catalog().installed;
-    cards.push(...installed.map(renderManagedPluginCard));
+    const cards = [...builtInCards().map(renderBuiltInCard), ...installed.map(renderManagedPluginCard)];
     refs.pluginsInstalledList.replaceChildren(...cards);
     renderManagedPluginDetail();
 
@@ -3379,7 +3546,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (ids.join(",") !== pluginHealthIdsKey) {
       void refreshPluginHealth(ids);
     }
-  };
+  }
 
   /**
    * What Orivo is being built towards, named rather than promised in a
@@ -3506,10 +3673,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     ) {
       state.pluginView = "list";
     }
-    const view = state.pluginView;
+    const view = currentPluginView();
     renderDiscoveredPlugins();
-    refs.pluginsCatalogPanel.toggleAttribute("data-detail-open", view !== "list");
-    refs.pluginsDetailEmpty.hidden = view !== "list";
+    // Only a pick takes the list's place in a narrow window: the one open by
+    // default shows beside the list, or not at all.
+    refs.pluginsCatalogPanel.toggleAttribute("data-detail-open", state.pluginView !== "list");
     refs.wallpaperPluginPanel.hidden = view !== "wallpaper-searcher";
     refs.wineSettingsPanel.hidden = view !== "wine";
     refs.nxnativePanel.hidden = view !== "nxnative" || !nxnativePanel || !nxnativeInstalled;
@@ -3524,6 +3692,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     } else if (!settingUp && gamestreamSetupOpen) {
       gamestreamSetupOpen = false;
       gamestreamSetup.close();
+    } else if (settingUp) {
+      // The plugin's own ⋯ entries (an update, automatic updates) may have changed.
+      gamestreamView.render();
     }
     const managed = installed.find((plugin) => plugin.id === openManagedPluginId());
     const runs = Boolean(managed?.extensions.some((kind) => kind.toLocaleLowerCase().includes("runner")));
@@ -3534,13 +3705,14 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (view !== shownPluginView) {
       shownPluginView = view;
       playPluginDetailEntrance();
+      // Opened, by a pick or by default: Switch reads the Mac again.
+      if (view === "nxnative") nxnativePanel?.open();
     }
 
     // An iOS build downloads no code and starts no game itself, so what is left
     // of the section there is what is built in and works: the wallpaper search.
     refs.pluginsCatalogGroup.hidden = !platformFeatures.downloadablePlugins;
     refs.pluginsCatalogSearch.value = state.pluginCatalogSearch;
-    refs.pluginsAutomaticUpdates.checked = pluginManager.updatePolicy().automatic;
     const available = pluginManager.catalog().available;
     const term = state.pluginCatalogSearch.trim().toLocaleLowerCase();
     const matches = available.filter((entry) => matchesCatalog(entry, term, state.pluginCategoryFilter));
@@ -3560,6 +3732,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       available.length === 0
         ? t("app.plugins.noneToInstall")
         : t("app.plugins.noMatch");
+  };
+
+  /**
+   * What the cards say before their detail is ever opened: the PC streaming
+   * uses, and Switch's checklist. Both are reads; nothing is set up here.
+   */
+  const loadPluginCardFacts = async (signal: AbortSignal): Promise<void> => {
+    const [stream, nxnative] = await Promise.all([
+      gameStreamClient.load(signal).catch(() => null),
+      nxnativeAvailable && nxnativeInstalled
+        ? invoke<NxnativeStatus>("nxnative_status").catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    if (signal.aborted) return;
+    if (stream && !gamestreamSetup.snapshot().opened) streamingHost = stream.host.trim();
+    if (nxnative) nxnativeStatus = nxnative;
+    renderDiscoveredPlugins();
   };
 
   const pluginName = (pluginId: string): string => {
@@ -3597,10 +3786,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   const openPluginDetail = (id: PluginView): void => {
+    // A second press on the open card reads it again; the first is read as it opens.
+    const again = currentPluginView() === id;
     state.pluginView = id;
     renderPluginList();
     renderWineSettingsPanel();
-    if (id === "nxnative") nxnativePanel?.open();
+    if (id === "nxnative" && again) nxnativePanel?.open();
     if (id === "wine" && state.wineSettings.runner === null && !state.wineSettings.loading) {
       void refreshWineRunnerSettings();
     }
@@ -3608,9 +3799,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const renderWineSettingsPanel = (): void => {
     const settings = state.wineSettings;
-    refs.wineSettingsPanel.hidden = state.pluginView !== "wine";
+    const open = currentPluginView() === "wine";
+    refs.wineSettingsPanel.hidden = !open;
     refs.wineSettingsPanel.setAttribute("aria-busy", String(settings.loading));
-    if (state.pluginView !== "wine") {
+    if (!open) {
       return;
     }
 
@@ -3779,6 +3971,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (render) {
         renderWineSettingsPanel();
       }
+      renderDiscoveredPlugins();
       return;
     }
 
@@ -3799,6 +3992,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (render) {
       renderWineSettingsPanel();
     }
+    // The Wine card says whether the runner is ready.
+    renderDiscoveredPlugins();
   };
 
   const setWineProfileEnabled = async (profileId: string, enabled: boolean): Promise<void> => {
@@ -5797,15 +5992,52 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const renderDataUsage = (): void => {
     const size = root.querySelector<HTMLElement>("#derived-cache-size");
-    const entries = root.querySelector<HTMLElement>("#derived-cache-entries");
-    const freshness = root.querySelector<HTMLElement>("#derived-cache-freshness");
+    const bar = root.querySelector<HTMLElement>("#derived-cache-bar");
     if (size) size.textContent = formatDataSize(state.dataUsage.derivedCacheBytes);
-    if (entries) {
-      entries.textContent = state.dataUsage.derivedCacheEntries === 1
-          ? t("app.data.entryOne", { count: state.dataUsage.derivedCacheEntries.toLocaleString() })
-          : t("app.data.entryMany", { count: state.dataUsage.derivedCacheEntries.toLocaleString() });
+    // One colour for the one figure the host measures: full when there is a
+    // cache, empty once it has been cleared.
+    if (bar) bar.style.width = state.dataUsage.derivedCacheBytes > 0 ? "100%" : "0%";
+  };
+
+  /**
+   * "What's new", written large: the running version's highlights, bundled and
+   * translated (src/release-highlights.ts). The version is the host's once it
+   * has answered, the build's until then.
+   */
+  const runningVersion = (): string | null =>
+    state.update.currentVersion || (typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null);
+
+  const renderAboutNews = (): void => {
+    const section = root.querySelector<HTMLElement>("#about-news");
+    const title = root.querySelector<HTMLElement>("#about-news-title");
+    const list = root.querySelector<HTMLElement>("#about-news-list");
+    if (!section || !title || !list) return;
+    const news = aboutHighlights(RELEASE_HIGHLIGHTS, runningVersion());
+    section.hidden = !news;
+    if (!news) {
+      list.replaceChildren();
+      return;
     }
-    if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
+    title.textContent = t("app.about.newsTitle", { version: news.version });
+    list.replaceChildren(
+      ...news.items.map((item) => {
+        const row = document.createElement("li");
+        row.className = "about-news__item";
+        const tile = document.createElement("span");
+        tile.className = "plugin-icon";
+        tile.dataset.category = item.tone;
+        tile.innerHTML = icon(item.icon);
+        const copy = document.createElement("span");
+        copy.className = "about-news__copy";
+        const heading = document.createElement("strong");
+        heading.textContent = t(item.titleKey);
+        const line = document.createElement("small");
+        line.textContent = t(item.lineKey);
+        copy.append(heading, line);
+        row.append(tile, copy);
+        return row;
+      }),
+    );
   };
 
   const renderUpdatePanel = (): void => {
@@ -5828,6 +6060,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
     button.textContent = description.buttonLabel;
     button.disabled = description.buttonDisabled;
+    // The hero's one strong action is installing what is waiting; a check is
+    // offered too, but quietly.
+    const shownStatus = isTauriRuntime() ? state.update.status : "idle";
+    button.classList.toggle("is-primary", shownStatus === "available" || shownStatus === "ready");
+    status.dataset.updateStatus = shownStatus;
 
     const label = document.createElement("span");
     label.className = "update-status__label";
@@ -5836,17 +6073,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     detail.className = "update-status__detail";
     detail.textContent = description.detail;
     status.replaceChildren(label, detail);
-    // What is new, as a few bullets, when the release says so readably.
-    if (description.highlights && description.highlights.length > 0) {
-      const list = document.createElement("ul");
-      list.className = "update-status__highlights";
-      for (const line of description.highlights) {
-        const item = document.createElement("li");
-        item.textContent = line;
-        list.append(item);
-      }
-      status.append(list);
-    }
+    // Drawn with the status because the host's version arrives with it.
+    renderAboutNews();
 
     const downloading = isTauriRuntime() && state.update.status === "downloading";
     progress.hidden = !downloading;
@@ -5907,7 +6135,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       settingsSidebarEntranceTimer = restart(sidebar, settingsSidebarEntranceTimer);
     }
     setDelay(refs.settingsTitle, enteringPage ? 50 : 0);
-    setDelay(refs.settingsDescription, enteringPage ? 90 : 30);
     const panel = refs.settingsPanels.find((candidate) => !candidate.hidden);
     if (panel) {
       const lines = Array.from(
@@ -5933,7 +6160,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   ): void => {
     const definition = SETTINGS_SECTIONS.find((section) => section.id === route.section)!;
     refs.settingsTitle.textContent = definition.label;
-    refs.settingsDescription.textContent = definition.description;
     for (const button of refs.settingsSectionButtons) {
       const active = button.dataset.settingsSection === route.section;
       button.classList.toggle("is-active", active);
@@ -6130,17 +6356,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
   };
 
-  const refreshDerivedData = async (): Promise<void> => {
-    const refresh = root.querySelector<HTMLButtonElement>("#refresh-derived-data");
-    if (refresh) refresh.disabled = true;
+  /** The host holds the addresses; the page only says which one it means. */
+  const openOrivoPage = async (page: string): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast(t("app.about.linkDesktop"));
+      return;
+    }
     try {
-      if (isTauriRuntime()) await invoke("refresh_store_sources");
-      await Promise.all([loadProviderStatuses(), loadDataUsage()]);
-      showToast(t("app.data.refreshed"));
+      await invoke("open_orivo_page", { page });
     } catch (error) {
-      showToast(messageFromError(error, t("app.data.refreshFailed")));
-    } finally {
-      if (refresh) refresh.disabled = false;
+      showToast(messageFromError(error, t("app.store.openFailed")));
+    }
+  };
+
+  const openDataFolder = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast(t("app.data.folderDesktop"));
+      return;
+    }
+    try {
+      await invoke("open_data_folder");
+    } catch (error) {
+      showToast(messageFromError(error, t("app.data.folderFailed")));
     }
   };
 
@@ -6824,18 +7061,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const loadAboutVersions = async (request = settingsRequest): Promise<void> => {
     const appVersion = root.querySelector<HTMLElement>("#about-app-version");
-    const tauriVersion = root.querySelector<HTMLElement>("#about-tauri-version");
     if (!isTauriRuntime()) {
-      if (appVersion) appVersion.textContent = t("app.about.devBuild");
-      if (tauriVersion) tauriVersion.textContent = t("app.about.browserPreview");
+      // The preview names the version of the checkout it was built from,
+      // which the markup already carries.
       renderUpdatePanel();
       return;
     }
     try {
-      const [app, tauri] = await Promise.all([getVersion(), getTauriVersion()]);
+      const app = await getVersion();
       if (request !== settingsRequest) return;
       if (appVersion) appVersion.textContent = app;
-      if (tauriVersion) tauriVersion.textContent = tauri;
       // The updater copy names the running version, so it is refreshed with the
       // rest of the About metadata rather than read separately.
       state.update = { ...state.update, currentVersion: app };
@@ -7112,6 +7347,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // Consumed whatever the section was: a request that missed its page is
       // stale, not pending.
       pendingPluginView = null;
+      pluginsSectionShown = route.section === "plugins";
       renderSettingsRoute(route, enteringPage);
       renderPluginList();
       renderWineSettingsPanel();
@@ -7166,6 +7402,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       if (route.section === "data") void loadDataUsage(request);
       if (route.section === "about") void loadAboutVersions(request);
       if (route.section === "plugins") void loadWallpaperCredentials(request);
+      if (route.section === "plugins") void loadPluginCardFacts(activation.signal);
       if (activation.restoreState) refs.settingsPage.scrollTop = activation.restoreState.scrollTop;
     },
     deactivate(): PageRestoreState | null {
@@ -7173,6 +7410,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       settingsRequest += 1;
       const scrollTop = refs.settingsPage.scrollTop;
       state.pluginView = "list";
+      pluginsSectionShown = false;
       state.wineSettings.pendingDeleteProfileId = "";
       renderPluginList();
       renderWineSettingsPanel();
@@ -7295,7 +7533,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       const page = link.dataset.navPage;
       if (page === "store") {
         if (currentRoute.page === "store") return;
-        navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" });
+        navigate({ page: "store", store: "all", query: "" });
       } else if (page === "me") {
         if (currentRoute.page === "me") return;
         navigate({ page: "me" });
@@ -7398,6 +7636,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       void rollbackInstalledPlugin(rollbackId);
       return;
     }
+    const autoUpdates = target?.closest<HTMLButtonElement>("[data-plugin-auto-updates]")?.dataset
+      .pluginAutoUpdates;
+    if (autoUpdates) {
+      // The controller repaints the menu with the host's own value either way;
+      // this only needs to say why it did not stick.
+      void pluginManager.setAutomaticUpdates(autoUpdates === "on").catch((error) => {
+        showToast(pluginErrorMessage(error));
+      });
+      return;
+    }
     const logId = target?.closest<HTMLButtonElement>("[data-plugin-log]")?.dataset.pluginLog;
     if (logId) {
       void togglePluginLog(logId);
@@ -7435,13 +7683,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       .settingsAction;
     if (action === "reset-preferences") {
       void savePreferences({ reset: true });
-    } else if (action === "refresh-derived") {
-      void refreshDerivedData();
+    } else if (action === "open-data-folder" && platformFeatures.showsDataFolder) {
+      void openDataFolder();
     } else if (action === "clear-derived") {
       void clearDerivedData();
     } else if (action === "check-updates" && platformFeatures.selfUpdates) {
       void runUpdateAction();
     }
+
+    const aboutPage = target?.closest<HTMLElement>("[data-about-page]")?.dataset.aboutPage;
+    if (aboutPage) void openOrivoPage(aboutPage);
 
     if (target?.closest("#moonlight-stream-save")) {
       void saveMoonlightStream();
@@ -7459,13 +7710,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         void savePreferences({ storeRegion: target.value as StoreRegion });
       }
       return;
-    }
-    if (target instanceof HTMLInputElement && target.id === "plugins-automatic-updates") {
-      // The controller repaints the checkbox back to the host's own value
-      // either way; this only needs to say why it did not stick.
-      void pluginManager.setAutomaticUpdates(target.checked).catch((error) => {
-        showToast(pluginErrorMessage(error));
-      });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -7584,8 +7828,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         navigate(
           {
             page: "store",
-            category: current.category,
-            platforms: [...current.platforms],
+            store: current.store,
             query: refs.search.value.trim(),
           },
           { replace: true },
@@ -7606,8 +7849,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       event.preventDefault();
       navigate({
         page: "store",
-        category: route.category,
-        platforms: [...route.platforms],
+        store: route.store,
         query: refs.search.value.trim(),
       });
       return;
@@ -8021,6 +8263,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
+    const updateButton = document.querySelector<HTMLElement>("#check-updates-button");
+    if (updateButton) updateButton.hidden = !features.selfUpdates;
+    const dataFolderRow = document.querySelector<HTMLElement>("#data-folder-row");
+    if (dataFolderRow) dataFolderRow.hidden = !features.showsDataFolder;
     if (!features.storeChoices) return;
     // On iOS the Library's button reads both: an Epic game has no launcher to
     // ask there, and a GOG or Epic game goes to Playport if anywhere.
@@ -8045,7 +8291,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const hash = window.location.hash;
     const isDefaultEntry = hash === "" || hash === "#" || hash === "#/";
     if (isDefaultEntry && state.preferences.startPage === "store") {
-      navigate({ page: "store", category: "for-you", platforms: ["pc"], query: "" }, { replace: true });
+      navigate({ page: "store", store: "all", query: "" }, { replace: true });
     }
   })();
 
@@ -8094,6 +8340,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     runnerManager.dispose();
     launchSplash.dispose();
     stopWatchingPluginUpdates();
+    stopWatchingPluginStoreTabs();
   };
 }
 
@@ -8915,7 +9162,6 @@ function shell(): string {
           <div class="settings-content">
             <header class="settings-header">
               <h1 id="settings-page-title">${t("settings.general.label")}</h1>
-              <p id="settings-page-description">${t("settings.general.description")}</p>
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
@@ -9000,9 +9246,6 @@ function shell(): string {
                 ).join("")}
               </details>
 
-              <div class="settings-card__header settings-card__header--start">
-                <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences" title="${t("settings.reset.hint")}">${t("settings.reset.label")}</button>
-              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-libraries" data-settings-panel="libraries" aria-labelledby="settings-tab-libraries" tabindex="0" hidden>
@@ -9071,18 +9314,14 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-plugins" data-settings-panel="plugins" aria-labelledby="settings-tab-plugins" tabindex="0" hidden>
-              <!-- No card header: the page title already says "Plugins &
-                   Runners". The plugins Orivo has sit on the left and open
-                   their detail on the right; the catalogue runs underneath. -->
+              <!-- No card header: the page title already says "Plugins". The
+                   plugins Orivo has sit on the left and open their detail on
+                   the right (the first one when none was picked); the
+                   catalogue runs underneath. -->
               <section id="plugins-catalog-panel" class="plugins-page" data-settings-searchable>
                 <div class="plugins-split">
                   <div id="plugins-installed-list" class="plugins-mine" aria-label="${t("app.plugin.installed")}"></div>
                   <div id="plugins-detail" class="plugins-detail">
-                    <div id="plugins-detail-empty" class="plugins-detail__empty">
-                      <span class="plugins-detail__empty-mark" aria-hidden="true">${icon("puzzle")}</span>
-                      <span>${t("app.plugins.pickOne")}</span>
-                    </div>
-
                     <section id="wallpaper-plugin-panel" class="plugin-detail" aria-labelledby="wallpaper-plugin-title" hidden>
                       <header class="plugin-detail__header">
                         <button type="button" class="plugin-back-button" data-plugin-back aria-label="${t("app.plugins.backAria")}">${icon("chevron-left")}</button>
@@ -9194,19 +9433,15 @@ function shell(): string {
                 <div id="plugins-catalog-group" class="plugins-group plugins-group--catalog">
                   <div class="plugins-group__header">
                     <h2 class="plugins-group__title">${t("app.plugins.catalogue")}</h2>
+                    <label class="plugins-search">
+                      ${icon("search")}
+                      <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
+                    </label>
                     <div class="plugins-group__header-actions">
-                      <label class="plugins-automatic-updates">
-                        <input id="plugins-automatic-updates" type="checkbox" />
-                        <span>${t("app.plugins.autoUpdates")}</span>
-                      </label>
                       <button type="button" class="settings-button settings-button--quiet plugins-group__action" data-plugin-refresh-registry title="${t("app.plugins.refresh")}" aria-label="${t("app.plugins.refresh")}">${icon("refresh")}</button>
                       <button type="button" class="settings-button settings-button--quiet plugins-group__action plugins-debug-only" data-plugin-install-file title="${t("app.plugins.installFile")}" aria-label="${t("app.plugins.installFile")}">${icon("folder")}</button>
                     </div>
                   </div>
-                  <label class="plugins-search">
-                    ${icon("search")}
-                    <input id="plugins-catalog-search" type="search" class="plugins-search__input" placeholder="${t("app.plugins.searchPlaceholder")}" aria-label="${t("app.plugins.searchAria")}" />
-                  </label>
                   <div id="plugins-catalog-filters" class="plugins-filters" hidden></div>
                   <div id="plugins-catalog-list" class="plugins-catalog"></div>
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
@@ -9215,58 +9450,70 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
-              <div class="settings-card" data-settings-searchable>
+              <!-- The host measures only what it can rebuild (the derived
+                   cache), so the total is that and one bar, not a breakdown. -->
+              <div class="settings-card storage-total" data-settings-searchable>
+                <p class="storage-total__figure"><strong id="derived-cache-size">${formatDataSize(0)}</strong><span>${t("app.data.inCache")}</span></p>
+                <span class="storage-bar" aria-hidden="true"><span id="derived-cache-bar" class="storage-bar__fill"></span></span>
+              </div>
+              <div class="settings-card storage-actions" data-settings-searchable>
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>${t("app.data.cacheTitle")}</strong>
-                    <small><span id="derived-cache-entries">${t("app.data.entryMany", { count: 0 })}</span> · <span id="derived-cache-freshness">${t("app.data.notRefreshed")}</span></small>
+                    <small>${t("app.data.cacheHint")}</small>
                   </div>
-                  <span id="derived-cache-size" class="settings-metric">0 B</span>
+                  <button id="clear-derived-cache" type="button" class="plugin-install-button" data-settings-action="clear-derived">${t("app.data.clear")}</button>
                 </div>
-                <div class="settings-row settings-row--actions">
-                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">${t("app.data.refresh")}</button>
-                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">${t("app.data.clear")}</button>
+                <div id="data-folder-row" class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>${t("app.data.folder")}</strong>
+                  </div>
+                  <button id="open-data-folder" type="button" class="plugin-install-button" data-settings-action="open-data-folder">${t("app.data.open")}</button>
                 </div>
-                <p class="settings-hint">${t("app.data.hint", { device: hostDeviceLabel() })}</p>
               </div>
+              <p class="storage-safe"><span class="storage-pill">${t("app.data.safe")}</span></p>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-about" data-settings-panel="about" aria-labelledby="settings-tab-about" tabindex="0" hidden>
-              <div class="settings-card" data-settings-searchable>
-                <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>Orivo</strong>
-                    <small>${t("app.about.tagline")}</small>
-                  </div>
-                  <span id="about-app-version" class="settings-metric">—</span>
-                </div>
-                <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("app.about.tauri")}</strong>
-                    <small>${t("app.about.tauriHint")}</small>
-                  </div>
-                  <span id="about-tauri-version" class="settings-metric">—</span>
-                </div>
-                <div id="updates-row" class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("app.about.updates")}</strong>
+              <div class="settings-card about-hero" data-settings-searchable>
+                <img class="about-hero__mark" src="/media/orivo-ring-icon.png" alt="" />
+                <div class="about-hero__copy">
+                  <strong class="about-hero__title">Orivo <span id="about-app-version">${typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : ""}</span></strong>
+                  <div id="updates-row" class="about-hero__update">
                     <small id="update-status" class="update-status"></small>
                     <div id="update-progress" class="update-progress" role="progressbar" aria-label="${t("app.about.updateProgress")}" aria-valuemin="0" aria-valuemax="100" hidden>
                       <span class="update-progress__fill"></span>
                     </div>
                   </div>
-                  <button id="check-updates-button" type="button" class="settings-button" data-settings-action="check-updates">${t("app.update.check")}</button>
                 </div>
+                <button id="check-updates-button" type="button" class="plugin-install-button about-hero__action" data-settings-action="check-updates">${t("app.update.check")}</button>
               </div>
-              <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label">${t("app.about.attributions")}</p>
-                <ul class="settings-attributions">
-                  <li>${t("app.about.steamTrademark")}</li>
-                  <li>${t("app.about.wine")}</li>
-                  <li>${t("app.about.dxvk")}</li>
-                  <li>${t("app.about.listings")}</li>
-                </ul>
+              <div id="about-news" class="settings-card about-news" data-settings-searchable hidden>
+                <p id="about-news-title" class="about-news__title"></p>
+                <ul id="about-news-list" class="about-news__list"></ul>
               </div>
+              <div class="settings-card about-links" data-settings-searchable>
+                <button type="button" class="about-link" data-about-page="releases">
+                  <span>${t("app.about.allNews")}</span>${icon("chevron-right")}
+                </button>
+                <details class="about-licences">
+                  <summary class="about-link" data-nav-focusable>
+                    <span>${t("app.about.licences")}</span>${icon("chevron-right")}
+                  </summary>
+                  <ul class="settings-attributions">
+                    <li>${t("app.about.steamTrademark")}</li>
+                    <li>${t("app.about.wine")}</li>
+                    <li>${t("app.about.dxvk")}</li>
+                    <li>${t("app.about.listings")}</li>
+                  </ul>
+                </details>
+                <button type="button" class="about-link" data-about-page="new-issue">
+                  <span>${t("app.about.report")}</span>${icon("chevron-right")}
+                </button>
+              </div>
+              <p class="about-reset">
+                <button type="button" class="settings-button about-reset__button" data-settings-action="reset-preferences">${t("app.about.reset")}</button>
+              </p>
             </section>
           </div>
         </main>

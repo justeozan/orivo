@@ -13,66 +13,36 @@ import {
 const storeHost = "#app-page-store:not([hidden])";
 
 /**
- * The Store rebuild (`53c0d96`, `311a91f`) replaced the provider-pill filter
- * bar with category/platform chips over the real, generated catalogue
- * (`src/generated/store-catalog.ts`, refreshed by `pnpm store:refresh`), and
- * dropped the synthetic "Price unavailable" / stale-offer / provider-notice
- * copy that only made sense over the old all-null-price editorial fixture.
- * Real prices are fetched from Steam, so the honesty rule now lives in
- * `formatPrice`/`selectBestOffer` (covered by `store-model.test.ts`): the
- * price slot is omitted rather than filled with a placeholder when no offer
- * carries one. These specs assert the current chip/rail UI and the omission
- * behaviour, not the retired provider-pill design.
+ * The Store is one brand at a time: two chevrons walk the stores ("Tout",
+ * PlayStation, Xbox, Nintendo, Steam, Epic) routed as `?store=`, the brand's
+ * masthead names the one on screen, then its exclusives in rows of three. The bundled catalogue carries no exclusive
+ * yet, so "Tout" keeps the whole shelf and every brand shows its empty state;
+ * these specs assert exactly that, and the detail a card opens.
  */
-test.describe("Store filters", () => {
-  test("category and platform filters combine and land in the URL", async ({ page }) => {
+test.describe("Store chevrons", () => {
+  test("a chevron walks to the next store and lands in the URL", async ({ page }) => {
     await openRoute(page, "#/store", "store");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(STORE_CATALOG_SIZE);
+    await expect(page.locator(`${storeHost} .store-tab`)).toHaveCount(0);
 
-    await page.locator("[data-focus-key='category-all-games']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games");
-    const allGamesCount = await page.locator(`${storeHost} .store-card`).count();
-    expect(allGamesCount).toBeGreaterThan(0);
+    await page.locator("[data-focus-key='store-next']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?store=playstation");
+    await expect(page.locator(`${storeHost} .store-page`)).toHaveAttribute("data-store", "playstation");
+    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(0);
+    await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("No exclusives yet");
 
-    await page.locator("[data-focus-key='platform-pc']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games&platform=pc");
-    const combinedCount = await page.locator(`${storeHost} .store-card`).count();
-    expect(combinedCount).toBeGreaterThan(0);
-    expect(combinedCount).toBeLessThanOrEqual(allGamesCount);
-
-    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await expect(page.locator("[data-focus-key='category-for-you']")).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
-    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
+    await page.locator("[data-focus-key='store-previous']").click();
+    await page.locator("[data-focus-key='store-previous']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?store=epic");
   });
 
-  test("filter state survives a reload", async ({ page }) => {
-    await openRoute(page, "#/store?category=all-games&platform=pc", "store");
-    const count = await page.locator(`${storeHost} .store-card`).count();
-    expect(count).toBeGreaterThan(0);
-
+  test("the store survives a reload", async ({ page }) => {
+    await openRoute(page, "#/store?store=nintendo", "store");
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=all-games&platform=pc");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
-    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
-    // Exactly one category chip and one platform chip are pressed — no leaked state.
-    await expect(
-      page.locator(`${storeHost} .store-chipbar--categories .store-chip[aria-pressed='true']`),
-    ).toHaveCount(1);
-    await expect(
-      page.locator(`${storeHost} .store-chipbar--platforms .store-chip--platform[aria-pressed='true']`),
-    ).toHaveCount(1);
+    expect(await currentHash(page)).toBe("#/store?store=nintendo");
+    await expect(page.locator(`${storeHost} .store-page`)).toHaveAttribute("data-store", "nintendo");
   });
 
   test("a search with no matches yields an explicit empty state, not a fabricated one", async ({
@@ -83,6 +53,24 @@ test.describe("Store filters", () => {
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(0);
     await expect(page.locator(`${storeHost} .store-empty__title`)).toHaveText("No game matches");
     await expect(page.locator(`${storeHost} .store-card__price`)).toHaveCount(0);
+  });
+});
+
+test.describe("Store detail", () => {
+  test("a card opens its game in place, and Escape puts it back", async ({ page }) => {
+    await openRoute(page, "#/store", "store");
+    await page.locator(`[data-focus-key='game-${STORE_FIRST_GAME_ID}']`).click();
+
+    const dialog = page.locator(`${storeHost} .store-detail`);
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAttribute("aria-modal", "true");
+    await expect(dialog.locator(".store-detail__title")).toHaveText("Planet of Lana");
+    await expect(dialog.locator(".store-detail__amount")).toHaveText(/^\d+,\d{2}\s?€$/);
+    await expect(page.locator("[data-focus-key='detail-buy']")).toBeFocused();
+
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(`[data-focus-key='game-${STORE_FIRST_GAME_ID}']`)).toBeFocused();
   });
 });
 
@@ -105,26 +93,9 @@ test.describe("Store price honesty", () => {
       // (`selectBestOffer` + `formatPrice`, store-model.ts): "Gratuit" or a
       // "12,34 €"-shaped amount, never a placeholder or a bare number.
       if (card.price !== null) {
-        expect(card.price, `${card.id}: unrecognised price format`).toMatch(/^(Gratuit|\d+,\d{2}\s?€)$/);
+        expect(card.price, `${card.id}: unrecognised price format`).toMatch(/^(Gratuit|Free|\d+,\d{2}\s?€)$/);
       }
     }
-  });
-});
-
-test.describe("Store price sources", () => {
-  test("each source's message is a hover on its dot, and the panel stays on screen", async ({ page }) => {
-    await openRoute(page, "#/store", "store");
-    await page.click(`${storeHost} .store-chip--more`);
-    const layout = await page.evaluate(() => {
-      const panel = document.querySelector(".store-more-panel")!.getBoundingClientRect();
-      const items = [...document.querySelectorAll<HTMLElement>(".store-more-panel__item")];
-      return { panelTop: panel.top, items: items.length, untitled: items.filter((item) => !item.title).length };
-    });
-    // The sentence behind each dot is its tooltip, not a paragraph that once
-    // grew the panel up past the top of the window.
-    expect(layout.items).toBeGreaterThan(0);
-    expect(layout.untitled).toBe(0);
-    expect(layout.panelTop).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -142,8 +113,9 @@ test.describe("Store never mutates the Library", () => {
     await wishlist.click();
     await expect(wishlist).toHaveAttribute("aria-pressed", "true");
 
-    // Browse a detail page from the Store as well.
+    // Browse a detail page from the Store as well, through the card's detail.
     await page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`).click();
+    await page.locator("[data-focus-key='detail-page']").click();
     await waitForPage(page, "game");
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");
@@ -163,12 +135,10 @@ test.describe("Store never mutates the Library", () => {
 });
 
 test.describe("Store return state", () => {
-  test("navigating away and back restores the filters", async ({ page }) => {
-    await openRoute(page, "#/store", "store");
-    await page.locator("[data-focus-key='category-all-games']").click();
-    await page.locator("[data-focus-key='platform-pc']").click();
-    await expect.poll(() => currentHash(page)).toBe("#/store?category=all-games&platform=pc");
-    const count = await page.locator(`${storeHost} .store-card`).count();
+  test("navigating away and back restores the store", async ({ page }) => {
+    await openRoute(page, "#/store?store=playstation", "store");
+    await page.locator("[data-focus-key='store-next']").click();
+    await expect.poll(() => currentHash(page)).toBe("#/store?store=xbox");
 
     await page.locator("[data-nav-page='library']").click();
     await waitForPage(page, "library");
@@ -176,35 +146,23 @@ test.describe("Store return state", () => {
     await page.goBack();
     await waitForPage(page, "store");
 
-    expect(await currentHash(page)).toBe("#/store?category=all-games&platform=pc");
-    await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(count);
-    await expect(page.locator("[data-focus-key='category-all-games']")).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    await expect(page.locator("[data-focus-key='platform-pc']")).toHaveAttribute("aria-pressed", "true");
+    expect(await currentHash(page)).toBe("#/store?store=xbox");
+    await expect(page.locator(`${storeHost} .store-page`)).toHaveAttribute("data-store", "xbox");
   });
 
-  test("navigating away and back restores focus to the previously opened card", async ({ page }) => {
-    // The Store rebuild replaced the vertical grid with a single-row
-    // horizontal rail (`.store-rail__track`) that resets `scrollLeft` on every
-    // re-render, so there is no scroll offset left to restore — the intent
-    // that survives is focus, which `store-page.ts`'s `deactivate()` /
-    // `restorePageState()` still capture and reapply by `data-focus-key`.
+  test("navigating away and back restores focus to the game that was opened", async ({ page }) => {
     await openRoute(page, "#/store", "store");
 
-    const card = page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`);
-    await card.click();
+    await page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`).click();
+    await page.locator("[data-focus-key='detail-page']").click();
     await waitForPage(page, "game");
 
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");
 
     // `activate()` schedules `restorePageState()` inside a `requestAnimationFrame`
-    // (store-page.ts), one tick the click handler and `waitForPage` do not wait
-    // out on their own, so the focus read polls rather than trusting a fixed
-    // pause — the same race as the compact form-factor's `matchMedia` listener
-    // (81ea15d) and the onboarding wordmark's image decode.
+    // (store-page.ts), one tick `waitForPage` does not wait out on its own, so
+    // the focus read polls rather than trusting a fixed pause.
     await expect
       .poll(() =>
         page.evaluate(() => (document.activeElement as HTMLElement | null)?.dataset?.focusKey ?? null),
@@ -223,9 +181,9 @@ test.describe("Store return state", () => {
     await search.press("Enter");
     await expect.poll(() => currentHash(page)).toBe("#/store?q=hades");
     await expect(page.locator(`${storeHost} .store-card`)).toHaveCount(1);
-    // The card carries the store's own capsule, which is the art the game was
-    // sold with and already has its name written across it, so the card prints
-    // no title of its own. Its accessible name is what says which game it is.
+    // The card carries the store's own capsule, which already has the game's
+    // name written across it, so the card prints no title of its own. Its
+    // accessible name is what says which game it is.
     await expect(page.locator(`${storeHost} .store-card__open`)).toHaveAttribute(
       "aria-label",
       "Open Hades",

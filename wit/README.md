@@ -8,8 +8,10 @@ than being hidden in JSON or a command string.
 ## Rules
 
 - Components use one compatible world: `source-plugin`, `runner-plugin`,
-  `metadata-plugin` or `ui-plugin`. Only `runner-plugin` is invocable today; the
-  other three are still contract-only.
+  `metadata-plugin`, `ui-plugin` or `store-tab-plugin`. `runner-plugin` and
+  `store-tab-plugin` are invocable today; the other three are still
+  contract-only. A component may target a world of its own that includes two of
+  them; the host instantiates it against the one each request needs.
 - `runner.prepare-launch` returns opaque IDs only. The Orivo host validates a
   profile and constructs the native process without a shell.
 - Wine-Staging is the first-party native reference adapter for this runner
@@ -47,6 +49,18 @@ than being hidden in JSON or a command string.
   does not return is interrupted.
 - `src-tauri/fixtures/runner-fixture` is the reference third-party component for
   this contract, and the host's tests are written against it.
+- `store-tabs` adds pages to the Store, as data: up to four tabs, each a label,
+  an `#rrggbb` accent and up to 120 games (title, short description, `https`
+  pictures, genres, a price in minor units of an ISO 4217 currency, an optional
+  `https` page). The manifest declares it with the `store_tab` extension —
+  `extension-kind` has no case for it, since adding one would break every v1
+  component — and a package that declares it must export the world. The host
+  refuses an answer of the wrong *shape* whole and drops a *field* it will not
+  show; game ids come back as `<plugin id>:<id>`, and a game's page address
+  stays in the host, which opens it on request. The world imports only the
+  journal, so an answer depends on the component's bytes alone and is asked for
+  once per installed package. `src-tauri/fixtures/store-tab-fixture` is the
+  reference component, with one of each dropped field in its answer.
 
 The host validates package identity and capabilities in
 `src-tauri/src/plugin_manifest.rs`, invokes components in
@@ -99,7 +113,16 @@ answers a simulated call.
    `PluginRuntime` — the same fuel, epoch deadline and memory ceilings Orivo
    enforces — and prints the host's journal alongside the answer, so a
    `permission-denied` shows *why* rather than only that one happened.
-6. **Package it.** `.orivo-plugin` archives, signing and the registry are the
+6. **A Store tab instead, or as well.** Target `store-tab-plugin` (or a world
+   that includes it), declare `"extensions": ["store_tab"]`, and see what the
+   Store would receive:
+   ```sh
+   cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- check <your-plugin-dir>
+   cargo run --manifest-path sdk/orivo-plugin-sdk/Cargo.toml -- simulate <your-plugin-dir> \
+     --request store-tabs
+   ```
+   `src-tauri/fixtures/store-tab-fixture` is a complete one to read from.
+7. **Package it.** `.orivo-plugin` archives, signing and the registry are the
    installer's territory (`src-tauri/src/plugin_installer.rs`,
    `src-tauri/src/plugin_registry.rs`), not this SDK's. Until that flow is
    available to third parties, install a validated directory through Orivo's

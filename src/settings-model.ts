@@ -93,7 +93,6 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
   /** The sidebar tab: one word, next to the section's glyph. */
   tab: string;
   icon: IconName;
-  description: string;
 }> = [
   // Read through t() at import: the language is settled before this module
   // loads (i18n.ts reads it synchronously), and a change reloads the page.
@@ -110,7 +109,6 @@ export const SETTINGS_SECTIONS: ReadonlyArray<{
     label: t(`settings.${id}.label`),
     tab: t(`settings.${id}.tab`),
     icon,
-    description: t(`settings.${id}.description`),
   })),
 ] as const;
 

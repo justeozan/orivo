@@ -260,7 +260,7 @@ This replaces the old modal/backdrop pattern. Settings now has:
 Routes live in the hash. The parser is total: every input resolves to an `AppRoute`, never to a thrown error.
 
 - `#/library` — the default. `#`, `#/` and an empty hash all resolve here.
-- `#/store` — optional `?category=<for-you|short-sessions|strong-stories|relaxing|all-games>`, repeated `?provider=<...>`, and `?q=<text>`. An unknown category falls back to `for-you`; unknown providers are dropped; duplicates collapse. Serialising omits defaults, so the canonical Store URL is bare `#/store`.
+- `#/store` — optional `?store=<all|playstation|xbox|nintendo|steam|epic|plugin:<plugin id>[:<key>]>` and `?q=<text>`. An unknown store falls back to `all` ("Tout"); the filters of the old Store (`category`, `platform`) are dropped. Serialising omits defaults, so the canonical Store URL is bare `#/store`.
 - `#/games/<gameId>?from=library|store` — `from` accepts only those two values, anything else becomes `null`. `gameId` is percent-encoded in the hash.
 - `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `data`, `about`. `#/settings` alone means `general`; `#/settings/appearance`, folded into General, opens General and is rewritten to its address. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
 - Anything else — not-found, carrying the path it could not resolve. The page names that path and offers one way back to the Library.
@@ -288,6 +288,16 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
 - `styles.css` owns the global layer: tokens, topbar, shell, the `.app-page` hosts, the Library scene and Settings.
 - Every page added on top of the shell owns exactly one stylesheet with a class prefix reserved to it: `store-` in `store-page.css`, `gd-` in `game-detail-page.css`. A page never styles another page's classes and never restyles a shell class.
 - **A page stylesheet must not fight the shell's top padding.** The shell gives scrolling pages their clearance with `.app-page--scroll { padding-top: var(--topbar-height) }`. No negative top margin, no `padding-top: 0` on the host, no repositioning of the host, no re-declaring `position` or `inset` on `.app-page`. A page that needs full-bleed artwork under the topbar draws it inside its own root element instead of cancelling the shell's padding.
+
+### 4.2a Store — une marque à la fois
+
+Maquettes : `docs/design/store/`. On doit comprendre au premier coup d'œil que c'est un store.
+
+- **Une marque à l'écran.** Sa couleur d'ambiance lave toute la page (un seul token, `--store-accent`, enregistré comme couleur pour que le changement de store soit un fondu) ; son logo officiel et ses machines officielles tiennent le haut de page, posées sur une ligne de lumière avec leur reflet. Sources et conditions d'usage : `docs/store-brand-assets.md`.
+- **Deux chevrons, pas de barre.** Un à gauche, un à droite, qui parcourent en boucle Tout, PlayStation, Xbox, Nintendo, Steam, Epic puis les stores ajoutés par les plugins. Aucun nom de store imprimé : le masthead dit où l'on est.
+- **Des rangées de trois grandes cartes paysage** (deux sous 900 px, une sous 600 px) : « Recommandé pour toi », « Les mieux notés » numérotés 1-2-3 sur la note de la presse publiée et sur rien d'autre, puis le reste. Les cartes grandissent avec la fenêtre : une télé a des cartes plus grandes, pas plus de colonnes.
+- **Seulement les exclusivités.** Une marque n'affiche que ses exclusivités (`exclusiveTo`, une donnée curée et sourcée) ; tant qu'aucun jeu n'en porte, « Tout » garde toute l'étagère et une marque montre un état vide.
+- **Le détail s'ouvre sur place.** La carte s'agrandit en panneau : images qui défilent, prix et boutique, Acheter, Fiche du jeu, liste de souhaits. Échap ou B ferme et rend le focus à la carte ; Tab et la manette restent dans le panneau ; rien ne bouge sous mouvement réduit.
 
 ### 4.2b Page d'un jeu — un cadre, pas un document
 
@@ -333,7 +343,7 @@ Each page implements `mount` / `activate` / `deactivate` and is driven by a life
 - **L'avancé est fermé par défaut.** Les termes de recherche, la version, les journaux et les profils techniques vont dans un `<details class="plugin-more">` fermé, ou derrière Beta features.
 - **Une progression, c'est une barre et une ligne.** La ligne a la forme `Étape 2/7 · Shaders · ~12 min`, avec un seul bouton Arrêter. À la fin, une ligne : le résultat, ou l'erreur telle que l'outil l'a dite.
 - **Les titres de section** (petites capitales `plugin-detail__section`) n'apparaissent que si le panneau a au moins deux sections visibles.
-- **Les étapes guidées numérotées** (`gs-steps`) servent seulement à un parcours qu'on suit dans l'ordre une seule fois, comme l'appairage de Game streaming. Elles ne servent pas pour une liste de prérequis.
+- **Un parcours qu'on suit une seule fois** (l'appairage de Game streaming) pose **une question à la fois** dans le panneau de droite (`gs-flow`) : en grand, un seul bouton principal (`gs-cta`), les choix en tuiles (`gs-tile`, sélection = `plugin-card.is-selected`). Une fois prêt, il ne reste qu'un bouton et un menu ⋯ (`pluginMoreMenu`) pour le reste. Pas pour une liste de prérequis.
 
 #### Les composants à reprendre
 
@@ -346,7 +356,7 @@ Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
 | Ligne | `plugin-fields` / `plugin-field` · `plugin-field__label` · `plugin-field__inputs` |
 | Fiche | `plugin-facts` / `plugin-fact` (libellé · valeur) |
 | État | `ws-pill` · `ws-pill--on` |
-| Avancé | `details.plugin-more` |
+| Avancé | `details.plugin-more` · menu ⋯ `pluginMoreMenu` (`plugin-dots`, `plugin-menu`) |
 | Grille | `plugin-card` · `.source-grid .source-account-row` |
 
 #### Avant / après — Switch (nxnative), 21 novembre 2026

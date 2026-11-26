@@ -24,9 +24,8 @@ const GOLDENS: GoldenCase[] = [
     hash: "#/store",
     name: "store",
     masks: () => [],
-    // The Store's real catalogue (`src/generated/store-catalog.ts`) replaced the
-    // ten-game editorial fixture; this is the first card of an unfiltered
-    // "Pour toi" browse (`STORE_FIRST_GAME_ID` in e2e/helpers.ts).
+    // "Tout" over the bundled catalogue (`src/generated/store-catalog.ts`):
+    // the masthead, then the first rows.
   },
   {
     golden: "game-detail",
@@ -107,12 +106,10 @@ for (const golden of GOLDENS) {
         expect(widths.root.scroll, `${golden.golden}: page root`).toBeLessThanOrEqual(widths.root.client + 1);
       }
 
-      // Sideways scrolling is allowed only in the Store's card rail, which
-      // advertises itself by leaving a card peeking past the edge. The
-      // category/platform chip bars (`.store-chipbar`) fit inside both
-      // acceptance widths without overflowing, so they never reach this
-      // check; anything else scrolling sideways is content escaping its column.
-      const DELIBERATE_RAILS = ["store-rail__track"];
+      // Sideways scrolling is allowed only where a row says so; the Store has
+      // none any more (its rows wrap), so anything scrolling sideways is
+      // content escaping its column.
+      const DELIBERATE_RAILS: string[] = [];
       const scrollers = await page.evaluate(() => {
         const activePage = [...document.querySelectorAll<HTMLElement>(".app-page")].find((el) => !el.hidden)!;
         return [activePage, ...activePage.querySelectorAll<HTMLElement>("*")]
@@ -182,13 +179,14 @@ test.describe("reduced motion", () => {
   // Emulated before the first navigation so the pages read the preference on
   // their very first render (`prefersReducedMotion()` is checked at render time).
   // Orivo animates everything by default, whatever the OS says; "System" is
-  // the choice that hands the decision back to it. The browser preview keeps
-  // preferences in memory only, so the choice is made once and the pages are
-  // then reached without a reload.
+  // the choice that hands the decision back to it. It is set before boot, as
+  // the motion remembered from the last start: choosing it on the page instead
+  // left the Settings entrance, already started under "full", running on a
+  // slow runner when the page was measured.
   test.beforeEach(async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => window.localStorage.setItem("orivo.motion", "system"));
     await openRoute(page, "#/settings/general", "settings");
-    await page.locator("[data-segmented='motion'] [data-segment-value='system']").click();
     await expect(page.locator("#app")).toHaveAttribute("data-motion", "system");
   });
 

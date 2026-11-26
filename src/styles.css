@@ -1186,7 +1186,7 @@ html[data-device="phone"] .nav-indicator { display: none; }
 .steam-import-button .icon { width: 15px; height: 15px; }
 
 /* The Wine wizard stays an overlay task; Wine profiles themselves live in
-   Settings › Plugins & Runners. */
+   Settings › Plugins. */
 .wine-panel {
   position: fixed;
   z-index: 21;
@@ -2323,7 +2323,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { opacity: 1; transform: none; }
 }
 .settings-layout.is-entering .settings-header h1,
-.settings-layout.is-entering .settings-header p,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .provider-status-row,
 .settings-layout.is-entering .settings-panel:not([hidden]) .settings-group__label,
@@ -2349,9 +2348,8 @@ body[data-mood="rage"] { --violet: #f2453c; }
      sticky and short, so its own border would end half way down the panel. */
   border-left: 1px solid rgba(255,255,255,.07);
 }
-.settings-header { margin: 0 0 14px; padding-top: 4px; }
-.settings-header h1 { margin: 0 0 5px; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
-.settings-header p { margin: 0; color: #d0cadf; font-size: 13.5px; line-height: 1.5; }
+.settings-header { margin: 0 0 18px; padding-top: 4px; }
+.settings-header h1 { margin: 0; color: #f7f5fa; font-size: 25px; font-weight: 620; letter-spacing: -.03em; }
 
 .settings-panel { display: grid; gap: 0; }
 .settings-panel[hidden] { display: none; }
@@ -2601,6 +2599,126 @@ body[data-mood="rage"] { --violet: #f2453c; }
   to { background-position: 40px 0; }
 }
 
+/* Settings › Storage: the one figure the host measures, large, over its bar;
+   then a plate of rows, and the promise as a pill. */
+.settings-panel > .storage-total,
+.settings-panel > .storage-actions,
+.settings-panel > .storage-safe { border-top: 0; }
+.storage-total,
+.storage-actions {
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.storage-total { gap: 14px; padding: 22px; }
+.storage-total__figure { display: flex; align-items: baseline; gap: 10px; margin: 0; }
+.storage-total__figure strong { color: #f7f5fa; font-size: 34px; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.storage-total__figure span { color: #9b97a3; font-size: 13.5px; }
+.storage-bar { display: block; height: 6px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.10); }
+.storage-bar__fill { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--violet); transition: width 240ms ease; }
+.storage-actions { margin-top: 14px; padding: 0 18px; }
+.storage-actions .settings-row { min-height: 58px; padding: 10px 0; }
+.storage-actions .settings-row[hidden] { display: none; }
+.storage-actions .settings-row__copy { gap: 2px; }
+.storage-actions .settings-row__copy small { color: #9b97a3; font-size: 12px; }
+.storage-actions .plugin-install-button { min-width: 0; border-radius: 999px; }
+.storage-safe { margin: 12px 0 0; }
+/* Settings › About: the version in a lit plate with the one action it may
+   need, what is new written large, then the links as rows with chevrons. */
+.settings-panel > .about-hero,
+.settings-panel > .about-news,
+.settings-panel > .about-links,
+.settings-panel > .about-reset { border-top: 0; }
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background:
+    radial-gradient(70% 130% at 0% 0%, rgba(125,84,244,.26), transparent 60%),
+    linear-gradient(170deg, rgba(25,26,35,.7), rgba(16,17,26,.7));
+}
+.about-hero__mark { width: 56px; height: 56px; flex: none; object-fit: contain; }
+.about-hero__copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.about-hero__title { color: #f7f5fa; font-size: 24px; font-weight: 650; letter-spacing: -.02em; }
+.about-hero__update[hidden] { display: none; }
+.about-hero .update-status__label { color: #9b97a3; font-size: 13px; font-weight: 500; }
+/* The detail is for when something is happening or went wrong; at rest the
+   one line above says it all. */
+.about-hero .update-status__detail { display: none; color: #9b97a3; font-size: 12px; }
+.about-hero .update-status[data-update-status="downloading"] .update-status__detail,
+.about-hero .update-status[data-update-status="error"] .update-status__detail { display: block; }
+.about-hero__action { flex: none; border-radius: 999px; }
+.about-hero__action[hidden] { display: none; }
+.about-hero__action.is-primary {
+  height: 44px;
+  padding: 0 24px;
+  border-color: transparent;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 8px 24px -8px rgba(84,66,160,.8);
+  font-size: 15px;
+}
+.about-hero__action.is-primary:hover:not(:disabled),
+.about-hero__action.is-primary[data-nav-focus] { border-color: transparent; background: linear-gradient(100deg, #d2cafa, #b6a9ea); }
+.about-news { gap: 4px; margin-top: 24px; }
+.about-news__title { margin: 0 0 6px; color: #9b97a3; font-size: 13px; font-weight: 600; }
+.about-news__list { display: grid; margin: 0; padding: 0; list-style: none; }
+.about-news__item { display: flex; align-items: center; gap: 18px; padding: 14px 4px; }
+.about-news__item + .about-news__item { border-top: 1px solid rgba(255,255,255,.07); }
+.about-news__item .plugin-icon .icon { width: 24px; height: 24px; }
+.about-news__copy { display: grid; min-width: 0; gap: 4px; }
+.about-news__copy strong { color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; line-height: 1.25; }
+.about-news__copy small { color: #9b97a3; font-size: 13.5px; line-height: 1.4; }
+.about-links {
+  margin-top: 16px;
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.about-links > * + * { border-top: 1px solid rgba(255,255,255,.08); }
+.about-link {
+  display: flex;
+  width: 100%;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 0;
+  color: #f4f2f8;
+  background: none;
+  font: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  text-align: left;
+  cursor: pointer;
+  list-style: none;
+}
+.about-link::-webkit-details-marker { display: none; }
+.about-link .icon { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.about-link:hover .icon, .about-link[data-nav-focus] .icon { color: #f4f2f8; }
+.about-licences[open] > .about-link .icon { transform: rotate(90deg); }
+.about-licences .settings-attributions { padding: 0 18px 16px 36px; color: #9b97a3; font-size: 12.5px; }
+.about-reset { margin: 16px 0 0; }
+.about-reset__button { color: #f09a9f; }
+.about-reset__button:hover:not(:disabled), .about-reset__button[data-nav-focus]:not(:disabled) { color: #ffb8bc; }
+
+.storage-pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid rgba(67,214,107,.35);
+  border-radius: 999px;
+  color: #a6e6b8;
+  background: rgba(67,214,107,.10);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
 /* Plugins page. The plugins Orivo has are cards on the left; the one that is
    open shows its detail on the right, so changing plugin never leaves the
    page; the catalogue runs underneath, two cards to a line. */
@@ -2623,17 +2741,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
   padding-left: clamp(20px, 3cqi, 40px);
   border-left: 1px solid rgba(255,255,255,.08);
 }
-.plugins-detail__empty {
-  display: grid;
-  min-height: 240px;
-  place-content: center;
-  justify-items: center;
-  gap: 10px;
-  color: rgba(244,242,248,.42);
-  font-size: 13px;
-}
-.plugins-detail__empty[hidden] { display: none; }
-.plugins-detail__empty-mark .icon { width: 28px; height: 28px; opacity: .6; }
 
 /* One plugin, one card: the coloured icon, the name and its pill, two short
    lines, and a single control or chevron on the right. */
@@ -2698,6 +2805,10 @@ body[data-mood="rage"] { --violet: #f2453c; }
   white-space: nowrap;
 }
 .plugin-card__copy small + small { color: rgba(244,242,248,.38); font-size: 11.5px; }
+/* How the plugin stands: green when it works, amber when something is missing. */
+.plugin-card__copy .plugin-card__status { color: rgba(244,242,248,.6); font-size: 12px; }
+.plugin-card__copy .plugin-card__status[data-tone="ok"] { color: #a6e6b8; }
+.plugin-card__copy .plugin-card__status[data-tone="warn"] { color: #f2c46d; }
 .plugin-card__chevron { display: grid; color: rgba(244,242,248,.4); transition: color 160ms ease, transform 180ms cubic-bezier(.2,.8,.2,1); }
 .plugin-card__chevron .icon { width: 16px; height: 16px; }
 .plugin-card.is-openable:hover .plugin-card__chevron { color: #fff; transform: translateX(2px); }
@@ -2766,6 +2877,43 @@ body[data-mood="rage"] { --violet: #f2453c; }
 .plugin-pill[data-category="music"] { border-color: rgba(80,220,130,.35); color: #b2f0c7; background: rgba(47,191,98,.14); }
 .plugin-pill[data-category="saves"] { border-color: rgba(170,145,255,.38); color: #d6c9ff; background: rgba(139,108,242,.14); }
 .plugin-pill[data-category="tools"] { border-color: rgba(240,190,90,.35); color: #f6dba4; background: rgba(240,180,41,.12); }
+/* A state rather than a shelf: online, offline. */
+.plugin-pill[data-tone="ok"] { border-color: rgba(67,214,107,.35); color: #a6e6b8; background: rgba(67,214,107,.10); }
+.plugin-pill[data-tone="warn"] { border-color: rgba(242,196,109,.35); color: #f2c46d; background: rgba(242,196,109,.10); }
+
+/* A detail's ⋯: the rare actions, in the glass of Play's launch menu, opening
+   downwards and right-aligned under the button. */
+.plugin-more-menu { position: relative; display: inline-flex; }
+.plugin-dots {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 50%;
+  color: #d5d1dc;
+  background: rgba(255,255,255,.05);
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.plugin-dots:hover, .plugin-dots[data-nav-focus], .plugin-dots[aria-expanded="true"] { border-color: rgba(255,255,255,.3); background: rgba(255,255,255,.1); }
+.plugin-dots .icon { width: 17px; height: 17px; }
+.play-launch-menu.plugin-menu {
+  top: calc(100% + 8px);
+  right: 0;
+  bottom: auto;
+  left: auto;
+  z-index: 30;
+  min-width: 220px;
+  background: rgba(28,28,38,.96);
+  text-align: left;
+}
+.plugin-menu__item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; font-size: 13.5px; color: #d5d1dc; }
+.plugin-menu__item .icon { width: 15px; height: 15px; flex: none; }
+.plugin-menu__item--danger { color: #f09a9f; }
+.plugin-menu__separator { margin: 4px 6px; border: 0; border-top: 1px solid rgba(255,255,255,.08); }
+.plugin-menu__meta { margin: 0; padding: 5px 11px 7px; color: #7d7789; font-size: 11.5px; }
 
 /* The one filled control on a card or a detail header. */
 .plugin-install-button {
@@ -2882,9 +3030,9 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .plugins-detail .wine-directory-empty { padding: 12px 14px; font-size: 12.5px; }
 .plugins-detail .wine-profile-card { padding: 12px 14px; gap: 6px; }
 
-/* Streaming's setup sits under the plugin's own detail, which already has
-   the header. */
-#plugin-managed-panel:not([hidden]) ~ #gamestream-setup-panel > .plugin-detail__header { display: none; }
+/* Streaming's detail is its one question: the card beside it already names
+   the plugin, so the header only comes back with the way back (narrow). */
+#gamestream-setup-panel > .plugin-detail__header { display: none; }
 
 .plugin-facts { display: grid; }
 .plugin-fact {
@@ -2949,15 +3097,17 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 /* The catalogue: a title, its two quiet actions, a hairline search, cards. */
 .plugins-group { display: grid; gap: 12px; padding-top: 22px; border-top: 1px solid rgba(255,255,255,.08); }
 .plugins-group[hidden] { display: none; }
-.plugins-group__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plugins-group__header { display: flex; align-items: center; gap: 12px 30px; }
+.plugins-group__header-actions { margin-left: auto; }
 .plugins-group__title { margin: 0; color: #f7f5fa; font-size: 19px; font-weight: 620; letter-spacing: -.02em; }
 .plugins-group__header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .plugins-group__action { width: 32px; height: 32px; padding: 0; justify-content: center; }
 .plugins-group__action .icon { width: 15px; height: 15px; }
-.plugins-automatic-updates { display: flex; align-items: center; gap: 7px; margin-right: 6px; color: #b7b2c1; font-size: 12px; }
 .plugins-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 400px), 1fr)); gap: 12px; }
 .plugins-search {
   display: flex;
+  min-width: 0;
+  flex: 1;
   height: 34px;
   max-width: 420px;
   align-items: center;
@@ -2976,11 +3126,14 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 @container (max-width: 640px) {
   .plugins-split { grid-template-columns: minmax(0, 1fr); }
   .plugins-detail { position: static; min-height: 0; padding-left: 0; border-left: 0; }
-  .plugins-detail__empty { display: none; }
   .plugins-page[data-detail-open] .plugins-mine,
   .plugins-page[data-detail-open] .plugins-group { display: none; }
   .plugins-page:not([data-detail-open]) .plugins-detail { display: none; }
+  /* The plugin open by default is not shown here, so its card is not lit. */
+  .plugins-page:not([data-detail-open]) .plugin-card.is-selected { border-color: rgba(255,255,255,.09); background: rgba(255,255,255,.028); box-shadow: none; }
+  .plugins-page:not([data-detail-open]) .plugin-card.is-selected .plugin-card__chevron { color: rgba(244,242,248,.4); }
   .plugin-back-button { display: grid; }
+  #gamestream-setup-panel > .plugin-detail__header { display: flex; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3039,57 +3192,130 @@ html:not([data-beta]) .plugins-debug-only { display: none !important; }
 .runner-directory-row__revoked { color: #f0a3a3; }
 .runner-import { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #b7b2c1; font-size: 12px; }
 
-/* Game streaming setup: four steps, one open at a time. A finished step folds
-   to a line with a tick; the one in front of the person is open; the rest wait,
-   numbered. The buttons are the Settings words-and-hairline ones used elsewhere,
-   so nothing here is a new kind of control. */
+/* Game streaming: one question at a time, centred in the detail column and
+   set large — it is read from a sofa as often as from a desk. Choices are
+   tiles in the plugin-card look; the one main button is the lavender pill. */
 #gamestream-setup-body { padding: 0; }
-.gs-steps { display: grid; margin: 0; padding: 0; list-style: none; }
-.gs-step { display: grid; gap: 10px; padding: 14px 0; }
-.gs-step + .gs-step { border-top: 1px solid rgba(255,255,255,.08); }
-.gs-step__head { display: flex; align-items: center; gap: 12px; }
-.gs-step__mark {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  flex: none;
-  place-items: center;
-  border: 1px solid rgba(255,255,255,.28);
-  border-radius: 50%;
-  color: #cec8dd;
-  font-size: 12.5px;
-  font-variant-numeric: tabular-nums;
+.gs-flow {
+  display: flex;
+  min-height: 330px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
 }
-.gs-step__copy { display: grid; min-width: 0; flex: 1; gap: 2px; }
-.gs-step__copy strong { color: #f4f2f8; font-size: 14.5px; font-weight: 560; letter-spacing: -.01em; }
-.gs-step__copy small { overflow: hidden; color: rgba(244,242,248,.52); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
-.gs-step.is-todo .gs-step__copy strong { color: rgba(244,242,248,.55); }
-.gs-step.is-active .gs-step__mark { border-color: rgba(185,168,255,.8); color: #e7dfff; }
-.gs-step.is-done .gs-step__mark {
-  border-color: rgba(114,170,232,.78);
-  color: #dcebfa;
-  background: rgba(76,146,222,.14);
+.gs-flow__q { margin: 0; color: #f7f5fa; font-size: 26px; font-weight: 620; letter-spacing: -.02em; }
+.gs-flow__host { margin: 0; color: #9b97a3; font-size: 14px; }
+.gs-flow__hint { margin: 0; color: #c8c5cf; font-size: 16px; }
+.gs-flow__note { margin: 0; color: #9993a7; font-size: 13px; }
+.gs-flow__error { margin: 0; max-width: 440px; color: #f0a3a3; font-size: 13px; }
+.gs-flow__actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 14px; }
+.gs-flow__mark.plugin-icon { width: 72px; height: 72px; border-radius: 19px; }
+.gs-flow__mark.plugin-icon .icon { width: 36px; height: 36px; }
+.gs-cta {
+  display: inline-flex;
+  height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  border: 0;
+  border-radius: 999px;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 8px 24px -8px rgba(84,66,160,.8);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, transform 140ms cubic-bezier(.2,.8,.2,1);
 }
-.gs-step__body { display: grid; gap: 10px; padding-left: 38px; }
-.gs-step__content { display: grid; gap: 10px; }
-.gs-step__text { margin: 0; color: #d0cadf; font-size: 13px; line-height: 1.55; }
-.gs-step__note, .gs-step__status { margin: 0; color: #9993a7; font-size: 12.5px; line-height: 1.5; }
-.gs-step__error { margin: 0; color: #f0a3a3; font-size: 12.5px; line-height: 1.5; }
-.gs-step__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
-.gs-step .credentials-form__field { max-width: 420px; }
-/* The primary actions wear the Libraries tab's account button; it is sized for
-   a short label there, so here it only has to fit its own words. */
-.gs-primary.source-account-row__account { width: auto; min-width: 116px; }
-.gs-primary:disabled { cursor: default; opacity: .6; }
+.gs-cta:hover:not(:disabled), .gs-cta[data-nav-focus] { background: linear-gradient(100deg, #ccc3f6, #b3a6e6); }
+.gs-cta:active:not(:disabled) { transform: scale(.97); }
+.gs-cta:disabled { cursor: default; opacity: .6; }
+.gs-cta .icon { width: 16px; height: 16px; }
+.gs-tiles { display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+.gs-tile {
+  display: flex;
+  width: 160px;
+  height: 140px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  color: #f6f4fa;
+  background: rgba(255,255,255,.028);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms cubic-bezier(.2,.8,.2,1);
+}
+.gs-tile .icon { width: 34px; height: 34px; color: #c8c5cf; stroke-width: 1.4; }
+.gs-tile:hover:not(:disabled), .gs-tile[data-nav-focus] { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.05); }
+.gs-tile.is-selected {
+  border-color: rgba(185,168,255,.55);
+  background: linear-gradient(120deg, rgba(150,128,255,.16), rgba(255,255,255,.03) 70%);
+  box-shadow: 0 0 0 1px rgba(185,168,255,.18), 0 14px 34px -16px rgba(150,128,255,.9);
+}
+.gs-tile.is-selected .icon { color: #dad8ff; }
+.gs-tile--ghost { border-style: dashed; border-color: rgba(255,255,255,.18); color: #9b97a3; background: none; }
+.gs-tile--ghost .icon { color: #9b97a3; }
+.gs-tile:disabled { cursor: default; opacity: .6; }
+.gs-tile__name { max-width: 100%; overflow: hidden; font-size: 16px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.gs-address {
+  width: min(100%, 360px);
+  height: 46px;
+  padding: 0 16px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 14px;
+  outline: 0;
+  color: #f4f2f8;
+  background: rgba(10,10,16,.35);
+  font: inherit;
+  font-size: 16px;
+  text-align: center;
+}
+.gs-address:focus, .gs-address[data-nav-focus] { border-color: rgba(185,168,255,.7); }
+.gs-address::placeholder { color: rgba(244,242,248,.36); }
 /* The PIN is the one number read off this screen and typed on another machine,
    so it is set at a size that survives that walk. */
 .gs-pin {
-  color: #f2eff7;
-  font-size: 40px;
+  padding-left: .14em;
+  color: #fff;
+  font-size: 96px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  letter-spacing: .24em;
+  letter-spacing: .14em;
+  line-height: 1;
   user-select: all;
+}
+.gs-wait { display: flex; align-items: center; gap: 8px; margin: 0; color: #9b97a3; font-size: 13.5px; }
+.gs-wait__dot { width: 8px; height: 8px; border-radius: 50%; background: #7d54f4; animation: gs-pulse 1.2s ease-in-out infinite; }
+@keyframes gs-pulse { 50% { opacity: .25; } }
+.gs-host {
+  display: flex;
+  width: 100%;
+  max-width: 560px;
+  align-items: center;
+  gap: 20px;
+  padding: 22px 24px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 18px;
+  background: rgba(255,255,255,.028);
+  text-align: left;
+}
+.gs-host__mark.plugin-icon { width: 72px; height: 72px; border-radius: 18px; }
+.gs-host__mark.plugin-icon .icon { width: 34px; height: 34px; }
+.gs-host__copy { display: grid; min-width: 0; gap: 8px; }
+.gs-host__name { overflow: hidden; color: #f7f5fa; font-size: 26px; font-weight: 620; letter-spacing: -.02em; text-overflow: ellipsis; white-space: nowrap; }
+.gs-host__pills { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (prefers-reduced-motion: reduce) { .gs-wait__dot { animation: none; } }
+[data-motion="reduced"] .gs-wait__dot { animation: none; }
+@container (max-width: 640px) {
+  .gs-flow { min-height: 0; padding: 18px 0; }
+  .gs-pin { font-size: 72px; }
 }
 
 
@@ -3830,11 +4056,6 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .ws-source--recommended .plugin-field__label::after { content: " ★"; color: #c9b8ff; font-size: 11px; }
 .ws-pill { flex: none; padding: 2px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; color: rgba(244,242,248,.55); font-size: 11px; font-weight: 560; white-space: nowrap; }
 .ws-pill--on { border-color: rgba(114,170,232,.6); color: #dcebfa; background: rgba(76,146,222,.14); }
-
-/* An update's highlights: a short, airy list under the version line. */
-.update-status__highlights { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
-.update-status__highlights li { position: relative; padding-left: 16px; color: rgba(244,242,248,.82); font-size: 13px; line-height: 1.4; }
-.update-status__highlights li::before { position: absolute; top: .55em; left: 2px; width: 5px; height: 5px; border-radius: 50%; background: #b9a8ff; content: ""; }
 
 /* Each store is a small card read top to bottom: its logo, its name, then
    the one decision (Connect, or the account that turns into Disconnect). The

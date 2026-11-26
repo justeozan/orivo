@@ -65,8 +65,7 @@ test.describe("Settings is a page, not a modal", () => {
 
     await page.locator("[data-nav-page='store']").click();
     await waitForPage(page, "store");
-    // The Store nav link always requests the PC platform by default.
-    expect(await currentHash(page)).toBe("#/store?platform=pc");
+    expect(await currentHash(page)).toBe("#/store");
   });
 });
 
@@ -149,19 +148,20 @@ test.describe("Settings navigation", () => {
     await waitForPage(page, "settings");
 
     expect(await currentHash(page)).toBe("#/settings/plugins");
-    await expect(page.locator("#settings-page-title")).toHaveText("Plugins & Runners");
+    await expect(page.locator("#settings-page-title")).toHaveText("Plugins");
   });
 });
 
-test.describe("Plugins & Runners browser", () => {
-  test("the section opens the plugin browser, not the Wine panel", async ({ page }) => {
+test.describe("Plugins browser", () => {
+  test("the section opens the plugin browser with its first plugin open", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#wine-settings-panel")).toBeHidden();
+    // No empty "pick a plugin": the first card's detail is open beside the list.
+    await expect(page.locator("#plugins-detail-empty")).toHaveCount(0);
+    await expect(page.locator("#wine-settings-panel")).toBeVisible();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
-    // Nothing is open yet: the detail column asks for a pick.
-    await expect(page.locator("#plugins-detail-empty")).toBeVisible();
+    await expect(page.locator("[data-plugin-card='wine']")).toHaveClass(/is-selected/);
     // Runner profiles live in the detail of the plugin that provides them.
     await expect(page.locator("#runners-panel")).toBeHidden();
 
@@ -216,7 +216,9 @@ test.describe("Plugins & Runners browser", () => {
   test("in a narrow window a plugin's detail takes the list's place, with a way back", async ({ page }) => {
     await page.setViewportSize({ width: 620, height: 820 });
     await openRoute(page, "#/settings/plugins", "settings");
-    await expect(page.locator("#plugins-detail-empty")).toBeHidden();
+    // The plugin open by default does not take the list's place.
+    await expect(page.locator("#plugins-installed-list")).toBeVisible();
+    await expect(page.locator("#wine-settings-panel")).toBeHidden();
 
     await page.locator("[data-plugin-open='wallpaper-searcher']").click();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
@@ -228,17 +230,11 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
   });
 
-  test("Plugins & Runners offers automatic updates and a registry check, both no-ops without Tauri", async ({
-    page,
-  }) => {
+  test("Plugins offers a registry check, a no-op without Tauri", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
-    const automaticUpdates = page.locator("#plugins-automatic-updates");
-    await expect(automaticUpdates).not.toBeChecked();
-    await automaticUpdates.click();
-    // Without a desktop host the command simply cannot run; the panel must
-    // not crash or get stuck offering a promise it cannot keep.
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    // Automatic updates moved into a registry plugin's ⋯ menu.
+    await expect(page.locator("#plugins-automatic-updates")).toHaveCount(0);
 
     await page.locator("[data-plugin-refresh-registry]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
@@ -328,7 +324,8 @@ test.describe("Settings ships no fake controls", () => {
       page.locator(`[data-segmented='${preference}'] [aria-pressed='true']`);
     await expect(lit("startPage")).toHaveAttribute("data-segment-value", "library");
     await expect(page.locator("#preference-store-region")).toHaveValue("automatic");
-    await expect(page.locator("#reset-preferences")).toBeVisible();
+    // Reset lives once, at the foot of About.
+    await expect(page.locator("#settings-panel-general [data-settings-action='reset-preferences']")).toHaveCount(0);
 
     // "full" joined "system"/"reduced" when the Windows animation fix landed
     // (`b5809d2`), letting a player opt back into motion its OS says to skip;
@@ -338,11 +335,12 @@ test.describe("Settings ships no fake controls", () => {
 
     await openRoute(page, "#/settings/data", "settings");
     await expect(page.locator("#derived-cache-size")).toHaveText("0 B");
-    await expect(page.locator("#derived-cache-freshness")).toHaveText("Not refreshed yet");
+    await expect(page.locator("#clear-derived-cache")).toBeVisible();
+    await expect(page.locator("#open-data-folder")).toBeVisible();
 
     await openRoute(page, "#/settings/about", "settings");
-    await expect(page.locator("#about-app-version")).toHaveText("Development build");
-    await expect(page.locator("#about-tauri-version")).toHaveText("Browser preview");
+    await expect(page.locator("#about-app-version")).toHaveText(/^\d+\.\d+\.\d+/);
+    await expect(page.locator("#about-news-list .about-news__item").first()).toBeVisible();
     await expect(page.locator(`${settingsHost} .settings-attributions li`)).toHaveCount(4);
   });
 });

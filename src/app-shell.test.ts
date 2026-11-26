@@ -693,17 +693,18 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     expect(setup.hidden).toBe(false);
-    // The setup opens beside the list, under the plugin's own detail, and the
-    // plugin's card says it is the one open.
+    // The setup is the whole detail beside the list (the plugin's own entries
+    // wait in its ⋯), and the plugin's card says it is the one open.
     const page = root.querySelector<HTMLElement>("#plugins-catalog-panel")!;
     expect(page.hasAttribute("data-detail-open")).toBe(true);
-    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(false);
+    expect(root.querySelector<HTMLElement>("#plugin-managed-panel")!.hidden).toBe(true);
     expect(
       root.querySelector("[data-plugin-card='com.orivo.gamestream']")?.classList.contains("is-selected"),
     ).toBe(true);
-    // Nothing found on this machine, so the first step is the active one.
-    expect(setup.querySelector("[data-gs-step='client']")?.classList.contains("is-active")).toBe(true);
-    expect(setup.textContent).toContain("Install Moonlight");
+    // Nothing found on this machine, so that is the one question asked.
+    expect(setup.querySelector<HTMLElement>(".gs-flow")?.dataset.gsScreen).toBe("missing");
+    expect(setup.textContent).toContain("Moonlight is missing");
+    expect(setup.querySelector("[data-gs-action='install-moonlight']")?.textContent).toBe("Install");
     expect(setup.textContent).not.toMatch(/emulator|runner profile|granted folder|stream cards|placeholder/i);
 
     setup.querySelector<HTMLButtonElement>("[data-plugin-back]")!.click();
@@ -733,9 +734,10 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     const card = root.querySelector<HTMLElement>("[data-plugin-card='dev.example.saves']")!;
-    // Its shelf, who made it, and the mark that says there is an update.
+    // Its shelf, how it stands, and the mark that says there is an update.
     expect(card.querySelector(".plugin-pill")?.textContent).toBe("Saves");
-    expect(card.textContent).toContain("Community");
+    expect(card.querySelector(".plugin-card__status")?.textContent).toBe("Ready");
+    expect(card.textContent).toContain("v1.1.0 available");
     expect(card.querySelector(".plugin-card__flag--info")).not.toBeNull();
 
     card.querySelector<HTMLButtonElement>(".plugin-card__open")!.click();
@@ -744,12 +746,46 @@ describe("application shell against the desktop backend", () => {
     const detail = root.querySelector<HTMLElement>("#plugin-managed-panel")!;
     expect(detail.hidden).toBe(false);
     expect(detail.querySelector("[data-plugin-update='dev.example.saves']")).not.toBeNull();
-    expect(detail.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
     expect(detail.textContent).toContain("v1.0.0 → v1.1.0");
+    // Removal and automatic updates wait in the ⋯ menu, with the version line.
+    const menu = detail.querySelector<HTMLElement>(".plugin-menu")!;
+    expect(menu.hidden).toBe(true);
+    expect(menu.querySelector("[data-plugin-uninstall='dev.example.saves']")).not.toBeNull();
+    expect(menu.querySelector(".plugin-menu__meta")?.textContent).toBe("v1.0.0 · Community · Manual updates");
+    expect(root.querySelector("#plugins-automatic-updates")).toBeNull();
+    detail.querySelector<HTMLButtonElement>(".plugin-dots")!.click();
+    expect(menu.hidden).toBe(false);
+    menu.querySelector<HTMLButtonElement>("[data-plugin-auto-updates='on']")!.click();
+    await settleAll();
+    expect(tauri.invoke.mock.calls.some(([command, args]) =>
+      command === "set_plugin_update_policy" && (args as { automatic?: boolean })?.automatic === true,
+    )).toBe(true);
     // The list and the catalogue stay where they are.
     expect(root.querySelector<HTMLElement>("#plugins-catalog-panel")!.hidden).toBe(false);
     expect(root.querySelector("[data-plugin-card='dev.example.saves']")?.classList.contains("is-selected")).toBe(true);
-    expect(root.querySelector<HTMLElement>("#plugins-detail-empty")!.hidden).toBe(true);
+  });
+
+  it("opens the first plugin beside the list when none was picked, and says how each one stands", async () => {
+    mount();
+    await goto("#/settings/plugins");
+    await settleAll();
+
+    // No "pick a plugin": Wine, first in the list, is open.
+    expect(root.querySelector("#plugins-detail-empty")).toBeNull();
+    expect(root.querySelector<HTMLElement>("#wine-settings-panel")!.hidden).toBe(false);
+    const wine = root.querySelector<HTMLElement>("[data-plugin-card='wine']")!;
+    expect(wine.classList.contains("is-selected")).toBe(true);
+    // Opened by default, not picked: a narrow window still shows the list first.
+    expect(root.querySelector("#plugins-catalog-panel")!.hasAttribute("data-detail-open")).toBe(false);
+    // Its state, not "Built in", under the name.
+    const status = wine.querySelector<HTMLElement>(".plugin-card__status")!;
+    expect(status.textContent).toBe("Ready");
+    expect(status.dataset.tone).toBe("ok");
+
+    // Leaving the section opens nothing behind it.
+    await goto("#/settings/general");
+    await settleAll();
+    expect(root.querySelector<HTMLElement>("#wine-settings-panel")!.hidden).toBe(true);
   });
 
   it("shows how a finished game streaming setup stands instead of the wizard", async () => {
@@ -764,12 +800,17 @@ describe("application shell against the desktop backend", () => {
     await settleAll();
 
     const setup = root.querySelector<HTMLElement>("#gamestream-setup-panel")!;
-    expect(
-      [...setup.querySelectorAll(".gs-step")].map((step) => step.classList.contains("is-done")),
-    ).toEqual([true, true, true, true]);
-    expect(setup.textContent).toContain("Moonlight found (Moonlight)");
-    expect(setup.textContent).toContain("12 games added to your Library");
-    expect(setup.textContent).toContain("Open Library");
+    expect(setup.querySelector<HTMLElement>(".gs-flow")?.dataset.gsScreen).toBe("host");
+    expect(setup.querySelector(".gs-host__name")?.textContent).toBe("my-pc.local");
+    expect(setup.textContent).toContain("Online");
+    expect(setup.textContent).toContain("12 games");
+    expect(setup.querySelector("[data-gs-action='open-library']")?.textContent).toBe("See my games");
+    // The plugin's removal is in the setup's own ⋯ menu.
+    expect(setup.querySelector(".plugin-menu [data-plugin-uninstall='com.orivo.gamestream']")).not.toBeNull();
+    // Its card says it is ready, and with which app and PC.
+    const card = root.querySelector<HTMLElement>("[data-plugin-card='com.orivo.gamestream']")!;
+    expect(card.querySelector(".plugin-card__status")?.textContent).toBe("Ready · 12 games");
+    expect(card.textContent).toContain("Moonlight · my-pc.local");
     // The PC was asked about on arrival rather than trusted from last time.
     expect(
       tauri.invoke.mock.calls.filter(([command]) => command === "probe_gamestream_host"),

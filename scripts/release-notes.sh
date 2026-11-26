@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Prints the body of a GitHub Release: one line per pull request merged since
-# the previous release, then the download notes.
+# Prints the body of a GitHub Release: the version's highlights when it has
+# some (src/release-highlights.ts), one line per pull request merged since the
+# previous release, then the download notes.
 #
 #   scripts/release-notes.sh v0.4.3
 #
@@ -40,6 +41,16 @@ for commit in $(git log --first-parent --reverse --format='%H' "$range"); do
   case "$lines" in *"- #$number :"*) continue ;; esac
   lines+="- #$number : $title"$'\n'
 done
+
+# Highlights are a nicety: a Node too old to load them, or any other failure,
+# leaves the PR list alone rather than stopping a release.
+highlights=$(node "$(dirname "$0")/release-highlights.mjs" notes "$tag") || {
+  echo "release-notes.sh: no highlights for $tag (see above)." >&2
+  highlights=""
+}
+if [ -n "$highlights" ]; then
+  printf '%s\n\n## Pull requests\n\n' "$highlights"
+fi
 
 if [ -n "$lines" ]; then
   printf '%s' "$lines"
