@@ -108,6 +108,46 @@ mode would, through it, be naming its own argument list. When both agree on
 Every element of which the host read and validated itself. Nothing the plugin
 said reaches that vector.
 
+### From Play to the picture, and back (desktop)
+
+Moonlight shows its own pages before the stream: a "quit what is running?"
+dialog, a grey "Starting…" page, a black window. Orivo stands in front of all
+of it (`stream_session.rs`): its window floats above other apps from the
+launch until the first picture, and the splash says each step.
+
+The steps come from Moonlight's log. Moonlight prints its path on stderr
+(`Redirecting log output to /tmp/Moonlight-<epoch>.log`), and the host reads
+it as it is written:
+
+| Moonlight writes | The splash |
+| --- | --- |
+| `"<PC>" is now online at "<host>:47989"` | Connecting to the PC |
+| nothing for 2.5 s after that line | Asks: another game is open on the PC |
+| `Executing request: …/cancel?` | Closing the other game |
+| `Executing request: …/launch?` or `/resume?` | Starting or resuming on the PC |
+| `Starting RTSP handshake...` | Opening the stream |
+| `Received first video packet` | Opens onto the stream, then Orivo steps aside |
+| `Qt Critical: <message>` | The launch failed, with Moonlight's words |
+
+Moonlight does not log its "quit what is running?" dialog. It just waits on
+the answer, right after the PC answered, so silence there is read as that
+question. Orivo asks it in its own splash. "Close it and play" ends that
+Moonlight run, runs `moonlight quit <host>` and launches the game again
+through the whole launch path. If Moonlight moves on by itself after all, the
+question goes away.
+
+These lines are Moonlight 6.x's wording, not a contract. A log that stops
+moving for 40 s, or a Moonlight that never names its log, makes Orivo step out
+of the way and let Moonlight show itself. When the Moonlight process ends,
+Orivo comes back to the front and plays the way in backwards. The play time
+counted is the time since the first picture.
+
+What ends the stream is Moonlight ending. A host app that never exits keeps
+the stream open after the game closes: a Sunshine or Apollo app whose command
+is `detached` (Playnite's `--start` export, `steam://` URLs) cannot be
+followed by the host. The host side needs a command that waits for the game,
+such as Playnite Watcher for Playnite.
+
 ## The feed
 
 `GET {origin}/api/apps` against Sunshine's own web API, with Basic auth over

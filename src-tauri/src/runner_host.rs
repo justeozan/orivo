@@ -1251,9 +1251,41 @@ impl PreparedRunnerLaunch {
     }
 
     pub fn spawn(&self) -> Result<Child, RunnerHostError> {
-        self.command()
+        let mut command = self.command();
+        // Moonlight names its log on stderr before anything else, and the log
+        // is the only place it says how far a stream has got: the host reads
+        // it to know when the picture is up (`stream_session`).
+        if self.is_stream() {
+            command.stderr(Stdio::piped());
+        }
+        command
             .spawn()
             .map_err(|_| RunnerHostError::ApplicationUnavailable)
+    }
+
+    /// Whether this is the closed `stream <host> <app>` shape.
+    pub fn is_stream(&self) -> bool {
+        self.arguments.len() == 3 && self.arguments[0] == Path::new("stream")
+    }
+
+    /// The machine a stream or its `quit` is for.
+    pub fn machine(&self) -> Option<String> {
+        let verb = self.arguments.first()?;
+        (verb == Path::new("stream") || verb == Path::new("quit"))
+            .then(|| self.arguments.get(1)?.to_str().map(str::to_owned))
+            .flatten()
+    }
+
+    /// For a stream, the client's own `quit <host>`: the same program and the
+    /// same host, which this launch already validated, so ending what the
+    /// machine is running needs no new string from anywhere.
+    pub fn stream_quit(&self) -> Option<PreparedRunnerLaunch> {
+        self.is_stream().then(|| PreparedRunnerLaunch {
+            program: self.program.clone(),
+            arguments: vec![PathBuf::from("quit"), self.arguments[1].clone()],
+            working_directory: self.working_directory.clone(),
+            title: self.title.clone(),
+        })
     }
 }
 
@@ -1824,6 +1856,39 @@ fn sha256_of(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared(arguments: &[&str]) -> PreparedRunnerLaunch {
+        PreparedRunnerLaunch {
+            program: PathBuf::from("/Applications/Moonlight.app/Contents/MacOS/Moonlight"),
+            arguments: arguments.iter().map(PathBuf::from).collect(),
+            working_directory: None,
+            title: "Hades II".into(),
+        }
+    }
+
+    #[test]
+    fn a_stream_knows_its_machine_and_how_to_quit_what_runs_there() {
+        let stream = prepared(&["stream", "100.72.203.120", "Hades II"]);
+        assert!(stream.is_stream());
+        assert_eq!(stream.machine().as_deref(), Some("100.72.203.120"));
+        let quit = stream.stream_quit().expect("a stream has a quit");
+        assert_eq!(
+            quit.arguments,
+            vec![PathBuf::from("quit"), PathBuf::from("100.72.203.120")]
+        );
+        assert_eq!(quit.program, stream.program);
+        // `quit` is not itself a stream: its stderr is not read.
+        assert!(!quit.is_stream());
+        assert_eq!(quit.machine().as_deref(), Some("100.72.203.120"));
+    }
+
+    #[test]
+    fn an_emulator_launch_has_no_machine_and_nothing_to_quit() {
+        let emulator = prepared(&["/Games/Hades II.nsp"]);
+        assert!(!emulator.is_stream());
+        assert_eq!(emulator.machine(), None);
+        assert!(emulator.stream_quit().is_none());
+    }
     use crate::catalog::{RunnerGrantedDirectory, RunnerProfileSettings};
     use std::sync::atomic::AtomicU64;
 

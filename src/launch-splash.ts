@@ -20,10 +20,22 @@
    the splash stands for a short beat first, so it reads as a transition rather
    than a flicker, and a launch that shows neither signal still steps aside
    after a deadline: a game that opened behind Orivo is never left there.
+
+   A streamed game is told apart (a `stream` handoff). Moonlight opens pages
+   of its own before the picture — a question, a grey "Starting…" page, a
+   black window — and the host keeps Orivo's window above them while it reads
+   Moonlight's log (`stream_session.rs`). The splash says each step, draws the
+   link between this machine and the PC (`launch-weave.ts`), asks in its own
+   words when the PC is already running another game, and opens onto the
+   stream when its first picture arrives. When the stream ends the host brings
+   Orivo back, and the splash plays the way in backwards before the library.
+   Focus and visibility say nothing here: Moonlight takes the foreground the
+   moment it starts.
    --------------------------------------------------------------------------- */
 
 import { applyLogoFit, prepareLogo } from "./logo-fit";
-import { t } from "./i18n";
+import { t, type MessageKey } from "./i18n";
+import { createLaunchWeave, type LaunchWeave, type WeaveStage } from "./launch-weave";
 import { prefersReducedMotion } from "./motion";
 
 /**
@@ -31,7 +43,28 @@ import { prefersReducedMotion } from "./motion";
  * `window`: a game Orivo started and whose window the host watches for; it
  * says when that window is up (`gameWindow`), and Orivo steps aside then.
  */
-export type LaunchHandoff = "process" | "client" | "window";
+export type LaunchHandoff = "process" | "client" | "window" | "stream";
+
+/** A stream's steps, as the host reads them from Moonlight (`stream_session.rs`). */
+export type StreamStage =
+  | "connecting"
+  | "host-busy"
+  | "stalled"
+  | "closing"
+  | "launching"
+  | "handshake"
+  | "visible"
+  | "failed"
+  | "ended";
+
+export interface StreamUpdate {
+  stage: StreamStage;
+  /** The game is resumed rather than started on the PC. */
+  resumed?: boolean;
+}
+
+/** What the player can say to a stream that is waiting. */
+export type StreamAction = "replace" | "cancel" | "uncover";
 
 export interface LaunchSplashGame {
   id: string;
@@ -89,6 +122,13 @@ export interface LaunchSplashOptions {
   timing?: Partial<LaunchSplashTiming>;
   reducedMotion?: () => boolean;
   now?: () => number;
+  /**
+   * The player's answer to a waiting stream: quit what the PC runs and play
+   * (`replace`), stop (`cancel`), or let Moonlight show itself (`uncover`).
+   */
+  streamControl?: (gameId: string, action: StreamAction) => void;
+  /** The strings' drawing; replaced in tests. */
+  createWeave?: (strings: HTMLCanvasElement, seam: HTMLCanvasElement) => LaunchWeave;
 }
 
 export interface LaunchSplash {
@@ -99,6 +139,10 @@ export interface LaunchSplash {
   gameWindow(gameId: string, shown: boolean): void;
   /** Starting `gameId` failed, before or after the host accepted it. */
   failed(gameId: string): void;
+  /** A step of the stream started for `gameId`. */
+  stream(gameId: string, update: StreamUpdate): void;
+  /** The host brought Orivo back from a stream that lasted `seconds`. */
+  welcomeBack(game: LaunchSplashGame, seconds: number | null): void;
   /** Escape or B: back to Orivo, which stays. The launch itself carries on. */
   dismiss(): void;
   isOpen(): boolean;
@@ -127,10 +171,40 @@ export function windowForegroundSignals(target: Window = window, page: Document 
 /** Reads the handoff the host sent with a launch. Anything else is a game Orivo started. */
 export function readLaunchHandoff(result: unknown): LaunchHandoff {
   const handoff = (result as { handoff?: unknown } | null | undefined)?.handoff;
-  return handoff === "client" || handoff === "window" ? handoff : "process";
+  return handoff === "client" || handoff === "window" || handoff === "stream" ? handoff : "process";
 }
 
-type Phase = "closed" | "starting" | "waiting" | "leaving";
+type Phase = "closed" | "starting" | "waiting" | "diving" | "leaving" | "returning";
+
+/** How long the library waits behind the way back before it is given back. */
+const RETURN_BEAT_MS = 900;
+
+/** The line under the progress bar for each step a stream announces. */
+const STREAM_STATUS: Partial<Record<StreamStage, MessageKey>> = {
+  connecting: "misc.splash.stream.connecting",
+  closing: "misc.splash.stream.closing",
+  launching: "misc.splash.stream.launching",
+  handshake: "misc.splash.stream.handshake",
+};
+
+const WEAVE_STAGE: Partial<Record<StreamStage, WeaveStage>> = {
+  connecting: "connecting",
+  "host-busy": "busy",
+  closing: "closing",
+  launching: "launching",
+  handshake: "handshake",
+  visible: "visible",
+};
+
+/** "42 min" or "1 h 05 min", for the way back from a stream. */
+export function streamDuration(seconds: number): string {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return t("misc.splash.stream.minutes", { minutes });
+  return t("misc.splash.stream.hours", {
+    hours: Math.floor(minutes / 60),
+    minutes: String(minutes % 60).padStart(2, "0"),
+  });
+}
 
 export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
   const { host, covers } = options;
@@ -138,6 +212,9 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
   const signals = options.signals ?? windowForegroundSignals();
   const reducedMotion = options.reducedMotion ?? prefersReducedMotion;
   const now = options.now ?? (() => performance.now());
+  const makeWeave =
+    options.createWeave ??
+    ((strings: HTMLCanvasElement, seam: HTMLCanvasElement) => createLaunchWeave({ strings, seam, reducedMotion }));
 
   let phase: Phase = "closed";
   let gameId: string | null = null;
@@ -155,6 +232,8 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
   let beatPending = false;
   let returnFocusTo: HTMLElement | null = null;
   let stopWatching: (() => void) | null = null;
+  let weave: LaunchWeave | null = null;
+  let streamStage: StreamStage | null = null;
   const timers = new Set<number>();
 
   const schedule = (callback: () => void, ms: number): void => {
@@ -229,7 +308,11 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
     progress.className = "launch-splash__progress";
     progress.setAttribute("aria-hidden", "true");
     progress.append(document.createElement("span"));
-    content.append(title, progress);
+    // What a stream is doing, said once per step; empty for any other game.
+    const status = document.createElement("p");
+    status.className = "launch-splash__status";
+    status.setAttribute("role", "status");
+    content.append(title, progress, status);
 
     const mark = document.createElement("img");
     mark.className = "launch-splash__mark";
@@ -237,7 +320,73 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
     mark.alt = "";
     mark.setAttribute("aria-hidden", "true");
 
-    host.replaceChildren(art, veil, content, mark);
+    const strings = document.createElement("canvas");
+    strings.className = "launch-splash__strings";
+    strings.setAttribute("aria-hidden", "true");
+    const seam = document.createElement("canvas");
+    seam.className = "launch-splash__seam";
+    seam.setAttribute("aria-hidden", "true");
+
+    host.replaceChildren(art, veil, strings, content, mark, seam);
+  };
+
+  const part = <T extends HTMLElement>(selector: string): T | null => host.querySelector<T>(selector);
+
+  /** The strings, made the first time a stream needs them. */
+  const strings = (): LaunchWeave | null => {
+    if (weave) return weave;
+    const canvas = part<HTMLCanvasElement>(".launch-splash__strings");
+    const seam = part<HTMLCanvasElement>(".launch-splash__seam");
+    if (!canvas || !seam) return null;
+    weave = makeWeave(canvas, seam);
+    weave.start();
+    return weave;
+  };
+
+  const say = (key: MessageKey | null): void => {
+    const status = part(".launch-splash__status");
+    if (status) status.textContent = key ? t(key) : "";
+  };
+
+  const dropQuestion = (): void => {
+    part(".launch-splash__question")?.remove();
+    host.classList.remove("is-asking");
+  };
+
+  /** Asked in the splash, over the game's art: Moonlight's own dialog stays behind it. */
+  const ask = (id: string): void => {
+    if (part(".launch-splash__question")) return;
+    const question = document.createElement("div");
+    question.className = "launch-splash__question";
+    question.setAttribute("role", "alertdialog");
+    question.setAttribute("aria-label", t("misc.splash.stream.busy"));
+    const text = document.createElement("p");
+    text.className = "launch-splash__question-text";
+    text.textContent = t("misc.splash.stream.busy");
+    const actions = document.createElement("div");
+    actions.className = "launch-splash__question-actions";
+    const replace = document.createElement("button");
+    replace.type = "button";
+    replace.className = "launch-splash__answer launch-splash__answer--primary";
+    replace.textContent = t("misc.splash.stream.replace");
+    replace.addEventListener("click", () => {
+      dropQuestion();
+      options.streamControl?.(id, "replace");
+      streamStep({ stage: "closing" });
+    });
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "launch-splash__answer";
+    cancel.textContent = t("misc.splash.stream.cancel");
+    cancel.addEventListener("click", () => {
+      options.streamControl?.(id, "cancel");
+      close(true);
+    });
+    actions.append(replace, cancel);
+    question.append(text, actions);
+    part(".launch-splash__content")?.append(question);
+    host.classList.add("is-asking");
+    replace.focus({ preventScroll: true });
   };
 
   /** Take everything down at once. The shell is already live again by now. */
@@ -245,9 +394,12 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
     clearTimers();
     stopWatching?.();
     stopWatching = null;
+    weave?.stop();
+    weave = null;
+    streamStage = null;
     phase = "closed";
     gameId = null;
-    host.classList.remove("is-open");
+    host.classList.remove("is-open", "is-asking", "is-return");
     host.hidden = true;
     // The artwork goes with it: a splash that comes back is built afresh.
     host.replaceChildren();
@@ -302,7 +454,7 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
   };
 
   const evaluate = (): void => {
-    if (phase !== "waiting") return;
+    if (phase !== "waiting" || handoff === "stream") return;
     const beat = openedAt + timing.holdMs - now();
     if (!stepsAside) {
       // Orivo stays. Covered, there is nobody left to show the splash to;
@@ -327,6 +479,9 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
 
   const onSignal = (signal: ForegroundSignal): void => {
     if (phase !== "starting" && phase !== "waiting") return;
+    // Moonlight comes forward the moment it starts, behind the splash; none
+    // of this says anything about the stream.
+    if (handoff === "stream") return;
     if (signal === "blur") lostFocus = true;
     if (signal === "hidden") covered = true;
     if (signal === "focus" && lostFocus) {
@@ -342,12 +497,89 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
     evaluate();
   };
 
+  /** The picture is up: close the strings into the seam and open it onto the stream. */
+  const openOntoStream = (): void => {
+    const id = gameId;
+    // Still a launch in progress until the seam is open: nothing else starts.
+    phase = "diving";
+    clearTimers();
+    stopWatching?.();
+    stopWatching = null;
+    dropQuestion();
+    say(null);
+    const leave = (): void => {
+      phase = "leaving";
+      if (stepsAside) {
+        options.stepAside().then(
+          () => schedule(() => close(false), timing.settleMs),
+          () => {
+            if (id) options.streamControl?.(id, "uncover");
+            phase = "waiting";
+            close(false);
+          },
+        );
+      } else {
+        // Orivo stays: it stops standing above the stream's window, which
+        // then has the screen, and the library is there behind it.
+        if (id) options.streamControl?.(id, "uncover");
+        phase = "waiting";
+        close(false);
+      }
+    };
+    const current = strings();
+    if (!current) {
+      leave();
+      return;
+    }
+    current.stage("visible");
+    void current.dive().then(() => {
+      if (phase === "diving" && gameId === id) leave();
+    });
+  };
+
+  function streamStep(update: StreamUpdate): void {
+    if (phase !== "starting" && phase !== "waiting") return;
+    streamStage = update.stage;
+    const weaveStage = WEAVE_STAGE[update.stage];
+    if (weaveStage && update.stage !== "visible") strings()?.stage(weaveStage);
+    switch (update.stage) {
+      case "host-busy":
+        say(null);
+        if (gameId) ask(gameId);
+        return;
+      case "visible":
+        openOntoStream();
+        return;
+      case "stalled":
+        // Moonlight is waiting on something Orivo cannot read: it gets the
+        // screen, the way any other game's window does.
+        dropQuestion();
+        if (phase === "waiting" && stepsAside) {
+          weave?.stop();
+          stepAside();
+        } else close(true);
+        return;
+      case "failed":
+      case "ended":
+        close(true);
+        return;
+      default:
+        dropQuestion();
+        say(
+          update.stage === "launching" && update.resumed
+            ? "misc.splash.stream.resuming"
+            : (STREAM_STATUS[update.stage] ?? null),
+        );
+    }
+  }
+
   return {
     open(game) {
       if (phase !== "closed") finish();
       gameId = game.id;
       openedAt = now();
       handoff = "process";
+      streamStage = null;
       lostFocus = false;
       covered = false;
       returned = false;
@@ -369,6 +601,13 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       phase = "waiting";
       handoff = kind;
       stepsAside = options.shouldStepAside() && !returned;
+      if (kind === "stream") {
+        // The host says when the picture is up, or that it never will be:
+        // no deadline here, and the first step may already have been said.
+        strings();
+        if (!streamStage) streamStep({ stage: "connecting" });
+        return;
+      }
       if (stepsAside) schedule(stepAside, kind === "window" ? timing.windowDeadlineMs : timing.deadlineMs);
       evaluate();
     },
@@ -387,12 +626,54 @@ export function createLaunchSplash(options: LaunchSplashOptions): LaunchSplash {
       if ((phase === "starting" || phase === "waiting") && id === gameId) close(true);
     },
 
+    stream(id, update) {
+      if (id !== gameId) return;
+      // Steps can arrive before the launch call has answered.
+      if (phase === "starting") handoff = "stream";
+      streamStep(update);
+    },
+
+    welcomeBack(game, seconds) {
+      if (phase !== "closed") finish();
+      gameId = game.id;
+      openedAt = now();
+      handoff = "stream";
+      phase = "returning";
+      const active = document.activeElement;
+      returnFocusTo = active instanceof HTMLElement && active !== document.body ? active : null;
+      host.hidden = false;
+      render(game);
+      const eyebrow = part(".launch-splash__eyebrow");
+      if (eyebrow) eyebrow.textContent = t("misc.splash.stream.ended");
+      const status = part(".launch-splash__status");
+      if (status && seconds && seconds > 0) status.textContent = streamDuration(seconds);
+      for (const element of covers) element.inert = true;
+      // Straight in, no fade: the way back starts on the stream's black.
+      host.classList.add("is-open", "is-return");
+      const current = strings();
+      const giveBack = (): void => {
+        if (phase === "returning" && gameId === game.id) schedule(() => close(true), RETURN_BEAT_MS);
+      };
+      if (current) void current.unfold().then(giveBack);
+      else giveBack();
+    },
+
     dismiss() {
-      if (phase === "starting" || phase === "waiting") close(true);
+      if (phase === "returning") {
+        close(true);
+        return;
+      }
+      if (phase !== "starting" && phase !== "waiting") return;
+      if (handoff === "stream" && gameId) {
+        // Waiting on the player's answer, Escape is "no"; otherwise Orivo
+        // stays and Moonlight is let in front when the stream comes.
+        options.streamControl?.(gameId, streamStage === "host-busy" ? "cancel" : "uncover");
+      }
+      close(true);
     },
 
     isOpen() {
-      return phase === "starting" || phase === "waiting";
+      return phase === "starting" || phase === "waiting" || phase === "diving";
     },
 
     dispose() {

@@ -1997,6 +1997,75 @@ body[data-mood="rage"] { --violet: #f2453c; }
   opacity: .72;
 }
 
+/* A stream's own layers (launch-weave.ts): the strings run behind the words,
+   the seam opens in front of everything onto the stream's first black. */
+.launch-splash__strings,
+.launch-splash__seam {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+/* One step at a time, in the voice of the eyebrow but quieter. Empty for any
+   game that is not a stream, and then it takes no room. */
+.launch-splash__status {
+  min-height: 1.35em;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 520;
+  letter-spacing: .01em;
+  text-shadow: 0 1px 2px rgba(6, 6, 10, .7), 0 2px 14px rgba(6, 6, 10, .5);
+}
+.launch-splash__status:empty { display: none; }
+.launch-splash.is-asking .launch-splash__progress,
+.launch-splash.is-asking .launch-splash__status { display: none; }
+/* The question Moonlight would ask in a grey dialog, asked here instead: one
+   line and two verbs on a panel of glass over the game's art. */
+.launch-splash__question {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 14px 14px 14px 16px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25, 26, 35, .74), rgba(16, 17, 26, .74));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, .35);
+  -webkit-backdrop-filter: blur(18px) saturate(120%);
+  backdrop-filter: blur(18px) saturate(120%);
+  animation: launch-splash-rise 420ms cubic-bezier(.2, .8, .2, 1) backwards;
+}
+.launch-splash__question-text { margin: 0; color: var(--text); font-size: 15px; font-weight: 600; }
+.launch-splash__question-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.launch-splash__answer {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, .11);
+  border-radius: 999px;
+  color: #e8e5ec;
+  background: #1a1b1f;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 140ms ease, border-color 140ms ease, filter 140ms ease;
+}
+.launch-splash__answer:hover,
+.launch-splash__answer[data-nav-focus] { border-color: rgba(255, 255, 255, .24); background: #23242a; }
+.launch-splash__answer--primary {
+  border-color: transparent;
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  box-shadow: 0 0 26px rgba(84, 66, 160, .5);
+}
+.launch-splash__answer--primary:hover,
+.launch-splash__answer--primary[data-nav-focus] { border-color: transparent; background: linear-gradient(100deg, #ccc3f6, #b3a6e6); }
+.launch-splash__answer:focus-visible { outline: 2px solid #dad8ff; outline-offset: 2px; }
+/* The way back from a stream starts on its black, so it is there at once;
+   leaving, it fades to the library like any splash. */
+.launch-splash.is-return.is-open { transition: none; }
+.launch-splash.is-return .launch-splash__content { animation: none; }
+.launch-splash.is-return .launch-splash__image { animation: none; transform: scale(1.04); }
+
 @keyframes launch-splash-push { from { transform: scale(1); } to { transform: scale(1.07); } }
 @keyframes launch-splash-rise { from { opacity: 0; transform: translateY(12px); } }
 @keyframes launch-splash-sweep { from { transform: translateX(-100%); } to { transform: translateX(265%); } }
