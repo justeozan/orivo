@@ -1,11 +1,24 @@
 [
   {
+    "id": "com.orivo.gamestream",
+    "name": "Moonlight / Sunshine",
+    "version": "0.2.1",
+    "summary": "Streams a local .stream game library through Moonlight / Sunshine.",
+    "url": "https://github.com/justeozan/orivo-plugin-moonlight/releases/download/v0.2.1/com.orivo.gamestream-0.2.1.orivo-plugin",
+    "sha256": "adb691493f1e024564381b8d3f2ef31575e7d4166bbfab6c4bab850659e85678",
+    "sizeBytes": 15057,
+    "category": "streaming",
+    "minOrivoVersion": "0.3.7",
+    "repository": "justeozan/orivo-plugin-moonlight"
+  },
+  {
     "id": "com.orivo.quiky",
     "name": "Quiky",
     "version": "0.2.0",
     "summary": "Installs Store games and follows the download, then the extraction.",
     "url": "https://github.com/justeozan/orivo-plugin-quiky/releases/download/v0.2.0/com.orivo.quiky-0.2.0.orivo-plugin",
     "sha256": "2aee952fabbfc0d48d68a441a7d226c2a5a97715acb0de263aa83f1fd066d076",
-    "sizeBytes": 53940
+    "sizeBytes": 53940,
+    "repository": "justeozan/orivo-plugin-quiky"
   }
 ]

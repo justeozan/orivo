@@ -97,6 +97,14 @@ et un index étaient signés de la même façon avec la même clé, si bien que 
 « document d’index » — seuls des champs JSON obligatoires différents séparaient
 les deux rôles.
 
+Les plugins **officiels** ne dépendent plus de l’index pour leurs mises à jour
+(`plugin_official_releases.rs`) : le registre compilé nomme leur dépôt GitHub,
+Orivo lit la redirection de `/releases/latest` (sans API, sans la suivre) et
+propose la release si elle est plus récente que l’index. Aucun digest n’est
+connu d’avance ; la signature du paquet par la clé de release en tient lieu,
+et l’anti-retour, le contrôle id/version et `minOrivoVersion` s’appliquent
+tels quels. Les plugins communautaires passent toujours par l’index signé.
+
 La jonction entre les deux est désormais faite. Le registre de grants ne demande
 plus si un fichier existe à côté du plugin : il demande à l’installateur si
 *ces octets-là* sont ceux pour lesquels la transaction a accepté une signature.

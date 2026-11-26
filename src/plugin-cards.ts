@@ -124,7 +124,12 @@ export interface PluginCardOptions {
   id: string;
   name: string;
   category: PluginCategory;
-  /** One or two short lines under the name: state, then who made it. */
+  /**
+   * How the plugin stands, in a word or two, coloured by its tone: the first
+   * line under the name. Ready is green, something missing is amber.
+   */
+  status?: { text: string; tone: "ok" | "warn" | "muted" } | null;
+  /** Short lines under the name (or under the state): a fact each. */
   lines: readonly string[];
   /** The view the whole card opens, with the label a screen reader hears. */
   open?: { view: string; label: string } | null;
@@ -167,6 +172,13 @@ export function pluginCard(options: PluginCardOptions): HTMLElement {
   name.textContent = options.name;
   title.append(name, pluginPill(options.category));
   copy.append(title);
+  if (options.status?.text) {
+    const status = document.createElement("small");
+    status.className = "plugin-card__status";
+    status.dataset.tone = options.status.tone;
+    status.textContent = options.status.text;
+    copy.append(status);
+  }
   for (const text of options.lines.filter(Boolean)) {
     const line = document.createElement("small");
     line.textContent = text;
@@ -251,4 +263,127 @@ export function updateBadge(count: number, title: string): HTMLElement | null {
   badge.textContent = String(count);
   badge.title = title;
   return badge;
+}
+
+/* ---------------------------------------------------------------------------
+   The ⋯ menu of a plugin's detail: the rare actions, out of the way.
+   --------------------------------------------------------------------------- */
+
+export type MoreMenuEntry =
+  | {
+      kind: "item";
+      label: string;
+      icon?: IconName;
+      danger?: boolean;
+      disabled?: boolean;
+      /** Data attributes for the page's own click handler (`pluginUninstall: id`). */
+      data?: Record<string, string>;
+      run?: () => void;
+    }
+  | { kind: "separator" }
+  /** A small grey line of facts at the bottom: version, source, updates. */
+  | { kind: "meta"; text: string };
+
+/** The menu open right now, closed when another one opens. */
+let closeOpenMenu: (() => void) | null = null;
+
+/**
+ * A ⋯ button and the menu it opens, in the glass of Play's launch menu. The
+ * menu closes on a choice, a click elsewhere or Escape. A view that repaints
+ * while it is open passes `open` back in so it stays open.
+ */
+export function pluginMoreMenu(options: {
+  label: string;
+  entries: readonly MoreMenuEntry[];
+  open?: boolean;
+  onToggle?: (open: boolean) => void;
+}): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "plugin-more-menu";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "plugin-dots";
+  button.dataset.pluginMore = "";
+  button.setAttribute("aria-label", options.label);
+  button.title = options.label;
+  button.setAttribute("aria-haspopup", "menu");
+  button.innerHTML = icon("more");
+  const menu = document.createElement("div");
+  menu.className = "play-launch-menu plugin-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", options.label);
+
+  let detach = (): void => {};
+  const setOpen = (open: boolean, notify = true): void => {
+    menu.hidden = !open;
+    button.setAttribute("aria-expanded", String(open));
+    detach();
+    detach = () => {};
+    if (open) {
+      // Opened by a press, another open menu closes. Opened again by a repaint,
+      // the copy it replaces is already on its way out and detaches itself.
+      if (notify && closeOpenMenu && closeOpenMenu !== close) closeOpenMenu();
+      closeOpenMenu = close;
+      const onClick = (event: MouseEvent): void => {
+        if (!wrap.isConnected) return detach();
+        if (!wrap.contains(event.target as Node)) close();
+      };
+      const onKey = (event: KeyboardEvent): void => {
+        if (!wrap.isConnected) return detach();
+        if (event.key !== "Escape") return;
+        // Closing the menu is what the key was for, not leaving the page too.
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+        button.focus();
+      };
+      document.addEventListener("click", onClick, true);
+      document.addEventListener("keydown", onKey, true);
+      detach = () => {
+        document.removeEventListener("click", onClick, true);
+        document.removeEventListener("keydown", onKey, true);
+      };
+    } else if (closeOpenMenu === close) {
+      closeOpenMenu = null;
+    }
+    if (notify) options.onToggle?.(open);
+  };
+  const close = (): void => setOpen(false);
+
+  for (const entry of options.entries) {
+    if (entry.kind === "separator") {
+      const line = document.createElement("hr");
+      line.className = "plugin-menu__separator";
+      menu.append(line);
+      continue;
+    }
+    if (entry.kind === "meta") {
+      const meta = document.createElement("p");
+      meta.className = "plugin-menu__meta";
+      meta.textContent = entry.text;
+      menu.append(meta);
+      continue;
+    }
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "play-launch-option plugin-menu__item";
+    item.classList.toggle("plugin-menu__item--danger", Boolean(entry.danger));
+    item.setAttribute("role", "menuitem");
+    item.disabled = Boolean(entry.disabled);
+    for (const [key, value] of Object.entries(entry.data ?? {})) item.dataset[key] = value;
+    if (entry.icon) item.insertAdjacentHTML("beforeend", icon(entry.icon));
+    const label = document.createElement("span");
+    label.textContent = entry.label;
+    item.append(label);
+    item.addEventListener("click", () => {
+      close();
+      entry.run?.();
+    });
+    menu.append(item);
+  }
+
+  button.addEventListener("click", () => setOpen(Boolean(menu.hidden)));
+  setOpen(Boolean(options.open), false);
+  wrap.append(button, menu);
+  return wrap;
 }

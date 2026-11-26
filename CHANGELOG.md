@@ -1,5 +1,9 @@
 # Changelog
 
+Kept up to 0.4.2. Since then every merged PR is a release: its notes are on
+the GitHub release, and the short highlights shown in Settings › About live in
+`src/release-highlights.ts` (see `docs/RELEASING.md`).
+
 ## [Unreleased]
 
 ### Fixed

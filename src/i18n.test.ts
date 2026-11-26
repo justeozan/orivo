@@ -14,10 +14,10 @@ describe("i18n", () => {
 
   it("translates and falls back to English for a missing key", () => {
     setLanguage("fr");
-    expect(t("settings.data.label")).toBe("Données");
+    expect(t("settings.data.label")).toBe("Stockage");
     expect(document.documentElement.lang).toBe("fr");
     setLanguage("en");
-    expect(t("settings.data.label")).toBe("Data");
+    expect(t("settings.data.label")).toBe("Storage");
   });
 
   it("translates every message into every language", () => {

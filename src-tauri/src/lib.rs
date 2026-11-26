@@ -1,6 +1,7 @@
 // Quiky is the only caller of a few installer helpers; the App Store edition
 // leaves it out, and those helpers with it.
 #![cfg_attr(feature = "app-store", allow(dead_code))]
+mod about;
 mod android_games;
 mod artwork_backfill;
 mod catalog;
@@ -30,6 +31,7 @@ mod plugin_compile_cache;
 mod plugin_health;
 mod plugin_index;
 mod plugin_installer;
+mod plugin_official_releases;
 // `pub`, not `mod`: the developer SDK (`sdk/orivo-plugin-sdk`) links this crate
 // as an rlib so its manifest validator and host simulator call the same
 // policy and invocation code Orivo runs, instead of a second copy that could
@@ -1303,6 +1305,8 @@ pub fn run() {
             preferences::update_preferences,
             preferences::get_data_usage,
             preferences::clear_derived_cache,
+            preferences::open_data_folder,
+            about::open_orivo_page,
             #[cfg(not(feature = "app-store"))]
             quiky_installer::get_quiky_status,
             #[cfg(not(feature = "app-store"))]

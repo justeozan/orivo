@@ -191,12 +191,42 @@ pub struct IndexEntry {
     pub version: String,
     pub summary: String,
     pub url: String,
-    pub sha256: String,
-    pub size_bytes: u64,
+    pub integrity: PackageIntegrity,
     pub min_orivo_version: Option<String>,
     /// One of `PLUGIN_CATEGORIES`, or absent. An unknown value is dropped, not
     /// fatal: a newer publisher must not make an older host reject the index.
     pub category: Option<String>,
+}
+
+/// What holds the downloaded bytes to the entry before the archive is opened.
+///
+/// Two answers, kept apart on purpose rather than folded into an optional
+/// digest: an entry with no digest is not a weaker pinned entry, it is a
+/// different promise, and the code that downloads it has to know which one it
+/// was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageIntegrity {
+    /// A signed index (or this binary) named the exact bytes. Length and
+    /// SHA-256 are checked before the archive is read.
+    Pinned { sha256: String, size_bytes: u64 },
+    /// Found through an official plugin's latest GitHub release
+    /// (`plugin_official_releases.rs`). Nothing named the bytes in advance, and
+    /// no digest is invented for them: what covers the content is the package's
+    /// own `signature.ed25519`, which the installer requires to verify against
+    /// Orivo's release key on every registry download — so an archive nobody
+    /// pinned is still one only that key could have produced. The download is
+    /// bounded by [`MAX_PACKAGE_BYTES`] instead of by a declared size.
+    ReleaseSigned,
+}
+
+impl IndexEntry {
+    /// The size a document declared, or nothing when no document did.
+    pub fn size_bytes(&self) -> Option<u64> {
+        match self.integrity {
+            PackageIntegrity::Pinned { size_bytes, .. } => Some(size_bytes),
+            PackageIntegrity::ReleaseSigned => None,
+        }
+    }
 }
 
 /// Mirrors `PluginCategory` in `src/plugin-cards.ts`.
@@ -371,8 +401,10 @@ fn validate_entry(entry: IndexEntryDocument) -> Option<IndexEntry> {
         version: entry.version,
         summary: entry.summary,
         url: entry.url,
-        sha256: entry.sha256.to_ascii_lowercase(),
-        size_bytes: entry.size_bytes,
+        integrity: PackageIntegrity::Pinned {
+            sha256: entry.sha256.to_ascii_lowercase(),
+            size_bytes: entry.size_bytes,
+        },
         min_orivo_version: entry.min_orivo_version,
         category: entry
             .category
@@ -671,11 +703,15 @@ pub async fn refresh_index(
 ///
 /// Length and digest are checked against the entry rather than against
 /// anything the response says, so a server that lies about either produces a
-/// refusal and not a file.
+/// refusal and not a file. An entry nothing pinned is bounded by
+/// [`MAX_PACKAGE_BYTES`] instead, and its bytes are vouched for by the package
+/// signature the installer checks next — see [`PackageIntegrity::ReleaseSigned`].
+///
+/// `on_progress` receives the bytes read and, when known, the total.
 pub async fn download_entry(
     entry: &IndexEntry,
     cancelled: &AtomicBool,
-    on_progress: &mut (dyn FnMut(u64) + Send),
+    on_progress: &mut (dyn FnMut(u64, Option<u64>) + Send),
 ) -> Result<Vec<u8>, String> {
     if !url_host(&entry.url).is_some_and(|host| host_allowed(&host)) {
         return Err("This download is outside Orivo's registry.".into());
@@ -690,43 +726,67 @@ pub async fn download_entry(
         // A 404 here is not a server refusing us: it is a registry entry whose
         // release has not been published yet. Saying so is the difference
         // between a user retrying forever and a user reaching for sideload.
-        return Err(if response.status().as_u16() == 404 {
-            "This plugin has not been published yet. Install it from a .orivo-plugin file."
-                .to_string()
-        } else {
-            format!(
-                "The plugin source rejected the request ({}).",
-                response.status().as_u16()
-            )
+        return Err(match (response.status().as_u16(), &entry.integrity) {
+            (404, PackageIntegrity::Pinned { .. }) => {
+                "This plugin has not been published yet. Install it from a .orivo-plugin file."
+                    .to_string()
+            }
+            // The release exists — GitHub named it as the latest — but carries
+            // no package under the name Orivo builds for it.
+            (404, PackageIntegrity::ReleaseSigned) => {
+                "This release has no Orivo package attached.".to_string()
+            }
+            (status, _) => format!("The plugin source rejected the request ({status})."),
         });
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length != entry.size_bytes)
-    {
-        return Err("The package size does not match the registry.".into());
+    let (limit, declared) = download_bounds(&entry.integrity);
+    match (declared, response.content_length()) {
+        (Some(declared), Some(length)) if length != declared => {
+            return Err("The package size does not match the registry.".into());
+        }
+        (None, Some(length)) if length > limit => {
+            return Err("This package is larger than Orivo allows.".into());
+        }
+        _ => {}
     }
+    let total = declared.or(response.content_length());
 
-    let mut bytes = Vec::with_capacity(entry.size_bytes as usize);
+    let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(limit) as usize);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         if cancelled.load(Ordering::Acquire) {
             return Err("Cancelled.".into());
         }
         let chunk = chunk.map_err(|_| "The download was interrupted.".to_string())?;
-        if bytes.len() as u64 + chunk.len() as u64 > entry.size_bytes {
-            return Err("The package is larger than the registry declares.".into());
+        if bytes.len() as u64 + chunk.len() as u64 > limit {
+            return Err(match declared {
+                Some(_) => "The package is larger than the registry declares.".into(),
+                None => "This package is larger than Orivo allows.".into(),
+            });
         }
         bytes.extend_from_slice(&chunk);
-        on_progress(bytes.len() as u64);
+        on_progress(bytes.len() as u64, total);
     }
-    if bytes.len() as u64 != entry.size_bytes {
-        return Err("The package size does not match the registry.".into());
-    }
-    if format!("{:x}", Sha256::digest(&bytes)) != entry.sha256 {
-        return Err("The package failed its integrity check.".into());
+    if let PackageIntegrity::Pinned { sha256, size_bytes } = &entry.integrity {
+        if bytes.len() as u64 != *size_bytes {
+            return Err("The package size does not match the registry.".into());
+        }
+        if format!("{:x}", Sha256::digest(&bytes)) != *sha256 {
+            return Err("The package failed its integrity check.".into());
+        }
     }
     Ok(bytes)
+}
+
+/// How many bytes a download may read, and how many it must read exactly when
+/// a document said so. An entry nothing pinned still has a ceiling: the one the
+/// manifest policy would refuse past anyway, applied before the bytes are held
+/// rather than after.
+fn download_bounds(integrity: &PackageIntegrity) -> (u64, Option<u64>) {
+    match integrity {
+        PackageIntegrity::Pinned { size_bytes, .. } => (*size_bytes, Some(*size_bytes)),
+        PackageIntegrity::ReleaseSigned => (MAX_PACKAGE_BYTES, None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -773,7 +833,7 @@ fn semver_key(value: &str) -> Option<(u32, u32, u32, bool, String)> {
 // Grammar
 // ---------------------------------------------------------------------------
 
-fn valid_plugin_id(value: &str) -> bool {
+pub(crate) fn valid_plugin_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.split('.').count() >= 3
@@ -1333,6 +1393,23 @@ mod tests {
             &url("https://github.com/a"),
             MAX_REDIRECTS
         ));
+    }
+
+    /// An entry nothing pinned has no declared size to stop at, and must not
+    /// therefore have no limit at all.
+    #[test]
+    fn a_download_nobody_pinned_is_still_bounded() {
+        assert_eq!(
+            download_bounds(&PackageIntegrity::ReleaseSigned),
+            (MAX_PACKAGE_BYTES, None)
+        );
+        assert_eq!(
+            download_bounds(&PackageIntegrity::Pinned {
+                sha256: "a".repeat(64),
+                size_bytes: 1114,
+            }),
+            (1114, Some(1114))
+        );
     }
 
     #[test]
