@@ -46,7 +46,7 @@ test.describe("Settings is a page, not a modal", () => {
     // Also from inside a control, and repeatedly.
     await page.locator("[data-settings-section='general']").click();
     await waitForPage(page, "settings");
-    await page.locator("#preference-start-page").focus();
+    await page.locator("[data-segmented='startPage'] [aria-pressed='true']").focus();
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
     await page.waitForTimeout(250);
@@ -70,7 +70,7 @@ test.describe("Settings is a page, not a modal", () => {
 });
 
 test.describe("Settings navigation", () => {
-  test("all six sections are reachable by URL", async ({ page }) => {
+  test("every section is reachable by URL", async ({ page }) => {
     for (const section of SETTINGS_SECTIONS) {
       await openRoute(page, `#/settings/${section.id}`, "settings");
 
@@ -87,7 +87,7 @@ test.describe("Settings navigation", () => {
     }
   });
 
-  test("all six sections are reachable from the sidebar", async ({ page }) => {
+  test("every section is reachable from the sidebar", async ({ page }) => {
     await openRoute(page, "#/settings/general", "settings");
 
     for (const section of SETTINGS_SECTIONS) {
@@ -105,8 +105,8 @@ test.describe("Settings navigation", () => {
   });
 
   test("the tablist is a single Tab stop (roving tabindex)", async ({ page }) => {
-    // Six sections must not cost six Tab presses to walk past. The selected tab
-    // is the only one in the tab order; the other five are reached with arrows.
+    // Five sections must not cost five Tab presses to walk past. The selected
+    // tab is the only one in the tab order; the others are reached with arrows.
     for (const section of SETTINGS_SECTIONS) {
       await openRoute(page, `#/settings/${section.id}`, "settings");
 
@@ -148,19 +148,20 @@ test.describe("Settings navigation", () => {
     await waitForPage(page, "settings");
 
     expect(await currentHash(page)).toBe("#/settings/plugins");
-    await expect(page.locator("#settings-page-title")).toHaveText("Plugins & Runners");
+    await expect(page.locator("#settings-page-title")).toHaveText("Plugins");
   });
 });
 
-test.describe("Plugins & Runners browser", () => {
-  test("the section opens the plugin browser, not the Wine panel", async ({ page }) => {
+test.describe("Plugins browser", () => {
+  test("the section opens the plugin browser with its first plugin open", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#wine-settings-panel")).toBeHidden();
+    // No empty "pick a plugin": the first card's detail is open beside the list.
+    await expect(page.locator("#plugins-detail-empty")).toHaveCount(0);
+    await expect(page.locator("#wine-settings-panel")).toBeVisible();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
-    // Nothing is open yet: the detail column asks for a pick.
-    await expect(page.locator("#plugins-detail-empty")).toBeVisible();
+    await expect(page.locator("[data-plugin-card='wine']")).toHaveClass(/is-selected/);
     // Runner profiles live in the detail of the plugin that provides them.
     await expect(page.locator("#runners-panel")).toBeHidden();
 
@@ -215,7 +216,9 @@ test.describe("Plugins & Runners browser", () => {
   test("in a narrow window a plugin's detail takes the list's place, with a way back", async ({ page }) => {
     await page.setViewportSize({ width: 620, height: 820 });
     await openRoute(page, "#/settings/plugins", "settings");
-    await expect(page.locator("#plugins-detail-empty")).toBeHidden();
+    // The plugin open by default does not take the list's place.
+    await expect(page.locator("#plugins-installed-list")).toBeVisible();
+    await expect(page.locator("#wine-settings-panel")).toBeHidden();
 
     await page.locator("[data-plugin-open='wallpaper-searcher']").click();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
@@ -227,17 +230,11 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
   });
 
-  test("Plugins & Runners offers automatic updates and a registry check, both no-ops without Tauri", async ({
-    page,
-  }) => {
+  test("Plugins offers a registry check, a no-op without Tauri", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
-    const automaticUpdates = page.locator("#plugins-automatic-updates");
-    await expect(automaticUpdates).not.toBeChecked();
-    await automaticUpdates.click();
-    // Without a desktop host the command simply cannot run; the panel must
-    // not crash or get stuck offering a promise it cannot keep.
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    // Automatic updates moved into a registry plugin's ⋯ menu.
+    await expect(page.locator("#plugins-automatic-updates")).toHaveCount(0);
 
     await page.locator("[data-plugin-refresh-registry]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
@@ -265,7 +262,8 @@ test.describe("Plugins & Runners browser", () => {
     page,
   }) => {
     // Install from file is a debug control, offered with Beta features on.
-    await openRoute(page, "#/settings/appearance", "settings");
+    await openRoute(page, "#/settings/general", "settings");
+    await page.locator(".settings-disclosure > summary").click();
     await page.locator("#preference-beta").check();
     await openRoute(page, "#/settings/plugins", "settings");
 
@@ -322,24 +320,27 @@ test.describe("Settings ships no fake controls", () => {
 
   test("the controls that do exist are the real ones", async ({ page }) => {
     await openRoute(page, "#/settings/general", "settings");
-    await expect(page.locator("#preference-start-page")).toBeVisible();
-    await expect(page.locator("#preference-start-page")).toHaveValue("library");
+    const lit = (preference: string) =>
+      page.locator(`[data-segmented='${preference}'] [aria-pressed='true']`);
+    await expect(lit("startPage")).toHaveAttribute("data-segment-value", "library");
     await expect(page.locator("#preference-store-region")).toHaveValue("automatic");
-    await expect(page.locator("#reset-preferences")).toBeVisible();
+    // Reset lives once, at the foot of About.
+    await expect(page.locator("#settings-panel-general [data-settings-action='reset-preferences']")).toHaveCount(0);
 
-    await openRoute(page, "#/settings/appearance", "settings");
     // "full" joined "system"/"reduced" when the Windows animation fix landed
-    // (`b5809d2`), letting a player opt back into motion its OS says to skip.
-    await expect(page.locator("input[name='motion-preference']")).toHaveCount(3);
-    await expect(page.locator("input[name='motion-preference'][value='system']")).toBeChecked();
+    // (`b5809d2`), letting a player opt back into motion its OS says to skip;
+    // it is the default since Appearance folded into General.
+    await expect(page.locator("[data-segmented='motion'] button")).toHaveCount(3);
+    await expect(lit("motion")).toHaveAttribute("data-segment-value", "full");
 
     await openRoute(page, "#/settings/data", "settings");
     await expect(page.locator("#derived-cache-size")).toHaveText("0 B");
-    await expect(page.locator("#derived-cache-freshness")).toHaveText("Not refreshed yet");
+    await expect(page.locator("#clear-derived-cache")).toBeVisible();
+    await expect(page.locator("#open-data-folder")).toBeVisible();
 
     await openRoute(page, "#/settings/about", "settings");
-    await expect(page.locator("#about-app-version")).toHaveText("Development build");
-    await expect(page.locator("#about-tauri-version")).toHaveText("Browser preview");
+    await expect(page.locator("#about-app-version")).toHaveText(/^\d+\.\d+\.\d+/);
+    await expect(page.locator("#about-news-list .about-news__item").first()).toBeVisible();
     await expect(page.locator(`${settingsHost} .settings-attributions li`)).toHaveCount(4);
   });
 });

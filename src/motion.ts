@@ -1,7 +1,7 @@
 /**
  * The single guard behind every animation in Orivo, JS and CSS alike.
  *
- * The Appearance → Motion preference wins over the operating system:
+ * The General → Animations preference wins over the operating system:
  *   - `"full"`    → always animate, even when the OS asks for reduced motion.
  *                  Windows flips `prefers-reduced-motion` to `reduce` as soon as
  *                  "Animation effects" is off under Accessibility/Performance —
@@ -52,16 +52,29 @@ export function rememberMotionPreference(value: string, memory: MotionMemory | n
   }
 }
 
+/**
+ * The choice last applied, or null on a first start. The shell starts from it
+ * rather than from the default until the host answers: the default is "full",
+ * and a player who chose less must not get a burst of motion — the startup
+ * animation's among it — in the moment before the host has said so.
+ */
+export function rememberedMotionPreference(
+  memory: MotionMemory | null = localMemory(),
+): "full" | "system" | "reduced" | null {
+  let value: string | null = null;
+  try {
+    value = memory?.getItem(MOTION_MEMORY_KEY) ?? null;
+  } catch {
+    return null;
+  }
+  return value && MOTION_VALUES.includes(value) ? (value as "full" | "system" | "reduced") : null;
+}
+
 /** Run before the shell mounts, so the guards above see the choice at once. */
 export function applyRememberedMotionPreference(
   memory: MotionMemory | null = localMemory(),
   root: HTMLElement = document.documentElement,
 ): void {
-  let value: string | null = null;
-  try {
-    value = memory?.getItem(MOTION_MEMORY_KEY) ?? null;
-  } catch {
-    return;
-  }
-  if (value && MOTION_VALUES.includes(value)) root.dataset.motion = value;
+  const value = rememberedMotionPreference(memory);
+  if (value) root.dataset.motion = value;
 }

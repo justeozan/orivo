@@ -717,12 +717,16 @@ describe("the setup view", () => {
   });
 
   const text = (): string => root.textContent ?? "";
+  const screen = (): string | undefined => root.querySelector<HTMLElement>(".gs-flow")?.dataset.gsScreen;
   const button = (name: string): HTMLButtonElement =>
     root.querySelector<HTMLButtonElement>(`[data-gs-action='${name}']`)!;
-  const mountFor = (host: FakeHost): { setup: GameStreamSetup; clock: ReturnType<typeof createClock> } => {
-    const { setup, clock } = build(host);
-    mountGameStreamSetup(root, setup);
-    return { setup, clock };
+  const mountFor = (
+    host: FakeHost,
+    options: Parameters<typeof mountGameStreamSetup>[2] = {},
+  ): { setup: GameStreamSetup; clock: ReturnType<typeof createClock>; libraryOpened: () => number } => {
+    const built = build(host);
+    mountGameStreamSetup(root, built.setup, options);
+    return built;
   };
 
   it("draws nothing until it is opened", () => {
@@ -730,15 +734,17 @@ describe("the setup view", () => {
     expect(root.children).toHaveLength(0);
   });
 
-  it("offers the install, the check and the picker when Moonlight is missing", async () => {
+  it("asks for the streaming app alone when it is missing, with one Install", async () => {
     const host = createFakeHost();
     host.clients = [];
     const { setup } = mountFor(host);
     await setup.open();
 
-    expect(root.querySelector("[data-gs-step='client']")!.classList.contains("is-active")).toBe(true);
-    expect(text()).toContain("Moonlight on this Mac");
-    expect(button("install-moonlight")).not.toBeNull();
+    expect(screen()).toBe("missing");
+    expect(root.querySelector(".gs-flow__q")!.textContent).toBe("Moonlight is missing");
+    // One main button; checking again and choosing by hand stay at hand, quietly.
+    expect(root.querySelectorAll(".gs-cta")).toHaveLength(1);
+    expect(button("install-moonlight").classList.contains("gs-cta")).toBe(true);
     expect(button("check-again")).not.toBeNull();
     expect(button("choose-client")).not.toBeNull();
 
@@ -747,24 +753,47 @@ describe("the setup view", () => {
     expect(host.openedLinks).toEqual(["moonlight"]);
   });
 
-  it("collapses a finished step to a line and expands only the active one", async () => {
+  it("asks which PC with the address field when Orivo knows none", async () => {
     const host = createFakeHost();
     const { setup } = mountFor(host);
     await setup.open();
 
-    const client = root.querySelector("[data-gs-step='client']")!;
-    expect(client.classList.contains("is-done")).toBe(true);
-    expect(client.querySelector(".gs-step__body")).toBeNull();
-    expect(client.textContent).toContain("Moonlight found (Moonlight)");
-    const pcStep = root.querySelector("[data-gs-step='host']")!;
-    expect(pcStep.classList.contains("is-active")).toBe(true);
-    expect(pcStep.getAttribute("aria-current")).toBe("step");
-    expect(pcStep.querySelector("input")!.placeholder).toBe("my-pc.local or 192.168.1.20");
-    expect(root.querySelector("[data-gs-step='pair'] .gs-step__body")).toBeNull();
+    expect(screen()).toBe("address");
+    expect(root.querySelector(".gs-flow__q")!.textContent).toBe("Which PC?");
+    expect(root.querySelector<HTMLInputElement>("#gs-host")!.placeholder).toBe("my-pc.local or 192.168.1.20");
+    // No tile for a PC that does not exist, and no step list.
+    expect(root.querySelector(".gs-tile")).toBeNull();
+    expect(root.querySelector(".gs-steps")).toBeNull();
   });
 
-  it("offers a small choice when several clients are installed", async () => {
-    const host = createFakeHost();
+  it("offers the PC it knows and Other, and connects to the one picked", async () => {
+    const host = createFakeHost({ profile: profile(), saved: "astra.local" });
+    host.probe = { state: "unreachable", host: "astra.local", games: 0 };
+    const { setup } = mountFor(host);
+    await setup.open();
+
+    expect(screen()).toBe("pick");
+    const known = button("connect-saved");
+    expect(known.textContent).toContain("astra.local");
+    expect(known.classList.contains("is-selected")).toBe(true);
+    expect(known.querySelector(".plugin-pill")!.textContent).toBe("Offline");
+
+    // Other opens the field, and Cancel goes back to the tiles.
+    button("add-host").click();
+    expect(screen()).toBe("address");
+    expect(root.querySelector<HTMLInputElement>("#gs-host")!.value).toBe("");
+    button("cancel-add-host").click();
+    expect(screen()).toBe("pick");
+
+    host.probe = { state: "paired", host: "astra.local", games: 3 };
+    button("connect-saved").click();
+    await flush();
+    expect(host.calls.filter((call) => call === "probeHost:stream-1:astra.local")).toHaveLength(2);
+    expect(setup.snapshot().facts.paired).toBe(true);
+  });
+
+  it("lets the streaming app be chosen among the ones found, or by hand", async () => {
+    const host = createFakeHost({ profile: profile({ gameCount: 3 }), saved: "my-pc.local" });
     host.clients = [
       { id: "client-1", label: "Moonlight" },
       { id: "client-2", label: "Moonlight Qt" },
@@ -773,14 +802,23 @@ describe("the setup view", () => {
     await setup.open();
     setup.edit("client");
 
-    const select = root.querySelector<HTMLSelectElement>("#gs-client-select")!;
-    expect([...select.options].map((option) => option.textContent)).toEqual([
-      "Moonlight",
-      "Moonlight Qt",
-    ]);
-    select.value = "client-2";
-    select.dispatchEvent(new Event("change"));
+    expect(screen()).toBe("app");
+    const tiles = [...root.querySelectorAll<HTMLButtonElement>("[data-gs-action='select-client']")];
+    expect(tiles.map((tile) => tile.textContent)).toEqual(["Moonlight", "Moonlight Qt"]);
+    expect(tiles[0]!.classList.contains("is-selected")).toBe(true);
+    tiles[1]!.click();
     expect(setup.snapshot().client.selectedId).toBe("client-2");
+    expect(root.querySelector("[data-gs-client='client-2']")!.classList.contains("is-selected")).toBe(true);
+
+    button("done-editing").click();
+    expect(screen()).toBe("host");
+
+    // An app picked by hand is taken at once, and the question closes.
+    setup.edit("client");
+    button("choose-client").click();
+    await flush();
+    expect(host.calls).toContain("createStreamProfile:picker");
+    expect(screen()).toBe("host");
   });
 
   it("tidies a pasted address in the box and connects with it", async () => {
@@ -799,7 +837,7 @@ describe("the setup view", () => {
     expect(host.calls).toContain("probeHost:stream-1:my-pc.local");
   });
 
-  it("shows the PIN large with the exact instructions, the PIN page button and the certificate note", async () => {
+  it("shows the PIN alone and large, where to type it, and that Orivo waits", async () => {
     const host = createFakeHost();
     host.probe = { state: "notPaired", host: "my-pc.local", games: 0 };
     const { setup } = mountFor(host);
@@ -807,10 +845,13 @@ describe("the setup view", () => {
     setup.setHostInput("my-pc.local");
     await setup.connect();
 
+    expect(screen()).toBe("pin");
     expect(root.querySelector(".gs-pin")!.textContent).toBe("1234");
-    expect(text()).toContain("On your PC, open Sunshine (or Apollo) › PIN, type 1234 and a name.");
-    expect(text()).toContain("A certificate warning is expected");
-    expect(text()).toContain("Waiting for your PC…");
+    expect(text()).toContain("Type it in Sunshine › PIN");
+    expect(root.querySelector(".gs-wait")!.textContent).toBe("Waiting…");
+    // The certificate warning is said where the click leads to it, not under it.
+    expect(button("open-pin-page").title).toBe(SETUP_COPY.certificate);
+    expect(text()).not.toContain(SETUP_COPY.certificate);
 
     button("open-pin-page").click();
     await flush();
@@ -827,6 +868,7 @@ describe("the setup view", () => {
     await setup.connect();
     await clock.tick();
 
+    expect(screen()).toBe("pair");
     expect(text()).toContain("Pairing didn't finish. Try again.");
     host.pairing = { state: "started", host: "my-pc.local", pin: "9876" };
     button("start-pairing").click();
@@ -834,28 +876,85 @@ describe("the setup view", () => {
     expect(root.querySelector(".gs-pin")!.textContent).toBe("9876");
   });
 
-  it("reports progress and ends on a count and an Open Library button", async () => {
+  it("ends on the PC, its pills and See my games, after real progress", async () => {
     const host = createFakeHost();
-    const { setup, libraryOpened } = (() => {
-      const built = build(host);
-      mountGameStreamSetup(root, built.setup);
-      return built;
-    })();
+    const { setup, libraryOpened } = mountFor(host);
     await setup.open();
     setup.setHostInput("my-pc.local");
     await setup.connect();
     await flush();
 
+    expect(screen()).toBe("host");
     expect(text()).toContain("Looking for games on your PC…");
     host.progressImport(7);
     expect(text()).toContain("Found 7 games…");
     host.finishImport(12);
-    expect(text()).toContain("12 games added to your Library.");
-    expect(root.querySelector("[data-gs-step='games']")!.classList.contains("is-done")).toBe(true);
 
+    expect(root.querySelector(".gs-host__name")!.textContent).toBe("my-pc.local");
+    expect([...root.querySelectorAll(".gs-host__pills .plugin-pill")].map((pill) => pill.textContent)).toEqual([
+      "Online",
+      "12 games",
+    ]);
+    // One main button, and the rest behind ⋯.
+    expect(root.querySelectorAll(".gs-cta")).toHaveLength(1);
     button("open-library").click();
     expect(libraryOpened()).toBe(1);
-    expect(button("refresh-games").textContent).toBe("Refresh games");
+  });
+
+  it("keeps changing the PC, resyncing and the app in the ⋯ menu, with the plugin's own entries", async () => {
+    const host = createFakeHost({ profile: profile({ gameCount: 12 }), saved: "my-pc.local" });
+    const uninstall = { kind: "item", label: "Uninstall", data: { pluginUninstall: "x" } } as const;
+    const meta = { kind: "meta", text: "v0.2.0 · Official · Auto-updates" } as const;
+    const { setup } = mountFor(host, { pluginMenu: () => [uninstall, meta] });
+    await setup.open();
+
+    const menu = root.querySelector<HTMLElement>(".plugin-menu")!;
+    expect(menu.hidden).toBe(true);
+    root.querySelector<HTMLButtonElement>(".plugin-dots")!.click();
+    expect(menu.hidden).toBe(false);
+    expect([...menu.querySelectorAll("[role='menuitem']")].map((item) => item.textContent)).toEqual([
+      "Change PC",
+      "Resync",
+      "Streaming app",
+      "Uninstall",
+    ]);
+    expect(menu.querySelector(".plugin-menu__meta")!.textContent).toBe("v0.2.0 · Official · Auto-updates");
+
+    // A repaint (the runners changed) keeps it open.
+    host.setProfile(profile({ gameCount: 12, displayName: "Renamed" }));
+    expect(root.querySelector<HTMLElement>(".plugin-menu")!.hidden).toBe(false);
+
+    button("refresh-games").click();
+    await flush();
+    expect(host.calls).toContain("startImport:stream-1");
+    expect(root.querySelector<HTMLElement>(".plugin-menu")!.hidden).toBe(true);
+
+    root.querySelector<HTMLButtonElement>(".plugin-dots")!.click();
+    button("edit-host").click();
+    expect(screen()).toBe("pick");
+    button("done-editing").click();
+    expect(screen()).toBe("host");
+
+    root.querySelector<HTMLButtonElement>(".plugin-dots")!.click();
+    button("edit-client").click();
+    expect(screen()).toBe("app");
+  });
+
+  it("says when the games could not be listed, with a retry and a check of the PC", async () => {
+    const host = createFakeHost();
+    const { setup } = mountFor(host);
+    await setup.open();
+    setup.setHostInput("my-pc.local");
+    await setup.connect();
+    await flush();
+    host.runners.importFor = () => job({ phase: "failed", message: "Can't reach my-pc.local." });
+    host.setProfile(profile());
+
+    expect(root.querySelector("[role='alert']")!.textContent).toBe("Can't reach my-pc.local.");
+    expect(button("refresh-games").classList.contains("gs-cta")).toBe(true);
+    button("recheck").click();
+    await flush();
+    expect(host.calls.filter((call) => call.startsWith("probeHost"))).toHaveLength(2);
   });
 
   it("keeps the cursor in the address box through a repaint", async () => {

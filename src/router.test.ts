@@ -129,4 +129,31 @@ describe("hash routing", () => {
     });
     expect(parseAppRoute("#/settings/not-real").page).toBe("not-found");
   });
+
+  it("opens a folded settings section where its settings now live", () => {
+    // Appearance's motion and trailer options moved into General.
+    expect(parseAppRoute("#/settings/appearance")).toEqual({
+      page: "settings",
+      section: "general",
+      attachGameId: null,
+    });
+  });
+});
+
+describe("HashRouter and moved settings sections", () => {
+  it("rewrites the old address in place, on a deep link and on a typed one", async () => {
+    window.location.hash = "#/settings/appearance";
+    const router = new HashRouter();
+    const heard: string[] = [];
+    const stop = router.start((route) => heard.push(appRouteToHash(route)));
+    expect(window.location.hash).toBe("#/settings/general");
+
+    window.location.hash = "#/library";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    window.location.hash = "#/settings/appearance";
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(window.location.hash).toBe("#/settings/general");
+    expect(heard).toEqual(["#/settings/general", "#/library", "#/settings/general"]);
+    stop();
+  });
 });

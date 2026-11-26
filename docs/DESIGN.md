@@ -205,7 +205,7 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 
 #### The Library with nothing in it — the welcome screen
 
-- An empty catalogue is an answer, not a gap. It is never filled in with fixtures: the showcase games exist behind a debug toggle in Settings › Appearance and nowhere else.
+- An empty catalogue is an answer, not a gap. It is never filled in with fixtures: the showcase games exist behind a debug toggle in Settings › General › Experimental and nowhere else.
 - The welcome screen stands **inside the Library page host**, in front of the same wallpaper, with the Library's own furniture (hero, rail, browse bar, arrows) taken out of the layout rather than merely covered — so nothing behind it is tabbable. Connecting a store dissolves into the library instead of navigating away from it.
 - Nothing is shown until the first library load has answered. A hero with no game in it, and a welcome screen shown to someone whose library is about to arrive, are both a lie told for one frame.
 - The name in the heading is the **brand wordmark** (`/media/orivo-logo.png`), never type the app sets itself. A logo redrawn in the interface font drifts from the logo everywhere else the moment either one changes. Its `alt` completes the heading, so the accessible name stays "Welcome to Orivo" even if the artwork never decodes, and the intrinsic size on the tag holds the box open until it does.
@@ -219,7 +219,7 @@ Orivo runs as a routed multi-page application. Library, Store, game detail, Sett
 - It stands until the first library load has answered and the scene's artwork has decoded (that wait is capped at 700 ms), so what it uncovers is the real scene and never the empty backdrop. The arrival holds the screen for 1.4 s from the start of the page, once per session; it never stays longer than 6 s, whatever the library does. Its exit is the void lifting off the scene while the mark comes forward a touch.
 - It never takes input: `pointer-events: none` and `aria-hidden`. A click during the arrival reaches the shell behind it.
 - Every element rests in its arrived state; keyframes only say where it arrives from, filled backwards and never forwards — a forwards fill holds the very values the exit transitions change, and a transition never starts on a value an animation holds.
-- Under reduced motion there is no arrival, no hold and no exit: it is there, then it is not. The Appearance preference is remembered by the WebView itself, so the first frame of the next start already honours it before the host is asked.
+- Under reduced motion there is no arrival, no hold and no exit: it is there, then it is not. The Animations preference (Settings › General) is remembered by the WebView itself, so the first frame of the next start already honours it before the host is asked.
 
 #### Starting a game — the launch splash
 
@@ -259,7 +259,7 @@ Routes live in the hash. The parser is total: every input resolves to an `AppRou
 - `#/library` — the default. `#`, `#/` and an empty hash all resolve here.
 - `#/store` — optional `?store=<all|playstation|xbox|nintendo|steam|epic|plugin:<plugin id>[:<key>]>` and `?q=<text>`. An unknown store falls back to `all` ("Tout"); the filters of the old Store (`category`, `platform`) are dropped. Serialising omits defaults, so the canonical Store URL is bare `#/store`.
 - `#/games/<gameId>?from=library|store` — `from` accepts only those two values, anything else becomes `null`. `gameId` is percent-encoded in the hash.
-- `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `appearance`, `data`, `about`. `#/settings` alone means `general`. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
+- `#/settings/<section>` — sections are `general`, `libraries`, `plugins`, `data`, `about`. `#/settings` alone means `general`; `#/settings/appearance`, folded into General, opens General and is rewritten to its address. `?attachGame=<gameId>` targets the plugins section. An unknown section is **not** silently corrected to `general`: it is a not-found.
 - Anything else — not-found, carrying the path it could not resolve. The page names that path and offers one way back to the Library.
 
 Ids and trust across the boundary:
@@ -340,7 +340,7 @@ Maquettes : `docs/design/store/`. On doit comprendre au premier coup d'œil que 
 - **L'avancé est fermé par défaut.** Les termes de recherche, la version, les journaux et les profils techniques vont dans un `<details class="plugin-more">` fermé, ou derrière Beta features.
 - **Une progression, c'est une barre et une ligne.** La ligne a la forme `Étape 2/7 · Shaders · ~12 min`, avec un seul bouton Arrêter. À la fin, une ligne : le résultat, ou l'erreur telle que l'outil l'a dite.
 - **Les titres de section** (petites capitales `plugin-detail__section`) n'apparaissent que si le panneau a au moins deux sections visibles.
-- **Les étapes guidées numérotées** (`gs-steps`) servent seulement à un parcours qu'on suit dans l'ordre une seule fois, comme l'appairage de Game streaming. Elles ne servent pas pour une liste de prérequis.
+- **Un parcours qu'on suit une seule fois** (l'appairage de Game streaming) pose **une question à la fois** dans le panneau de droite (`gs-flow`) : en grand, un seul bouton principal (`gs-cta`), les choix en tuiles (`gs-tile`, sélection = `plugin-card.is-selected`). Une fois prêt, il ne reste qu'un bouton et un menu ⋯ (`pluginMoreMenu`) pour le reste. Pas pour une liste de prérequis.
 
 #### Les composants à reprendre
 
@@ -353,7 +353,7 @@ Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
 | Ligne | `plugin-fields` / `plugin-field` · `plugin-field__label` · `plugin-field__inputs` |
 | Fiche | `plugin-facts` / `plugin-fact` (libellé · valeur) |
 | État | `ws-pill` · `ws-pill--on` |
-| Avancé | `details.plugin-more` |
+| Avancé | `details.plugin-more` · menu ⋯ `pluginMoreMenu` (`plugin-dots`, `plugin-menu`) |
 | Grille | `plugin-card` · `.source-grid .source-account-row` |
 
 #### Avant / après — Switch (nxnative), 21 novembre 2026
@@ -579,7 +579,7 @@ Orivo shows what it actually knows. These are product rules, not copy suggestion
 - **Visible focus, always.** `:focus-visible` draws a 2px `#c3b5ff` outline with offset. Focus styling is never removed; a component that needs a different indicator must provide one of at least equal visibility.
 - **Everything is reachable by keyboard.** Interactive elements are real `button` / `input` elements, icon-only controls carry an `aria-label`, and decorative layers are `aria-hidden`. No click handler on a non-focusable element.
 - **Only the active page is focusable.** Inactive page hosts are `hidden` and `inert`, so Tab never lands in a page the user cannot see.
-- **`prefers-reduced-motion` is honoured, twice.** The system query collapses transitions and animations and forces `scroll-behavior: auto`. The Appearance preference mirrors it with `data-motion="reduced"` and wins over the system setting, so the app can be calmed down without changing macOS.
+- **`prefers-reduced-motion` is honoured, twice.** The system query collapses transitions and animations and forces `scroll-behavior: auto`. The Animations preference (Settings › General, `All` by default) mirrors it with `data-motion="reduced"` and wins over the system setting, so the app can be calmed down without changing macOS.
 - **No autoplaying video, anywhere.** Trailers use `controls` and `preload="metadata"` with autoplay off, and start only on explicit user intent. Motion-only embellishments are attached only when motion is allowed.
 - **Keyboard shortcuts are page-scoped.** The only shortcut shared by every page focuses the contextual search (`⌘K` / `Ctrl+K`, or `/` when not typing). Library shortcuts (arrows, Enter, `i`, `Shift+I`) return early unless Library is the active route, so they can never fire from the Store, a game detail or Settings. Escape belongs to whatever task is open — the Wine wizard first, then the library menu — and otherwise blurs the search field.
 - **Announce what changes on its own.** Regions that update without a direct user action use `role="status"` / `aria-live="polite"`; nothing announces assertively.

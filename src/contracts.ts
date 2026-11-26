@@ -89,7 +89,7 @@ export type StoreCategory =
   | "all-games";
 
 export type SettingsSection =
-  "general" | "libraries" | "plugins" | "appearance" | "data" | "about";
+  "general" | "libraries" | "plugins" | "data" | "about";
 
 export type GameMediaKind = "wallpaper" | "video" | "icon" | "cover";
 

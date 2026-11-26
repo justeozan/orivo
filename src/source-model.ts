@@ -163,6 +163,27 @@ export function sourceSyncSummary(result: SourceSyncResult): string {
   return t("misc.source.summary", { label: result.label, parts: parts.join(" · ") });
 }
 
+/**
+ * How many library games came from any of `sources`. A Settings card states
+ * what a store brought in rather than who is signed in, so the number is read
+ * off the library itself and is right even after a sync from somewhere else.
+ */
+export function sourceGameCount(
+  games: readonly { source?: string }[],
+  sources: readonly string[],
+): number {
+  let count = 0;
+  for (const game of games) {
+    if (game.source && sources.includes(game.source)) count += 1;
+  }
+  return count;
+}
+
+/** "1 game", "12 games": the line under a connected store's name. */
+export function gameCountLabel(count: number): string {
+  return count === 1 ? t("misc.source.games.one") : t("misc.source.games.other", { count });
+}
+
 /** How a connected source reads in the Sources menu and in Settings. */
 export function sourceStatusLine(status: SourceAccountStatus): string {
   if (!status.connected) {
