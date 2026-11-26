@@ -1,6 +1,12 @@
 /** Store page, its filters and price lines; Library source row and sort; Library onboarding. */
 export const en = {
   // Store model
+  "store.tab.all": "All",
+  "store.tab.steam": "Steam exclusives",
+  "store.tab.epic": "Epic exclusives",
+  "store.filters.stores": "Stores",
+  "store.detail.open": "Discover",
+  "store.detail.close": "Close",
   "store.category.forYou": "For you",
   "store.category.allGames": "All games",
   "store.platform.emulators": "Emulators",
@@ -113,6 +119,12 @@ export const en = {
 };
 
 export const fr: Partial<Record<keyof typeof en, string>> = {
+  "store.tab.all": "Tout",
+  "store.tab.steam": "Exclusivité Steam",
+  "store.tab.epic": "Exclu Epic Games",
+  "store.filters.stores": "Stores",
+  "store.detail.open": "Découvrir",
+  "store.detail.close": "Fermer",
   "store.category.forYou": "Pour toi",
   "store.category.allGames": "Tous les jeux",
   "store.platform.emulators": "Émulateurs",

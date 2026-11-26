@@ -254,6 +254,12 @@ export interface GameSummary {
    * when nothing is known.
    */
   availablePlatforms?: StorePlatform[];
+  /**
+   * The one brand that sells this game, when a curator or a source says so.
+   * Authoritative over what the offers suggest: a shop list is never proof
+   * that no other shop carries the game.
+   */
+  exclusiveTo?: "playstation" | "xbox" | "nintendo" | "steam" | "epic" | (string & {});
   owned: boolean;
   launchable: boolean;
   wishlisted: boolean;
@@ -325,6 +331,8 @@ export type AppRoute =
       category: StoreCategory;
       platforms: StorePlatform[];
       query: string;
+      /** The shop front (`all`, `playstation`, a plugin id…); absent means "Tout". */
+      store?: string;
     }
   | { page: "game"; gameId: GameId; from: "library" | "store" | null }
   | { page: "settings"; section: SettingsSection; attachGameId: GameId | null }

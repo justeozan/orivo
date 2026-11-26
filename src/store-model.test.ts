@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { setLanguage } from "./i18n";
 import type { GameSummary, ProviderStatus, StoreOffer, StoreProvider } from "./contracts";
 import {
   createInitialStoreState,
@@ -16,6 +17,12 @@ import {
   type StoreBrowsePage,
   type StoreHomeView,
   type StorePageState,
+  exclusiveBrandOf,
+  registerStoreTab,
+  resolveStoreTab,
+  selectExclusives,
+  storeTabs,
+  unregisterStoreTab,
 } from "./store-model";
 
 const NOW = Date.parse("2026-08-01T12:00:00.000Z");
@@ -42,6 +49,7 @@ function game(overrides: Partial<GameSummary> = {}): GameSummary {
   return {
     id,
     title: "Test Game",
+    exclusiveTo: "steam",
     source: "store",
     shortDescription: "A test entry.",
     coverUrl: "/media/cover.jpg",
@@ -412,8 +420,10 @@ describe("selectStoreGames", () => {
   });
 
   it("passes everything through for for-you and all-games", () => {
-    expect(selectStoreGames(stateWith({ home, category: "for-you" }))).toHaveLength(3);
-    expect(selectStoreGames(stateWith({ home, category: "all-games" }))).toHaveLength(3);
+    const sold = home.games.map((entry) => ({ ...entry, offers: [] }));
+    const open = { ...home, games: sold };
+    expect(selectStoreGames(stateWith({ home: open, category: "for-you" }))).toHaveLength(3);
+    expect(selectStoreGames(stateWith({ home: open, category: "all-games" }))).toHaveLength(3);
   });
 
   it("combines the category filter with the platform filter", () => {
@@ -473,11 +483,12 @@ describe("matchesPlatforms", () => {
   // A game sold on Steam has no PlayStation offer even when it ships on
   // PlayStation, so the filter must read availability, not only offers.
   it("keeps a Steam-sold game whose availability includes PS5, not only exclusives", () => {
-    const multiPlatform = game({ id: "steam:1", availablePlatforms: ["pc", "playstation"] });
-    const pcOnly = game({ id: "steam:2", availablePlatforms: ["pc"] });
-    const unknown = game({ id: "steam:3" });
+    const multiPlatform = game({ id: "steam:1", exclusiveTo: undefined, availablePlatforms: ["pc", "playstation"] });
+    const pcOnly = game({ id: "steam:2", exclusiveTo: undefined, availablePlatforms: ["pc"] });
+    const unknown = game({ id: "steam:3", exclusiveTo: undefined });
     const exclusive = game({
       id: "psn:1",
+      exclusiveTo: undefined,
       supportedPlatforms: [],
       offers: [offer({ gameId: "psn:1", provider: "playstation" })],
     });
@@ -495,7 +506,7 @@ describe("matchesPlatforms", () => {
           platforms: ["playstation"],
         }),
       ).map((entry) => entry.id),
-    ).toEqual(["steam:1", "psn:1"]);
+    ).toEqual(["psn:1"]); // `psn:1` is the only exclusive; "Tout" lists exclusives
   });
 });
 
@@ -706,5 +717,80 @@ describe("selectBestOffer ordering", () => {
 
     expect(selectBestOffer(game({ offers: [stale, verified] }), "EUR")?.id).toBe("verified");
     expect(selectBestOffer(game({ offers: [verified, stale] }), "EUR")?.id).toBe("verified");
+  });
+});
+
+describe("store tabs and exclusives", () => {
+  const ps = game({ id: "ps", exclusiveTo: undefined, supportedPlatforms: [], availablePlatforms: ["playstation"], offers: [] });
+  const xbox = game({ id: "xb", exclusiveTo: undefined, supportedPlatforms: [], availablePlatforms: ["xbox"], offers: [] });
+  const nintendo = game({ id: "nin", exclusiveTo: undefined, supportedPlatforms: [], availablePlatforms: ["switch"], offers: [] });
+  const steamExclusive = game({ id: "st", exclusiveTo: "steam" });
+  const multi = game({ id: "multi", exclusiveTo: undefined, supportedPlatforms: ["windows"], availablePlatforms: ["pc", "playstation"] });
+  const all = [ps, xbox, nintendo, steamExclusive, multi];
+
+  it("lists the six built-in stores, All first", () => {
+    expect(storeTabs().map((tab) => tab.id)).toEqual(["all", "playstation", "xbox", "nintendo", "steam", "epic"]);
+    for (const tab of storeTabs()) expect(tab.ambient).toMatch(/^(#[0-9a-f]{6}|var\(--violet\))$/i);
+  });
+
+  it("keeps only the exclusives of the chosen store, and all of them for All", () => {
+    expect(selectExclusives(all, "playstation").map((entry) => entry.id)).toEqual(["ps"]);
+    expect(selectExclusives(all, "xbox").map((entry) => entry.id)).toEqual(["xb"]);
+    expect(selectExclusives(all, "nintendo").map((entry) => entry.id)).toEqual(["nin"]);
+    expect(selectExclusives(all, "steam").map((entry) => entry.id)).toEqual(["st"]);
+    expect(selectExclusives(all, "epic")).toEqual([]);
+    expect(selectExclusives(all, "all").map((entry) => entry.id)).toEqual(["ps", "xb", "nin", "st"]);
+  });
+
+  it("never infers a Steam exclusive from a one-shop offer list", () => {
+    const steamOnly = game({ id: "so", exclusiveTo: undefined, offers: [offer({ gameId: "so", provider: "steam" })] });
+    expect(exclusiveBrandOf(steamOnly)).toBeNull();
+  });
+
+  it("labels the Tout, Steam and Epic stores in French once the language is set", () => {
+    setLanguage("fr");
+    try {
+      expect(storeTabs().map((tab) => tab.label)).toEqual([
+        "Tout", "PlayStation", "Xbox", "Nintendo", "Exclusivité Steam", "Exclu Epic Games",
+      ]);
+    } finally {
+      setLanguage("en");
+    }
+  });
+
+  it("gives a plugin tab the games that name it", () => {
+    registerStoreTab({ id: "retro", label: "Retro" });
+    try {
+      const mine = game({ id: "mine", exclusiveTo: "retro" });
+      expect(selectExclusives([mine, ps], "retro").map((entry) => entry.id)).toEqual(["mine"]);
+    } finally {
+      unregisterStoreTab("retro");
+    }
+  });
+
+  it("keeps the whole shelf under All when no game is exclusive, but not under a brand", () => {
+    expect(selectExclusives([multi], "all")).toEqual([multi]);
+    expect(selectExclusives([multi], "xbox")).toEqual([]);
+  });
+
+  it("selectStoreGames follows the store in state", () => {
+    const state = stateWith({ home: homeView({ games: all }), storeId: "xbox" });
+    expect(selectStoreGames(state).map((entry) => entry.id)).toEqual(["xb"]);
+    const next = reduceStorePageState(state, { type: "store-changed", storeId: "nintendo" });
+    expect(selectStoreGames(next).map((entry) => entry.id)).toEqual(["nin"]);
+    expect(reduceStorePageState(state, { type: "store-changed", storeId: "nope" }).storeId).toBe("all");
+  });
+
+  it("merges a plugin tab and rejects unsafe ones", () => {
+    expect(registerStoreTab({ id: "retro", label: "Retro", ambient: "#ff00aa", consoles: ["SNES"] })).toBe(true);
+    expect(registerStoreTab({ id: "bad id", label: "x" })).toBe(false);
+    expect(registerStoreTab({ id: "playstation", label: "Fake" })).toBe(false);
+    registerStoreTab({ id: "dirty", label: "<img src=x onerror=alert(1)>", ambient: "red; background:url(x)" });
+    expect(storeTabs().map((tab) => tab.id)).toContain("retro");
+    expect(resolveStoreTab("dirty").ambient).toBe("var(--violet)");
+    expect(selectExclusives(all, "retro")).toEqual([]);
+    unregisterStoreTab("retro");
+    unregisterStoreTab("dirty");
+    expect(resolveStoreTab("retro").id).toBe("all");
   });
 });

@@ -652,3 +652,12 @@ toast à chaque démarrage.
 ## Registre distant
 
 Format de l'index, mises à jour et soumission d'un plugin communautaire : voir [plugin-registry.md](plugin-registry.md).
+
+## Page Store ajoutée par un plugin
+
+Point d'extension côté front : `registerStoreTab({ id, label, ambient?, consoles? })`
+(`src/store-model.ts`). L'onglet rejoint la barre ; il liste les jeux dont
+`exclusiveTo` vaut son `id`. Les données sont non fiables : id, libellé et
+couleur sont validés, rendus en `textContent`. Le pont hôte (WIT / IPC) qui
+appelle ce registre reste à écrire ; sous `app-store`, aucun plugin téléchargé
+ne l'alimente.

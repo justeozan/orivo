@@ -144,6 +144,8 @@ test.describe("Store never mutates the Library", () => {
 
     // Browse a detail page from the Store as well.
     await page.locator(`[data-focus-key='game-${STORE_SECOND_GAME_ID}']`).click();
+    // A card opens the animated detail first; its verb leaves for the game page.
+    await page.locator(".store-detail__action").click();
     await waitForPage(page, "game");
     await page.locator(".gd-back").click();
     await waitForPage(page, "store");

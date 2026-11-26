@@ -120,3 +120,14 @@ describe("hash routing", () => {
     expect(parseAppRoute("#/settings/not-real").page).toBe("not-found");
   });
 });
+
+describe("store route", () => {
+  it("round-trips the store and drops an invalid or default one", () => {
+    const route = parseAppRoute("#/store?store=playstation");
+    expect(route).toMatchObject({ page: "store", store: "playstation" });
+    expect(appRouteToHash(route)).toBe("#/store?store=playstation");
+    expect(parseAppRoute("#/store?store=All%20Bad")).not.toHaveProperty("store");
+    expect(parseAppRoute("#/store?store=all")).not.toHaveProperty("store");
+    expect(parseAppRoute("#/store?category=legacy-mood")).toMatchObject({ category: "for-you" });
+  });
+});

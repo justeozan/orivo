@@ -38,6 +38,8 @@ import {
   selectBestOffer,
   selectHeroCopy,
   selectStoreGames,
+  storeTabs,
+  resolveStoreTab,
   sessionLabel,
   STORE_CATEGORIES,
   STORE_PLATFORMS,
@@ -406,6 +408,8 @@ export function createStorePage(options: StorePageOptions): AppPage {
   let transientStatus = "";
   let morePlatformsOpen = false;
   let whyOpen = false;
+  let detailTimer: ReturnType<typeof setInterval> | null = null;
+  let detailOpener: HTMLElement | null = null;
   /** Which of the two stacked backdrop layers is currently showing. */
   let backdropFront = 0;
   let backdropUrl = "";
@@ -434,6 +438,9 @@ export function createStorePage(options: StorePageOptions): AppPage {
     railTrack: null as HTMLElement | null,
     arrowPrevious: null as HTMLButtonElement | null,
     arrowNext: null as HTMLButtonElement | null,
+    storeBar: null as HTMLElement | null,
+    consoleBar: null as HTMLElement | null,
+    detail: null as HTMLElement | null,
     categoryBar: null as HTMLElement | null,
     platformBar: null as HTMLElement | null,
     morePanel: null as HTMLElement | null,
@@ -458,6 +465,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     category: state.category,
     platforms: [...state.platforms],
     query: state.query.trim(),
+    ...(state.storeId !== "all" ? { store: state.storeId } : {}),
   });
 
   const navigateWithCurrentFilters = (): void => options.navigate(currentStoreRoute());
@@ -825,6 +833,13 @@ export function createStorePage(options: StorePageOptions): AppPage {
     const filters = element("section", "store-filters");
     filters.setAttribute("aria-label", t("store.filters.label"));
 
+    // The store bar: one tab per shop front. Left and right walk it.
+    nodes.storeBar = element("nav", "store-tabs");
+    nodes.storeBar.setAttribute("aria-label", t("store.filters.stores"));
+    nodes.storeBar.setAttribute("data-nav-row", "");
+    nodes.consoleBar = element("div", "store-consoles");
+    nodes.consoleBar.setAttribute("aria-hidden", "true");
+
     nodes.categoryBar = element("nav", "store-chipbar store-chipbar--categories");
     nodes.categoryBar.setAttribute("aria-label", t("store.filters.categories"));
     // A strip of chips is a row: left and right walk it, on into the platform
@@ -885,7 +900,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     nodes.morePanel.hidden = true;
     platformGroup.append(nodes.platformBar, nodes.morePanel);
 
-    filters.append(nodes.categoryBar, platformGroup);
+    filters.append(nodes.storeBar, nodes.consoleBar, nodes.categoryBar, platformGroup);
     return filters;
   };
 
@@ -1101,9 +1116,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
     // An entry of the shelf's rail: left and right step between the cards.
     open.dataset.navItem = "";
     open.setAttribute("aria-label", t("store.card.open", { title: game.title }));
-    open.addEventListener("click", () =>
-      options.navigate({ page: "game", gameId: game.id, from: "store" }),
-    );
+    open.addEventListener("click", () => openDetail(game, open));
     open.addEventListener("focus", () => previewGame(game.id));
 
     const media = element("span", "store-card__media");
@@ -1314,7 +1327,123 @@ export function createStorePage(options: StorePageOptions): AppPage {
     installNodes.clear();
   };
 
+  const renderStoreBar = (): void => {
+    const bar = nodes.storeBar;
+    if (!bar) return;
+    const tabs = storeTabs();
+    const key = tabs.map((tab) => tab.id).join("|");
+    if (bar.dataset.tabs !== key) {
+      bar.dataset.tabs = key;
+      bar.replaceChildren(
+        ...tabs.map((tab) => {
+          const button = element("button", "store-tab");
+          button.type = "button";
+          button.dataset.focusKey = `store-${tab.id}`;
+          button.dataset.store = tab.id;
+          button.style.setProperty("--tab-ambient", tab.ambient);
+          // textContent only: a plugin's label never reaches innerHTML.
+          button.append(iconElement(tab.icon, "store-tab__icon"), element("span", "store-tab__label", tab.label));
+          button.addEventListener("click", () => {
+            if (state.storeId === tab.id) return;
+            closeDetail(false);
+            dispatch({ type: "store-changed", storeId: tab.id });
+            navigateWithCurrentFilters();
+          });
+          return button;
+        }),
+      );
+    }
+    const active = resolveStoreTab(state.storeId);
+    for (const button of bar.querySelectorAll<HTMLElement>("[data-store]")) {
+      const on = button.dataset.store === active.id;
+      button.classList.toggle("store-tab--active", on);
+      button.setAttribute("aria-pressed", String(on));
+    }
+    pageRoot?.style.setProperty("--store-ambient", active.ambient);
+    pageRoot?.setAttribute("data-store", active.id);
+    nodes.consoleBar?.replaceChildren(
+      ...active.consoles.map((name) => element("span", "store-console", name)),
+    );
+  };
+
+  const closeDetail = (restoreFocus: boolean): void => {
+    if (detailTimer) clearInterval(detailTimer);
+    detailTimer = null;
+    nodes.detail?.remove();
+    nodes.detail = null;
+    // Give the page behind back to the pointer, Tab and the spatial navigation.
+    for (const child of Array.from(pageRoot?.children ?? [])) (child as HTMLElement).inert = false;
+    const opener = detailOpener;
+    detailOpener = null;
+    if (restoreFocus && opener?.isConnected) opener.focus();
+  };
+
+  const openDetail = (game: GameSummary, opener: HTMLElement): void => {
+    closeDetail(false);
+    detailOpener = opener;
+    const reduced = document.documentElement.dataset.motion === "reduced";
+    const frames = [game.heroUrl, game.landscapeUrl, game.coverUrl].filter(
+      (url, index, all) => Boolean(url) && all.indexOf(url) === index,
+    );
+    const overlay = element("div", "store-detail");
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", game.title);
+    const reel = element("div", "store-detail__reel");
+    const images = frames.map((url, index) => {
+      const image = element("img", "store-detail__frame");
+      image.alt = "";
+      image.decoding = "async";
+      // Only the first frame loads up front; the rest wait for their turn.
+      if (index === 0) image.src = url;
+      image.classList.toggle("store-detail__frame--on", index === 0);
+      reel.append(image);
+      return image;
+    });
+    const body = element("div", "store-detail__body");
+    const price = offerLine(game);
+    body.append(element("h2", "store-detail__title", game.title));
+    if (price) body.append(element("span", "store-detail__price", price));
+    const action = element("button", "store-detail__action", t("store.detail.open"));
+    action.type = "button";
+    action.addEventListener("click", () => options.navigate({ page: "game", gameId: game.id, from: "store" }));
+    const close = element("button", "store-detail__close");
+    close.type = "button";
+    close.setAttribute("aria-label", t("store.detail.close"));
+    close.append(iconElement("close", "store-detail__close-icon"));
+    close.addEventListener("click", () => closeDetail(true));
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      closeDetail(true);
+    });
+    body.append(action);
+    overlay.append(reel, body, close);
+    // The page behind goes inert so focus cannot leave the dialog.
+    for (const child of Array.from(pageRoot?.children ?? [])) (child as HTMLElement).inert = true;
+    pageRoot?.append(overlay);
+    nodes.detail = overlay;
+    if (!reduced) {
+      const opening = opener.getBoundingClientRect();
+      overlay.style.setProperty("--from-x", `${Math.round(opening.left + opening.width / 2 - window.innerWidth / 2)}px`);
+      overlay.style.setProperty("--from-y", `${Math.round(opening.top + opening.height / 2 - window.innerHeight / 2)}px`);
+      overlay.classList.add("store-detail--animated");
+    }
+    action.focus();
+    if (!reduced && images.length > 1) {
+      let at = 0;
+      detailTimer = setInterval(() => {
+        images[at]?.classList.remove("store-detail__frame--on");
+        at = (at + 1) % images.length;
+        const next = images[at];
+        if (next && !next.src) next.src = frames[at];
+        next?.classList.add("store-detail__frame--on");
+      }, 3200);
+    }
+  };
+
   const renderFilters = (): void => {
+    renderStoreBar();
     for (const chip of nodes.categoryBar?.querySelectorAll<HTMLElement>(".store-chip") ?? []) {
       const active = chip.dataset.category === state.category;
       chip.classList.toggle("store-chip--active", active);
@@ -1541,6 +1670,10 @@ export function createStorePage(options: StorePageOptions): AppPage {
       const route = context.route;
       if (route.page !== "store") return;
       dispatch({
+        type: "store-changed",
+        storeId: route.store ?? "all",
+      }, false);
+      dispatch({
         type: "activate",
         category: route.category,
         platforms: route.platforms,
@@ -1571,6 +1704,7 @@ export function createStorePage(options: StorePageOptions): AppPage {
       });
     },
     deactivate() {
+      closeDetail(false);
       for (const timer of [queryTimer, statusTimer, previewTimer]) {
         if (timer) clearTimeout(timer);
       }

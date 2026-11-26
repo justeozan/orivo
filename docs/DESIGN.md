@@ -357,6 +357,10 @@ Il ne faut pas créer de composant tant qu'un de ceux-ci convient :
 | `Installez d'abord ce qui manque ci-dessus.` | les boutons sont désactivés, et la pastille `6/9` dit pourquoi |
 | `Les jeux que vous construisez apparaissent ici…` | la section n'existe pas tant qu'il n'y a pas de jeu |
 
+### Store — barre de stores
+
+Une barre de pastilles en tête : Tout, PlayStation, Xbox, Nintendo, Exclusivité Steam, Exclu Epic Games, puis les entrées ajoutées par un plugin (`registerStoreTab`, texte jamais injecté en HTML, couleur validée en `#rrggbb`). Le store actif pose sa couleur de marque en `--store-ambient` sur la page : c'est une ambiance seulement, le violet reste l'accent d'action et de focus. Chaque store affiche ses consoles en petites pastilles. La liste ne montre que les exclusivités du store choisi ; « Tout » les réunit. `exclusiveTo` (curé) prime ; seules les consoles se déduisent des plateformes, Steam et Epic ne sont jamais déduits. Tant que le catalogue embarqué n'a aucune exclusivité, « Tout » garde l'étagère entière. Un clic sur une carte ouvre un détail animé (depuis la carte, diaporama des images, prix, un verbe) ; Échap ferme et rend le focus ; rien ne bouge sous reduced-motion. Lien : `#/store?store=<id>`, un id inconnu retombe sur Tout.
+
 ## 5. Hero Cinématique partagé
 
 - Le hero est une image plein fond de jeu, non une carte.

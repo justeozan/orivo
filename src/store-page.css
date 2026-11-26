@@ -1291,3 +1291,171 @@ html[data-form-factor="compact"] .store-more-panel {
   max-height: calc(100svh - var(--topbar-height) - var(--h-chipbar) - 40px);
   overflow-y: auto;
 }
+
+/* ---------------------------------------------------------------------------
+   Store bar, ambiance and detail.
+   The brand colour only tints the page (`--store-ambient`); violet stays the
+   action and focus accent.
+   --------------------------------------------------------------------------- */
+
+.store-page {
+  --store-ambient: var(--violet);
+}
+
+.store-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background: radial-gradient(120% 60% at 50% 0%, color-mix(in srgb, var(--store-ambient) 38%, transparent), transparent 70%);
+  transition: opacity 0.4s ease;
+}
+
+.store-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.store-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  background: rgb(255 255 255 / 0.06);
+  color: inherit;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+
+.store-tab--active {
+  background: color-mix(in srgb, var(--tab-ambient) 42%, transparent);
+  border-color: var(--tab-ambient);
+}
+
+.store-tab:focus-visible,
+.store-detail__action:focus-visible,
+.store-detail__close:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+.store-tab__icon {
+  width: 18px;
+  height: 18px;
+}
+
+.store-consoles {
+  display: flex;
+  gap: 6px;
+  min-height: 0;
+}
+
+.store-console {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: rgb(255 255 255 / 0.1);
+}
+
+.store-detail {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  align-content: end;
+  background: rgb(8 8 12 / 0.92);
+}
+
+.store-detail--animated {
+  animation: store-detail-in 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes store-detail-in {
+  from {
+    opacity: 0;
+    transform: translate(var(--from-x, 0), var(--from-y, 0)) scale(0.2);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.store-detail__reel {
+  position: absolute;
+  inset: 0;
+}
+
+.store-detail__frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.8s ease;
+}
+
+.store-detail__frame--on {
+  opacity: 1;
+}
+
+.store-detail__body {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 48px var(--pad, 46px);
+  background: linear-gradient(transparent, rgb(8 8 12 / 0.9));
+}
+
+.store-detail__title {
+  margin: 0;
+  flex: 1 1 100%;
+}
+
+.store-detail__action {
+  padding: 10px 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--violet);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.store-detail__close {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.5);
+  color: #fff;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-detail--animated {
+    animation: none;
+  }
+  .store-detail__frame,
+  .store-tab,
+  .store-page::before {
+    transition: none;
+  }
+}
+
+:root[data-motion="reduced"] .store-detail--animated {
+  animation: none;
+}

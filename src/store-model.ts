@@ -56,6 +56,8 @@ export interface StorePageState {
   ownedGameIds: string[];
   /** The card the hero is currently describing. */
   previewGameId: string | null;
+  /** The shop front on show; its games are the exclusives of that brand. */
+  storeId: StoreTabId;
 }
 
 export type StorePageAction =
@@ -71,12 +73,110 @@ export type StorePageAction =
   | { type: "browse-loaded"; requestId: number; page: StoreBrowsePage; append: boolean }
   | { type: "request-failed"; requestId: number; message: string; offline: boolean }
   | { type: "category-changed"; category: StoreCategory }
+  | { type: "store-changed"; storeId: StoreTabId }
   | { type: "platforms-changed"; platforms: StorePlatform[] }
   | { type: "query-changed"; query: string }
   | { type: "wishlist-changed"; gameId: string; wishlisted: boolean }
   | { type: "owned-games-loaded"; gameIds: string[] }
   | { type: "preview-changed"; gameId: string | null }
   | { type: "connectivity-changed"; online: boolean };
+
+/** The shop front a shopper picks: one brand, its consoles and its mood colour. */
+export type StoreTabId = "all" | "playstation" | "xbox" | "nintendo" | "steam" | "epic" | (string & {});
+
+export interface StoreTabDefinition {
+  id: StoreTabId;
+  label: string;
+  /** Brand colour, used as page ambiance only; violet stays the action accent. */
+  ambient: string;
+  icon: "windows" | "playstation" | "xbox" | "switch" | "emulator";
+  consoles: string[];
+  /** Absent for "all"; a plugin tab brings its own games. */
+  exclusiveTo?: StoreExclusiveBrand;
+  source?: "builtin" | "plugin";
+}
+
+export type StoreExclusiveBrand = "playstation" | "xbox" | "nintendo" | "steam" | "epic";
+
+/** Built from a function so labels follow the language set at boot, not at import. */
+export const builtinStoreTabs = (): readonly StoreTabDefinition[] => [
+  { id: "all", label: t("store.tab.all"), ambient: "var(--violet)", icon: "emulator", consoles: [] },
+  { id: "playstation", label: "PlayStation", ambient: "#0070d1", icon: "playstation", consoles: ["PS5", "PS4"], exclusiveTo: "playstation" },
+  { id: "xbox", label: "Xbox", ambient: "#107c10", icon: "xbox", consoles: ["Series X|S", "One"], exclusiveTo: "xbox" },
+  { id: "nintendo", label: "Nintendo", ambient: "#e60012", icon: "switch", consoles: ["Switch", "Switch 2"], exclusiveTo: "nintendo" },
+  { id: "steam", label: t("store.tab.steam"), ambient: "#1b9bd8", icon: "windows", consoles: ["PC"], exclusiveTo: "steam" },
+  { id: "epic", label: t("store.tab.epic"), ambient: "#9aa0a6", icon: "windows", consoles: ["PC"], exclusiveTo: "epic" },
+];
+
+/** Plugin tabs, merged after the built-in ones. Registered by the plugin host. */
+const pluginTabs = new Map<string, StoreTabDefinition>();
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** Plugin data is untrusted: a bad id or colour is dropped, never rendered. */
+export function registerStoreTab(tab: { id: string; label: string; ambient?: string; consoles?: string[] }): boolean {
+  const id = tab.id.trim();
+  const label = tab.label.trim().slice(0, 24);
+  if (!/^[a-z0-9-]{1,32}$/.test(id) || !label || builtinStoreTabs().some((builtin) => builtin.id === id)) return false;
+  pluginTabs.set(id, {
+    id,
+    label,
+    ambient: tab.ambient && HEX_COLOR.test(tab.ambient) ? tab.ambient : "var(--violet)",
+    icon: "emulator",
+    consoles: (tab.consoles ?? []).slice(0, 4).map((value) => value.slice(0, 16)),
+    source: "plugin",
+  });
+  return true;
+}
+
+export function unregisterStoreTab(id: string): void {
+  pluginTabs.delete(id);
+}
+
+export function storeTabs(): StoreTabDefinition[] {
+  return [...builtinStoreTabs(), ...pluginTabs.values()];
+}
+
+/** An unknown id (an old link, a removed plugin) lands on "Tout". */
+export function resolveStoreTab(id: string | null | undefined): StoreTabDefinition {
+  return storeTabs().find((tab) => tab.id === id) ?? builtinStoreTabs()[0];
+}
+
+/**
+ * The one brand a game belongs to, or null when it is sold elsewhere too.
+ * A curated `exclusiveTo` wins. Otherwise only the console brands are derived:
+ * a game that ships on exactly one console family is that family's. Steam and
+ * Epic are never inferred, because an offer list does not prove another shop
+ * lacks the game.
+ */
+export function exclusiveBrandOf(game: GameSummary): StoreExclusiveBrand | null {
+  if (game.exclusiveTo) return game.exclusiveTo as StoreExclusiveBrand;
+  const platforms = new Set(gamePlatforms(game));
+  platforms.delete("emulators");
+  if (platforms.size !== 1) return null;
+  if (platforms.has("playstation")) return "playstation";
+  if (platforms.has("xbox")) return "xbox";
+  if (platforms.has("switch")) return "nintendo";
+  return null;
+}
+
+/**
+ * Exclusives only: of the chosen brand, or of any brand for "Tout".
+ *
+ * "Tout" falls back to the whole shelf while nothing in it is exclusive (the
+ * bundled catalogue carries no curated `exclusiveTo` yet), so the Store is never
+ * blank by default. A brand tab stays strict and may be empty.
+ */
+export function selectExclusives(games: GameSummary[], storeId: StoreTabId): GameSummary[] {
+  const tab = resolveStoreTab(storeId);
+  // A plugin tab lists the games that name it in `exclusiveTo`.
+  if (tab.source === "plugin") return games.filter((game) => (game.exclusiveTo as string | undefined) === tab.id);
+  const matches = games.filter((game) => {
+    const brand = exclusiveBrandOf(game);
+    return brand !== null && (!tab.exclusiveTo || tab.exclusiveTo === brand);
+  });
+  return matches.length === 0 && !tab.exclusiveTo ? games : matches;
+}
 
 export interface StoreCategoryOption {
   id: StoreCategory;
@@ -188,6 +288,7 @@ export function createInitialStoreState(): StorePageState {
     errorMessage: "",
     ownedGameIds: [],
     previewGameId: null,
+    storeId: "all",
   };
 }
 
@@ -269,6 +370,8 @@ export function reduceStorePageState(
         nextCursor: null,
         previewGameId: null,
       };
+    case "store-changed":
+      return { ...state, storeId: resolveStoreTab(action.storeId).id, previewGameId: null };
     case "platforms-changed":
       return {
         ...state,
@@ -415,8 +518,13 @@ export function selectStoreGames(state: StorePageState): GameSummary[] {
   // A browse page arrives already filtered, so its answer is kept whole rather
   // than run through the local heuristic again. Ownership still filters,
   // because the library can change after the page was fetched.
-  if (state.browseGames) return state.browseGames.filter((game) => !isOwned(game));
-  return state.home.games.filter((game) => !isOwned(game) && matchesStoreFilters(game, state));
+  if (state.browseGames) {
+    return selectExclusives(state.browseGames.filter((game) => !isOwned(game)), state.storeId);
+  }
+  return selectExclusives(
+    state.home.games.filter((game) => !isOwned(game) && matchesStoreFilters(game, state)),
+    state.storeId,
+  );
 }
 
 export function storeCategoryLabel(category: StoreCategory): string {

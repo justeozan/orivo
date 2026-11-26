@@ -427,6 +427,7 @@ function game(overrides: Partial<GameSummary> = {}): GameSummary {
     id,
     title: "OpenTTD",
     source: "store",
+    exclusiveTo: "steam",
     shortDescription: "A test entry.",
     coverUrl: "/media/cover.jpg",
     heroUrl: "/media/hero.jpg",

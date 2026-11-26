@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppRoute, GameSummary, ProviderStatus, StoreOffer, StoreProvider } from "./contracts";
 import { PageLifecycleHost } from "./page-lifecycle";
 import type { StoreBrowsePage, StoreBrowseRequest, StoreHomeView } from "./store-model";
-import { DEFAULT_HIGHLIGHTS, EDITORIAL_GAMES, formatPrice, selectBestOffer } from "./store-model";
+import {
+  DEFAULT_HIGHLIGHTS,
+  EDITORIAL_GAMES,
+  formatPrice,
+  registerStoreTab,
+  selectBestOffer,
+  unregisterStoreTab,
+} from "./store-model";
 import { createStorePage, type StorePageClient } from "./store-page";
 
 const HOUR = 60 * 60 * 1_000;
@@ -28,6 +35,7 @@ function game(overrides: Partial<GameSummary> = {}): GameSummary {
   return {
     id,
     title: "Test Game",
+    exclusiveTo: "steam",
     source: "store",
     shortDescription: "A test entry.",
     coverUrl: "/media/cover.jpg",
@@ -224,6 +232,9 @@ describe("Store page filtering", () => {
         provider: "playstation",
         providerLabel: "PlayStation Store",
       }),
+      // Also on Steam, so it is not an exclusive: this test is about the
+      // category and platform filters, not about the store bar.
+      offer({ gameId: "short-console", provider: "steam" }),
     ],
   });
   const storySteam = game({
@@ -363,6 +374,7 @@ describe("Store page degraded sources", () => {
                   provider: "playstation",
                   providerLabel: "PlayStation Store",
                 }),
+                offer({ gameId: "console-game", provider: "steam" }),
               ],
             }),
           ],
@@ -409,11 +421,9 @@ describe("Store page degraded sources", () => {
 
     expect(mounted.container.querySelector(".store-status--offline")).not.toBeNull();
     expect(fake.commands).toEqual(["listOwnedGameIds", "getHome"]);
-    // Cards, not titles: the handful of games that fall back to capsule art
-    // drop the text title so the wordmark is not printed twice.
-    expect(mounted.container.querySelectorAll(".store-card").length).toBe(EDITORIAL_GAMES.length);
-    expect(cardFor(mounted.container, EDITORIAL_GAMES[0].id)).not.toBeNull();
-    expect(mounted.container.querySelector(".store-hero")).not.toBeNull();
+    // No bundled pick is a curated exclusive: "Tout" keeps the whole shelf.
+    expect(mounted.container.querySelectorAll(".store-card").length).toBeGreaterThan(0);
+    expect((mounted.container.querySelector(".store-empty") as HTMLElement).hidden).toBe(true);
   });
 });
 
@@ -495,7 +505,8 @@ describe("Store page offer facts", () => {
   });
 
   it("shows the bundled catalogue's own price, and nothing where no shop quoted one", async () => {
-    const priced = EDITORIAL_GAMES.find((entry) => formatPrice(selectBestOffer(entry)) !== "");
+    const found = EDITORIAL_GAMES.find((entry) => formatPrice(selectBestOffer(entry)) !== "");
+    const priced = found && { ...found, exclusiveTo: "steam" as const };
     if (!priced) throw new Error("The bundled catalogue carries no priced game.");
     const expectedPrice = formatPrice(selectBestOffer(priced));
     const quoteless = game({ id: "quoteless", title: "Quoteless", offers: [] });
@@ -558,6 +569,8 @@ describe("Store page wishlist", () => {
     expect(mounted.navigations.some((route) => route.page === "library")).toBe(false);
 
     byFocusKey(mounted.container, "game-store:w").click();
+    // A card opens the animated detail; its verb leaves for the game page.
+    mounted.container.querySelector<HTMLButtonElement>(".store-detail__action")?.click();
     expect(mounted.navigations.at(-1)).toEqual({
       page: "game",
       gameId: "store:w",
@@ -658,5 +671,113 @@ describe("Store page lifecycle", () => {
 
     expect(byFocusKey(mounted.container, "wishlist-a").getAttribute("aria-pressed")).toBe("true");
     expect((document.activeElement as HTMLElement | null)?.dataset.focusKey).toBe("game-a");
+  });
+});
+
+describe("Store page store bar", () => {
+  const psExclusive = game({
+    id: "ps-only",
+    title: "Sony Only",
+    exclusiveTo: undefined,
+    supportedPlatforms: [],
+    availablePlatforms: ["playstation"],
+    offers: [offer({ gameId: "ps-only", provider: "playstation", providerLabel: "PlayStation Store" })],
+  });
+  const xboxExclusive = game({
+    id: "xb-only",
+    title: "Xbox Only",
+    exclusiveTo: undefined,
+    supportedPlatforms: [],
+    availablePlatforms: ["xbox"],
+    offers: [offer({ gameId: "xb-only", provider: "microsoft", providerLabel: "Microsoft Store" })],
+  });
+
+  const mountWithExclusives = async () => {
+    const fake = createFakeClient({ getHome: async () => homeView({ games: [psExclusive, xboxExclusive] }) });
+    const mounted = mountStore(fake.client);
+    await mounted.host.activate(storeRoute());
+    await flush();
+    return mounted;
+  };
+
+  it("lists the stores and tints the page with the active brand", async () => {
+    const mounted = await mountWithExclusives();
+    const bar = mounted.container.querySelector(".store-tabs") as HTMLElement;
+    expect([...bar.querySelectorAll(".store-tab__label")].map((node) => node.textContent)).toEqual([
+      "All",
+      "PlayStation",
+      "Xbox",
+      "Nintendo",
+      "Steam exclusives",
+      "Epic exclusives",
+    ]);
+    expect(cardTitles(mounted.container)).toEqual(["Sony Only", "Xbox Only"]);
+
+    byFocusKey(mounted.container, "store-xbox").click();
+    expect(cardTitles(mounted.container)).toEqual(["Xbox Only"]);
+    expect(pageRoot(mounted.container).style.getPropertyValue("--store-ambient")).toBe("#107c10");
+    expect(byFocusKey(mounted.container, "store-xbox").getAttribute("aria-pressed")).toBe("true");
+    expect(mounted.navigations.at(-1)).toMatchObject({ page: "store", store: "xbox" });
+
+    byFocusKey(mounted.container, "store-playstation").click();
+    expect(cardTitles(mounted.container)).toEqual(["Sony Only"]);
+    expect(pageRoot(mounted.container).style.getPropertyValue("--store-ambient")).toBe("#0070d1");
+  });
+
+  it("opens the store named in the route, and falls back to All for an unknown one", async () => {
+    const fake = createFakeClient({ getHome: async () => homeView({ games: [psExclusive, xboxExclusive] }) });
+    const mounted = mountStore(fake.client);
+    await mounted.host.activate(storeRoute({ store: "playstation" }));
+    await flush();
+    expect(cardTitles(mounted.container)).toEqual(["Sony Only"]);
+    await mounted.host.activate(storeRoute({ store: "gone-plugin" }));
+    await flush();
+    expect(cardTitles(mounted.container)).toEqual(["Sony Only", "Xbox Only"]);
+  });
+
+  it("opens an animated detail with the price, and Escape closes it and returns focus", async () => {
+    const mounted = await mountWithExclusives();
+    const card = byFocusKey(mounted.container, "game-ps-only");
+    card.focus();
+    card.click();
+    const detail = mounted.container.querySelector<HTMLElement>(".store-detail");
+    expect(detail).not.toBeNull();
+    expect(detail?.querySelector(".store-detail__title")?.textContent).toBe("Sony Only");
+    expect(detail?.querySelector(".store-detail__price")?.textContent).toContain("PlayStation Store");
+    expect(detail?.classList.contains("store-detail--animated")).toBe(true);
+    // The page behind cannot take focus while the dialog is open.
+    const behind = [...pageRoot(mounted.container).children].filter((node) => node !== detail);
+    expect(behind.length).toBeGreaterThan(0);
+    expect(behind.every((node) => (node as HTMLElement).inert)).toBe(true);
+
+    detail?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(mounted.container.querySelector(".store-detail")).toBeNull();
+    expect(document.activeElement).toBe(card);
+    expect(behind.some((node) => (node as HTMLElement).inert)).toBe(false);
+  });
+
+  it("does not animate the detail under reduced motion", async () => {
+    document.documentElement.dataset.motion = "reduced";
+    try {
+      const mounted = await mountWithExclusives();
+      byFocusKey(mounted.container, "game-ps-only").click();
+      expect(mounted.container.querySelector(".store-detail--animated")).toBeNull();
+    } finally {
+      delete document.documentElement.dataset.motion;
+    }
+  });
+
+  it("shows a plugin's store tab, escaped", async () => {
+    registerStoreTab({ id: "retro", label: "<b>Retro</b>", ambient: "#ff00aa" });
+    try {
+      const mounted = await mountWithExclusives();
+      const tab = byFocusKey(mounted.container, "store-retro");
+      expect(tab.textContent).toBe("<b>Retro</b>");
+      expect(tab.querySelector("b")).toBeNull();
+      tab.click();
+      expect(pageRoot(mounted.container).style.getPropertyValue("--store-ambient")).toBe("#ff00aa");
+    } finally {
+      unregisterStoreTab("retro");
+    }
   });
 });

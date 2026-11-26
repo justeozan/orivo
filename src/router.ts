@@ -56,11 +56,16 @@ export function parseAppRoute(hash: string): AppRoute {
     const platforms = query
       .getAll("platform")
       .filter((platform): platform is StorePlatform => storePlatforms.has(platform as StorePlatform));
+    const requestedStore = query.get("store") ?? "";
+    const store = /^[a-z0-9-]{1,32}$/.test(requestedStore) && requestedStore !== "all"
+      ? requestedStore
+      : undefined;
     return {
       page: "store",
       category,
       platforms: [...new Set(platforms)],
       query: query.get("q")?.trim() ?? "",
+      ...(store ? { store } : {}),
     };
   }
 
@@ -105,6 +110,7 @@ export function appRouteToHash(route: AppRoute): string {
   }
   if (route.page === "store") {
     const query = new URLSearchParams();
+    if (route.store && route.store !== "all") query.set("store", route.store);
     if (route.category !== "for-you") query.set("category", route.category);
     for (const platform of route.platforms) query.append("platform", platform);
     if (route.query.trim()) query.set("q", route.query.trim());
