@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { applyRememberedMotionPreference, prefersReducedMotion, rememberMotionPreference } from "./motion";
+import {
+  applyRememberedMotionPreference,
+  prefersReducedMotion,
+  rememberedMotionPreference,
+  rememberMotionPreference,
+} from "./motion";
 
 function memory() {
   const values = new Map<string, string>();
@@ -24,6 +29,15 @@ describe("the motion preference before the host has answered", () => {
     expect(document.documentElement.dataset.motion).toBe("reduced");
     // Which is what every animation guard reads, the startup one included.
     expect(prefersReducedMotion()).toBe(true);
+  });
+
+  it("reads back the choice last applied, and nothing else", () => {
+    const store = memory();
+    expect(rememberedMotionPreference(store)).toBeNull();
+    rememberMotionPreference("system", store);
+    expect(rememberedMotionPreference(store)).toBe("system");
+    store.values.set("orivo.motion", "dramatic");
+    expect(rememberedMotionPreference(store)).toBeNull();
   });
 
   it("follows the system on a first start, with nothing remembered", () => {

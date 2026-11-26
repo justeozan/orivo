@@ -167,8 +167,6 @@ export const en = {
   "app.steam.disconnected":
     "Steam was disconnected. Games already imported into Orivo remain in your library.",
   "app.steam.disconnectFailed": "Steam could not be disconnected.",
-  "app.source.desktopOnly":
-    "Connecting another game library is available in the Orivo desktop app.",
   "app.source.microsoftPair":
     "One Microsoft sign-in covers both: connecting or disconnecting one affects the other.",
   "app.source.waitingSignIn": "Waiting for sign-in…",
@@ -201,7 +199,7 @@ export const en = {
   "app.onboarding.localTitle": "Import local games",
   "app.onboarding.localDetail": "Apps, executables, shortcuts on {device}",
   "app.onboarding.alsoIn": "Both of these also live in ",
-  "app.onboarding.settingsLink": "Settings › Libraries & Sources",
+  "app.onboarding.settingsLink": "Settings › Accounts",
   "app.onboarding.emptyTitle": "Your library is empty",
   "app.onboarding.emptyBody": "Connect a platform to see your games here.",
   "app.onboarding.sourcesBody":
@@ -274,6 +272,8 @@ export const en = {
   "app.folder.add": "Add a folder",
   "app.folder.rescanShort": "Look again",
   "app.folder.removeShort": "Remove",
+  "app.folder.addShort": "Add",
+  "app.folder.manage": "Manage folders",
   "app.folder.addedOneFrom": "1 game added from {folder}.",
   "app.folder.addedManyFrom": "{count} games added from {folder}.",
   "app.folder.skippedOne": "1 shortcut could not be used.",
@@ -370,7 +370,6 @@ export const en = {
   "app.region.de": "Germany",
   "app.region.jp": "Japan",
   "app.region.au": "Australia",
-  "app.libraries.refreshAll": "Refresh all libraries",
   "app.libraries.panelAria": "Game libraries and providers",
   "app.libraries.steamTitle": "Steam library",
   "app.storeFolders.intro": "Your libraries come from your accounts. To show which games are installed on this Mac, Orivo needs to read each store's folder once.",
@@ -448,20 +447,18 @@ export const en = {
   "app.wallpaper.termBackground": "Background",
   "app.wallpaper.termLogo": "Logo",
   "app.motion.title": "Motion",
-  "app.motion.full": "Full",
+  "app.motion.full": "All",
   "app.motion.fullHint": "Always animate, even when the OS asks for less motion.",
   "app.motion.system": "System",
   "app.motion.systemHint": "Follow the system's reduced-motion setting.",
   "app.motion.reduced": "Reduced",
   "app.motion.reducedHint": "Always keep motion to a minimum in Orivo.",
-  "app.appearance.gamePages": "Game pages",
-  "app.appearance.autoplay": "Play trailers automatically",
+  "app.appearance.autoplay": "Autoplay trailers",
   "app.appearance.autoplayHint":
     "A game's page starts its first trailer on its own. Off, the trailer waits for you.",
-  "app.appearance.sound": "Play trailers with sound",
+  "app.appearance.sound": "With sound",
   "app.appearance.soundHint":
     "A trailer that starts by itself plays its sound. Off, it starts muted; one you choose always has sound.",
-  "app.appearance.beta": "Beta &amp; debug",
   "app.appearance.demo": "Show demo games",
   "app.appearance.demoHint":
     "Seeds the library with Elden Ring, Cyberpunk 2077 and other bundled fixtures, so the interface can be tested without importing real games.",
@@ -667,8 +664,6 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.steam.disconnected":
     "Steam a été déconnecté. Les jeux déjà importés dans Orivo restent dans ta bibliothèque.",
   "app.steam.disconnectFailed": "Impossible de déconnecter Steam.",
-  "app.source.desktopOnly":
-    "La connexion d’une autre bibliothèque de jeux est disponible dans l’app Orivo pour ordinateur.",
   "app.source.microsoftPair":
     "Une seule connexion Microsoft couvre les deux : connecter ou déconnecter l’un touche l’autre.",
   "app.source.waitingSignIn": "En attente de la connexion…",
@@ -702,7 +697,7 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.onboarding.localTitle": "Importer des jeux locaux",
   "app.onboarding.localDetail": "Apps, exécutables, raccourcis sur {device}",
   "app.onboarding.alsoIn": "Ces deux options se trouvent aussi dans ",
-  "app.onboarding.settingsLink": "Réglages › Bibliothèques et sources",
+  "app.onboarding.settingsLink": "Réglages › Comptes",
   "app.onboarding.emptyTitle": "Ta bibliothèque est vide",
   "app.onboarding.emptyBody": "Connecte une plateforme pour voir tes jeux ici.",
   "app.onboarding.sourcesBody":
@@ -780,6 +775,8 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.folder.add": "Ajouter un dossier",
   "app.folder.rescanShort": "Rechercher",
   "app.folder.removeShort": "Retirer",
+  "app.folder.addShort": "Ajouter",
+  "app.folder.manage": "Gérer les dossiers",
   "app.folder.addedOneFrom": "1 jeu ajouté depuis {folder}.",
   "app.folder.addedManyFrom": "{count} jeux ajoutés depuis {folder}.",
   "app.folder.skippedOne": "1 raccourci n’a pas pu être utilisé.",
@@ -877,7 +874,6 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.region.de": "Allemagne",
   "app.region.jp": "Japon",
   "app.region.au": "Australie",
-  "app.libraries.refreshAll": "Actualiser toutes les bibliothèques",
   "app.libraries.panelAria": "Bibliothèques de jeux et fournisseurs",
   "app.libraries.steamTitle": "Bibliothèque Steam",
   "app.storeFolders.intro": "Tes bibliothèques viennent de tes comptes. Pour montrer quels jeux sont installés sur ce Mac, Orivo doit lire une fois le dossier de chaque boutique.",
@@ -956,20 +952,18 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.wallpaper.termBackground": "Arrière-plan",
   "app.wallpaper.termLogo": "Logo",
   "app.motion.title": "Animations",
-  "app.motion.full": "Complet",
+  "app.motion.full": "Toutes",
   "app.motion.fullHint": "Toujours animer, même quand le système demande moins d’animations.",
   "app.motion.system": "Système",
   "app.motion.systemHint": "Suivre le réglage de réduction des animations du système.",
-  "app.motion.reduced": "Réduit",
+  "app.motion.reduced": "Réduites",
   "app.motion.reducedHint": "Toujours limiter les animations au minimum dans Orivo.",
-  "app.appearance.gamePages": "Pages de jeu",
-  "app.appearance.autoplay": "Lire les bandes-annonces automatiquement",
+  "app.appearance.autoplay": "Bandes-annonces auto",
   "app.appearance.autoplayHint":
     "La page d’un jeu lance sa première bande-annonce toute seule. Désactivé, la bande-annonce attend que tu la lances.",
-  "app.appearance.sound": "Lire les bandes-annonces avec le son",
+  "app.appearance.sound": "Avec le son",
   "app.appearance.soundHint":
     "Une bande-annonce qui démarre toute seule joue son son. Désactivé, elle démarre en sourdine ; celle que tu choisis a toujours le son.",
-  "app.appearance.beta": "Bêta &amp; débogage",
   "app.appearance.demo": "Afficher les jeux de démonstration",
   "app.appearance.demoHint":
     "Remplit la bibliothèque avec Elden Ring, Cyberpunk 2077 et d’autres jeux fictifs inclus, pour tester l’interface sans importer de vrais jeux.",

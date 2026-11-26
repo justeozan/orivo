@@ -42,10 +42,19 @@ describe("settings model", () => {
     expect(normalisePreferences({ startPage: "downloads", storeRegion: "zz", motion: "fast" })).toEqual(
       DEFAULT_PREFERENCES,
     );
-    expect(normalisePreferences({ motion: "full" })).toEqual({
+    expect(normalisePreferences({ motion: "system" })).toEqual({
       ...DEFAULT_PREFERENCES,
-      motion: "full",
+      motion: "system",
     });
+  });
+
+  it("animates everything unless a stored choice says otherwise", () => {
+    expect(DEFAULT_PREFERENCES.motion).toBe("full");
+    // No preference on file reads as the default...
+    expect(normalisePreferences({}).motion).toBe("full");
+    // ...but a choice already made is kept, whichever it was.
+    expect(normalisePreferences({ motion: "system" }).motion).toBe("system");
+    expect(normalisePreferences({ motion: "reduced" }).motion).toBe("reduced");
   });
 
   it("reads what Orivo does when a game starts, and nothing it does not know", () => {

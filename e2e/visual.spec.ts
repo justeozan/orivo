@@ -5,6 +5,7 @@ import {
   openRoute,
   topbarBox,
   waitForImages,
+  waitForPage,
   type PageName,
 } from "./helpers";
 
@@ -180,13 +181,23 @@ test.describe("topbar geometry", () => {
 test.describe("reduced motion", () => {
   // Emulated before the first navigation so the pages read the preference on
   // their very first render (`prefersReducedMotion()` is checked at render time).
+  // Orivo animates everything by default, whatever the OS says; "System" is
+  // the choice that hands the decision back to it. The browser preview keeps
+  // preferences in memory only, so the choice is made once and the pages are
+  // then reached without a reload.
   test.beforeEach(async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
+    await openRoute(page, "#/settings/general", "settings");
+    await page.locator("[data-segmented='motion'] [data-segment-value='system']").click();
+    await expect(page.locator("#app")).toHaveAttribute("data-motion", "system");
   });
 
   for (const golden of GOLDENS) {
     test(`${golden.golden}: nothing animates and no video autoplays`, async ({ page }) => {
-      await openRoute(page, golden.hash, golden.name);
+      await page.evaluate((hash) => {
+        window.location.hash = hash;
+      }, golden.hash);
+      await waitForPage(page, golden.name);
       await waitForImages(page);
       await page.waitForTimeout(400);
 
@@ -218,11 +229,20 @@ test.describe("reduced motion", () => {
     });
   }
 
-  test("the Appearance preference forces reduced motion on top of the system setting", async ({
+  test("the Animations preference forces reduced motion on top of the system setting", async ({
     page,
   }) => {
-    await openRoute(page, "#/settings/appearance", "settings");
-    await page.locator("input[name='motion-preference'][value='reduced']").check();
+    await page.locator("[data-segmented='motion'] [data-segment-value='reduced']").click();
     await expect(page.locator("#app")).toHaveAttribute("data-motion", "reduced");
   });
+
+});
+
+test("by default every animation plays, even when the system asks for less", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openRoute(page, "#/settings/general", "settings");
+  await expect(page.locator("#app")).toHaveAttribute("data-motion", "full");
+  await expect(
+    page.locator("[data-segmented='motion'] [data-segment-value='full']"),
+  ).toHaveAttribute("aria-pressed", "true");
 });

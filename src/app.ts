@@ -49,8 +49,16 @@ import {
   type OnboardingView,
 } from "./library-onboarding";
 import { isTauriRuntime, primeMediaDirectory, resolveMediaUrl, resolveMediaUrlSync } from "./media";
-import { prefersReducedMotion, rememberMotionPreference } from "./motion";
-import { LANGUAGE_NAMES, LANGUAGES, rememberLanguagePreference, t, type LanguagePreference } from "./i18n";
+import { prefersReducedMotion, rememberedMotionPreference, rememberMotionPreference } from "./motion";
+import {
+  LANGUAGE_NAMES,
+  LANGUAGES,
+  rememberLanguagePreference,
+  t,
+  type LanguagePreference,
+  type MessageKey,
+} from "./i18n";
+import { segmentChoice, segmentedControl, syncSegmented } from "./settings-segmented";
 import type { BootSplash } from "./boot-splash";
 import { createLaunchSplash, readLaunchHandoff, type LaunchSplashGame } from "./launch-splash";
 import {
@@ -111,9 +119,11 @@ import {
   CONNECTED_SOURCES,
   connectedSourceDescriptor,
   defaultSourceAccounts,
+  gameCountLabel,
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
+  sourceGameCount,
   sourceSyncSummary,
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
@@ -475,6 +485,16 @@ const AUTOMATIC_UPDATE_CHECK_DELAY_MS = 4_000;
  */
 const NOTIFICATION_TICK_MS = 30_000;
 /**
+ * Settings › General › Experimental: debug fixtures and unfinished surfaces,
+ * folded behind one row. The row counts them, so the list lives here once.
+ */
+const EXPERIMENTAL_TOGGLES = [
+  ["preference-show-showcase", "app.appearance.demo", "app.appearance.demoHint"],
+  ["preference-beta", "app.appearance.me", "app.appearance.meHint"],
+  ["preference-editorial-games", "app.appearance.editorial", "app.appearance.editorialHint"],
+  ["preference-debug-social", "app.appearance.social", "app.appearance.socialHint"],
+] as const satisfies ReadonlyArray<readonly [string, MessageKey, MessageKey]>;
+/**
  * The artwork the welcome screen stands on. Bundled with the app, and shown as
  * app chrome rather than as a claim about anyone's library — the only screen
  * in Orivo whose backdrop is not a game the user owns.
@@ -650,7 +670,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       pendingDeleteProfileId: "",
     },
     launchFeedback: null,
-    preferences: { ...DEFAULT_PREFERENCES },
+    // Until the host answers, the motion last applied stands, not the default.
+    preferences: {
+      ...DEFAULT_PREFERENCES,
+      motion: rememberedMotionPreference() ?? DEFAULT_PREFERENCES.motion,
+    },
     dataUsage: { derivedCacheBytes: 0, derivedCacheEntries: 0, refreshedAt: null },
     providerStatuses: defaultProviderStatuses(),
     settingsSearch: "",
@@ -2332,6 +2356,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryLoaded = true;
     renderSelection();
     releaseBootSplash();
+    // The Accounts cards state how many games each source brought in, so a
+    // sync or a scan that lands while they are on screen updates the number.
+    renderSteamSourceRow();
+    renderSourceAccountsPanel();
+    renderGameFoldersCard();
     // A download started in the Epic launcher is just as real as one started
     // here, so the watch follows the data rather than the click.
     if (state.games.some((game) => game.installState === "installing")) {
@@ -2495,6 +2524,53 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       gameFolders,
       isTauriRuntime() && platformFeatures.localRunners,
     );
+    renderGameFoldersCard();
+  };
+
+  /**
+   * The games folders as one more card in the Accounts grid: what they
+   * brought in, and the list itself one click away underneath, the way
+   * Steam's sign-in opens under its card. No folder yet: the card adds one.
+   */
+  const renderGameFoldersCard = (): void => {
+    const container = root.querySelector<HTMLElement>("#game-folders-card");
+    const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+    if (!container || !inline) return;
+    const offered = isTauriRuntime() && platformFeatures.localRunners;
+    container.hidden = !offered;
+    if (!offered) {
+      container.replaceChildren();
+      inline.hidden = true;
+      return;
+    }
+    const label = t("app.menu.gamesFolder");
+    const hasFolders = gameFolders.length > 0;
+    const { row, actions } = sourceRowElement("folders", label, icon("folder"), hasFolders);
+    // A card of the grid, not a store: the stores' row selector must not see it.
+    delete row.dataset.sourceRow;
+    row.dataset.folderCard = "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-account-row__account";
+    const name = document.createElement("span");
+    name.className = "source-account-row__account-name";
+    if (hasFolders) {
+      const count = gameCountLabel(sourceGameCount(state.games, ["local"]));
+      button.dataset.gameFolderAction = "manage";
+      button.classList.add("source-account-row__account--count");
+      button.setAttribute("aria-expanded", String(!inline.hidden));
+      button.setAttribute("aria-label", `${label} · ${count} — ${t("app.folder.manage")}`);
+      button.title = t("app.folder.manage");
+      name.classList.add("provider-health", "provider-health--available");
+      name.textContent = count;
+    } else {
+      button.dataset.gameFolderAction = "add";
+      name.textContent = t("app.folder.addShort");
+      button.setAttribute("aria-label", t("app.folder.add"));
+    }
+    button.append(name);
+    actions.append(button);
+    container.replaceChildren(row);
   };
 
   const rescanGameFolder = (folderId: string): void => {
@@ -4301,11 +4377,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     provider: string | null;
     idle: string;
     hover?: string;
+    /**
+     * The signed-in account. A connected card states the games it brought in
+     * rather than who is signed in, so the account is a tooltip away.
+     */
+    account?: string;
   }): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "source-account-row__account";
-    button.setAttribute("aria-label", options.hover ? `${options.idle} — ${options.hover}` : options.idle);
+    const said = options.account ? `${options.account} · ${options.idle}` : options.idle;
+    button.setAttribute("aria-label", options.hover ? `${said} — ${options.hover}` : said);
+    if (options.account) {
+      button.title = options.account;
+      // The count reads as a state, in the green every healthy state wears;
+      // the outline only comes back under the pointer, with "Disconnect".
+      button.classList.add("source-account-row__account--count");
+    }
     if (options.provider) {
       button.dataset.sourceAction = options.action;
       button.dataset.sourceProvider = options.provider;
@@ -4313,7 +4401,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       button.dataset.steamRowAction = options.action;
     }
     const name = document.createElement("span");
-    name.className = "source-account-row__account-name";
+    name.className = options.account
+      ? "source-account-row__account-name provider-health provider-health--available"
+      : "source-account-row__account-name";
     name.textContent = options.idle;
     button.append(name);
     if (options.hover) {
@@ -4367,9 +4457,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         sourceAccountButton({
           action: "disconnect",
           provider: null,
+          idle: gameCountLabel(sourceGameCount(state.games, ["steam"])),
           // The persona name is the account's own name; the id stands in
           // whenever Steam showed no profile to take one from.
-          idle: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
+          account: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
           hover: t("app.common.disconnect"),
         }),
       );
@@ -4556,14 +4647,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       String(state.sourceAccounts.loading || state.sourceAccounts.busy.size > 0),
     );
 
-    if (!isTauriRuntime()) {
-      const hint = document.createElement("p");
-      hint.className = "settings-hint";
-      hint.textContent = t("app.source.desktopOnly");
-      body.append(hint);
-      return;
-    }
-
     if (state.sourceAccounts.notice && state.sourceAccounts.noticeProvider === null) {
       body.append(sourceNoticeElement());
     }
@@ -4680,8 +4763,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           sourceAccountButton({
             action: "disconnect",
             provider: descriptor.provider,
+            // What the store brought in; the paired card counts both stores.
+            idle: gameCountLabel(
+              sourceGameCount(
+                state.games,
+                pairedStore ? [descriptor.provider, pairedStore.provider] : [descriptor.provider],
+              ),
+            ),
             // Who you are signed in as: the account, not a verdict about it.
-            idle: status.accountLabel || t("app.common.connectedState"),
+            account: status.accountLabel || t("app.common.connectedState"),
             hover: t("app.common.disconnect"),
           }),
         );
@@ -5736,22 +5826,19 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderGameStartPreference = (): void => {
     const row = root.querySelector<HTMLElement>("#preference-game-start-row");
-    const select = root.querySelector<HTMLSelectElement>("#preference-game-start");
     if (row) row.hidden = !platformFeatures.stepsAside;
-    if (select) select.value = state.preferences.onGameStart;
+    syncSegmented(root.querySelector<HTMLElement>("[data-segmented='onGameStart']"), state.preferences.onGameStart);
   };
 
   const renderPreferenceControls = (): void => {
-    const startPage = root.querySelector<HTMLSelectElement>("#preference-start-page");
+    const segmented = (preference: string): HTMLElement | null =>
+      root.querySelector<HTMLElement>(`[data-segmented='${preference}']`);
+    syncSegmented(segmented("startPage"), state.preferences.startPage);
+    syncSegmented(segmented("language"), state.preferences.language);
+    syncSegmented(segmented("motion"), state.preferences.motion);
     const storeRegion = root.querySelector<HTMLSelectElement>("#preference-store-region");
-    if (startPage) startPage.value = state.preferences.startPage;
     if (storeRegion) storeRegion.value = state.preferences.storeRegion;
-    const language = root.querySelector<HTMLSelectElement>("#preference-language");
-    if (language) language.value = state.preferences.language;
     renderGameStartPreference();
-    for (const input of root.querySelectorAll<HTMLInputElement>("input[name='motion-preference']")) {
-      input.checked = input.value === state.preferences.motion;
-    }
     const showcase = root.querySelector<HTMLInputElement>("#preference-show-showcase");
     if (showcase) showcase.checked = state.preferences.showShowcaseGames;
     const sampleSocial = root.querySelector<HTMLInputElement>("#preference-debug-social");
@@ -5775,7 +5862,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderProviderStatuses = (): void => {
     const list = root.querySelector<HTMLElement>("#provider-status-list");
-    const group = root.querySelector<HTMLElement>(".source-providers");
+    const soonRow = root.querySelector<HTMLElement>("#provider-soon-row");
     // Steam's row carries its health dot, so it has to be redrawn whenever
     // these statuses land.
     renderSteamSourceRow();
@@ -5787,9 +5874,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (provider) =>
         provider.provider !== "steam" && providerStatusForSource(provider.provider) === null,
     );
-    if (group) group.hidden = remaining.length === 0;
+    // A store whose feed answers is a card beside the others; the ones that
+    // can only say "Soon" share one line of logos under the grid, because a
+    // card each made a roadmap the loudest thing on the page.
+    const live = remaining.filter(
+      (provider) => provider.health === "available" || provider.health === "degraded",
+    );
+    const soon = remaining.filter((provider) => !live.includes(provider));
     const fragment = document.createDocumentFragment();
-    for (const provider of remaining) {
+    for (const provider of live) {
       const row = document.createElement("article");
       row.className = "provider-status-row";
       row.dataset.settingsSearchable = "";
@@ -5809,6 +5902,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       fragment.append(row);
     }
     list.replaceChildren(fragment);
+    if (soonRow) {
+      soonRow.hidden = soon.length === 0;
+      const label = document.createElement("span");
+      label.className = "source-soon__label";
+      label.textContent = providerHealthLabel("not-configured");
+      const items = soon.map((provider) => {
+        const item = document.createElement("span");
+        item.className = "source-soon__item";
+        item.dataset.soonProvider = provider.provider;
+        item.title = provider.message || provider.label;
+        const mark = document.createElement("span");
+        mark.className = "source-soon__mark";
+        mark.setAttribute("aria-hidden", "true");
+        mark.innerHTML = providerLogoMarkup(provider.provider);
+        const name = document.createElement("span");
+        name.textContent = provider.label;
+        item.append(mark, name);
+        return item;
+      });
+      soonRow.replaceChildren(label, ...items);
+    }
     // The connectable rows carry the rest of the health chips, so they have to
     // repaint whenever provider status lands.
     renderSourceAccountsPanel();
@@ -6548,6 +6662,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!storeFoldersPanel || !isTauriRuntime()) return;
     renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
   };
+  root.querySelector<HTMLElement>("#game-folders-card")?.addEventListener("click", (event) => {
+    const action = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]")
+      ?.dataset.gameFolderAction;
+    if (action === "add") {
+      void chooseGameFolder();
+    } else if (action === "manage") {
+      const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+      if (inline) inline.hidden = !inline.hidden;
+      renderGameFoldersCard();
+    }
+  });
   refs.gameFoldersPanel.addEventListener("click", (event) => {
     const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]");
     const action = button?.dataset.gameFolderAction;
@@ -6635,10 +6760,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     if (action === "refresh") {
       void refreshSourceAccounts();
-      return;
-    }
-    if (action === "resync") {
-      void resyncEveryLibrary();
       return;
     }
     const provider = trigger.dataset.sourceProvider ?? "";
@@ -7129,6 +7250,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // but its status still has to be read, or the row cannot say whether
         // Steam is connected.
         renderSteamSourceRow();
+        renderGameFoldersCard();
         void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
@@ -7418,6 +7540,22 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       return;
     }
 
+    // A segment already lit is not a change: pressing it again saves nothing
+    // and, for the language, does not reload the page.
+    const segment = segmentChoice(target);
+    if (segment && target?.closest("[aria-pressed='true']") === null) {
+      if (segment.preference === "startPage") {
+        void savePreferences({ startPage: segment.value as StartPage });
+      } else if (segment.preference === "language") {
+        void savePreferences({ language: segment.value as LanguagePreference });
+      } else if (segment.preference === "onGameStart") {
+        void savePreferences({ onGameStart: segment.value as GameStartAction });
+      } else if (segment.preference === "motion") {
+        void savePreferences({ motion: segment.value as MotionPreference });
+      }
+      return;
+    }
+
     const action = target?.closest<HTMLButtonElement>("[data-settings-action]")?.dataset
       .settingsAction;
     if (action === "reset-preferences") {
@@ -7442,23 +7580,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   refs.settingsPage.addEventListener("change", (event) => {
     const target = event.target;
     if (target instanceof HTMLSelectElement) {
-      if (target.id === "preference-start-page") {
-        void savePreferences({ startPage: target.value as StartPage });
-      } else if (target.id === "preference-store-region") {
+      if (target.id === "preference-store-region") {
         void savePreferences({ storeRegion: target.value as StoreRegion });
-      } else if (target.id === "preference-language") {
-        void savePreferences({ language: target.value as LanguagePreference });
-      } else if (target.id === "preference-game-start") {
-        void savePreferences({ onGameStart: target.value as GameStartAction });
       }
       return;
-    }
-    if (
-      target instanceof HTMLInputElement &&
-      target.name === "motion-preference" &&
-      target.checked
-    ) {
-      void savePreferences({ motion: target.value as MotionPreference });
     }
     if (target instanceof HTMLInputElement && target.id === "preference-show-showcase") {
       // Toggling the debug demo games re-seeds (or clears) the library.
@@ -8932,36 +9057,30 @@ function shell(): string {
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
-              <!-- One list, no cards: the section's rows sit directly on the
-                   page surface, so the only outline on screen is the one
-                   around the settings themselves. -->
-              <div class="settings-card" data-settings-searchable>
+              <!-- Plates of one-line rows: a choice of two or three words is
+                   a segmented pill, on/off is a switch, a longer list is its
+                   value and a chevron. What each does is in the row's title,
+                   not under it. -->
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-start-page">
-                    <strong>${t("settings.startPage.label")}</strong>
-                    <small>${t("settings.startPage.hint")}</small>
-                  </label>
-                  <select id="preference-start-page" class="settings-select">
-                    <option value="library">${t("settings.startPage.library")}</option>
-                    <option value="store">${t("settings.startPage.store")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${t("language.hint")}"><strong id="preference-language-label">${t("language.label")}</strong></span>
+                  ${segmentedControl("language", "preference-language-label", [
+                    { value: "system", label: t("language.system") },
+                    ...LANGUAGES.map((code) => ({ value: code, label: LANGUAGE_NAMES[code], lang: code })),
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-language">
-                    <strong>${t("language.label")}</strong>
-                    <small>${t("language.hint")}</small>
-                  </label>
-                  <select id="preference-language" class="settings-select">
-                    <option value="system">${t("language.system")}</option>
-                    ${LANGUAGES.map((code) => `<option value="${code}" lang="${code}">${LANGUAGE_NAMES[code]}</option>`).join("")}
-                  </select>
+                  <span class="settings-row__copy" title="${t("settings.startPage.hint")}"><strong id="preference-start-page-label">${t("settings.startPage.label")}</strong></span>
+                  ${segmentedControl("startPage", "preference-start-page-label", [
+                    { value: "library", label: t("settings.startPage.library") },
+                    { value: "store", label: t("settings.startPage.store") },
+                  ])}
                 </div>
                 <div class="settings-row">
-                  <label class="settings-row__copy" for="preference-store-region">
+                  <label class="settings-row__copy" for="preference-store-region" title="${t("settings.storeRegion.hint")}">
                     <strong>${t("settings.storeRegion.label")}</strong>
-                    <small>${t("settings.storeRegion.hint")}</small>
                   </label>
-                  <select id="preference-store-region" class="settings-select">
+                  <select id="preference-store-region" class="settings-select settings-select--value">
                     <option value="automatic">${t("settings.storeRegion.automatic")}</option>
                     <option value="us">${t("app.region.us")}</option>
                     <option value="ca">${t("app.region.ca")}</option>
@@ -8975,22 +9094,52 @@ function shell(): string {
                 <!-- Desktop only: a phone switches to the game's app by itself, so
                      there is nothing to choose. Shown once the host says it can. -->
                 <div class="settings-row" id="preference-game-start-row" hidden>
-                  <label class="settings-row__copy" for="preference-game-start">
-                    <strong>${t("settings.gameStart.label")}</strong>
-                    <small>${stepAsideCopy().hint}</small>
-                  </label>
-                  <select id="preference-game-start" class="settings-select">
-                    <option value="step-aside">${stepAsideCopy().action}</option>
-                    <option value="stay">${t("settings.gameStart.stay")}</option>
-                  </select>
+                  <span class="settings-row__copy" title="${stepAsideCopy().hint}"><strong id="preference-game-start-label">${t("settings.gameStart.label")}</strong></span>
+                  ${segmentedControl("onGameStart", "preference-game-start-label", [
+                    { value: "step-aside", label: stepAsideCopy().action },
+                    { value: "stay", label: t("settings.gameStart.stay") },
+                  ])}
                 </div>
+              </div>
+
+              <p class="settings-group__label settings-group__label--plain">${t("settings.general.display")}</p>
+              <div class="settings-card settings-card--plate" data-settings-searchable>
                 <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("settings.reset.label")}</strong>
-                    <small>${t("settings.reset.hint")}</small>
-                  </div>
-                  <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences">${t("settings.reset.label")}</button>
+                  <span class="settings-row__copy"><strong id="motion-preference-title">${t("app.motion.title")}</strong></span>
+                  ${segmentedControl("motion", "motion-preference-title", [
+                    { value: "full", label: t("app.motion.full"), title: t("app.motion.fullHint") },
+                    { value: "system", label: t("app.motion.system"), title: t("app.motion.systemHint") },
+                    { value: "reduced", label: t("app.motion.reduced"), title: t("app.motion.reducedHint") },
+                  ])}
                 </div>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.autoplayHint")}">
+                  <input type="checkbox" id="preference-trailer-autoplay" />
+                  <span><strong>${t("app.appearance.autoplay")}</strong></span>
+                </label>
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t("app.appearance.soundHint")}">
+                  <input type="checkbox" id="preference-trailer-sound" />
+                  <span><strong>${t("app.appearance.sound")}</strong></span>
+                </label>
+              </div>
+
+              <!-- Debug and unfinished surfaces: one closed row until asked for. -->
+              <details class="settings-card settings-card--plate settings-disclosure" data-settings-searchable>
+                <summary class="settings-row" data-nav-focusable>
+                  <span class="settings-row__copy"><strong>${t("settings.experimental.label")}</strong></span>
+                  <span class="settings-row__value">${t("settings.experimental.count", { count: EXPERIMENTAL_TOGGLES.length })}</span>
+                  ${icon("chevron-right", "settings-disclosure__chevron")}
+                </summary>
+                ${EXPERIMENTAL_TOGGLES.map(
+                  ([id, label, hint]) => `
+                <label class="settings-row settings-choice settings-choice--toggle" title="${t(hint)}">
+                  <input type="checkbox" id="${id}" />
+                  <span><strong>${t(label)}</strong></span>
+                </label>`,
+                ).join("")}
+              </details>
+
+              <div class="settings-card__header settings-card__header--start">
+                <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences" title="${t("settings.reset.hint")}">${t("settings.reset.label")}</button>
               </div>
             </section>
 
@@ -9004,17 +9153,13 @@ function shell(): string {
                    page. Its one extra affordance, signing in, expands under its
                    row. -->
               <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}">
-                <!-- No title, no pitch: the rows below are their own heading. -->
-                <header class="settings-card__header settings-card__header--actions">
-                  <!-- One refresh, not two: re-reading the connected accounts and
-                       re-syncing their libraries are the same wish from where the
-                       user stands, and a second, icon-only button next to this one
-                       only ever asked which of the two they meant. -->
-                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">${t("app.libraries.refreshAll")}</button>
-                </header>
+                <!-- No title, no pitch and no "Refresh all": the cards are their
+                     own heading, and a connected card carries its own sync glyph,
+                     which is the same wish aimed at one store. -->
 
-                <!-- Steam and every other store share one grid of two or three
-                     columns: to the reader they are all the same kind of row. -->
+                <!-- Steam and every other store share one grid of cards: to the
+                     reader they are all the same kind of thing. The games
+                     folders end it, as the one source that is not a store. -->
                 <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
@@ -9024,18 +9169,22 @@ function shell(): string {
                 </div>
 
                 <div id="source-accounts-body" class="source-accounts-body"></div>
+                <div id="provider-status-list" class="provider-status-list"></div>
+                <div id="game-folders-card" class="game-folders-card"></div>
+                <!-- Desktop: the watched games folders (game-folders.ts), opened
+                     from the Folders card. The library's menu keeps one "Games
+                     folders" entry; the list, rescans and removals live here. -->
+                <div id="game-folders-inline" class="steam-inline-panel game-folders-inline" hidden>
+                  <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
                 </div>
-                <div class="source-providers">
-                  <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
+                <!-- The stores with nothing to connect yet: one quiet line of
+                     logos, not a card each. -->
+                <div id="provider-soon-row" class="source-soon" hidden></div>
               </section>
               <!-- Mac App Store edition only (store-folders.ts): the sandbox
                    reads Steam's and Epic's folders once the player allows it. -->
               <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
-              <!-- Desktop: the watched games folders (game-folders.ts). The
-                   library's menu keeps one "Games folders" entry; the list,
-                   rescans and removals live here. -->
-              <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside
@@ -9193,59 +9342,6 @@ function shell(): string {
                   <p id="plugins-catalog-empty" class="settings-hint" hidden>${t("app.plugins.noMatch")}</p>
                 </div>
               </section>
-            </section>
-
-            <section class="settings-panel" role="tabpanel" id="settings-panel-appearance" data-settings-panel="appearance" aria-labelledby="settings-tab-appearance" tabindex="0" hidden>
-              <!-- One card, two labelled groups: the choices already say what
-                   they do, so three more headers above them were the same
-                   information set twice. -->
-              <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label" id="motion-preference-title">${t("app.motion.title")}</p>
-                <div class="settings-choices" role="radiogroup" aria-labelledby="motion-preference-title">
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="full" />
-                    <span><strong>${t("app.motion.full")}</strong><small>${t("app.motion.fullHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="system" />
-                    <span><strong>${t("app.motion.system")}</strong><small>${t("app.motion.systemHint")}</small></span>
-                  </label>
-                  <label class="settings-choice">
-                    <input type="radio" name="motion-preference" value="reduced" />
-                    <span><strong>${t("app.motion.reduced")}</strong><small>${t("app.motion.reducedHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.gamePages")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-autoplay" />
-                    <span><strong>${t("app.appearance.autoplay")}</strong><small>${t("app.appearance.autoplayHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-trailer-sound" />
-                    <span><strong>${t("app.appearance.sound")}</strong><small>${t("app.appearance.soundHint")}</small></span>
-                  </label>
-                </div>
-                <p class="settings-group__label">${t("app.appearance.beta")}</p>
-                <div class="settings-choices">
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-show-showcase" />
-                    <span><strong>${t("app.appearance.demo")}</strong><small>${t("app.appearance.demoHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-beta" />
-                    <span><strong>${t("app.appearance.me")}</strong><small>${t("app.appearance.meHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-editorial-games" />
-                    <span><strong>${t("app.appearance.editorial")}</strong><small>${t("app.appearance.editorialHint")}</small></span>
-                  </label>
-                  <label class="settings-choice settings-choice--toggle">
-                    <input type="checkbox" id="preference-debug-social" />
-                    <span><strong>${t("app.appearance.social")}</strong><small>${t("app.appearance.socialHint")}</small></span>
-                  </label>
-                </div>
-              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>

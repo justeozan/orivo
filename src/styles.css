@@ -1026,32 +1026,9 @@ html[data-device="phone"] .primary-nav.has-indicator .nav-link.is-active {
 [data-motion="reduced"] .play-button__aura i { animation: none; }
 
 
-/* The Steam account surface is a card inside Settings › Libraries & Sources.
+/* The Steam account surface is a card inside Settings › Accounts.
    It is no longer a floating dialog, so the card chrome comes from
    `.settings-card`. */
-
-/* Every action on this page is a line of text, not a chip: no plate, no
-   border, no radius. Hover marks it with an underline and nothing else. */
-.steam-header-button {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 1px;
-  border: 0;
-  border-radius: 4px;
-  color: #ddd7ec;
-  background: none;
-  font-size: 13px;
-  font-weight: 560;
-  white-space: nowrap;
-  transition: color 140ms ease;
-}
-.steam-header-button:hover:not(:disabled), .steam-header-button[data-nav-focus]:not(:disabled) { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
-.steam-header-button:active:not(:disabled) { opacity: .7; }
-.steam-header-button:disabled { cursor: default; opacity: .45; }
-.steam-header-button .icon { width: 15px; height: 15px; }
-.steam-header-button--label { padding: 2px 1px; font-weight: 560; }
 
 .steam-account-body {
   display: flex;
@@ -2371,7 +2348,6 @@ body[data-mood="rage"] { --violet: #f2453c; }
 }
 /* A header that is only an action: no title to sit beside it, so it sits at
    the end of the line it belongs to. */
-.settings-card__header--actions { justify-content: flex-end; padding: 14px 0 2px; }
 .settings-card__copy { display: grid; min-width: 0; flex: 1; gap: 4px; }
 .settings-card__copy strong { color: #f7f5fa; font-size: 15px; font-weight: 620; letter-spacing: -.016em; }
 .settings-card__copy small { color: #d0cadf; font-size: 13px; line-height: 1.5; }
@@ -2424,6 +2400,99 @@ body[data-mood="rage"] { --violet: #f2453c; }
   font-size: 13.5px;
 }
 .settings-select:hover, .settings-select[data-nav-focus] { border-bottom-color: rgba(255,255,255,.5); }
+
+/* Settings › General: rows on a plate. One line each — the label, then its
+   control — and what a row does lives in its title, not under it. */
+.settings-panel > .settings-card--plate {
+  border: 1px solid rgba(255,255,255,.10);
+  border-radius: 18px;
+  background: linear-gradient(170deg, rgba(25,26,35,.62), rgba(16,17,26,.62));
+}
+.settings-panel > .settings-card--plate + .settings-card--plate { margin-top: 14px; }
+.settings-card--plate > .settings-row,
+.settings-card--plate > summary.settings-row {
+  min-height: 58px;
+  padding: 9px 18px;
+  gap: 8px 14px;
+}
+/* Too narrow for the label and its pill side by side, the pill takes the
+   next line rather than running off the plate. */
+.settings-card--plate > .settings-row:has(> .settings-segmented) { flex-wrap: wrap; }
+.settings-card--plate > .settings-row > .settings-segmented { margin-left: auto; }
+.settings-card--plate .settings-row__copy { flex: 1 0 auto; max-width: 100%; }
+/* A group's name above its plate: a word, not a heading in capitals. */
+.settings-panel > .settings-group__label--plain {
+  padding: 22px 0 10px;
+  border-top: 0;
+  color: #9b97a3;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.settings-panel > .settings-card__header--start { justify-content: flex-start; padding: 16px 0 0; border-top: 0; }
+
+/* Two or three words in one pill, the chosen one lit. */
+.settings-segmented {
+  display: flex;
+  flex: none;
+  padding: 3px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 999px;
+  background: rgba(6,7,11,.35);
+}
+.settings-segmented__option {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  color: #c8c5cf;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 160ms ease, color 160ms ease;
+}
+.settings-segmented__option:hover { color: #f4f2f8; }
+.settings-segmented__option[aria-pressed="true"] {
+  color: #1a1531;
+  background: linear-gradient(100deg, #c3b9f2, #a99bdf);
+  font-weight: 600;
+}
+.settings-segmented__option:focus-visible,
+.settings-segmented__option[data-nav-focus] {
+  outline: 2px solid #c9b6ff;
+  outline-offset: 1px;
+}
+
+/* A list too long for a pill: its value and a chevron, the native menu on
+   press. */
+.settings-select--value {
+  min-width: 0;
+  padding: 0 22px 0 6px;
+  border-bottom: 0;
+  color: #c8c5cf;
+  text-align: right;
+  text-align-last: right;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23f4f2f8' stroke-opacity='.4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 6 6 6-6 6'/%3E%3C/svg%3E");
+  background-size: 16px 16px;
+  background-position: right 0 center;
+  cursor: pointer;
+}
+.settings-select--value:hover { color: #f4f2f8; }
+.settings-select--value[data-nav-focus] { border-radius: 8px; outline: 2px solid #c9b6ff; outline-offset: 2px; }
+
+/* Folded options: one row with their count until it is opened. */
+.settings-disclosure > summary { list-style: none; cursor: pointer; }
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-row__value { color: #c8c5cf; font-size: 13.5px; }
+.settings-disclosure__chevron { width: 16px; height: 16px; color: rgba(244,242,248,.4); transition: transform 160ms ease; }
+.settings-disclosure[open] .settings-disclosure__chevron { transform: rotate(90deg); }
+.settings-disclosure > summary:focus-visible,
+.settings-disclosure > summary[data-nav-focus] { outline: none; }
+.settings-disclosure > summary:focus-visible strong,
+.settings-disclosure > summary[data-nav-focus] strong { color: #fff; text-decoration: underline; text-underline-offset: 4px; }
 
 /* Buttons are words. No plate, no border, no radius: hover underlines them and
    that is the whole affordance. */
@@ -3330,8 +3399,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
    thing it is about to do. Everything that decides lives on this side. The
    corners are barely turned; the label is what varies, and it is measured to
    one width so swapping a persona for a verb never shifts the row. */
-.source-account-row__account,
-.settings-card__header--actions .steam-header-button {
+.source-account-row__account {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
@@ -3375,10 +3443,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
 }
 .source-account-row__account:hover,
 .source-account-row__account:focus-visible,
-.source-account-row__account[data-nav-focus],
-.settings-card__header--actions .steam-header-button:hover:not(:disabled),
-.settings-card__header--actions .steam-header-button:focus-visible:not(:disabled),
-.settings-card__header--actions .steam-header-button[data-nav-focus]:not(:disabled) {
+.source-account-row__account[data-nav-focus] {
   color: #fff;
   border-color: rgba(255,255,255,.72);
   background: rgba(255,255,255,.1);
@@ -3397,8 +3462,7 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
   border-color: rgba(255,122,132,.92);
   background: rgba(228,74,88,.16);
 }
-.source-account-row__account:active,
-.settings-card__header--actions .steam-header-button:active:not(:disabled) { transform: translateY(0); }
+.source-account-row__account:active { transform: translateY(0); }
 /* At rest the row says who you are; under the pointer it says what you can do
    about it. Only one of the two is ever drawn — and only on the button that has
    both to draw. A button offering to connect has one label and keeps it, rather
@@ -3441,7 +3505,6 @@ html[data-motion="reduced"] .nxnative-indeterminate::after { width: 100%; opacit
 .source-account-row__dot--degraded { background: #d8b25c; }
 .source-account-row__dot--unavailable { background: #c9636a; }
 .source-account-row__dot--not-configured { background: #56525e; }
-.source-providers { border-top: 0; }
 /* Aligned with the text column above it, not centred in the panel. */
 .source-account-shared {
   margin: -6px 0 0;
@@ -3910,6 +3973,37 @@ html[data-device="phone"] .browse-bar__mode { height: 26px; min-height: 0; paddi
 .provider-status-row .source-account-row__mark img { width: 34px; height: 34px; margin: 0 auto; }
 .provider-status-row strong { font-size: 13.5px; }
 .provider-status-row .provider-health { margin: auto 0 0; }
+
+/* Accounts: the live price-data stores and the games folders are cells of the
+   same grid as the stores you sign in to, so their wrappers are unwrapped. */
+.source-grid .provider-status-list,
+.source-grid .game-folders-card { display: contents; }
+.source-grid .game-folders-card[hidden] { display: none; }
+.source-grid .game-folders-inline { padding: 0; border-bottom: 0; }
+/* A connected card states what it brought in, in green and without a frame;
+   the frame (and "Disconnect", in red) only arrives under the pointer. */
+.source-account-row__account--count:not(:hover):not(:focus-visible):not([data-nav-focus]):not([aria-expanded="true"]) {
+  border-color: transparent;
+  background: none;
+}
+.source-account-row__account--count .provider-health { font-size: 12.5px; text-transform: none; }
+/* The stores with nothing to connect yet: one quiet line of small logos under
+   a hairline, where a card each used to stand. */
+.source-soon {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255,255,255,.08);
+}
+.source-soon[hidden] { display: none; }
+.source-soon__label { margin-right: 4px; color: #9b97a3; font-size: 12.5px; font-weight: 600; }
+.source-soon__item { display: inline-flex; align-items: center; gap: 8px; color: #b3aebd; font-size: 13px; }
+.source-soon__mark { display: inline-grid; width: 20px; height: 20px; place-items: center; }
+.source-soon__mark img,
+.source-soon__mark .icon { width: 20px; height: 20px; object-fit: contain; }
 
 .runner-profile-card__mode[hidden] { display: none; }
 
