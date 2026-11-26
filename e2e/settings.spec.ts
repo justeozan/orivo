@@ -335,11 +335,12 @@ test.describe("Settings ships no fake controls", () => {
 
     await openRoute(page, "#/settings/data", "settings");
     await expect(page.locator("#derived-cache-size")).toHaveText("0 B");
-    await expect(page.locator("#derived-cache-freshness")).toHaveText("Not refreshed yet");
+    await expect(page.locator("#clear-derived-cache")).toBeVisible();
+    await expect(page.locator("#open-data-folder")).toBeVisible();
 
     await openRoute(page, "#/settings/about", "settings");
-    await expect(page.locator("#about-app-version")).toHaveText("Development build");
-    await expect(page.locator("#about-tauri-version")).toHaveText("Browser preview");
+    await expect(page.locator("#about-app-version")).toHaveText(/^\d+\.\d+\.\d+/);
+    await expect(page.locator("#about-news-list .about-news__item").first()).toBeVisible();
     await expect(page.locator(`${settingsHost} .settings-attributions li`)).toHaveCount(4);
   });
 });

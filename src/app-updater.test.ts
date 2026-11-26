@@ -195,12 +195,15 @@ describe("About panel updater wiring", () => {
     updater.check.mockResolvedValue(download.handle);
 
     await press();
-    expect(statusLabel()).toBe("Version 0.4.0 is available");
+    expect(statusLabel()).toBe("0.4.0 available");
     expect(statusDetail()).toBe("Orivo installs it and restarts once to finish.");
+    // What the update brings is written large under the hero, under its version.
+    expect(root.querySelector("#about-news-title")?.textContent).toBe("What's new in 0.4.0");
     expect(
-      [...root.querySelectorAll(".update-status__highlights li")].map((item) => item.textContent),
+      [...root.querySelectorAll("#about-news-list strong")].map((item) => item.textContent),
     ).toEqual(["Faster store browsing"]);
-    expect(button().textContent).toBe("Download and install");
+    expect(button().textContent).toBe("Update");
+    expect(button().classList.contains("is-primary")).toBe(true);
 
     await press();
     expect(button().disabled).toBe(true);

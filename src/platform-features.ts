@@ -26,6 +26,8 @@ export interface PlatformFeatures {
    * phone or tablet a new version comes from the store.
    */
   selfUpdates: boolean;
+  /** Orivo can show its data folder in the file manager. Not on a phone. */
+  showsDataFolder: boolean;
 }
 
 export const DESKTOP_FEATURES: PlatformFeatures = {
@@ -34,6 +36,7 @@ export const DESKTOP_FEATURES: PlatformFeatures = {
   storeChoices: false,
   stepsAside: true,
   selfUpdates: true,
+  showsDataFolder: true,
 };
 
 function isTauriRuntime(): boolean {
@@ -52,6 +55,7 @@ export function readPlatformFeatures(value: unknown): PlatformFeatures {
     storeChoices: flag("storeChoices"),
     stepsAside: flag("stepsAside"),
     selfUpdates: flag("selfUpdates"),
+    showsDataFolder: flag("showsDataFolder"),
   };
 }
 

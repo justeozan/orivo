@@ -1,6 +1,7 @@
 // Quiky is the only caller of a few installer helpers; the App Store edition
 // leaves it out, and those helpers with it.
 #![cfg_attr(feature = "app-store", allow(dead_code))]
+mod about;
 mod android_games;
 mod artwork_backfill;
 mod catalog;
@@ -1285,6 +1286,8 @@ pub fn run() {
             preferences::update_preferences,
             preferences::get_data_usage,
             preferences::clear_derived_cache,
+            preferences::open_data_folder,
+            about::open_orivo_page,
             #[cfg(not(feature = "app-store"))]
             quiky_installer::get_quiky_status,
             #[cfg(not(feature = "app-store"))]

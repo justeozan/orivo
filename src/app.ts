@@ -1,4 +1,4 @@
-import { getTauriVersion, getVersion } from "@tauri-apps/api/app";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "./host";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -141,7 +141,6 @@ import {
   type StoreRegion,
   defaultProviderStatuses,
   formatDataSize,
-  formatFreshness,
   hasWallpaperKey,
   normaliseDataUsage,
   normalisePreferences,
@@ -161,6 +160,7 @@ import {
   startDownload,
   updateProgressPercent,
 } from "./updater-model";
+import { aboutNews } from "./about-model";
 import {
   createDefaultPluginManagerClient,
   createPluginManagerController,
@@ -5972,15 +5972,69 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const renderDataUsage = (): void => {
     const size = root.querySelector<HTMLElement>("#derived-cache-size");
-    const entries = root.querySelector<HTMLElement>("#derived-cache-entries");
-    const freshness = root.querySelector<HTMLElement>("#derived-cache-freshness");
+    const bar = root.querySelector<HTMLElement>("#derived-cache-bar");
     if (size) size.textContent = formatDataSize(state.dataUsage.derivedCacheBytes);
-    if (entries) {
-      entries.textContent = state.dataUsage.derivedCacheEntries === 1
-          ? t("app.data.entryOne", { count: state.dataUsage.derivedCacheEntries.toLocaleString() })
-          : t("app.data.entryMany", { count: state.dataUsage.derivedCacheEntries.toLocaleString() });
+    // One colour for the one figure the host measures: full when there is a
+    // cache, empty once it has been cleared.
+    if (bar) bar.style.width = state.dataUsage.derivedCacheBytes > 0 ? "100%" : "0%";
+  };
+
+  /**
+   * "What's new", written large: a pending update's notes when they say
+   * something readable, otherwise the running version's changelog section.
+   * The changelog is fetched only when About is first opened, as its own chunk.
+   */
+  const runningVersion = (): string | null =>
+    state.update.currentVersion || (typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : null);
+  let aboutChangelog: string | null = null;
+  let aboutChangelogRequested = false;
+  const loadAboutChangelog = (): void => {
+    if (aboutChangelogRequested) return;
+    aboutChangelogRequested = true;
+    void import("../CHANGELOG.md?raw")
+      .then((module) => {
+        aboutChangelog = module.default;
+        renderAboutNews();
+      })
+      .catch(() => {
+        // Notes are a nicety: without them the section is simply not drawn.
+      });
+  };
+
+  const renderAboutNews = (): void => {
+    const section = root.querySelector<HTMLElement>("#about-news");
+    const title = root.querySelector<HTMLElement>("#about-news-title");
+    const list = root.querySelector<HTMLElement>("#about-news-list");
+    if (!section || !title || !list) return;
+    const news = aboutNews(state.update, aboutChangelog, runningVersion());
+    section.hidden = !news;
+    if (!news) {
+      list.replaceChildren();
+      return;
     }
-    if (freshness) freshness.textContent = formatFreshness(state.dataUsage.refreshedAt);
+    title.textContent = t("app.about.newsTitle", { version: news.version });
+    list.replaceChildren(
+      ...news.items.map((item) => {
+        const row = document.createElement("li");
+        row.className = "about-news__item";
+        const tile = document.createElement("span");
+        tile.className = "plugin-icon";
+        tile.dataset.category = item.category;
+        tile.innerHTML = icon(item.icon);
+        const copy = document.createElement("span");
+        copy.className = "about-news__copy";
+        const heading = document.createElement("strong");
+        heading.textContent = item.title;
+        copy.append(heading);
+        if (item.detail) {
+          const detail = document.createElement("small");
+          detail.textContent = item.detail;
+          copy.append(detail);
+        }
+        row.append(tile, copy);
+        return row;
+      }),
+    );
   };
 
   const renderUpdatePanel = (): void => {
@@ -6003,6 +6057,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
     button.textContent = description.buttonLabel;
     button.disabled = description.buttonDisabled;
+    // The hero's one strong action is installing what is waiting; a check is
+    // offered too, but quietly.
+    const shownStatus = isTauriRuntime() ? state.update.status : "idle";
+    button.classList.toggle("is-primary", shownStatus === "available" || shownStatus === "ready");
+    status.dataset.updateStatus = shownStatus;
 
     const label = document.createElement("span");
     label.className = "update-status__label";
@@ -6011,17 +6070,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     detail.className = "update-status__detail";
     detail.textContent = description.detail;
     status.replaceChildren(label, detail);
-    // What is new, as a few bullets, when the release says so readably.
-    if (description.highlights && description.highlights.length > 0) {
-      const list = document.createElement("ul");
-      list.className = "update-status__highlights";
-      for (const line of description.highlights) {
-        const item = document.createElement("li");
-        item.textContent = line;
-        list.append(item);
-      }
-      status.append(list);
-    }
+    // What is new depends on what is waiting, so it is drawn with the status.
+    renderAboutNews();
 
     const downloading = isTauriRuntime() && state.update.status === "downloading";
     progress.hidden = !downloading;
@@ -6305,17 +6355,28 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
   };
 
-  const refreshDerivedData = async (): Promise<void> => {
-    const refresh = root.querySelector<HTMLButtonElement>("#refresh-derived-data");
-    if (refresh) refresh.disabled = true;
+  /** The host holds the addresses; the page only says which one it means. */
+  const openOrivoPage = async (page: string): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast(t("app.about.linkDesktop"));
+      return;
+    }
     try {
-      if (isTauriRuntime()) await invoke("refresh_store_sources");
-      await Promise.all([loadProviderStatuses(), loadDataUsage()]);
-      showToast(t("app.data.refreshed"));
+      await invoke("open_orivo_page", { page });
     } catch (error) {
-      showToast(messageFromError(error, t("app.data.refreshFailed")));
-    } finally {
-      if (refresh) refresh.disabled = false;
+      showToast(messageFromError(error, t("app.store.openFailed")));
+    }
+  };
+
+  const openDataFolder = async (): Promise<void> => {
+    if (!isTauriRuntime()) {
+      showToast(t("app.data.folderDesktop"));
+      return;
+    }
+    try {
+      await invoke("open_data_folder");
+    } catch (error) {
+      showToast(messageFromError(error, t("app.data.folderFailed")));
     }
   };
 
@@ -6984,18 +7045,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
 
   const loadAboutVersions = async (request = settingsRequest): Promise<void> => {
     const appVersion = root.querySelector<HTMLElement>("#about-app-version");
-    const tauriVersion = root.querySelector<HTMLElement>("#about-tauri-version");
+    loadAboutChangelog();
     if (!isTauriRuntime()) {
-      if (appVersion) appVersion.textContent = t("app.about.devBuild");
-      if (tauriVersion) tauriVersion.textContent = t("app.about.browserPreview");
+      // The preview names the version of the checkout it was built from,
+      // which the markup already carries.
       renderUpdatePanel();
       return;
     }
     try {
-      const [app, tauri] = await Promise.all([getVersion(), getTauriVersion()]);
+      const app = await getVersion();
       if (request !== settingsRequest) return;
       if (appVersion) appVersion.textContent = app;
-      if (tauriVersion) tauriVersion.textContent = tauri;
       // The updater copy names the running version, so it is refreshed with the
       // rest of the About metadata rather than read separately.
       state.update = { ...state.update, currentVersion: app };
@@ -7560,13 +7620,16 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       .settingsAction;
     if (action === "reset-preferences") {
       void savePreferences({ reset: true });
-    } else if (action === "refresh-derived") {
-      void refreshDerivedData();
+    } else if (action === "open-data-folder" && platformFeatures.showsDataFolder) {
+      void openDataFolder();
     } else if (action === "clear-derived") {
       void clearDerivedData();
     } else if (action === "check-updates" && platformFeatures.selfUpdates) {
       void runUpdateAction();
     }
+
+    const aboutPage = target?.closest<HTMLElement>("[data-about-page]")?.dataset.aboutPage;
+    if (aboutPage) void openOrivoPage(aboutPage);
 
     if (target?.closest("#moonlight-stream-save")) {
       void saveMoonlightStream();
@@ -8160,6 +8223,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     renderOnboardingPanel();
     const updatesRow = document.querySelector<HTMLElement>("#updates-row");
     if (updatesRow) updatesRow.hidden = !features.selfUpdates;
+    const updateButton = document.querySelector<HTMLElement>("#check-updates-button");
+    if (updateButton) updateButton.hidden = !features.selfUpdates;
+    const dataFolderRow = document.querySelector<HTMLElement>("#data-folder-row");
+    if (dataFolderRow) dataFolderRow.hidden = !features.showsDataFolder;
     if (!features.storeChoices) return;
     // On iOS the Library's button reads both: an Epic game has no launcher to
     // ask there, and a GOG or Epic game goes to Playport if anywhere.
@@ -9345,58 +9412,70 @@ function shell(): string {
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-data" data-settings-panel="data" aria-labelledby="settings-tab-data" tabindex="0" hidden>
-              <div class="settings-card" data-settings-searchable>
+              <!-- The host measures only what it can rebuild (the derived
+                   cache), so the total is that and one bar, not a breakdown. -->
+              <div class="settings-card storage-total" data-settings-searchable>
+                <p class="storage-total__figure"><strong id="derived-cache-size">${formatDataSize(0)}</strong><span>${t("app.data.inCache")}</span></p>
+                <span class="storage-bar" aria-hidden="true"><span id="derived-cache-bar" class="storage-bar__fill"></span></span>
+              </div>
+              <div class="settings-card storage-actions" data-settings-searchable>
                 <div class="settings-row">
                   <div class="settings-row__copy">
                     <strong>${t("app.data.cacheTitle")}</strong>
-                    <small><span id="derived-cache-entries">${t("app.data.entryMany", { count: 0 })}</span> · <span id="derived-cache-freshness">${t("app.data.notRefreshed")}</span></small>
+                    <small>${t("app.data.cacheHint")}</small>
                   </div>
-                  <span id="derived-cache-size" class="settings-metric">0 B</span>
+                  <button id="clear-derived-cache" type="button" class="plugin-install-button" data-settings-action="clear-derived">${t("app.data.clear")}</button>
                 </div>
-                <div class="settings-row settings-row--actions">
-                  <button id="refresh-derived-data" type="button" class="settings-button" data-settings-action="refresh-derived">${t("app.data.refresh")}</button>
-                  <button id="clear-derived-cache" type="button" class="settings-button settings-button--quiet" data-settings-action="clear-derived">${t("app.data.clear")}</button>
+                <div id="data-folder-row" class="settings-row">
+                  <div class="settings-row__copy">
+                    <strong>${t("app.data.folder")}</strong>
+                  </div>
+                  <button id="open-data-folder" type="button" class="plugin-install-button" data-settings-action="open-data-folder">${t("app.data.open")}</button>
                 </div>
-                <p class="settings-hint">${t("app.data.hint", { device: hostDeviceLabel() })}</p>
               </div>
+              <p class="storage-safe"><span class="storage-pill">${t("app.data.safe")}</span></p>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-about" data-settings-panel="about" aria-labelledby="settings-tab-about" tabindex="0" hidden>
-              <div class="settings-card" data-settings-searchable>
-                <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>Orivo</strong>
-                    <small>${t("app.about.tagline")}</small>
-                  </div>
-                  <span id="about-app-version" class="settings-metric">—</span>
-                </div>
-                <div class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("app.about.tauri")}</strong>
-                    <small>${t("app.about.tauriHint")}</small>
-                  </div>
-                  <span id="about-tauri-version" class="settings-metric">—</span>
-                </div>
-                <div id="updates-row" class="settings-row">
-                  <div class="settings-row__copy">
-                    <strong>${t("app.about.updates")}</strong>
+              <div class="settings-card about-hero" data-settings-searchable>
+                <img class="about-hero__mark" src="/media/orivo-ring-icon.png" alt="" />
+                <div class="about-hero__copy">
+                  <strong class="about-hero__title">Orivo <span id="about-app-version">${typeof __APP_VERSION__ === "string" ? __APP_VERSION__ : ""}</span></strong>
+                  <div id="updates-row" class="about-hero__update">
                     <small id="update-status" class="update-status"></small>
                     <div id="update-progress" class="update-progress" role="progressbar" aria-label="${t("app.about.updateProgress")}" aria-valuemin="0" aria-valuemax="100" hidden>
                       <span class="update-progress__fill"></span>
                     </div>
                   </div>
-                  <button id="check-updates-button" type="button" class="settings-button" data-settings-action="check-updates">${t("app.update.check")}</button>
                 </div>
+                <button id="check-updates-button" type="button" class="plugin-install-button about-hero__action" data-settings-action="check-updates">${t("app.update.check")}</button>
               </div>
-              <div class="settings-card" data-settings-searchable>
-                <p class="settings-group__label">${t("app.about.attributions")}</p>
-                <ul class="settings-attributions">
-                  <li>${t("app.about.steamTrademark")}</li>
-                  <li>${t("app.about.wine")}</li>
-                  <li>${t("app.about.dxvk")}</li>
-                  <li>${t("app.about.listings")}</li>
-                </ul>
+              <div id="about-news" class="settings-card about-news" data-settings-searchable hidden>
+                <p id="about-news-title" class="about-news__title"></p>
+                <ul id="about-news-list" class="about-news__list"></ul>
               </div>
+              <div class="settings-card about-links" data-settings-searchable>
+                <button type="button" class="about-link" data-about-page="releases">
+                  <span>${t("app.about.allNews")}</span>${icon("chevron-right")}
+                </button>
+                <details class="about-licences">
+                  <summary class="about-link" data-nav-focusable>
+                    <span>${t("app.about.licences")}</span>${icon("chevron-right")}
+                  </summary>
+                  <ul class="settings-attributions">
+                    <li>${t("app.about.steamTrademark")}</li>
+                    <li>${t("app.about.wine")}</li>
+                    <li>${t("app.about.dxvk")}</li>
+                    <li>${t("app.about.listings")}</li>
+                  </ul>
+                </details>
+                <button type="button" class="about-link" data-about-page="new-issue">
+                  <span>${t("app.about.report")}</span>${icon("chevron-right")}
+                </button>
+              </div>
+              <p class="about-reset">
+                <button type="button" class="settings-button about-reset__button" data-settings-action="reset-preferences">${t("app.about.reset")}</button>
+              </p>
             </section>
           </div>
         </main>

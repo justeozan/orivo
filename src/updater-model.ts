@@ -58,28 +58,16 @@ export interface UpdateDescription {
   detail: string;
   buttonLabel: string;
   buttonDisabled: boolean;
-  /** What the new version brings, one short line each; empty when unknown. */
-  highlights?: string[];
 }
 
-/** No more than a glance: the full notes are the changelog's job. */
-const MAX_HIGHLIGHTS = 5;
-/** A highlight is one line; a longer first sentence is cut at a word. */
-const MAX_HIGHLIGHT_LENGTH = 110;
-
 /**
- * The release notes as a handful of readable bullets.
- *
- * A release's body is the changelog section: long paragraphs, then download
- * instructions for people installing by hand. Shown as-is it was a wall of
- * text. This keeps the bullets of the "Added" and "Changed" sections, takes
- * each one's first sentence, strips the Markdown and stops at five. Anything
- * it cannot read as such gives nothing, and the panel then simply says a new
- * version is there.
+ * The bullets of a release body's "Added" and "Changed" sections, in order,
+ * as plain text: links reduced to their words, emphasis and code marks gone.
+ * What is fixed stays out — a list of repaired bugs is not what is new.
  */
-export function releaseHighlights(body: string | null | undefined): string[] {
+export function releaseBullets(body: string | null | undefined): string[] {
   if (!body) return [];
-  const highlights: string[] = [];
+  const bullets: string[] = [];
   let section = "";
   for (const raw of body.split(/\r?\n/)) {
     const line = raw.trim();
@@ -96,15 +84,21 @@ export function releaseHighlights(body: string | null | undefined): string[] {
       .replace(/[*_`]+/g, "")
       .replace(/\s+/g, " ")
       .trim();
-    const sentence = /^(.+?[.!?])(\s|$)/.exec(text)?.[1] ?? text;
-    let short = sentence.replace(/[.]$/, "");
-    if (short.length > MAX_HIGHLIGHT_LENGTH) {
-      short = `${short.slice(0, MAX_HIGHLIGHT_LENGTH).replace(/\s+\S*$/, "")}…`;
-    }
-    if (short) highlights.push(short);
-    if (highlights.length >= MAX_HIGHLIGHTS) break;
+    if (text) bullets.push(text);
   }
-  return highlights;
+  return bullets;
+}
+
+/** The text up to its first full stop, without that stop. */
+export function firstSentence(text: string): string {
+  const sentence = /^(.+?[.!?])(\s|$)/.exec(text)?.[1] ?? text;
+  return sentence.replace(/[.]$/, "");
+}
+
+/** One line at most `max` long, cut at a word when it has to be cut. */
+export function shortenLine(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max).replace(/\s+\S*$/, "")}…`;
 }
 
 export const INITIAL_UPDATE_STATE: UpdateState = {
@@ -258,7 +252,6 @@ export function describeUpdateState(state: UpdateState): UpdateDescription {
         detail: t("misc.update.available.detail"),
         buttonLabel: t("misc.update.available.button"),
         buttonDisabled: false,
-        highlights: releaseHighlights(state.notes),
       };
     case "up-to-date":
       return {
