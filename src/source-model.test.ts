@@ -3,10 +3,12 @@ import { brandIcon, hasBrandIcon, icon } from "./icons";
 import {
   CONNECTED_SOURCES,
   defaultSourceAccounts,
+  gameCountLabel,
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
   sourceBadge,
+  sourceGameCount,
   sourceStatusLine,
   sourceSyncSummary,
 } from "./source-model";
@@ -230,5 +232,33 @@ describe("sourceStatusLine", () => {
     expect(sourceStatusLine({ ...epic, connected: true, accountLabel: "  " })).toBe("Connected");
     expect(sourceStatusLine(epic)).toBe("Not connected");
     expect(sourceStatusLine(ubisoft)).toBe("Signs in through its own window");
+  });
+});
+
+describe("sourceGameCount", () => {
+  const games = [
+    { source: "steam" },
+    { source: "steam" },
+    { source: "xbox" },
+    { source: "microsoft-store" },
+    { source: "local" },
+    {},
+  ];
+
+  it("counts the games each source brought in", () => {
+    expect(sourceGameCount(games, ["steam"])).toBe(2);
+    expect(sourceGameCount(games, ["local"])).toBe(1);
+    expect(sourceGameCount(games, ["gog"])).toBe(0);
+  });
+
+  it("adds up the sources one card speaks for", () => {
+    // Xbox and the Microsoft Store are one sign-in and one card.
+    expect(sourceGameCount(games, ["xbox", "microsoft-store"])).toBe(2);
+  });
+
+  it("says one game and many games", () => {
+    expect(gameCountLabel(1)).toBe("1 game");
+    expect(gameCountLabel(214)).toBe("214 games");
+    expect(gameCountLabel(0)).toBe("0 games");
   });
 });

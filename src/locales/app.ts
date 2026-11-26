@@ -168,8 +168,6 @@ export const en = {
   "app.steam.disconnected":
     "Steam was disconnected. Games already imported into Orivo remain in your library.",
   "app.steam.disconnectFailed": "Steam could not be disconnected.",
-  "app.source.desktopOnly":
-    "Connecting another game library is available in the Orivo desktop app.",
   "app.source.microsoftPair":
     "One Microsoft sign-in covers both: connecting or disconnecting one affects the other.",
   "app.source.waitingSignIn": "Waiting for sign-in…",
@@ -202,7 +200,7 @@ export const en = {
   "app.onboarding.localTitle": "Import local games",
   "app.onboarding.localDetail": "Apps, executables, shortcuts on {device}",
   "app.onboarding.alsoIn": "Both of these also live in ",
-  "app.onboarding.settingsLink": "Settings › Libraries & Sources",
+  "app.onboarding.settingsLink": "Settings › Accounts",
   "app.onboarding.emptyTitle": "Your library is empty",
   "app.onboarding.emptyBody": "Connect a platform to see your games here.",
   "app.onboarding.sourcesBody":
@@ -275,6 +273,8 @@ export const en = {
   "app.folder.add": "Add a folder",
   "app.folder.rescanShort": "Look again",
   "app.folder.removeShort": "Remove",
+  "app.folder.addShort": "Add",
+  "app.folder.manage": "Manage folders",
   "app.folder.addedOneFrom": "1 game added from {folder}.",
   "app.folder.addedManyFrom": "{count} games added from {folder}.",
   "app.folder.skippedOne": "1 shortcut could not be used.",
@@ -371,7 +371,6 @@ export const en = {
   "app.region.de": "Germany",
   "app.region.jp": "Japan",
   "app.region.au": "Australia",
-  "app.libraries.refreshAll": "Refresh all libraries",
   "app.libraries.panelAria": "Game libraries and providers",
   "app.libraries.steamTitle": "Steam library",
   "app.storeFolders.intro": "Your libraries come from your accounts. To show which games are installed on this Mac, Orivo needs to read each store's folder once.",
@@ -658,8 +657,6 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.steam.disconnected":
     "Steam a été déconnecté. Les jeux déjà importés dans Orivo restent dans ta bibliothèque.",
   "app.steam.disconnectFailed": "Impossible de déconnecter Steam.",
-  "app.source.desktopOnly":
-    "La connexion d’une autre bibliothèque de jeux est disponible dans l’app Orivo pour ordinateur.",
   "app.source.microsoftPair":
     "Une seule connexion Microsoft couvre les deux : connecter ou déconnecter l’un touche l’autre.",
   "app.source.waitingSignIn": "En attente de la connexion…",
@@ -693,7 +690,7 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.onboarding.localTitle": "Importer des jeux locaux",
   "app.onboarding.localDetail": "Apps, exécutables, raccourcis sur {device}",
   "app.onboarding.alsoIn": "Ces deux options se trouvent aussi dans ",
-  "app.onboarding.settingsLink": "Réglages › Bibliothèques et sources",
+  "app.onboarding.settingsLink": "Réglages › Comptes",
   "app.onboarding.emptyTitle": "Ta bibliothèque est vide",
   "app.onboarding.emptyBody": "Connecte une plateforme pour voir tes jeux ici.",
   "app.onboarding.sourcesBody":
@@ -771,6 +768,8 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.folder.add": "Ajouter un dossier",
   "app.folder.rescanShort": "Rechercher",
   "app.folder.removeShort": "Retirer",
+  "app.folder.addShort": "Ajouter",
+  "app.folder.manage": "Gérer les dossiers",
   "app.folder.addedOneFrom": "1 jeu ajouté depuis {folder}.",
   "app.folder.addedManyFrom": "{count} jeux ajoutés depuis {folder}.",
   "app.folder.skippedOne": "1 raccourci n’a pas pu être utilisé.",
@@ -868,7 +867,6 @@ export const fr: Partial<Record<keyof typeof en, string>> = {
   "app.region.de": "Allemagne",
   "app.region.jp": "Japon",
   "app.region.au": "Australie",
-  "app.libraries.refreshAll": "Actualiser toutes les bibliothèques",
   "app.libraries.panelAria": "Bibliothèques de jeux et fournisseurs",
   "app.libraries.steamTitle": "Bibliothèque Steam",
   "app.storeFolders.intro": "Tes bibliothèques viennent de tes comptes. Pour montrer quels jeux sont installés sur ce Mac, Orivo doit lire une fois le dossier de chaque boutique.",

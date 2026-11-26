@@ -109,9 +109,11 @@ import {
   CONNECTED_SOURCES,
   connectedSourceDescriptor,
   defaultSourceAccounts,
+  gameCountLabel,
   isConnectedSource,
   normaliseSourceAccounts,
   normaliseSourceSyncResult,
+  sourceGameCount,
   sourceSyncSummary,
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
@@ -2332,6 +2334,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     libraryLoaded = true;
     renderSelection();
     releaseBootSplash();
+    // The Accounts cards state how many games each source brought in, so a
+    // sync or a scan that lands while they are on screen updates the number.
+    renderSteamSourceRow();
+    renderSourceAccountsPanel();
+    renderGameFoldersCard();
     // A download started in the Epic launcher is just as real as one started
     // here, so the watch follows the data rather than the click.
     if (state.games.some((game) => game.installState === "installing")) {
@@ -2495,6 +2502,53 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       gameFolders,
       isTauriRuntime() && platformFeatures.localRunners,
     );
+    renderGameFoldersCard();
+  };
+
+  /**
+   * The games folders as one more card in the Accounts grid: what they
+   * brought in, and the list itself one click away underneath, the way
+   * Steam's sign-in opens under its card. No folder yet: the card adds one.
+   */
+  const renderGameFoldersCard = (): void => {
+    const container = root.querySelector<HTMLElement>("#game-folders-card");
+    const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+    if (!container || !inline) return;
+    const offered = isTauriRuntime() && platformFeatures.localRunners;
+    container.hidden = !offered;
+    if (!offered) {
+      container.replaceChildren();
+      inline.hidden = true;
+      return;
+    }
+    const label = t("app.menu.gamesFolder");
+    const hasFolders = gameFolders.length > 0;
+    const { row, actions } = sourceRowElement("folders", label, icon("folder"), hasFolders);
+    // A card of the grid, not a store: the stores' row selector must not see it.
+    delete row.dataset.sourceRow;
+    row.dataset.folderCard = "";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "source-account-row__account";
+    const name = document.createElement("span");
+    name.className = "source-account-row__account-name";
+    if (hasFolders) {
+      const count = gameCountLabel(sourceGameCount(state.games, ["local"]));
+      button.dataset.gameFolderAction = "manage";
+      button.classList.add("source-account-row__account--count");
+      button.setAttribute("aria-expanded", String(!inline.hidden));
+      button.setAttribute("aria-label", `${label} · ${count} — ${t("app.folder.manage")}`);
+      button.title = t("app.folder.manage");
+      name.classList.add("provider-health", "provider-health--available");
+      name.textContent = count;
+    } else {
+      button.dataset.gameFolderAction = "add";
+      name.textContent = t("app.folder.addShort");
+      button.setAttribute("aria-label", t("app.folder.add"));
+    }
+    button.append(name);
+    actions.append(button);
+    container.replaceChildren(row);
   };
 
   const rescanGameFolder = (folderId: string): void => {
@@ -4111,11 +4165,23 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     provider: string | null;
     idle: string;
     hover?: string;
+    /**
+     * The signed-in account. A connected card states the games it brought in
+     * rather than who is signed in, so the account is a tooltip away.
+     */
+    account?: string;
   }): HTMLButtonElement => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "source-account-row__account";
-    button.setAttribute("aria-label", options.hover ? `${options.idle} — ${options.hover}` : options.idle);
+    const said = options.account ? `${options.account} · ${options.idle}` : options.idle;
+    button.setAttribute("aria-label", options.hover ? `${said} — ${options.hover}` : said);
+    if (options.account) {
+      button.title = options.account;
+      // The count reads as a state, in the green every healthy state wears;
+      // the outline only comes back under the pointer, with "Disconnect".
+      button.classList.add("source-account-row__account--count");
+    }
     if (options.provider) {
       button.dataset.sourceAction = options.action;
       button.dataset.sourceProvider = options.provider;
@@ -4123,7 +4189,9 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       button.dataset.steamRowAction = options.action;
     }
     const name = document.createElement("span");
-    name.className = "source-account-row__account-name";
+    name.className = options.account
+      ? "source-account-row__account-name provider-health provider-health--available"
+      : "source-account-row__account-name";
     name.textContent = options.idle;
     button.append(name);
     if (options.hover) {
@@ -4177,9 +4245,10 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         sourceAccountButton({
           action: "disconnect",
           provider: null,
+          idle: gameCountLabel(sourceGameCount(state.games, ["steam"])),
           // The persona name is the account's own name; the id stands in
           // whenever Steam showed no profile to take one from.
-          idle: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
+          account: account.status?.personaName || account.status?.steamId || t("app.common.connectedState"),
           hover: t("app.common.disconnect"),
         }),
       );
@@ -4366,14 +4435,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       String(state.sourceAccounts.loading || state.sourceAccounts.busy.size > 0),
     );
 
-    if (!isTauriRuntime()) {
-      const hint = document.createElement("p");
-      hint.className = "settings-hint";
-      hint.textContent = t("app.source.desktopOnly");
-      body.append(hint);
-      return;
-    }
-
     if (state.sourceAccounts.notice && state.sourceAccounts.noticeProvider === null) {
       body.append(sourceNoticeElement());
     }
@@ -4490,8 +4551,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
           sourceAccountButton({
             action: "disconnect",
             provider: descriptor.provider,
+            // What the store brought in; the paired card counts both stores.
+            idle: gameCountLabel(
+              sourceGameCount(
+                state.games,
+                pairedStore ? [descriptor.provider, pairedStore.provider] : [descriptor.provider],
+              ),
+            ),
             // Who you are signed in as: the account, not a verdict about it.
-            idle: status.accountLabel || t("app.common.connectedState"),
+            account: status.accountLabel || t("app.common.connectedState"),
             hover: t("app.common.disconnect"),
           }),
         );
@@ -5585,7 +5653,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
    */
   const renderProviderStatuses = (): void => {
     const list = root.querySelector<HTMLElement>("#provider-status-list");
-    const group = root.querySelector<HTMLElement>(".source-providers");
+    const soonRow = root.querySelector<HTMLElement>("#provider-soon-row");
     // Steam's row carries its health dot, so it has to be redrawn whenever
     // these statuses land.
     renderSteamSourceRow();
@@ -5597,9 +5665,15 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       (provider) =>
         provider.provider !== "steam" && providerStatusForSource(provider.provider) === null,
     );
-    if (group) group.hidden = remaining.length === 0;
+    // A store whose feed answers is a card beside the others; the ones that
+    // can only say "Soon" share one line of logos under the grid, because a
+    // card each made a roadmap the loudest thing on the page.
+    const live = remaining.filter(
+      (provider) => provider.health === "available" || provider.health === "degraded",
+    );
+    const soon = remaining.filter((provider) => !live.includes(provider));
     const fragment = document.createDocumentFragment();
-    for (const provider of remaining) {
+    for (const provider of live) {
       const row = document.createElement("article");
       row.className = "provider-status-row";
       row.dataset.settingsSearchable = "";
@@ -5619,6 +5693,27 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       fragment.append(row);
     }
     list.replaceChildren(fragment);
+    if (soonRow) {
+      soonRow.hidden = soon.length === 0;
+      const label = document.createElement("span");
+      label.className = "source-soon__label";
+      label.textContent = providerHealthLabel("not-configured");
+      const items = soon.map((provider) => {
+        const item = document.createElement("span");
+        item.className = "source-soon__item";
+        item.dataset.soonProvider = provider.provider;
+        item.title = provider.message || provider.label;
+        const mark = document.createElement("span");
+        mark.className = "source-soon__mark";
+        mark.setAttribute("aria-hidden", "true");
+        mark.innerHTML = providerLogoMarkup(provider.provider);
+        const name = document.createElement("span");
+        name.textContent = provider.label;
+        item.append(mark, name);
+        return item;
+      });
+      soonRow.replaceChildren(label, ...items);
+    }
     // The connectable rows carry the rest of the health chips, so they have to
     // repaint whenever provider status lands.
     renderSourceAccountsPanel();
@@ -6358,6 +6453,17 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     if (!storeFoldersPanel || !isTauriRuntime()) return;
     renderStoreFolders(storeFoldersPanel, await loadStoreFolderAccess());
   };
+  root.querySelector<HTMLElement>("#game-folders-card")?.addEventListener("click", (event) => {
+    const action = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]")
+      ?.dataset.gameFolderAction;
+    if (action === "add") {
+      void chooseGameFolder();
+    } else if (action === "manage") {
+      const inline = root.querySelector<HTMLElement>("#game-folders-inline");
+      if (inline) inline.hidden = !inline.hidden;
+      renderGameFoldersCard();
+    }
+  });
   refs.gameFoldersPanel.addEventListener("click", (event) => {
     const button = (event.target as Element | null)?.closest<HTMLButtonElement>("[data-game-folder-action]");
     const action = button?.dataset.gameFolderAction;
@@ -6445,10 +6551,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     if (action === "refresh") {
       void refreshSourceAccounts();
-      return;
-    }
-    if (action === "resync") {
-      void resyncEveryLibrary();
       return;
     }
     const provider = trigger.dataset.sourceProvider ?? "";
@@ -6938,6 +7040,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
         // but its status still has to be read, or the row cannot say whether
         // Steam is connected.
         renderSteamSourceRow();
+        renderGameFoldersCard();
         void refreshSteamAccountStatus();
         void refreshSourceAccounts();
         void loadProviderStatuses(request);
@@ -8808,17 +8911,13 @@ function shell(): string {
                    page. Its one extra affordance, signing in, expands under its
                    row. -->
               <section id="source-accounts-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}">
-                <!-- No title, no pitch: the rows below are their own heading. -->
-                <header class="settings-card__header settings-card__header--actions">
-                  <!-- One refresh, not two: re-reading the connected accounts and
-                       re-syncing their libraries are the same wish from where the
-                       user stands, and a second, icon-only button next to this one
-                       only ever asked which of the two they meant. -->
-                  <button id="source-accounts-resync" type="button" class="steam-header-button steam-header-button--label" data-source-action="resync">${t("app.libraries.refreshAll")}</button>
-                </header>
+                <!-- No title, no pitch and no "Refresh all": the cards are their
+                     own heading, and a connected card carries its own sync glyph,
+                     which is the same wish aimed at one store. -->
 
-                <!-- Steam and every other store share one grid of two or three
-                     columns: to the reader they are all the same kind of row. -->
+                <!-- Steam and every other store share one grid of cards: to the
+                     reader they are all the same kind of thing. The games
+                     folders end it, as the one source that is not a store. -->
                 <div class="source-grid">
                 <div class="steam-source-block">
                   <div id="steam-source-row"></div>
@@ -8828,18 +8927,22 @@ function shell(): string {
                 </div>
 
                 <div id="source-accounts-body" class="source-accounts-body"></div>
+                <div id="provider-status-list" class="provider-status-list"></div>
+                <div id="game-folders-card" class="game-folders-card"></div>
+                <!-- Desktop: the watched games folders (game-folders.ts), opened
+                     from the Folders card. The library's menu keeps one "Games
+                     folders" entry; the list, rescans and removals live here. -->
+                <div id="game-folders-inline" class="steam-inline-panel game-folders-inline" hidden>
+                  <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
                 </div>
-                <div class="source-providers">
-                  <div id="provider-status-list" class="provider-status-list"></div>
                 </div>
+                <!-- The stores with nothing to connect yet: one quiet line of
+                     logos, not a card each. -->
+                <div id="provider-soon-row" class="source-soon" hidden></div>
               </section>
               <!-- Mac App Store edition only (store-folders.ts): the sandbox
                    reads Steam's and Epic's folders once the player allows it. -->
               <section id="store-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.libraries.panelAria")}" hidden></section>
-              <!-- Desktop: the watched games folders (game-folders.ts). The
-                   library's menu keeps one "Games folders" entry; the list,
-                   rescans and removals live here. -->
-              <section id="game-folders-panel" class="settings-card" data-settings-searchable aria-label="${t("app.menu.gamesFolder")}" hidden></section>
               <!-- Android only: a phone streams PC games through Moonlight's own
                    app, which takes the PC by the name it shows for it. Named
                    once, every PC game in the library offers the stream beside

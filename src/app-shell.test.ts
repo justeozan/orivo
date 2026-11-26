@@ -1077,21 +1077,130 @@ describe("application shell against the desktop backend", () => {
     const dot = gogRow?.querySelector(".source-account-row__dot");
     expect(dot?.classList.contains("source-account-row__dot--available")).toBe(true);
     expect(dot?.getAttribute("aria-label")).toBe("Store data: available");
-    // …and is not repeated in the store-data-only list below it.
-    const remaining = Array.from(
-      root.querySelectorAll<HTMLElement>("#provider-status-list .provider-status-row strong"),
+    // …and is not repeated among the store-data-only stores below it.
+    const soon = Array.from(
+      root.querySelectorAll<HTMLElement>("#provider-soon-row [data-soon-provider]"),
+    ).map((entry) => entry.dataset.soonProvider);
+    expect(soon).toEqual(["humble"]);
+    expect(root.querySelector("#source-accounts-panel #provider-soon-row")).not.toBeNull();
+  });
+
+  it("gathers the stores that are not ready yet into one line, and keeps live ones as cards", async () => {
+    backend.providers = [
+      { provider: "apple", label: "Apple App Store", health: "available", message: "", refreshedAt: null },
+      { provider: "humble", label: "Humble Store", health: "not-configured", message: "", refreshedAt: null },
+      { provider: "playstation", label: "PlayStation Store", health: "unavailable", message: "", refreshedAt: null },
+    ];
+    mount();
+    await goto("#/settings/libraries");
+
+    const cards = Array.from(
+      root.querySelectorAll<HTMLElement>(".source-grid .provider-status-row strong"),
     ).map((entry) => entry.textContent);
-    expect(remaining).toEqual(["Humble"]);
-    // One card now, not two.
-    expect(root.querySelectorAll("#provider-status-list")).toHaveLength(1);
-    expect(root.querySelector("#source-accounts-panel #provider-status-list")).not.toBeNull();
+    expect(cards).toEqual(["Apple App Store"]);
+    const soonRow = root.querySelector<HTMLElement>("#provider-soon-row");
+    expect(soonRow?.hidden).toBe(false);
+    expect(
+      Array.from(soonRow!.querySelectorAll<HTMLElement>("[data-soon-provider]")).map(
+        (entry) => entry.textContent,
+      ),
+    ).toEqual(["Humble Store", "PlayStation Store"]);
+    // One line, no card each, and no "Refresh all" above the grid.
+    expect(soonRow?.querySelector(".provider-status-row")).toBeNull();
+    expect(root.querySelector("[data-source-action='resync']")).toBeNull();
+  });
+
+  it("states the games each connected store brought in, and syncs that store alone", async () => {
+    backend.library = [
+      { ...alpha, id: "gog:1", source: "gog" },
+      { ...alpha, id: "gog:2", source: "gog" },
+      { ...alpha, id: "epic:1", source: "epic" },
+    ];
+    backend.sources = [
+      { provider: "gog", label: "GOG", connected: true, accountLabel: "player-one", style: "token", sharesSignInWith: [], launchable: true },
+    ];
+    backend.sourceSync = { provider: "gog", label: "GOG", totalGames: 2, importedGames: 0, updatedGames: 0, skippedGames: 0 };
+    mount();
+    await settle();
+    await goto("#/settings/libraries");
+
+    const gog = root.querySelector<HTMLElement>("[data-source-row='gog']");
+    const state = gog?.querySelector<HTMLElement>("[data-source-action='disconnect']");
+    expect(state?.querySelector(".source-account-row__account-name")?.textContent).toBe("2 games");
+    expect(state?.querySelector(".provider-health--available")).not.toBeNull();
+    // The account is still named, a pointer away.
+    expect(state?.title).toBe("player-one");
+    // A store not signed in to offers to connect instead of a count.
+    expect(
+      root.querySelector("[data-source-row='epic'] [data-source-action='connect']")?.textContent,
+    ).toBe("Connect");
+
+    const before = tauri.invoke.mock.calls.length;
+    gog?.querySelector<HTMLButtonElement>("[data-source-action='sync']")!.click();
+    await settle();
+    expect(
+      tauri.invoke.mock.calls
+        .slice(before)
+        .filter(([command]) => command === "sync_source_library"),
+    ).toEqual([["sync_source_library", { provider: "gog" }]]);
+  });
+
+  describe("the games folders card", () => {
+    let folders: Record<string, unknown>[] = [];
+    beforeEach(() => {
+      folders = [];
+      const base = tauri.invoke.getMockImplementation()!;
+      tauri.invoke.mockImplementation(async (command, args) => {
+        if (command === "list_game_folders") return folders;
+        if (command === "choose_game_folder") return null;
+        return base(command, args);
+      });
+      backend.library = [
+        { ...alpha, id: "local:1", source: "local" },
+        { ...alpha, id: "local:2", source: "local" },
+      ];
+    });
+    const card = (): HTMLElement | null => root.querySelector("#game-folders-card [data-folder-card]");
+
+    it("adds a folder when there is none", async () => {
+      mount();
+      await settle();
+      await goto("#/settings/libraries");
+
+      card()!.querySelector<HTMLButtonElement>("[data-game-folder-action='add']")!.click();
+      await settle();
+      expect(tauri.invoke.mock.calls.some(([command]) => command === "choose_game_folder")).toBe(true);
+    });
+
+    it("states what the folders brought in and opens their list under the grid", async () => {
+      folders = [{ id: "f1", label: "Games", available: true }];
+      mount();
+      await settle();
+      await goto("#/settings/libraries");
+
+      const manage = card()!.querySelector<HTMLButtonElement>("[data-game-folder-action='manage']")!;
+      expect(manage.textContent).toBe("2 games");
+      const inline = root.querySelector<HTMLElement>("#game-folders-inline")!;
+      expect(inline.hidden).toBe(true);
+
+      manage.click();
+      await settle();
+      expect(inline.hidden).toBe(false);
+      // The list is the same one as before: a row per folder, with its actions.
+      expect(inline.querySelector("[data-game-folder-action='rescan'][data-folder-id='f1']")).not.toBeNull();
+      expect(
+        card()!.querySelector("[data-game-folder-action='manage']")?.getAttribute("aria-expanded"),
+      ).toBe("true");
+    });
   });
 
   it("names the Steam account by its persona, and falls back to its id", async () => {
+    // The card states the games Steam brought in; the account it is signed in
+    // as stays one pointer away, on the same button.
     const accountName = (): string | null =>
       root.querySelector<HTMLElement>(
-        "[data-source-row='steam'] .source-account-row__account-name",
-      )?.textContent ?? null;
+        "[data-source-row='steam'] [data-steam-row-action='disconnect']",
+      )?.title ?? null;
 
     backend.steamStatus = {
       connected: true,
