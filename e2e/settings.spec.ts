@@ -325,7 +325,8 @@ test.describe("Settings ships no fake controls", () => {
       page.locator(`[data-segmented='${preference}'] [aria-pressed='true']`);
     await expect(lit("startPage")).toHaveAttribute("data-segment-value", "library");
     await expect(page.locator("#preference-store-region")).toHaveValue("automatic");
-    await expect(page.locator("#reset-preferences")).toBeVisible();
+    // Reset lives once, at the foot of About.
+    await expect(page.locator("#settings-panel-general [data-settings-action='reset-preferences']")).toHaveCount(0);
 
     // "full" joined "system"/"reduced" when the Windows animation fix landed
     // (`b5809d2`), letting a player opt back into motion its OS says to skip;

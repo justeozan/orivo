@@ -792,7 +792,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     notFoundPage: get<HTMLElement>("#app-page-not-found"),
     notFoundDetail: get<HTMLElement>("#not-found-detail"),
     settingsTitle: get<HTMLElement>("#settings-page-title"),
-    settingsDescription: get<HTMLElement>("#settings-page-description"),
     settingsLayout: get<HTMLElement>(".settings-layout"),
     settingsSidebar: get<HTMLElement>(".settings-sidebar"),
     settingsPanels: Array.from(root.querySelectorAll<HTMLElement>("[data-settings-panel]")),
@@ -6116,7 +6115,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       settingsSidebarEntranceTimer = restart(sidebar, settingsSidebarEntranceTimer);
     }
     setDelay(refs.settingsTitle, enteringPage ? 50 : 0);
-    setDelay(refs.settingsDescription, enteringPage ? 90 : 30);
     const panel = refs.settingsPanels.find((candidate) => !candidate.hidden);
     if (panel) {
       const lines = Array.from(
@@ -6142,7 +6140,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   ): void => {
     const definition = SETTINGS_SECTIONS.find((section) => section.id === route.section)!;
     refs.settingsTitle.textContent = definition.label;
-    refs.settingsDescription.textContent = definition.description;
     for (const button of refs.settingsSectionButtons) {
       const active = button.dataset.settingsSection === route.section;
       button.classList.toggle("is-active", active);
@@ -9103,7 +9100,6 @@ function shell(): string {
           <div class="settings-content">
             <header class="settings-header">
               <h1 id="settings-page-title">${t("settings.general.label")}</h1>
-              <p id="settings-page-description">${t("settings.general.description")}</p>
             </header>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-general" data-settings-panel="general" aria-labelledby="settings-tab-general" tabindex="0">
@@ -9188,9 +9184,6 @@ function shell(): string {
                 ).join("")}
               </details>
 
-              <div class="settings-card__header settings-card__header--start">
-                <button id="reset-preferences" type="button" class="settings-button settings-button--quiet" data-settings-action="reset-preferences" title="${t("settings.reset.hint")}">${t("settings.reset.label")}</button>
-              </div>
             </section>
 
             <section class="settings-panel" role="tabpanel" id="settings-panel-libraries" data-settings-panel="libraries" aria-labelledby="settings-tab-libraries" tabindex="0" hidden>
