@@ -8,7 +8,8 @@ import type {
   StoreTabId,
 } from "./contracts";
 import { currentLanguage, t } from "./i18n";
-import { STORE_CATALOG, STORE_CATALOG_META } from "./generated/store-catalog";
+import { STORE_CATALOG_META } from "./generated/store-catalog";
+import { BUNDLED_STORE_GAMES } from "./store-catalog-all";
 
 export type StoreLoadPhase =
   | "loading"
@@ -119,19 +120,21 @@ export function editorialProviderStatuses(): ProviderStatus[] {
     providerStatus("humble", "Humble Store", "available", t("store.provider.usd")),
     providerStatus("fanatical", "Fanatical", "available", t("store.provider.usd")),
     providerStatus("instant-gaming", "Instant Gaming", "not-configured", t("store.provider.notConfigured")),
-    providerStatus("playstation", "PlayStation Store", "degraded", t("store.provider.unverified")),
-    providerStatus("microsoft", "Microsoft Store", "degraded", t("store.provider.unverified")),
-    providerStatus("nintendo", "Nintendo eShop", "degraded", t("store.provider.unverified")),
+    // The exclusives carry prices read off each console store's French page.
+    providerStatus("playstation", "PlayStation Store", "available", t("store.provider.steam")),
+    providerStatus("microsoft", "Microsoft Store", "available", t("store.provider.steam")),
+    providerStatus("nintendo", "Nintendo eShop", "available", t("store.provider.steam")),
   ];
 }
 
 /**
- * The catalog shipped with the app. Every title, description, genre, platform
- * and price comes from the game's own store listing (see
- * `scripts/fetch-store-catalog.mjs`); the editorial copy in `curation` is
- * Orivo's. It is what the page shows before — and instead of — a live feed.
+ * The catalog shipped with the app: the sourced exclusives first
+ * (`scripts/store-exclusives.json`), then the curated shelf. Every title,
+ * description, genre, platform and price comes from the game's own store
+ * listing; the editorial copy in `curation` is Orivo's. It is what the page
+ * shows before — and instead of — a live feed.
  */
-export const EDITORIAL_GAMES: GameSummary[] = STORE_CATALOG;
+export const EDITORIAL_GAMES: GameSummary[] = BUNDLED_STORE_GAMES;
 
 export function editorialStoreHome(): StoreHomeView {
   return {

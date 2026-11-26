@@ -27,11 +27,11 @@ test.describe("hash router", () => {
 
   test("in-app navigation encodes the id the same way a deep link does", async ({ page }) => {
     await openRoute(page, "#/store", "store");
-    await page.locator("[data-focus-key='game-steam:1608230']").click();
+    await page.locator("[data-focus-key='game-store:marvels-spider-man-2']").click();
     await page.locator("[data-focus-key='detail-page']").click();
     await waitForPage(page, "game");
 
-    expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
+    expect(await currentHash(page)).toBe("#/games/store%3Amarvels-spider-man-2?from=store");
   });
 
   test("a game id containing a slash is rejected rather than half-decoded", async ({ page }) => {
@@ -86,7 +86,7 @@ test.describe("hash router", () => {
     await waitForPage(page, "store");
 
     // A card opens its detail in place; the detail's "Game page" goes on.
-    await page.locator("[data-focus-key='game-steam:1608230']").click();
+    await page.locator("[data-focus-key='game-store:marvels-spider-man-2']").click();
     await page.locator("[data-focus-key='detail-page']").click();
     await waitForPage(page, "game");
 
@@ -104,7 +104,7 @@ test.describe("hash router", () => {
 
     await page.goForward();
     await waitForPage(page, "game");
-    expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
+    expect(await currentHash(page)).toBe("#/games/store%3Amarvels-spider-man-2?from=store");
 
     // Exactly one host is ever mounted and visible.
     await expect(page.locator(".app-page:not([hidden])")).toHaveCount(1);

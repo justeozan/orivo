@@ -430,9 +430,11 @@ describe("Store page offline", () => {
 
     expect(mounted.container.querySelector(".store-status--offline")).not.toBeNull();
     expect(fake.commands).toEqual(["listOwnedGameIds", "getHome"]);
-    // Cards, not titles: games whose art carries their wordmark print no title.
-    expect(mounted.container.querySelectorAll(".store-card").length).toBe(EDITORIAL_GAMES.length);
-    expect(cardFor(mounted.container, EDITORIAL_GAMES[0].id)).not.toBeNull();
+    // Tout shows the bundled exclusives, every one of them, with no host.
+    const exclusives = EDITORIAL_GAMES.filter((entry) => entry.exclusiveTo);
+    expect(exclusives.length).toBeGreaterThan(0);
+    expect(mounted.container.querySelectorAll(".store-card").length).toBe(exclusives.length);
+    expect(cardFor(mounted.container, exclusives[0].id)).not.toBeNull();
     expect(mounted.container.querySelector(".store-empty")?.hasAttribute("hidden")).toBe(true);
   });
 });
@@ -636,7 +638,10 @@ describe("Store page offer facts", () => {
   });
 
   it("shows the bundled catalogue's own price, and nothing where no shop quoted one", async () => {
-    const priced = EDITORIAL_GAMES.find((entry) => formatPrice(selectBestOffer(entry)) !== "");
+    // Two games that are exclusive to nothing, so Tout keeps both on its shelf.
+    const priced = EDITORIAL_GAMES.find(
+      (entry) => !entry.exclusiveTo && formatPrice(selectBestOffer(entry)) !== "",
+    );
     if (!priced) throw new Error("The bundled catalogue carries no priced game.");
     const expectedPrice = formatPrice(selectBestOffer(priced));
     const quoteless = game({ id: "quoteless", title: "Quoteless", offers: [] });
