@@ -182,13 +182,14 @@ test.describe("reduced motion", () => {
   // Emulated before the first navigation so the pages read the preference on
   // their very first render (`prefersReducedMotion()` is checked at render time).
   // Orivo animates everything by default, whatever the OS says; "System" is
-  // the choice that hands the decision back to it. The browser preview keeps
-  // preferences in memory only, so the choice is made once and the pages are
-  // then reached without a reload.
+  // the choice that hands the decision back to it. It is set before boot, as
+  // the motion remembered from the last start: choosing it on the page instead
+  // left the Settings entrance, already started under "full", running on a
+  // slow runner when the page was measured.
   test.beforeEach(async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => window.localStorage.setItem("orivo.motion", "system"));
     await openRoute(page, "#/settings/general", "settings");
-    await page.locator("[data-segmented='motion'] [data-segment-value='system']").click();
     await expect(page.locator("#app")).toHaveAttribute("data-motion", "system");
   });
 
