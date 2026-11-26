@@ -42,7 +42,7 @@ export const STORE_SECOND_GAME_ID = "steam:383870";
 export const SETTINGS_SECTIONS = [
   { id: "general", title: "General" },
   { id: "libraries", title: "Accounts" },
-  { id: "plugins", title: "Plugins & Runners" },
+  { id: "plugins", title: "Plugins" },
   { id: "data", title: "Data" },
   { id: "about", title: "About" },
 ] as const;

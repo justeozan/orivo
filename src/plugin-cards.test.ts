@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { categoryFilterChips, pluginCard, pluginCategory, pluginIcon, updateBadge } from "./plugin-cards";
+import { categoryFilterChips, pluginCard, pluginCategory, pluginIcon, pluginMoreMenu, updateBadge } from "./plugin-cards";
 
 describe("pluginCategory", () => {
   it("reads the shelf from what the plugin is", () => {
@@ -111,5 +111,82 @@ describe("updateBadge", () => {
     expect(badge?.textContent).toBe("2");
     expect(badge?.title).toBe("2 updates");
     expect(updateBadge(0, "")).toBeNull();
+  });
+});
+
+describe("pluginCard status", () => {
+  it("puts how the plugin stands first, coloured by its tone", () => {
+    const card = pluginCard({
+      id: "nxnative",
+      name: "Switch",
+      category: "emulation",
+      status: { text: "Keys missing", tone: "warn" },
+      lines: ["nxnative"],
+    });
+    const lines = [...card.querySelectorAll(".plugin-card__copy small")];
+    expect(lines.map((line) => line.textContent)).toEqual(["Keys missing", "nxnative"]);
+    expect((lines[0] as HTMLElement).dataset.tone).toBe("warn");
+  });
+
+  it("draws no state line when there is nothing to say", () => {
+    const card = pluginCard({ id: "x", name: "X", category: "tools", status: null, lines: ["Built in"] });
+    expect(card.querySelector(".plugin-card__status")).toBeNull();
+  });
+});
+
+describe("pluginMoreMenu", () => {
+  const build = (open = false) => {
+    const ran: string[] = [];
+    const toggles: boolean[] = [];
+    const menu = pluginMoreMenu({
+      label: "More",
+      open,
+      onToggle: (value) => toggles.push(value),
+      entries: [
+        { kind: "item", label: "Resync", run: () => ran.push("resync") },
+        { kind: "separator" },
+        { kind: "item", label: "Uninstall", danger: true, data: { pluginUninstall: "p" } },
+        { kind: "meta", text: "v1 · Official" },
+      ],
+    });
+    document.body.replaceChildren(menu);
+    return { menu, ran, toggles };
+  };
+  const list = (): HTMLElement => document.querySelector<HTMLElement>("[role='menu']")!;
+  const dots = (): HTMLButtonElement => document.querySelector<HTMLButtonElement>(".plugin-dots")!;
+
+  it("opens on ⋯, runs a choice and closes", () => {
+    const { ran, toggles } = build();
+    expect(list().hidden).toBe(true);
+    dots().click();
+    expect(list().hidden).toBe(false);
+    expect(dots().getAttribute("aria-expanded")).toBe("true");
+    document.querySelector<HTMLButtonElement>("[role='menuitem']")!.click();
+    expect(ran).toEqual(["resync"]);
+    expect(list().hidden).toBe(true);
+    expect(toggles).toEqual([true, false]);
+  });
+
+  it("carries data for the page's own handler, the danger tone and the meta line", () => {
+    build();
+    const uninstall = document.querySelector<HTMLElement>("[data-plugin-uninstall='p']")!;
+    expect(uninstall.classList.contains("plugin-menu__item--danger")).toBe(true);
+    expect(document.querySelector(".plugin-menu__meta")!.textContent).toBe("v1 · Official");
+  });
+
+  it("closes on a click elsewhere and on Escape", () => {
+    build();
+    dots().click();
+    document.body.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(list().hidden).toBe(true);
+    dots().click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(list().hidden).toBe(true);
+  });
+
+  it("comes back open when a repaint asks for it, without reporting a toggle", () => {
+    const { toggles } = build(true);
+    expect(list().hidden).toBe(false);
+    expect(toggles).toEqual([]);
   });
 });

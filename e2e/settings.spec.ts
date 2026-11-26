@@ -149,19 +149,20 @@ test.describe("Settings navigation", () => {
     await waitForPage(page, "settings");
 
     expect(await currentHash(page)).toBe("#/settings/plugins");
-    await expect(page.locator("#settings-page-title")).toHaveText("Plugins & Runners");
+    await expect(page.locator("#settings-page-title")).toHaveText("Plugins");
   });
 });
 
-test.describe("Plugins & Runners browser", () => {
-  test("the section opens the plugin browser, not the Wine panel", async ({ page }) => {
+test.describe("Plugins browser", () => {
+  test("the section opens the plugin browser with its first plugin open", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
-    await expect(page.locator("#wine-settings-panel")).toBeHidden();
+    // No empty "pick a plugin": the first card's detail is open beside the list.
+    await expect(page.locator("#plugins-detail-empty")).toHaveCount(0);
+    await expect(page.locator("#wine-settings-panel")).toBeVisible();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
-    // Nothing is open yet: the detail column asks for a pick.
-    await expect(page.locator("#plugins-detail-empty")).toBeVisible();
+    await expect(page.locator("[data-plugin-card='wine']")).toHaveClass(/is-selected/);
     // Runner profiles live in the detail of the plugin that provides them.
     await expect(page.locator("#runners-panel")).toBeHidden();
 
@@ -216,7 +217,9 @@ test.describe("Plugins & Runners browser", () => {
   test("in a narrow window a plugin's detail takes the list's place, with a way back", async ({ page }) => {
     await page.setViewportSize({ width: 620, height: 820 });
     await openRoute(page, "#/settings/plugins", "settings");
-    await expect(page.locator("#plugins-detail-empty")).toBeHidden();
+    // The plugin open by default does not take the list's place.
+    await expect(page.locator("#plugins-installed-list")).toBeVisible();
+    await expect(page.locator("#wine-settings-panel")).toBeHidden();
 
     await page.locator("[data-plugin-open='wallpaper-searcher']").click();
     await expect(page.locator("#wallpaper-plugin-panel")).toBeVisible();
@@ -228,17 +231,11 @@ test.describe("Plugins & Runners browser", () => {
     await expect(page.locator("#wallpaper-plugin-panel")).toBeHidden();
   });
 
-  test("Plugins & Runners offers automatic updates and a registry check, both no-ops without Tauri", async ({
-    page,
-  }) => {
+  test("Plugins offers a registry check, a no-op without Tauri", async ({ page }) => {
     await openRoute(page, "#/settings/plugins", "settings");
 
-    const automaticUpdates = page.locator("#plugins-automatic-updates");
-    await expect(automaticUpdates).not.toBeChecked();
-    await automaticUpdates.click();
-    // Without a desktop host the command simply cannot run; the panel must
-    // not crash or get stuck offering a promise it cannot keep.
-    await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
+    // Automatic updates moved into a registry plugin's ⋯ menu.
+    await expect(page.locator("#plugins-automatic-updates")).toHaveCount(0);
 
     await page.locator("[data-plugin-refresh-registry]").click();
     await expect(page.locator("#plugins-catalog-panel")).toBeVisible();
