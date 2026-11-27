@@ -134,6 +134,54 @@ test.describe("topbar search", () => {
   });
 });
 
+test.describe("the topbar capsule", () => {
+  test("the folded search lays nothing over the buttons to its right", async ({ page }) => {
+    await openRoute(page, "#/library", "library");
+    // Without a Sentry DSN the button stays hidden; show it to aim at it.
+    const hit = await page.evaluate(() => {
+      const button = document.querySelector<HTMLButtonElement>("#feedback-button");
+      if (!button) return "missing";
+      button.hidden = false;
+      const box = button.getBoundingClientRect();
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return top && button.contains(top) ? "button" : (top?.className.toString() ?? "nothing");
+    });
+    expect(hit, "a click on the feedback button must reach it").toBe("button");
+  });
+
+  test("the menus it opens keep the page as their backdrop", async ({ page }) => {
+    await openRoute(page, "#/library", "library");
+    await page.locator("#library-menu-button").click();
+    await expect(page.locator("#library-source-menu")).toBeVisible();
+    // An ancestor with a backdrop filter (or a filter, or a mask) becomes the
+    // menu's backdrop root, and its blur then has nothing behind it to blur.
+    const roots = await page.evaluate(() => {
+      const found: string[] = [];
+      let node = document.querySelector("#library-source-menu")?.parentElement ?? null;
+      while (node && node !== document.documentElement) {
+        const style = getComputedStyle(node);
+        const backdrop = style.backdropFilter || style.getPropertyValue("-webkit-backdrop-filter");
+        if ((backdrop && backdrop !== "none") || style.filter !== "none" || style.maskImage !== "none") {
+          found.push(node.className.toString() || node.tagName);
+        }
+        node = node.parentElement;
+      }
+      return found;
+    });
+    expect(roots, "no ancestor of the menu may be a backdrop root").toEqual([]);
+  });
+
+  test("its page links are glyphs of one size, the current one included", async ({ page }) => {
+    await openRoute(page, "#/library", "library");
+    const links = await page.locator("header.topbar .nav-link:visible").evaluateAll((nodes) =>
+      nodes.map((node) => ({ text: node.textContent?.trim() ?? "", width: node.getBoundingClientRect().width })),
+    );
+    expect(links.length).toBeGreaterThan(1);
+    for (const link of links) expect(link.text).toBe("");
+    expect(new Set(links.map((link) => Math.round(link.width))).size).toBe(1);
+  });
+});
+
 test.describe("no circular spinners", () => {
   // House style (DESIGN.md 13): work in progress is an indeterminate bar.
   // `store-spin` and `gd-spin` were deleted; nothing may bring a disc back.

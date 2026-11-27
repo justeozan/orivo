@@ -196,7 +196,7 @@ test.describe("hash router", () => {
 
       const marked = page.locator("header.topbar [aria-current]");
       await expect(marked, `${routeCase.hash} should mark one nav item`).toHaveCount(1);
-      await expect(marked).toHaveText(routeCase.current);
+      await expect(marked).toHaveAttribute("aria-label", routeCase.current);
       await expect(marked).toHaveAttribute("aria-current", "page");
       // The whole document must not carry a second current marker either.
       await expect(page.locator("[aria-current]")).toHaveCount(1);
