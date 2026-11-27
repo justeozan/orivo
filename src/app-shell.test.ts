@@ -109,7 +109,7 @@ function visiblePages(root: HTMLElement): string[] {
 
 function currentNavLabels(root: HTMLElement): string[] {
   return Array.from(root.querySelectorAll<HTMLElement>("[aria-current]")).map(
-    (link) => link.textContent?.trim() ?? "",
+    (link) => link.getAttribute("aria-label") ?? "",
   );
 }
 
