@@ -18,6 +18,7 @@ mod game_folder;
 mod game_media;
 mod gamestream;
 mod launcher;
+mod ios_app;
 mod moonlight_android;
 mod moved_games;
 mod nxnative;
@@ -1063,6 +1064,7 @@ pub fn run() {
             epic_android::configure(app_data.clone(), None);
             // The PC a phone streams from through Moonlight, once named.
             moonlight_android::configure(app_data.clone());
+            ios_app::configure(app_data.clone());
             // Compiled plugin components are regenerable, so they live in the
             // cache directory rather than beside the packages they came from.
             // Naming it is all that happens here: the cache is opened by the
@@ -8413,6 +8415,15 @@ async fn launch_game_inner(
         // A stream from the player's PC and the download to this phone are
         // offered beside a card's own targets rather than among them, so they
         // are answered before the substitution below would refuse them.
+        // On an iPhone the card's own target starts nothing, so a card whose
+        // iPhone version opened before is that version, asked for or not.
+        let ios_version = cfg!(target_os = "ios") && ios_app::remembered(&game.id).is_some();
+        if launch_option.as_deref() == Some(ios_app::PLAY_OPTION)
+            || (launch_option.is_none() && ios_version)
+        {
+            stream_or_download = Some(ios_app::PLAY_OPTION.into());
+            launch_option = None;
+        }
         if matches!(
             launch_option.as_deref(),
             Some(moonlight_android::STREAM_OPTION) | Some(moonlight_android::INSTALL_ON_PHONE_OPTION)
@@ -8561,6 +8572,21 @@ async fn launch_game_inner(
         }
         Some(moonlight_android::INSTALL_ON_PHONE_OPTION) => {
             return Err("Use Install to download this game to the phone.".into());
+        }
+        Some(ios_app::PLAY_OPTION) => {
+            let opened = match ios_app::remembered(&game.id) {
+                Some(link) => ios_app::open(&app, link).await,
+                None => false,
+            };
+            if !opened {
+                // Deleted since: the card goes back to Install.
+                ios_app::forget(&game.id);
+                return Err(format!("{title} is no longer on this device. Press Install to get it again."));
+            }
+            return Ok(LaunchResult {
+                status: format!("Opening {title}"),
+                handoff: Some(LaunchHandoff::Client),
+            });
         }
         _ => {}
     }
@@ -9092,13 +9118,26 @@ async fn get_store_choices(
 /// Open the choice the menu offered. The WebView names a game and a row; the
 /// destination is the one the host built when it offered that row.
 #[tauri::command]
+///
+/// Answers whether the game itself opened: an iOS version already on the
+/// device is started rather than shown in the App Store, and its card offers
+/// Play from then on (`ios_app.rs`).
 async fn open_store_choice(
     game_id: String,
     choice_id: String,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let choice = store_choices::recall(&game_id, &choice_id)
         .ok_or_else(|| "That choice is no longer available. Press Install again.".to_string())?;
+    if let store_choices::StoreChoice::AppStore { track_id, .. } = &choice {
+        if let Some(link) = ios_app::link_of(*track_id) {
+            if ios_app::open(&app, link).await {
+                ios_app::remember(&game_id, *track_id);
+                return Ok(true);
+            }
+            ios_app::forget(&game_id);
+        }
+    }
     match choice.destination() {
         store_choices::Destination::Page(url) => {
             store::open_store_url(&url, &store::SystemUrlOpener)
@@ -9107,6 +9146,7 @@ async fn open_store_choice(
             playport::open(playport::installed(&app).await, &store::SystemUrlOpener)
         }
     }
+    .map(|()| false)
 }
 
 /// The PC a phone streams from through Moonlight, as the player named it.
@@ -10134,6 +10174,14 @@ fn launch_options_of(game: &Game, catalog: &Catalog) -> Vec<LaunchOptionView> {
             remote: launch_target_is_remote(target, catalog),
         })
         .collect();
+    if cfg!(target_os = "ios") && ios_app::remembered(&game.id).is_some() {
+        options.push(LaunchOptionView {
+            id: ios_app::PLAY_OPTION.into(),
+            label: "iPhone & iPad version".into(),
+            launchable: true,
+            remote: false,
+        });
+    }
     if let Some(label) = moonlight_android::stream_label(game) {
         let downloadable = matches!(
             &game.launch_target,

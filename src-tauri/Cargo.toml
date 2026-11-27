@@ -112,18 +112,21 @@ quiky_host = { package = "orivo-plugin-quiky-host", path = "../quiky-host/rust" 
 # macOS, Windows and Linux, so on iOS Orivo has to install one itself or every
 # `Entry::new` fails with "No default store has been set".
 #
-# `objc2`, `objc2-foundation` and `objc2-ui-kit` carry the one UIKit call Orivo
-# makes itself: `canOpenURL:`, which says whether Playport is installed
-# (`playport.rs`). Every iOS build already compiles all three, with these
-# features — tauri, wry and tao reach UIKit through them, at these versions — so
-# naming them compiles nothing new. MIT (`objc2`, `objc2-foundation`) and
-# Zlib OR Apache-2.0 OR MIT (`objc2-ui-kit`).
+# `objc2`, `objc2-foundation`, `objc2-ui-kit` and `block2` carry the UIKit
+# calls Orivo makes itself: `canOpenURL:`, which says whether Playport is
+# installed (`playport.rs`), and `openURL:options:completionHandler:`, which
+# says whether a game's iPhone version took its link (`ios_app.rs`). Every iOS
+# build already compiles all four, with these features — tauri, wry and tao
+# reach UIKit through them, at these versions — so naming them compiles nothing
+# new. MIT (`objc2`, `objc2-foundation`, `block2`) and Zlib OR Apache-2.0 OR MIT
+# (`objc2-ui-kit`).
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1.0", features = ["protected"] }
 keyring-core = "1.0"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIApplication", "UIResponder"] }
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDictionary", "NSString", "NSURL", "NSValue"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "UIApplication", "UIResponder"] }
 
 [target.'cfg(windows)'.dependencies]
 # `Win32_Foundation` is `HANDLE`, `FILETIME` and the other shared scalars that

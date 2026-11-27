@@ -8,6 +8,9 @@
  * plain Node to write the GitHub release notes.
  */
 export const en = {
+  "highlights.iphoneVersion.title": "iPhone versions, played from Orivo",
+  "highlights.iphoneVersion.line": "Installed already? Play opens it",
+
   "highlights.aboutHighlights.title": "What's new, in your language",
   "highlights.aboutHighlights.line": "A few short lines per release",
 
@@ -51,6 +54,9 @@ export const en = {
 };
 
 export const fr: Partial<Record<keyof typeof en, string>> = {
+  "highlights.iphoneVersion.title": "Versions iPhone, lancées depuis Orivo",
+  "highlights.iphoneVersion.line": "Déjà installée ? Jouer l’ouvre",
+
   "highlights.aboutHighlights.title": "Les nouveautés, en français",
   "highlights.aboutHighlights.line": "Quelques lignes courtes par version",
 

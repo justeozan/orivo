@@ -699,7 +699,7 @@ describe("game detail page on a device that cannot install", () => {
     detail.offers = [];
     const storeChoices = {
       list: vi.fn(async () => choices),
-      open: vi.fn(async () => {}),
+      open: vi.fn(async () => false),
     };
     const page = createGameDetailPage({
       navigate: () => {},
@@ -759,7 +759,7 @@ describe("game detail page on a device that cannot install", () => {
     detail.offers = [];
     const storeChoices = {
       list: vi.fn(async () => [playport]),
-      open: vi.fn(async () => {}),
+      open: vi.fn(async () => false),
     };
     const page = createGameDetailPage({
       navigate: () => {},

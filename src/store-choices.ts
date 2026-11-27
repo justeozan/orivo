@@ -30,7 +30,8 @@ export interface StoreChoice {
 
 export interface StoreChoicesClient {
   list(gameId: string): Promise<StoreChoice[]>;
-  open(gameId: string, choiceId: string): Promise<void>;
+  /** Whether the game itself opened: its iPhone version was already on the device. */
+  open(gameId: string, choiceId: string): Promise<boolean>;
 }
 
 /** Rows the host sent with an id and a label; anything else is dropped. */
@@ -50,7 +51,7 @@ export function createStoreChoicesClient(): StoreChoicesClient {
       return readStoreChoices(await invoke<unknown>("get_store_choices", { gameId }));
     },
     async open(gameId, choiceId) {
-      await invoke("open_store_choice", { gameId, choiceId });
+      return (await invoke<unknown>("open_store_choice", { gameId, choiceId })) === true;
     },
   };
 }
