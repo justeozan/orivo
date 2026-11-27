@@ -255,9 +255,12 @@ for (const size of [{ width: 2560, height: 1440 }, { width: 3840, height: 2160 }
       test.skip(testInfo.project.name !== "chromium-1536", "television sizes are captured once");
       await page.setViewportSize(size);
       await prepare(page, golden);
+      // A 4K frame takes CI's runner seconds per capture, and a stable
+      // screenshot needs two in a row: the default 7s ran out on the library.
       await expect(page).toHaveScreenshot(`${golden.golden}-${size.width}.png`, {
         mask: golden.masks(page),
         maskColor: "#101014",
+        timeout: 30_000,
       });
     });
   }
