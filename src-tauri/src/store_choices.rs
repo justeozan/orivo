@@ -22,7 +22,9 @@
 //!
 //! A GOG or Epic Games game is looked for the same way, with the studio its
 //! store recorded at sync: Fortnite on an iPhone is Epic's own App Store app,
-//! and "Install" used to hand it to an Epic launcher no iPhone has.
+//! and "Install" used to hand it to an Epic launcher no iPhone has. Fall Guys
+//! is not on the App Store at all: Epic sells it on iPhone in its own
+//! marketplace app, which Epic's universal links open on the game's page.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -82,9 +84,32 @@ pub enum StoreChoice {
     /// The PC version, in Playport, offered only where Playport is installed.
     /// `None` when Playport's compatibility list could not be read.
     Playport { verdict: Option<Compatibility> },
+    /// Steam Link, Valve's app that plays a Steam game running on the
+    /// player's own PC. The only way a Steam PC game is played on an iPhone
+    /// without a port: the Steam app there downloads nothing.
+    SteamLink,
     /// The game's page on the Steam store.
     SteamPage { app_id: u32 },
+    /// The game in the Epic Games Store app, Epic's own iPhone marketplace,
+    /// for the few Epic games it sells there (`EPIC_IOS_GAMES`).
+    EpicStore { slug: &'static str },
 }
+
+/// Steam Link on the App Store. Its page says Open once it is installed, so
+/// the same row installs it and starts it.
+const STEAM_LINK_APP_STORE_ID: u64 = 1_246_969_117;
+
+/// The Epic games the Epic Games Store app sells for iPhone, by the title the
+/// Epic library gives them, with their page on Epic's store. Only these pages
+/// are universal links Epic routes to the store app
+/// (`store.epicgames.com/.well-known/apple-app-site-association`): anywhere
+/// else the link would open a web page that installs nothing. Rocket League is
+/// left out on purpose: the app sells Sideswipe, another game.
+const EPIC_IOS_GAMES: &[(&str, &str)] = &[
+    ("fortnite", "fortnite"),
+    ("fall guys", "fall-guys"),
+    ("fall guys ultimate knockout", "fall-guys"),
+];
 
 /// Where a choice leads once it is picked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +134,9 @@ impl StoreChoice {
         match self {
             Self::AppStore { .. } => "app-store",
             Self::Playport { .. } => "playport",
+            Self::SteamLink => "steam-link",
             Self::SteamPage { .. } => "steam-page",
+            Self::EpicStore { .. } => "epic-store",
         }
     }
 
@@ -135,6 +162,10 @@ impl StoreChoice {
                 "View on Steam".to_string(),
                 "Its page on the Steam store".to_string(),
             ),
+            Self::EpicStore { .. } => {
+                ("iPhone & iPad version".to_string(), "Epic Games Store".to_string())
+            }
+            Self::SteamLink => ("Play from your PC".to_string(), "Steam Link".to_string()),
         };
         StoreChoiceView {
             id: self.id().to_string(),
@@ -154,6 +185,14 @@ impl StoreChoice {
             Self::SteamPage { app_id } => {
                 Destination::Page(format!("https://store.steampowered.com/app/{app_id}/"))
             }
+            Self::SteamLink => {
+                Destination::Page(format!("https://apps.apple.com/app/id{STEAM_LINK_APP_STORE_ID}"))
+            }
+            // A universal link: iOS hands it to the Epic Games Store app when
+            // it is installed, and Safari shows how to get the app otherwise.
+            Self::EpicStore { slug } => {
+                Destination::Page(format!("https://store.epicgames.com/p/{slug}"))
+            }
         }
     }
 }
@@ -161,7 +200,8 @@ impl StoreChoice {
 /// Everything "Install" can offer for one library game on this device, in
 /// the order the menu shows it: the PC version in Playport, the game's own iOS
 /// version (looked for only where `app_store` says the device installs from
-/// the App Store), then its Steam page.
+/// the App Store) or, for an Epic game the App Store lacks, its page in the
+/// Epic Games Store app, then its Steam page.
 ///
 /// `playport` is the game as Playport would name it, and only where Playport
 /// is installed. A GOG or Epic Games game gets no store page: neither store
@@ -196,8 +236,11 @@ pub async fn choices_for_game(
             LaunchTarget::Provider { provider, .. }
                 if app_store && matches!(provider.as_str(), "epic" | "gog") =>
             {
+                // Epic's own marketplace only where the App Store has nothing:
+                // Fortnite is in both, and one answer opens without a menu.
                 find_ios_version_by(http, title, &[developer.to_string()], region)
                     .await
+                    .or_else(|| (provider == "epic").then(|| epic_store_choice(title)).flatten())
                     .into_iter()
                     .collect()
             }
@@ -208,9 +251,19 @@ pub async fn choices_for_game(
     in_playport.into_iter().chain(from_stores).collect()
 }
 
-/// Everything "Install" can offer for a Steam game here: its iOS version when
-/// one is found on a device that can install it (`app_store`), then its Steam
-/// page, which is always there.
+/// The game in the Epic Games Store app, for an Epic game it sells there.
+pub fn epic_store_choice(title: &str) -> Option<StoreChoice> {
+    let title = normalise(title);
+    EPIC_IOS_GAMES
+        .iter()
+        .find(|(name, _)| *name == title)
+        .map(|(_, slug)| StoreChoice::EpicStore { slug })
+}
+
+/// Everything "Install" can offer for a Steam game here: on a device that
+/// installs from the App Store (`app_store`), its iOS version when one is
+/// found and Steam Link to play the PC one from the player's PC; then its
+/// Steam page, which is always there.
 pub async fn choices_for_steam_game(
     http: &dyn StoreHttp,
     title: &str,
@@ -223,6 +276,7 @@ pub async fn choices_for_steam_game(
         if let Some(native) = find_ios_version(http, title, app_id, region).await {
             choices.push(native);
         }
+        choices.push(StoreChoice::SteamLink);
     }
     choices.push(StoreChoice::SteamPage { app_id });
     choices
@@ -604,6 +658,7 @@ mod tests {
             choices,
             vec![
                 StoreChoice::AppStore { track_id: 5, seller: "ConcernedApe LLC".into() },
+                StoreChoice::SteamLink,
                 StoreChoice::SteamPage { app_id: 413_150 },
             ]
         );
@@ -621,7 +676,12 @@ mod tests {
     fn an_unreachable_store_still_leaves_the_steam_page() {
         let http = FakeHttp::new(Err("offline".into()), Err("offline".into()));
         let choices = block_on(choices_for_steam_game(&http, "Elden Ring", 1_245_620, "US", true));
-        assert_eq!(choices, vec![StoreChoice::SteamPage { app_id: 1_245_620 }]);
+        assert_eq!(choices, vec![StoreChoice::SteamLink, StoreChoice::SteamPage { app_id: 1_245_620 }]);
+        // Off iOS there is no Steam Link to offer, only the page.
+        let android = block_on(choices_for_steam_game(&http, "Elden Ring", 1_245_620, "US", false));
+        assert_eq!(android, vec![StoreChoice::SteamPage { app_id: 1_245_620 }]);
+        assert_eq!(StoreChoice::SteamLink.destination(), Destination::Page("https://apps.apple.com/app/id1246969117".into()));
+        assert_eq!(StoreChoice::SteamLink.view().id, "steam-link");
     }
 
     fn playport_list() -> Value {
@@ -647,6 +707,7 @@ mod tests {
             vec![
                 StoreChoice::Playport { verdict: Some(Compatibility::Runs) },
                 StoreChoice::AppStore { track_id: 5, seller: "ConcernedApe LLC".into() },
+                StoreChoice::SteamLink,
                 StoreChoice::SteamPage { app_id: 413_150 },
             ]
         );
@@ -661,6 +722,7 @@ mod tests {
             choices,
             vec![
                 StoreChoice::AppStore { track_id: 5, seller: "ConcernedApe LLC".into() },
+                StoreChoice::SteamLink,
                 StoreChoice::SteamPage { app_id: 413_150 },
             ]
         );
@@ -718,18 +780,45 @@ mod tests {
     fn an_epic_game_is_not_looked_for_without_a_studio_or_off_ios() {
         let epic = provider_target("epic", "fn:item:Fortnite");
         let list = CompatibilityList::new();
-        // No studio: a namesake by anybody would do, so nothing is offered.
-        assert_eq!(block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "", "FR", true, None, &list)), Vec::new());
+        // No studio: a namesake by anybody would do, so the App Store is not
+        // taken at its word; Epic's own store still sells its own game.
+        assert_eq!(
+            block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "", "FR", true, None, &list)),
+            vec![StoreChoice::EpicStore { slug: "fortnite" }]
+        );
         // Android installs nothing from the App Store.
         assert_eq!(
             block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "Epic Games", "FR", false, None, &list)),
             Vec::new()
         );
         // Another studio's game of the same name is somebody else's app.
+        let unknown = provider_target("epic", "ns:item:Imitation");
         assert_eq!(
-            block_on(choices_for_game(&fortnite(), "Fortnite", &epic, "Imitation Studio", "FR", true, None, &list)),
+            block_on(choices_for_game(&fortnite(), "Imitation", &unknown, "Imitation Studio", "FR", true, None, &list)),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn an_epic_game_only_epic_sells_on_iphone_opens_in_the_epic_games_store() {
+        let epic = provider_target("epic", "0a2d9f6403244d12969e11da6713137b:item:Fall Guys");
+        let list = CompatibilityList::new();
+        let choices = block_on(choices_for_game(&fortnite(), "Fall Guys", &epic, "Mediatonic", "FR", true, None, &list));
+        assert_eq!(choices, vec![StoreChoice::EpicStore { slug: "fall-guys" }]);
+        assert_eq!(choices[0].destination(), Destination::Page("https://store.epicgames.com/p/fall-guys".into()));
+        assert_eq!(choices[0].view().id, "epic-store");
+        // Its old name is the same game.
+        assert_eq!(epic_store_choice("Fall Guys: Ultimate Knockout"), Some(StoreChoice::EpicStore { slug: "fall-guys" }));
+        // The App Store version comes first when there is one: one answer, no menu.
+        let fortnite = provider_target("epic", "fn:item:Fortnite");
+        assert_eq!(
+            block_on(choices_for_game(&self::fortnite(), "Fortnite", &fortnite, "Epic Games", "FR", true, None, &list)),
+            vec![StoreChoice::AppStore { track_id: 6_483_539_426, seller: "Epic Games Sweden AB".into() }]
+        );
+        // A GOG copy is not Epic's to sell, and Android has its own Epic downloader.
+        let gog = provider_target("gog", "1");
+        assert_eq!(block_on(choices_for_game(&self::fortnite(), "Fall Guys", &gog, "Mediatonic", "FR", true, None, &list)), Vec::new());
+        assert_eq!(block_on(choices_for_game(&self::fortnite(), "Fall Guys", &epic, "Mediatonic", "FR", false, None, &list)), Vec::new());
     }
 
     #[test]
@@ -741,7 +830,7 @@ mod tests {
         let choices = block_on(choices_for_game(&http, "Stardew Valley", &target, "", "US", true, Some(&stardew_valley), &list));
         assert_eq!(
             choices,
-            vec![StoreChoice::Playport { verdict: None }, StoreChoice::SteamPage { app_id: 413_150 }]
+            vec![StoreChoice::Playport { verdict: None }, StoreChoice::SteamLink, StoreChoice::SteamPage { app_id: 413_150 }]
         );
     }
 
