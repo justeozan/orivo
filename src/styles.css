@@ -63,6 +63,39 @@
   --fs-bar: 13px;
 }
 
+/* Large screens and televisions. One factor scales the rail, hero, Play, the
+   arrows and the margins together, so the cards grow and the title, Play and
+   first card stay on one line. The height guard keeps a wide but short window
+   (2560x800) on the base sizes; compact below comes later and wins. */
+@media (min-width: 1920px) and (min-height: 900px) {
+  :root {
+    --ui-scale: 1.25;
+    --tap-min: calc(34px * var(--ui-scale));
+    --tap-round: calc(36px * var(--ui-scale));
+    --tap-icon: calc(15px * var(--ui-scale));
+    --hero-bottom: calc(443px * var(--ui-scale));
+    --hero-width: min(calc(560px * var(--ui-scale)), calc(100vw - 160px));
+    --fs-hero-title: calc(66px * var(--ui-scale));
+    --play-w: calc(148px * var(--ui-scale));
+    --play-h: calc(50px * var(--ui-scale));
+    --fs-play: calc(16px * var(--ui-scale));
+    --arrow-size: calc(50px * var(--ui-scale));
+    --rail-card-height: calc(222px * var(--ui-scale));
+    --rail-card-width: calc(148px * var(--ui-scale));
+    --rail-focus-bleed: calc(16px * var(--ui-scale));
+    --rail-header-h: calc(36px * var(--ui-scale));
+    --rail-header-gutter: calc(78px * var(--ui-scale));
+    --rail-bottom: calc(115px * var(--ui-scale));
+    --fs-rail-title: calc(15px * var(--ui-scale));
+    --edge-left: calc(67px * var(--ui-scale));
+    --edge-right: calc(40px * var(--ui-scale));
+    --edge-bottom: calc(45px * var(--ui-scale));
+    --fs-bar: calc(13px * var(--ui-scale));
+  }
+}
+@media (min-width: 2560px) and (min-height: 900px) { :root { --ui-scale: 1.6; } }
+@media (min-width: 3200px) and (min-height: 1200px) { :root { --ui-scale: 2.1; } }
+
 @property --cover-glint-angle {
   syntax: "<angle>";
   inherits: false;
@@ -1660,6 +1693,11 @@ html[data-device="phone"] .nav-indicator { display: none; }
   flex-basis: clamp(320px, 24vw, 388px);
   border-color: transparent;
   box-shadow: 0 2px 8px rgba(0,0,0,.28);
+}
+/* The selected card's landscape width follows the scaled card (388px on 222). */
+@media (min-width: 1920px) and (min-height: 900px) {
+  .game-card.is-selected,
+  .game-card.is-selected:hover { flex-basis: calc(var(--rail-card-height) * 1.75); }
 }
 
 .game-card::before,

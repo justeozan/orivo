@@ -244,3 +244,21 @@ test("by default every animation plays, even when the system asks for less", asy
     page.locator("[data-segmented='motion'] [data-segment-value='full']"),
   ).toHaveAttribute("aria-pressed", "true");
 });
+
+// Large screens: the same scene at television sizes. Goldens are macOS renders.
+for (const size of [{ width: 2560, height: 1440 }, { width: 3840, height: 2160 }]) {
+  for (const golden of [
+  GOLDENS[0],
+  { golden: "library", hash: "#/library", name: "library", masks: () => [] } as GoldenCase,
+]) {
+    test(`${golden.golden} at ${size.width}x${size.height} matches its visual golden`, async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== "chromium-1536", "television sizes are captured once");
+      await page.setViewportSize(size);
+      await prepare(page, golden);
+      await expect(page).toHaveScreenshot(`${golden.golden}-${size.width}.png`, {
+        mask: golden.masks(page),
+        maskColor: "#101014",
+      });
+    });
+  }
+}

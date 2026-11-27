@@ -343,3 +343,73 @@ test.describe("the shell canvas fills the window", () => {
     }
   });
 });
+
+test.describe("large screens and televisions", () => {
+  const STEPS = [
+    { width: 1536, height: 1024 },
+    { width: 1920, height: 1080 },
+    { width: 2560, height: 1440 },
+    { width: 3840, height: 2160 },
+  ];
+
+  test("the rail's cards grow at every step, and the scene stays aligned", async ({ page }) => {
+    const original = page.viewportSize()!;
+    test.skip(original.width !== 1536, "measured once, from the desktop project");
+    let previous = 0;
+    for (const size of STEPS) {
+      await page.setViewportSize(size);
+      await openRoute(page, "#/library", "library");
+      await waitForImages(page);
+      const probe = await page.evaluate(() => {
+        const card = document.querySelector<HTMLElement>(".game-card:not(.is-selected)");
+        const play = document.querySelector<HTMLElement>(".play-button");
+        const first = document.querySelector<HTMLElement>(".game-card");
+        return {
+          width: card?.getBoundingClientRect().width ?? 0,
+          height: card?.getBoundingClientRect().height ?? 0,
+          playLeft: play?.getBoundingClientRect().left ?? 0,
+          firstLeft: first?.getBoundingClientRect().left ?? 0,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      });
+      const label = `${size.width}x${size.height}`;
+      expect(probe.width, `${label} card width`).toBeGreaterThan(previous);
+      expect(probe.scrollWidth, `${label} horizontal overflow`).toBeLessThanOrEqual(size.width);
+      expect(Math.abs(probe.playLeft - probe.firstLeft), `${label} Play and first card share a left edge`)
+        .toBeLessThan(16 * (size.width / 1536));
+      expect((await selectorHeight(page)).height, `${label} .selector`).toBeCloseTo(size.height, 0);
+      previous = probe.width;
+    }
+    await page.setViewportSize(original);
+  });
+
+  test("a wide but short window keeps the base card size", async ({ page }) => {
+    test.skip(page.viewportSize()!.width !== 1536, "measured once, from the desktop project");
+    await page.setViewportSize({ width: 2560, height: 800 });
+    await openRoute(page, "#/library", "library");
+    const width = await page.evaluate(() =>
+      parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rail-card-width")),
+    );
+    expect(width).toBe(148);
+  });
+
+  test("the Store grows its cards and its grid gains columns on a television", async ({ page }) => {
+    test.skip(page.viewportSize()!.width !== 1536, "measured once, from the desktop project");
+    const probes: { card: number; columns: number }[] = [];
+    for (const size of [STEPS[0], STEPS[3]]) {
+      await page.setViewportSize(size);
+      await openRoute(page, "#/store", "store");
+      await waitForImages(page);
+      const rail = await storeCardVisibility(page);
+      probes.push({
+        card: rail.cards[0].width,
+        columns: await page.evaluate(
+          () => getComputedStyle(document.querySelector(".store-grid--grid")!).gridTemplateColumns.split(" ").length,
+        ),
+      });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(size.width);
+    }
+    expect(probes[1].card).toBeGreaterThan(probes[0].card);
+    expect(probes[1].columns).toBeGreaterThan(probes[0].columns);
+  });
+});

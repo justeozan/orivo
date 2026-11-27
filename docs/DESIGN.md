@@ -109,6 +109,7 @@ Le Selector est une scène de sélection, pas un dashboard. Un seul jeu possède
 - La carte sélectionnée possède une bordure Orivo Violet de 1.5-2px et une élévation très légère.
 - Les cartes adjacentes restent visibles et légèrement moins lumineuses; elles ne sont jamais floutées au point de perdre leur identité.
 - Le rail peut dépasser le bord droit du canvas pour suggérer la suite, sans overflow global de la page.
+- Grand écran et télévision: à partir de 1920px de large et 900px de haut, un seul facteur `--ui-scale` (1.25 à 1920, 1.6 à 2560, 2.1 à 3200 et plus) agrandit ensemble cartes (ratio 0,672 conservé), hero, Play, flèches et marges, pour que titre, Play et première carte restent sur la même ligne. Une fenêtre large mais courte garde l'échelle de base; compact et téléphone ne reçoivent aucune règle grand écran. Dans le Store, la longue grille passe de 3 à 4 colonnes dès 1920px, 5 dès 3200px.
 
 #### Barre de navigation
 
