@@ -147,12 +147,16 @@ An iOS build runs no PC game and may download no code, and two things follow
 - **Install.** Steam cannot be asked to install anything (`steam://` has no
   handler on iOS). The button asks the host where the game can be got instead
   (`src-tauri/src/store_choices.rs`): its own iOS version when the App Store
-  sells one by a studio Steam names, then its Steam page, which is always
-  there. One answer opens directly; two are offered beside the button.
+  sells one by a studio Steam names, then *Play from your PC* (Steam Link's
+  App Store page: the Steam app on an iPhone downloads no PC game, Steam Link
+  plays the one on the player's PC), then its Steam page, which is always
+  there. One answer opens directly; several are offered beside the button.
   A GOG or Epic Games game gets the same Install, looked up with the studio
   its store recorded: Fortnite opens Epic's own App Store app, where it
-  installs and then opens. A game with no iOS version says so in one line;
-  Install never asks for an Epic launcher, which no iPhone has.
+  installs and then opens. Fall Guys is not on the App Store: Epic sells it on
+  iPhone in its own marketplace app, which `store.epicgames.com/p/<slug>`
+  opens on the game's page (`EPIC_IOS_GAMES`). A game with no iOS version says
+  so in one line; Install never asks for an Epic launcher, which no iPhone has.
 - **Playport.** On a device where Playport is installed, the PC version comes
   first in that menu ([`playport.md`](playport.md)). Playport
   runs Windows games on the device itself; Orivo only asks whether it is there

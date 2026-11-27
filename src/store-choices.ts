@@ -17,6 +17,9 @@ const CHOICE_LABELS: Readonly<Record<string, () => string>> = {
   "app-store": () => t("app.store.choice.appStore"),
   playport: () => t("app.store.choice.playport"),
   "steam-page": () => t("app.store.choice.steamPage"),
+  "steam-link": () => t("app.store.choice.steamLink"),
+  // Epic's marketplace app is how this device gets the game, as the App Store is for others.
+  "epic-store": () => t("app.store.choice.appStore"),
 };
 
 export interface StoreChoice {
