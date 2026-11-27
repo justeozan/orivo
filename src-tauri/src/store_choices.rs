@@ -17,8 +17,11 @@
 //! leaves them the store page. The App Store entry has to be a game, carry the
 //! same title give or take an edition, and come from a studio Steam names as
 //! the game's developer or publisher. A port published by a porting house
-//! (Netflix's Hades, Playdigious's Dead Cells) is missed by that last rule, and
-//! that is the trade.
+//! (Playdigious's Dead Cells) or under another name ("Thronefall - A Little
+//! Kingdom", by Doghowl Games) is missed by those rules, and that is the
+//! trade. Such a port is found another way: Wikidata links many Steam games to
+//! their App Store app, and a link is somebody's deliberate claim, so it is
+//! trusted over the search, though still only if the App Store calls it a game.
 //!
 //! A GOG or Epic Games game is looked for the same way, with the studio its
 //! store recorded at sync: Fortnite on an iPhone is Epic's own App Store app,
@@ -42,6 +45,9 @@ use crate::{
 };
 
 const APP_STORE_SEARCH: &str = "https://itunes.apple.com/search";
+const APP_STORE_LOOKUP: &str = "https://itunes.apple.com/lookup";
+const WIKIDATA_SPARQL: &str = "https://query.wikidata.org/sparql";
+const MAX_LINKED_APPS: usize = 5;
 /// The App Store's own genre id for Games.
 const GAMES_GENRE_ID: &str = "6014";
 /// Long enough to answer the tap that follows the menu, short enough that a
@@ -288,6 +294,40 @@ async fn find_ios_version(
     app_id: u32,
     region: &str,
 ) -> Option<StoreChoice> {
+    // Both are asked at once, so the menu waits for the slower of the two
+    // rather than for both in a row; a link, where there is one, wins.
+    let (linked, searched) = futures_util::future::join(
+        linked_ios_version(http, app_id, region),
+        searched_ios_version(http, title, app_id, region),
+    )
+    .await;
+    linked.or(searched)
+}
+
+/// The iOS version Wikidata links to the Steam app, as sold in `region`.
+async fn linked_ios_version(http: &dyn StoreHttp, app_id: u32, region: &str) -> Option<StoreChoice> {
+    let links = http.get_json(&wikidata_app_store_ids_url(app_id)).await.ok()?;
+    let track_ids = linked_track_ids(&links);
+    if track_ids.is_empty() {
+        return None;
+    }
+    // The lookup also says whether the region sells it, and that it is a game:
+    // a link is somebody's word, and a wrong one must not open an app.
+    let found = http.get_json(&app_store_lookup_url(&track_ids, region)).await.ok()?;
+    found
+        .get("results")?
+        .as_array()?
+        .iter()
+        .filter(|result| is_game(result))
+        .find_map(app_store_choice)
+}
+
+async fn searched_ios_version(
+    http: &dyn StoreHttp,
+    title: &str,
+    app_id: u32,
+    region: &str,
+) -> Option<StoreChoice> {
     // The library records no studio for a Steam game, so the store says who
     // made it before the App Store is asked who sells it.
     let details = http
@@ -380,11 +420,57 @@ pub fn app_store_match(payload: &Value, title: &str, studios: &[String]) -> Opti
             if studio_words(&[artist.to_string(), seller.to_string()]).is_disjoint(&wanted) {
                 return None;
             }
-            Some(StoreChoice::AppStore {
-                track_id: result.get("trackId")?.as_u64()?,
-                seller: seller.trim().to_string(),
-            })
+            app_store_choice(result)
         })
+}
+
+/// One App Store result as the row that opens it, named after its seller.
+fn app_store_choice(result: &Value) -> Option<StoreChoice> {
+    let artist = result.get("artistName").and_then(Value::as_str).unwrap_or("");
+    let seller = result
+        .get("sellerName")
+        .and_then(Value::as_str)
+        .filter(|seller| !seller.trim().is_empty())
+        .unwrap_or(artist);
+    Some(StoreChoice::AppStore {
+        track_id: result.get("trackId")?.as_u64()?,
+        seller: seller.trim().to_string(),
+    })
+}
+
+/// Wikidata's "App Store app ID" (P3861) of the item whose "Steam
+/// application ID" (P1733) is `app_id`: people who know both games say so.
+pub fn wikidata_app_store_ids_url(app_id: u32) -> String {
+    let query =
+        format!("SELECT ?ios WHERE {{ ?game wdt:P1733 \"{app_id}\"; wdt:P3861 ?ios. }}");
+    reqwest::Url::parse_with_params(WIKIDATA_SPARQL, &[("query", query.as_str()), ("format", "json")])
+        .map(|url| url.to_string())
+        .unwrap_or_default()
+}
+
+/// The App Store ids of one Wikidata answer, oldest first: an Apple Arcade
+/// "+" edition comes after the app it was made from. Anything that is not an
+/// id is dropped, and a handful is plenty.
+fn linked_track_ids(payload: &Value) -> Vec<u64> {
+    let mut ids: Vec<u64> = payload
+        .pointer("/results/bindings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|binding| binding.pointer("/ios/value")?.as_str())
+        .filter_map(|value| value.trim().trim_start_matches("id").parse().ok())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.truncate(MAX_LINKED_APPS);
+    ids
+}
+
+pub fn app_store_lookup_url(track_ids: &[u64], region: &str) -> String {
+    let ids = track_ids.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+    reqwest::Url::parse_with_params(APP_STORE_LOOKUP, &[("id", ids.as_str()), ("country", region)])
+        .map(|url| url.to_string())
+        .unwrap_or_default()
 }
 
 fn is_game(result: &Value) -> bool {
@@ -611,11 +697,19 @@ mod tests {
         steam: Result<Value, String>,
         apple: Result<Value, String>,
         playport: Result<Value, String>,
+        wikidata: Result<Value, String>,
+        lookup: Result<Value, String>,
     }
 
     impl FakeHttp {
         fn new(steam: Result<Value, String>, apple: Result<Value, String>) -> Self {
-            Self { steam, apple, playport: Err("not asked".into()) }
+            Self {
+                steam,
+                apple,
+                playport: Err("not asked".into()),
+                wikidata: Err("not asked".into()),
+                lookup: Err("not asked".into()),
+            }
         }
     }
 
@@ -630,6 +724,10 @@ mod tests {
                 self.apple.clone()
             } else if url.starts_with("https://playport.dev/") {
                 self.playport.clone()
+            } else if url.starts_with(WIKIDATA_SPARQL) {
+                self.wikidata.clone()
+            } else if url.starts_with(APP_STORE_LOOKUP) {
+                self.lookup.clone()
             } else {
                 Err(format!("unexpected request {url}"))
             };
@@ -682,6 +780,80 @@ mod tests {
         assert_eq!(android, vec![StoreChoice::SteamPage { app_id: 1_245_620 }]);
         assert_eq!(StoreChoice::SteamLink.destination(), Destination::Page("https://apps.apple.com/app/id1246969117".into()));
         assert_eq!(StoreChoice::SteamLink.view().id, "steam-link");
+    }
+
+    fn wikidata_links(values: &[&str]) -> Value {
+        json!({ "results": { "bindings": values.iter()
+            .map(|value| json!({ "ios": { "type": "literal", "value": value } }))
+            .collect::<Vec<_>>() } })
+    }
+
+    /// Thronefall's iOS port: another studio, another name, so the search
+    /// refuses it, and only Wikidata's link finds it.
+    fn thronefall(lookup: Result<Value, String>) -> FakeHttp {
+        FakeHttp {
+            wikidata: Ok(wikidata_links(&["6744029320"])),
+            lookup,
+            ..FakeHttp::new(
+                Ok(json!({ "2239150": { "success": true, "data": {
+                    "name": "Thronefall", "developers": ["GrizzlyGames", "Mythwright"], "publishers": ["Mythwright"]
+                }}})),
+                Ok(search(vec![result(
+                    "Thronefall - A Little Kingdom", "Doghowl Games Ltd.", "Doghowl Games Ltd", GAMES_GENRE_ID, 6_744_029_320,
+                )])),
+            )
+        }
+    }
+
+    #[test]
+    fn finds_a_port_by_another_studio_through_the_link_wikidata_records() {
+        let port = search(vec![result(
+            "Thronefall - A Little Kingdom", "Doghowl Games Ltd.", "Doghowl Games Ltd", GAMES_GENRE_ID, 6_744_029_320,
+        )]);
+        let choices = block_on(choices_for_steam_game(&thronefall(Ok(port)), "Thronefall", 2_239_150, "FR", true));
+        assert_eq!(
+            choices,
+            vec![
+                StoreChoice::AppStore { track_id: 6_744_029_320, seller: "Doghowl Games Ltd".into() },
+                StoreChoice::SteamLink,
+                StoreChoice::SteamPage { app_id: 2_239_150 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_link_to_an_app_that_is_not_a_game_or_not_sold_here_is_ignored() {
+        let not_a_game = search(vec![result("Thronefall Guide", "Somebody", "", "6002", 6_744_029_320)]);
+        let not_sold_here = search(vec![]);
+        for lookup in [Ok(not_a_game), Ok(not_sold_here), Err("offline".to_string())] {
+            let choices = block_on(choices_for_steam_game(&thronefall(lookup), "Thronefall", 2_239_150, "FR", true));
+            assert_eq!(choices, vec![StoreChoice::SteamLink, StoreChoice::SteamPage { app_id: 2_239_150 }]);
+        }
+    }
+
+    #[test]
+    fn a_link_wins_over_what_the_search_found() {
+        let http = FakeHttp {
+            wikidata: Ok(wikidata_links(&["42"])),
+            lookup: Ok(search(vec![result("Stardew Valley", "ConcernedApe", "ConcernedApe LLC", GAMES_GENRE_ID, 42)])),
+            ..stardew()
+        };
+        let choices = block_on(choices_for_steam_game(&http, "Stardew Valley", 413_150, "US", true));
+        assert_eq!(choices[0], StoreChoice::AppStore { track_id: 42, seller: "ConcernedApe LLC".into() });
+    }
+
+    #[test]
+    fn reads_the_app_store_ids_of_a_wikidata_answer_oldest_first() {
+        let answer = wikidata_links(&["6448808007", "1491530147", "id1491530147", "not an id", "1"]);
+        assert_eq!(linked_track_ids(&answer), vec![1, 1_491_530_147, 6_448_808_007]);
+        assert!(linked_track_ids(&json!({})).is_empty());
+        let url = wikidata_app_store_ids_url(2_239_150);
+        assert!(url.starts_with("https://query.wikidata.org/sparql?query="));
+        assert!(url.contains("%222239150%22") && url.ends_with("&format=json"));
+        assert_eq!(
+            app_store_lookup_url(&[1, 2], "FR"),
+            "https://itunes.apple.com/lookup?id=1%2C2&country=FR"
+        );
     }
 
     fn playport_list() -> Value {

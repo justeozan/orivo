@@ -147,7 +147,10 @@ An iOS build runs no PC game and may download no code, and two things follow
 - **Install.** Steam cannot be asked to install anything (`steam://` has no
   handler on iOS). The button asks the host where the game can be got instead
   (`src-tauri/src/store_choices.rs`): its own iOS version when the App Store
-  sells one by a studio Steam names, then *Play from your PC* (Steam Link's
+  sells one by a studio Steam names, or one Wikidata links to the Steam game
+  (its *App Store app ID*, P3861, on the item with that *Steam application
+  ID*, P1733: how a port by another studio and under another name, such as
+  "Thronefall - A Little Kingdom", is found), then *Play from your PC* (Steam Link's
   App Store page: the Steam app on an iPhone downloads no PC game, Steam Link
   plays the one on the player's PC), then its Steam page, which is always
   there. One answer opens directly; several are offered beside the button.
