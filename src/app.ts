@@ -591,6 +591,8 @@ const WINLATOR_SHORTCUTS_WAITING_EVENT = "winlator-shortcuts-waiting";
 const WINE_LAUNCH_STATUS_EVENT = "wine-launch-status";
 /** The launch option a phone offers to download an Epic game rather than stream it (`moonlight_android.rs`). */
 const INSTALL_ON_PHONE_OPTION = "install-on-phone";
+/** The launch option of a game's own iPhone version, once it has opened (`ios_app.rs`). */
+const IOS_APP_OPTION = "ios-app";
 /** At most one look at the phone's own games per this many milliseconds. */
 const PHONE_GAMES_INTERVAL_MS = 20_000;
 /** How a download Orivo runs itself ends — an Epic game on a phone (`epic_android.rs`). */
@@ -1879,9 +1881,13 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     }
     const open = (choice: StoreChoice): void => {
       closeMenu();
-      void storeChoices.open(gameId, choice.id).catch((error) => {
-        showToast(messageFromError(error, t("app.store.openFailed")));
-      });
+      void storeChoices
+        .open(gameId, choice.id)
+        // The game opened, so the host now offers Play on its card.
+        .then((opened) => (opened ? refreshLibrary() : undefined))
+        .catch((error) => {
+          showToast(messageFromError(error, t("app.store.openFailed")));
+        });
     };
     if (choices.length === 0) {
       showToast(t("app.store.nowhere"));
@@ -5825,6 +5831,8 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       // A local game that would not start may have moved: the host has just
       // looked for it and marked it, and the card should say so now.
       if (game.source === "local") void refreshLibrary();
+      // An iPhone version that no longer opens was deleted: the card goes back to Install.
+      if (game.launchOptions?.some((option) => option.id === IOS_APP_OPTION)) void refreshLibrary();
       if (game.source === "wine") {
         state.launchFeedback = {
           gameId: game.id,

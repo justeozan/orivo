@@ -3336,6 +3336,7 @@ version = "0.4.22"
 dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
+ "block2",
  "core-graphics",
  "ed25519-dalek",
  "flate2",

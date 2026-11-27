@@ -45,7 +45,9 @@ export const NEXT_RELEASE = "next";
 export const RELEASE_HIGHLIGHTS: readonly ReleaseHighlights[] = [
   {
     version: "next",
-    items: [],
+    items: [
+      { icon: "play", tone: "library", titleKey: "highlights.iphoneVersion.title", lineKey: "highlights.iphoneVersion.line" },
+    ],
   },
   {
     version: "0.4.12",

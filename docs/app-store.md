@@ -160,6 +160,15 @@ An iOS build runs no PC game and may download no code, and two things follow
   iPhone in its own marketplace app, which `store.epicgames.com/p/<slug>`
   opens on the game's page (`EPIC_IOS_GAMES`). A game with no iOS version says
   so in one line; Install never asks for an Epic launcher, which no iPhone has.
+- **Play, for an iOS version already installed.** iOS tells no app what is
+  installed, and opens another app only through a link it declares. For the
+  iOS versions whose link is known (`ios_app.rs`, by App Store id), the
+  *iPhone & iPad version* row opens that link first, as a universal link only
+  (`openURL:options:` with `UniversalLinksOnly`, so never Safari). If the game
+  opens, Orivo remembers it (`ios-apps.json`) and the card offers Play, which
+  opens the game. A link that stops opening means the game was deleted: the
+  card goes back to Install. Without a known link, the row opens the App Store
+  page, whose button reads *Open* when the game is installed.
 - **Playport.** On a device where Playport is installed, the PC version comes
   first in that menu ([`playport.md`](playport.md)). Playport
   runs Windows games on the device itself; Orivo only asks whether it is there
