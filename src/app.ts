@@ -109,6 +109,7 @@ import {
   notificationsSettled,
   saveNotificationRecord,
   unreadNotificationCount,
+  bellShown,
   visibleNotifications,
   type NotificationContext,
   type NotificationId,
@@ -133,7 +134,7 @@ import {
 } from "./source-model";
 import { type AppPage, type AppPageSource, PageLifecycleHost } from "./page-lifecycle";
 import { HashRouter } from "./router";
-import { barGlyph, navGlyph, navPlateEase } from "./topbar-nav";
+import { barGlyph, navGlyph } from "./topbar-nav";
 import {
   DEFAULT_PREFERENCES,
   EMPTY_WALLPAPER_CREDENTIALS,
@@ -5059,11 +5060,12 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     const items = visibleNotifications(record);
     const unread = unreadNotificationCount(record);
     refs.notificationsDot.hidden = unread === 0;
-    // No notice, no bell. The last one dismissed from an open panel takes the
-    // panel with it, and focus that was in there lands on the mark, the next
-    // control along, rather than on a node that just left the page.
-    const empty = items.length === 0;
-    if (empty && !refs.notificationsControl.hidden) {
+    // Nothing new, no bell (`bellShown`). The last notice dismissed from an
+    // open panel takes the panel with it, and focus that was in there lands on
+    // the mark, the next control along, rather than on a node that just left
+    // the page.
+    const shown = bellShown(record, state.notifications.open);
+    if (!shown && !refs.notificationsControl.hidden) {
       const hadFocus = refs.notificationsControl.contains(document.activeElement);
       if (state.notifications.open) {
         state.notifications.open = false;
@@ -5075,7 +5077,7 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       refs.notificationsControl.hidden = true;
       if (hadFocus) refs.libraryMenuButton.focus();
     }
-    refs.notificationsControl.hidden = empty;
+    refs.notificationsControl.hidden = !shown;
     // Icon-only controls carry their own name, and this one's name changes.
     refs.notificationsButton.setAttribute(
       "aria-label",
@@ -5147,7 +5149,11 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
       state.notifications.highlighted = [];
     }
     renderNotifications();
-    if (!open && restoreFocus) refs.notificationsButton.focus();
+    // Closing reads everything, and with nothing unread the bell has gone:
+    // focus then goes to the mark, the next control along.
+    if (!open && restoreFocus) {
+      (refs.notificationsControl.hidden ? refs.libraryMenuButton : refs.notificationsButton).focus();
+    }
   };
 
   /**
@@ -7179,75 +7185,35 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
   };
 
   /**
-   * One plate of glass under the current page's link, slid from link to link
-   * rather than switched off on one and on at the next, so changing page reads
-   * as moving along the bar.
-   *
-   * Driven from here rather than by a CSS transition because its target moves
-   * while it travels: only the current page shows its name, so the link being
-   * reached grows and the one being left shrinks, and every link between them
-   * shifts. Each frame re-reads where the link is now and eases towards that,
-   * so the plate lands on the link's final shape instead of the one it had
-   * when the move began. The first placement, a resize, and reduced motion are
-   * instant: a plate gliding in from nowhere on launch would be noise.
+   * One plate under the current page's link, slid from link to link rather
+   * than switched off on one and on at the next, so changing page reads as
+   * moving along the bar. Every link is the same size, so where the plate is
+   * going is known when it leaves and a CSS transition carries it
+   * (`.nav-indicator.is-moving`). The first placement, a resize, and reduced
+   * motion are instant: a plate gliding in from nowhere on launch is noise.
    */
-  type NavPlate = { x: number; y: number; w: number; h: number };
-  const NAV_PLATE_MS = 560;
-  let navPlate: NavPlate | null = null;
-  let navPlateFrame = 0;
-  const plateOf = (link: HTMLElement): NavPlate => ({
-    x: link.offsetLeft,
-    y: link.offsetTop,
-    w: link.offsetWidth,
-    h: link.offsetHeight,
-  });
-  const paintNavPlate = (plate: NavPlate): void => {
-    navPlate = plate;
-    const indicator = refs.navIndicator;
-    indicator.style.setProperty("--nav-x", `${plate.x}px`);
-    indicator.style.setProperty("--nav-y", `${plate.y}px`);
-    indicator.style.setProperty("--nav-w", `${plate.w}px`);
-    indicator.style.setProperty("--nav-h", `${plate.h}px`);
-  };
+  let navPlacedOnce = false;
   const placeNavIndicator = (animate = true): void => {
     const active = refs.navLinks.find((link) => link.classList.contains("is-active") && !link.hidden);
     const indicator = refs.navIndicator;
-    window.cancelAnimationFrame(navPlateFrame);
-    navPlateFrame = 0;
     if (!active || active.offsetWidth === 0) {
-      navPlate = null;
-      indicator.classList.remove("is-placed");
+      navPlacedOnce = false;
+      indicator.classList.remove("is-placed", "is-moving");
       refs.primaryNav.classList.remove("has-indicator");
       return;
     }
-    const from = navPlate;
+    indicator.classList.toggle("is-moving", animate && navPlacedOnce);
+    indicator.style.setProperty("--nav-x", `${active.offsetLeft}px`);
+    indicator.style.setProperty("--nav-y", `${active.offsetTop}px`);
+    indicator.style.setProperty("--nav-w", `${active.offsetWidth}px`);
+    indicator.style.setProperty("--nav-h", `${active.offsetHeight}px`);
     indicator.classList.add("is-placed");
     refs.primaryNav.classList.add("has-indicator");
-    if (!animate || !from || prefersReducedMotion()) {
-      paintNavPlate(plateOf(active));
-      return;
-    }
-    const start = performance.now();
-    const step = (now: number): void => {
-      const t = Math.min(1, (now - start) / NAV_PLATE_MS);
-      const k = t === 1 ? 1 : navPlateEase(t);
-      const to = plateOf(active);
-      paintNavPlate({
-        x: from.x + (to.x - from.x) * k,
-        y: from.y + (to.y - from.y) * k,
-        w: from.w + (to.w - from.w) * k,
-        h: from.h + (to.h - from.h) * k,
-      });
-      navPlateFrame = t < 1 ? window.requestAnimationFrame(step) : 0;
-    };
-    navPlateFrame = window.requestAnimationFrame(step);
+    navPlacedOnce = true;
   };
   if (typeof ResizeObserver !== "undefined") {
-    // A resize mid-move is the move itself (the names opening and closing),
-    // which the frame loop already follows. Any other one snaps.
-    new ResizeObserver(() => {
-      if (navPlateFrame === 0) placeNavIndicator(false);
-    }).observe(refs.primaryNav);
+    // A window resized, or a link shown or hidden: the plate snaps.
+    new ResizeObserver(() => placeNavIndicator(false)).observe(refs.primaryNav);
   }
 
   /**
@@ -7299,13 +7265,6 @@ export function mountApp(root: HTMLElement, options: MountAppOptions = {}): () =
     syncTopbarScrolled(route);
     for (const link of refs.navLinks) {
       const active = link.dataset.navPage === current;
-      // The glyph of the page just reached gives a small hop as the plate
-      // arrives under it; staying on the same page replays nothing.
-      if (active && !link.classList.contains("is-active")) {
-        link.classList.remove("is-arriving");
-        void link.offsetWidth;
-        link.classList.add("is-arriving");
-      }
       link.classList.toggle("is-active", active);
       // The keys coming up into the bar land on the current page, never on a
       // link they last stood on: standing on a link opens its page.
@@ -8913,14 +8872,19 @@ function shell(): string {
              left edge, grows to the right around whatever it holds. -->
         <div class="topbar-capsule">
           <div class="library-menu-control">
-            <!-- The mark and the player are one control: the picture sits in
-                 the ring, and the menu it opens starts with the profile. -->
+            <!-- The mark and the player are one control, a coin: the picture
+                 on its face, the Orivo ring on its back. The menu it opens
+                 starts with the profile. -->
             <button id="library-menu-button" class="brand-mark-button" type="button" aria-label="${t("app.menu.open")}" aria-expanded="false" aria-controls="library-source-menu">
-              <img id="profile-avatar" class="brand-avatar" src="/media/steam-avatar.png" alt="" />
-              <img id="brand-mark-ring" class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
-              <!-- Rage mode wears the spiral instead of the ring. Both marks
-                   live in the markup so the swap is a class, not a fetch. -->
-              <img id="brand-mark-spiral" class="brand-mark" src="/media/orivo-spiral-icon.png" alt="" hidden />
+              <span class="brand-coin" aria-hidden="true">
+                <span class="brand-coin__face brand-coin__face--front"><img id="profile-avatar" class="brand-avatar" src="/media/steam-avatar.png" alt="" /></span>
+                <span class="brand-coin__face brand-coin__face--back">
+                  <img id="brand-mark-ring" class="brand-mark" src="/media/orivo-ring-icon.png" alt="" />
+                  <!-- Rage mode wears the spiral instead of the ring. Both marks
+                       live in the markup so the swap is a class, not a fetch. -->
+                  <img id="brand-mark-spiral" class="brand-mark" src="/media/orivo-spiral-icon.png" alt="" hidden />
+                </span>
+              </span>
             </button>
             <div id="library-source-menu" class="library-source-menu" hidden>
               <!-- The player first: the picture on the mark is theirs, so the
@@ -8994,13 +8958,12 @@ function shell(): string {
           </div>
           <nav class="primary-nav" aria-label="${t("app.nav.orivo")}">
             <span class="nav-indicator" aria-hidden="true"></span>
-            <!-- Icons carry the bar; only the current page says its name. Each
-                 button carries the name itself, so the ones that show only a
-                 glyph keep it. The filled glyph is the current page's. -->
-            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="${t("app.nav.library")}" data-nav-selected>${navGlyph("library")}<span>${t("app.nav.library")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="store" aria-label="${t("app.nav.store")}">${navGlyph("store")}<span>${t("app.nav.store")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="me" aria-label="${t("app.nav.me")}">${navGlyph("me")}<span>${t("app.nav.me")}</span></button>
-            <button type="button" class="nav-link" data-nav-page="settings" aria-label="${t("app.nav.settings")}">${navGlyph("settings")}<span>${t("app.nav.settings")}</span></button>
+            <!-- Glyphs only. Each button carries its page's name as its label,
+                 for a screen reader. The filled glyph is the current page's. -->
+            <button type="button" class="nav-link is-active" data-nav-page="library" aria-current="page" aria-label="${t("app.nav.library")}" data-nav-selected>${navGlyph("library")}</button>
+            <button type="button" class="nav-link" data-nav-page="store" aria-label="${t("app.nav.store")}">${navGlyph("store")}</button>
+            <button type="button" class="nav-link" data-nav-page="me" aria-label="${t("app.nav.me")}">${navGlyph("me")}</button>
+            <button type="button" class="nav-link" data-nav-page="settings" aria-label="${t("app.nav.settings")}">${navGlyph("settings")}</button>
           </nav>
           <span class="topbar-capsule__divider" aria-hidden="true"></span>
           <label class="search-control" id="topbar-search-control">

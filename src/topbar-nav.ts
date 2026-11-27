@@ -1,7 +1,6 @@
 /**
- * The topbar's page links: their glyphs and the motion of the plate that
- * travels between them. Kept apart from the shell so the pieces that can be
- * checked without a DOM are.
+ * The topbar's page links: their glyphs. Kept apart from the shell so the
+ * pieces that can be checked without a DOM are.
  */
 
 export type NavPage = "library" | "store" | "me" | "settings";
@@ -58,18 +57,4 @@ export function barGlyph(name: keyof typeof BAR_GLYPHS): string {
 export function navGlyph(page: NavPage): string {
   const glyph = NAV_GLYPHS[page];
   return glyphSvg(glyph.line, "line") + glyphSvg(glyph.fill, "fill");
-}
-
-/**
- * Where the plate is, from 0 to 1, a share `t` of the way through its move: a
- * damped spring, so it overshoots its link a little and settles back, which
- * is what makes it read as carried rather than teleported. Exactly 0 at the
- * start and 1 at the end, so the last frame lands on the link and not near it.
- */
-export function navPlateEase(t: number): number {
-  if (t <= 0) return 0;
-  if (t >= 1) return 1;
-  const raw = (x: number): number => 1 - Math.exp(-6 * x) * Math.cos(7.4 * x);
-  // The spring is a hair short of rest at t = 1; stretching it lands it there.
-  return raw(t) / raw(1);
 }

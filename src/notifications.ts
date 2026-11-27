@@ -177,6 +177,20 @@ export function unreadNotificationCount(
 }
 
 /**
+ * Whether the bell is in the bar. Only for something new: a notice already
+ * read is not worth a control on the scene, so the bell goes once everything
+ * in it has been seen — but not under the reader, while its panel is open.
+ */
+export function bellShown(
+  record: NotificationRecord,
+  panelOpen: boolean,
+  catalog: readonly NotificationDefinition[] = NOTIFICATIONS,
+): boolean {
+  if (visibleNotifications(record, catalog).length === 0) return false;
+  return panelOpen || unreadNotificationCount(record, catalog) > 0;
+}
+
+/**
  * Whether anything is still waiting on the clock. Once nothing is, the shell
  * stops ticking rather than re-asking the same settled question forever.
  */

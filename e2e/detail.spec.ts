@@ -15,7 +15,7 @@ test.describe("game detail origins", () => {
 
     expect(await currentHash(page)).toBe(`#/games/${encodeURIComponent(gameId!)}?from=library`);
     await expect(page.locator(`${detailHost} .gd-back__label`)).toHaveText("Back to Library");
-    await expect(page.locator("header.topbar [aria-current]")).toHaveText("Library");
+    await expect(page.locator("header.topbar [aria-current]")).toHaveAttribute("aria-label", "Library");
 
     await page.locator(`${detailHost} .gd-back`).click();
     await waitForPage(page, "library");
@@ -32,7 +32,7 @@ test.describe("game detail origins", () => {
 
     expect(await currentHash(page)).toBe("#/games/steam%3A1608230?from=store");
     await expect(page.locator(`${detailHost} .gd-back__label`)).toHaveText("Back to Store");
-    await expect(page.locator("header.topbar [aria-current]")).toHaveText("Store");
+    await expect(page.locator("header.topbar [aria-current]")).toHaveAttribute("aria-label", "Store");
 
     await page.locator(`${detailHost} .gd-back`).click();
     await waitForPage(page, "store");

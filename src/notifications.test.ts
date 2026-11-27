@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  bellShown,
   NOTIFICATIONS,
   NOTIFICATION_STORAGE_KEY,
   dismissNotification,
@@ -113,6 +114,24 @@ describe("the panel and the dot", () => {
     // A notice that arrives after the panel was read is unread again.
     record = markDelivered(record, "store-prices");
     expect(unreadNotificationCount(record)).toBe(1);
+  });
+
+  it("shows the bell only for something unread, and not under an open panel", () => {
+    let record = emptyNotificationRecord();
+    expect(bellShown(record, false)).toBe(false);
+
+    record = markDelivered(record, "artwork-keys");
+    expect(bellShown(record, false)).toBe(true);
+
+    // Opening reads everything; the bell stays while the panel is open…
+    record = markAllRead(record);
+    expect(bellShown(record, true)).toBe(true);
+    // …and goes when it closes, though the notice is still held.
+    expect(bellShown(record, false)).toBe(false);
+    expect(visibleNotifications(record)).toHaveLength(1);
+
+    record = dismissNotification(record, "artwork-keys");
+    expect(bellShown(record, true)).toBe(false);
   });
 
   it("leaves no dot behind when a notice is dismissed unread", () => {
