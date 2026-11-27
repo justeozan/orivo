@@ -29,6 +29,14 @@ const OAUTH_TOKEN_ENDPOINT: &str =
 const LAUNCHER_ASSETS_ENDPOINT: &str =
     "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets";
 const WINDOWS_PLATFORM: &str = "Windows";
+/// Everything the account owns, whatever it runs on. The Windows asset list
+/// misses a game held without a Windows build: Fall Guys claimed in the Epic
+/// Games Store app on a phone or on a console is in the account and not in
+/// that list. Paged by cursor.
+const LIBRARY_ITEMS_ENDPOINT: &str =
+    "https://library-service.live.use1a.on.epicgames.com/library/api/public/items";
+/// A real library is a few pages; this only stops a cursor that never ends.
+const MAX_LIBRARY_PAGES: usize = 50;
 const MAC_PLATFORM: &str = "Mac";
 const CATALOG_HOST: &str = "https://catalog-public-service-prod06.ol.epicgames.com";
 /// Epic answers a bulk catalog request per namespace. Keeping the batch small
@@ -283,6 +291,20 @@ struct LauncherAsset {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct LibraryPage {
+    #[serde(default)]
+    records: Vec<LauncherAsset>,
+    #[serde(default, rename = "responseMetadata")]
+    metadata: LibraryPageMetadata,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LibraryPageMetadata {
+    #[serde(default, rename = "nextCursor")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct CatalogItem {
     #[serde(default)]
     title: String,
@@ -314,6 +336,13 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
     let token = access_token().await?;
     let client = sources::http_client(PROVIDER)?;
     let assets = fetch_assets(&client, &token, WINDOWS_PLATFORM).await?;
+    let on_windows = assets
+        .iter()
+        .map(|asset| asset.app_name.clone())
+        .collect::<BTreeSet<_>>();
+    // An enhancement like the Mac list: when the library service does not
+    // answer, the Windows list is still the library it always was.
+    let owned_elsewhere = fetch_owned_records(&client, &token).await.unwrap_or_default();
     // Native-Mac is an enhancement to a library, never a precondition for one:
     // if Epic will not answer for the Mac platform right now, every game simply
     // goes unmarked rather than the sync failing.
@@ -340,7 +369,11 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
     let mut by_namespace: BTreeMap<String, Vec<LauncherAsset>> = BTreeMap::new();
     let mut library = SourceLibrary::default();
     let mut seen = BTreeSet::new();
-    for asset in assets {
+    // Epic can hold one game under two app names in a namespace (Fall Guys
+    // has two), and the library service returns both. The Windows list comes
+    // first, so its record is the one kept.
+    let mut titles = BTreeSet::new();
+    for asset in assets.into_iter().chain(owned_elsewhere) {
         // `ue` is the Unreal Engine marketplace namespace: plugins and assets,
         // never games. Everything else is decided by the catalog categories.
         if asset.namespace.is_empty() || asset.namespace == "ue" || asset.app_name.is_empty() {
@@ -369,24 +402,75 @@ pub async fn fetch_library() -> Result<SourceLibrary, SourceError> {
                 if !is_game(item) {
                     continue;
                 }
-                library.push(
-                    PROVIDER,
-                    library_game(
-                        &namespace,
-                        asset,
-                        item,
-                        native_mac.as_ref().map(|set| set.contains(&asset.app_name)),
-                        installations
-                            .get(&asset.app_name)
-                            .map(crate::epic_install::status_for),
-                    ),
+                let mut game = library_game(
+                    &namespace,
+                    asset,
+                    item,
+                    native_mac.as_ref().map(|set| set.contains(&asset.app_name)),
+                    installations
+                        .get(&asset.app_name)
+                        .map(crate::epic_install::status_for),
                 );
+                if !first_of_its_title(&mut titles, &namespace, &game.title) {
+                    continue;
+                }
+                if !on_windows.contains(&asset.app_name) {
+                    game.platforms = only_found_elsewhere(game.native_mac);
+                }
+                library.push(PROVIDER, game);
             }
         }
     }
 
     library.sort_by_title();
     Ok(library)
+}
+
+/// Whether this is the first record of its game: same namespace, same title
+/// give or take case and punctuation.
+fn first_of_its_title(titles: &mut BTreeSet<(String, String)>, namespace: &str, title: &str) -> bool {
+    titles.insert((namespace.to_string(), crate::store_choices::normalise(title)))
+}
+
+/// The platforms of a game the Windows list does not have: the Mac when the
+/// Mac list has it, nothing claimed otherwise.
+fn only_found_elsewhere(native_mac: Option<bool>) -> Vec<SourcePlatform> {
+    if native_mac == Some(true) {
+        vec![SourcePlatform::Macos]
+    } else {
+        Vec::new()
+    }
+}
+
+async fn fetch_owned_records(
+    client: &reqwest::Client,
+    token: &str,
+) -> Result<Vec<LauncherAsset>, SourceError> {
+    let mut records = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_LIBRARY_PAGES {
+        let mut request = client
+            .get(LIBRARY_ITEMS_ENDPOINT)
+            .query(&[("includeMetadata", "true")])
+            .bearer_auth(token);
+        if let Some(cursor) = &cursor {
+            request = request.query(&[("cursor", cursor.as_str())]);
+        }
+        let response = request.send().await.map_err(|_| SourceError::Network(PROVIDER))?;
+        if !response.status().is_success() {
+            return Err(sources::error_for_status(PROVIDER, response.status()));
+        }
+        let page = response
+            .json::<LibraryPage>()
+            .await
+            .map_err(|_| SourceError::UnexpectedResponse(PROVIDER))?;
+        records.extend(page.records);
+        match page.metadata.next_cursor.filter(|next| !next.is_empty()) {
+            Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
+            _ => break,
+        }
+    }
+    Ok(records)
 }
 
 async fn fetch_assets(
@@ -655,6 +739,33 @@ mod tests {
         ));
         assert_eq!(game.native_mac, Some(false));
         assert!(game.install.is_none());
+    }
+
+    #[test]
+    fn a_game_owned_without_a_windows_build_comes_from_the_library_service() {
+        let page: LibraryPage = serde_json::from_str(
+            r#"{"responseMetadata":{"nextCursor":"abc"},"records":[
+                {"namespace":"0a2d9f6403244d12969e11da6713137b","catalogItemId":"50118b7f954e450f8823df1614b24e80","appName":"0a2d9f6403244d12969e11da6713137b","productId":"x","sandboxName":"Live","recordType":"APPLICATION"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(page.metadata.next_cursor.as_deref(), Some("abc"));
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].catalog_item_id, "50118b7f954e450f8823df1614b24e80");
+        // Not in the Windows list: no Windows build is claimed for it.
+        assert_eq!(only_found_elsewhere(None), Vec::<SourcePlatform>::new());
+        assert_eq!(only_found_elsewhere(Some(false)), Vec::<SourcePlatform>::new());
+        assert_eq!(only_found_elsewhere(Some(true)), vec![SourcePlatform::Macos]);
+        // Fall Guys is two app names in one namespace: one card.
+        let mut titles = BTreeSet::new();
+        assert!(first_of_its_title(&mut titles, "50118b7f", "Fall Guys"));
+        assert!(!first_of_its_title(&mut titles, "50118b7f", "Fall Guys"));
+        assert!(!first_of_its_title(&mut titles, "50118b7f", "FALL GUYS™"));
+        // Another namespace is another game, whatever its name.
+        assert!(first_of_its_title(&mut titles, "other", "Fall Guys"));
+        // The last page has no cursor, and that is not an error.
+        let last: LibraryPage = serde_json::from_str(r#"{"records":[]}"#).unwrap();
+        assert!(last.metadata.next_cursor.is_none());
     }
 
     /// A refused Mac request is not the same answer as an empty one. Collapsing
