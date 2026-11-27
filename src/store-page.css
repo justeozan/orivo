@@ -24,9 +24,9 @@
 
   /* Scale. Lengths ride the viewport width so a television gets bigger cards,
      not more empty room around the same ones. */
-  --store-gap: clamp(14px, 1.35vw, 40px);
-  --store-radius: clamp(14px, 1.05vw, 30px);
-  --store-title: clamp(17px, 1.3vw, 34px);
+  --store-gap: clamp(14px, 1.35vw, 64px);
+  --store-radius: clamp(14px, 1.05vw, 44px);
+  --store-title: clamp(17px, 1.3vw, 52px);
 
   /* Ink, and the one recipe of glass the page uses. */
   --ink: #ffffff;
@@ -345,6 +345,11 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--store-gap);
 }
+/* A television gets more columns in the long grid (the row of three keeps its
+   three, wider) as well as bigger gaps; ordered before the
+   max-width blocks below so those still win on a narrow window. */
+@media (min-width: 1920px) { .store-grid--grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (min-width: 3200px) { .store-grid--grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
 
 /* --- Card ----------------------------------------------------------------- */
 
